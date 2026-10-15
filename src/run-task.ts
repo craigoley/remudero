@@ -1602,6 +1602,9 @@ import {
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
   reconcileDepReviewHold,
+  reconcileDependabotRefresh,
+  DEPENDABOT_REFRESH_CAUSES,
+  type DependabotHeadCommit,
   decideDepReview,
   isDependabotAuthor,
   syncNodePinForImageBump,
@@ -23865,7 +23868,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
   ]) as {
     number: number;
     url: string;
@@ -23875,6 +23878,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     headRefName?: string;
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
+    commits?: DependabotHeadCommit[];
   };
   const config = deps.config ?? loadConfig();
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
@@ -23921,9 +23925,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
+  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   try {
     reconcileDepReviewHold({
-      statePath: join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`),
+      statePath: holdStatePath,
       prUrl: view.url,
       prNumber: view.number,
       title: view.title ?? "",
@@ -23950,6 +23955,17 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 2;
   }
   if (result.decision === "hold") {
+    const refreshFlag = flagValue(rest, "--dependabot-refresh");
+    try {
+      const refresh = reconcileDependabotRefresh({
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, result,
+        cause: DEPENDABOT_REFRESH_CAUSES.find((cause) => cause === refreshFlag), commits: view.commits, nowMs: clock.now(),
+        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body), log,
+      });
+      if (refresh !== "none") console.log(`dependabot refresh ${refresh}: ${view.url}`);
+    } catch (error) {
+      log("dep-review.refresh_failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
+    }
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
   }
