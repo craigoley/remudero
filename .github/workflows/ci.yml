@@ -1438,7 +1438,7 @@ jobs:
           INCOMING="${RUNNER_TEMP}/coverage-ledger-choice"
           mkdir -p "$INCOMING"
           EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" --paginate --slurp \
-            --jq "[.[].artifacts[] | select(.name == \"${CHOICE_NAME}\")] | if length == 0 then empty elif length == 1 then .[0].id else error(\"multiple run ledger choices\") end")" \
+            | jq -r "[.[].artifacts[] | select(.name == \"${CHOICE_NAME}\")] | if length == 0 then empty elif length == 1 then .[0].id else error(\"multiple run ledger choices\") end")" \
             || die "cannot read this run's published choice; refusing to resolve another ledger"
           if [ -n "$EXISTING" ]; then
             gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${EXISTING}/zip" > "$INCOMING/choice.zip" \
@@ -1458,7 +1458,7 @@ jobs:
           [ -n "$CREATED" ] && [ "$CREATED" != "null" ] || die "run creation time is missing"
           CUTOFF="$(date -u -d "${CREATED} - 10 minutes" +%Y-%m-%dT%H:%M:%SZ)" || die "run creation time is invalid"
           LEDGER_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=test-tier-coverage-manifest-proposal&per_page=100" --paginate --slurp \
-            --jq "[.[].artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty")" \
+            | jq -r "[.[].artifacts[] | select((.expired | not) and .created_at < \"${CUTOFF}\")] | sort_by(.created_at, .id) | last | .id // empty")" \
             || die "cannot enumerate eligible proposals; unreadable is not absence"
           PUBLISH="${RUNNER_TEMP}/coverage-ledger-publish"
           mkdir -p "$PUBLISH"
@@ -2417,7 +2417,7 @@ jobs:
     # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-latest
-    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.

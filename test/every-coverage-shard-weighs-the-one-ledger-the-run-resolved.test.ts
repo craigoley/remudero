@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse } from "yaml";
@@ -193,10 +194,12 @@ test("the real strict selection CLI partitions all files on either one snapshot 
 
 const currentArtifacts = "actions/runs/42/artifacts?per_page=100";
 const proposalArtifacts = "actions/artifacts?name=test-tier-coverage-manifest-proposal";
+const artifactPages = (...artifacts: object[]) => JSON.stringify([{ artifacts }]);
+const existingChoicePage = artifactPages({ id: 88, name: "coverage-ledger-choice-42" });
 const defaults: GhShimRoute[] = [
-  { when: currentArtifacts, stdout: "" },
+  { when: currentArtifacts, stdout: artifactPages() },
   { when: "actions/runs/42 --jq", stdout: "2026-10-15T15:43:14Z" },
-  { when: proposalArtifacts, stdout: "17" },
+  { when: proposalArtifacts, stdout: artifactPages({ id: 17, expired: false, created_at: "2026-10-15T15:00:00Z" }) },
   { when: "actions/artifacts/17/zip", stdout: "fake archive; unzip is an explicit fixture port" },
   { when: "", stderr: "unexpected fake gh call", exit: 99 },
 ];
@@ -220,7 +223,7 @@ function shellFixture(run: (h: {
     for (const name of ["pure-test-pool.mjs", "diff-class.mjs"]) symlinkSync(join(root, "scripts", name), join(at, "scripts", name));
     writeFileSync(join(at, "scripts/test-tier-coverage-manifest.json"), snapshot);
     mkdirSync(join(at, "runner"));
-    const gh = ghShim([...routes, ...defaults]);
+    const gh = ghShim([{ when: "--slurp --jq", stderr: "the --slurp option is not supported with --jq", exit: 1 }, ...routes, ...defaults]);
     const git = ghShim([{ when: "diff --name-only", stdout: "src/lib/tmp.ts" }, { when: "", exit: 99 }], { command: "git" });
     const date = ghShim([{ when: "", stdout: "2026-10-15T15:33:14Z" }], { command: "date" });
     const archive = unzip === null ? undefined : ghShim(unzip, { command: "unzip" });
@@ -258,7 +261,134 @@ test("the resolver shell distinguishes API errors from a successful empty lookup
     assert.equal(emitted.artifactId, undefined);
     assert.equal(emitted.digest, digest);
     assert.ok(h.gh.calls().every(c => !c.includes("/zip")), "confirmed absence alone chooses committed, with no download fallback");
-  }, [{ when: proposalArtifacts, stdout: "" }]);
+  }, [{ when: proposalArtifacts, stdout: artifactPages() }]);
+  for (const when of [currentArtifacts, proposalArtifacts]) {
+    shellFixture(h => {
+      const malformed = h.shell("coverage-ledger", "Resolve one immutable");
+      assert.equal(malformed.status, 1, malformed.stderr);
+      assert.match(malformed.stderr, /coverage-ledger: (cannot read|cannot enumerate)/);
+      assert.equal(existsSync(join(h.at, "runner/coverage-ledger-publish/ledger-choice.json")), false);
+    }, [{ when, stdout: "not JSON" }]);
+  }
+});
+
+// The shared refusal shim is intentionally bypassed ONLY by a native binary with a loopback
+// URL and an empty private config. Script wrappers never run; no real credential env is inherited.
+function nativeCli(name: "gh" | "jq"): string {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    const candidate = join(directory, name);
+    let fd: number | undefined;
+    try {
+      fd = openSync(candidate, "r");
+      const magic = Buffer.alloc(4);
+      if (readSync(fd, magic, 0, magic.length, 0) !== magic.length) continue;
+      if (magic[0] === 0x23 && magic[1] === 0x21) continue;
+      return realpathSync(candidate);
+    } catch { /* Missing PATH entries are not a binary; an absent native CLI fails below. */ }
+    finally { if (fd !== undefined) closeSync(fd); }
+  }
+  throw new Error(`the loopback integration control requires the actual ${name} binary`);
+}
+
+function lookupParts(name: "EXISTING" | "LEDGER_ID", body: string) {
+  const startToken = `${name}="$(gh api `;
+  const start = body.indexOf(startToken);
+  assert.ok(start >= 0, `${name} must come from the emitted gh command`);
+  const end = body.indexOf(')" \\\n', start);
+  assert.ok(end > start, `${name} must retain its refusing command substitution`);
+  const command = body.slice(start + `${name}="$(`.length, end).replace(/\\\n/g, " ");
+  const parsed = /^gh api "[^"]+"\s+([^]*?)\s+(--jq|\|\s*jq\s+-r)\s+"([^]*)"\s*$/.exec(command);
+  assert.ok(parsed, `${name} must expose the actual CLI flags and global JSON query`);
+  const query = parsed[3]!.replaceAll('\\"', '"')
+    .replaceAll("${CHOICE_NAME}", "coverage-ledger-choice-42").replaceAll("${CUTOFF}", "2026-10-15T15:33:14Z");
+  assert.doesNotMatch(query, /\$\{/);
+  return { flags: parsed[1]!.trim().split(/\s+/), query, embedded: parsed[2] === "--jq" };
+}
+
+test("real gh pagination and external jq resolve the emitted global ledger queries over loopback", async () => {
+  const gh = nativeCli("gh");
+  const jq = nativeCli("jq");
+  const at = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ledger-http-`));
+  const requests = join(at, "requests");
+  writeFileSync(requests, "");
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, GH_TOKEN: "w9448-loopback-synthetic", GH_ENTERPRISE_TOKEN: "w9448-loopback-synthetic",
+    GH_CONFIG_DIR: at, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", CI: "true" };
+  const server = spawn(process.execPath, ["--input-type=module", "-e", `
+    import {createServer} from 'node:http';
+    import {appendFileSync} from 'node:fs';
+    const server=createServer((req,res)=>{
+      const url=new URL(req.url,'http://'+req.headers.host); const page=Number(url.searchParams.get('page')??1);
+      appendFileSync(process.argv[1],url.pathname+'?page='+page+'\\n');
+      if(url.pathname==='/broken'&&page===2){res.writeHead(503);res.end('fixture API unreadable');return;}
+      if(url.pathname==='/malformed'){res.writeHead(200,{'content-type':'application/json'});res.end('not JSON');return;}
+      const current=(id)=>({id,name:'coverage-ledger-choice-42'});
+      const proposal=(id,time,expired=false)=>({id,created_at:'2026-10-15T'+time+'Z',expired});
+      let artifacts=[];
+      if(url.pathname==='/choice')artifacts=page===1?[{id:1,name:'other'}]:[current(88)];
+      if(url.pathname==='/duplicate')artifacts=[current(page===1?88:99)];
+      if(url.pathname==='/proposal')artifacts=page===1?[proposal(29,'15:20:00'),proposal(100,'15:34:00')]:[proposal(17,'15:00:00'),proposal(99,'15:32:00',true)];
+      const headers={'content-type':'application/json'};
+      if(page===1)headers.link='<http://'+req.headers.host+url.pathname+'?page=2>; rel="next"';
+      res.writeHead(200,headers);res.end(JSON.stringify({artifacts}));
+    });
+    server.listen(0,'127.0.0.1',()=>process.send({port:server.address().port}));
+  `, requests], { env, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  const closed = once(server, "close").catch(() => undefined);
+  let errors = "";
+  server.stderr?.on("data", chunk => { errors = (errors + String(chunk)).slice(-4096); });
+  let startup: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      startup = setTimeout(() => reject(new Error(`loopback fixture readiness timed out: ${errors}`)), 10_000);
+      server.once("error", reject);
+      server.once("exit", () => reject(new Error(`loopback fixture exited before readiness: ${errors}`)));
+      server.once("message", message => {
+        const port = (message as { port?: number }).port;
+        if (!Number.isInteger(port) || !port || port < 1 || port > 65535) reject(new Error("invalid fixture port"));
+        else resolve(port);
+      });
+    });
+    clearTimeout(startup);
+    const endpoint = (path: string) => `http://127.0.0.1:${port}${path}`;
+    const ghVersion = spawnSync(gh, ["--version"], { env, encoding: "utf8", timeout: 10_000 });
+    const jqVersion = spawnSync(jq, ["--version"], { env, encoding: "utf8", timeout: 10_000 });
+    assert.match(ghVersion.stdout, /^gh version /); assert.match(jqVersion.stdout, /^jq-/);
+    const rejected = spawnSync(gh, ["api", endpoint("/choice"), "--paginate", "--slurp", "--jq", "."], { env, encoding: "utf8", timeout: 10_000 });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /--slurp.*not supported.*--jq/);
+    assert.equal(readFileSync(requests, "utf8"), "", "the real CLI rejects the old flags before any HTTP call");
+    const body = workflow().jobs["coverage-ledger"].steps.find((s: { id?: string }) => s.id === "resolve").run as string;
+    const run = (name: "EXISTING" | "LEDGER_ID", path: string) => {
+      const parts = lookupParts(name, body);
+      const pages = spawnSync(gh, ["api", endpoint(path), ...parts.flags, ...(parts.embedded ? ["--jq", parts.query] : [])], { env, encoding: "utf8", timeout: 10_000 });
+      assert.equal(pages.error, undefined); assert.equal(pages.signal, null);
+      if (pages.status !== 0 || parts.embedded) return pages;
+      const filtered = spawnSync(jq, ["-r", parts.query], { env, input: pages.stdout, encoding: "utf8", timeout: 10_000 });
+      assert.equal(filtered.error, undefined); assert.equal(filtered.signal, null);
+      return filtered;
+    };
+    for (const [name, path, expected] of [["EXISTING", "/choice", "88"], ["LEDGER_ID", "/proposal", "29"],
+      ["EXISTING", "/empty", ""], ["LEDGER_ID", "/empty", ""]] as const) {
+      const selected = run(name, path);
+      assert.equal(selected.status, 0, selected.stderr);
+      assert.equal(selected.stdout.trim(), expected, "filter all pages together, never take one runner's last page");
+    }
+    const duplicate = run("EXISTING", "/duplicate");
+    assert.notEqual(duplicate.status, 0); assert.match(duplicate.stderr, /multiple run ledger choices/);
+    for (const name of ["EXISTING", "LEDGER_ID"] as const) {
+      for (const path of ["/broken", "/malformed"]) {
+        const unreadable = run(name, path);
+        assert.notEqual(unreadable.status, 0, "API/content errors are not successful empty lookups");
+      }
+    }
+    const calls = readFileSync(requests, "utf8");
+    assert.match(calls, /\/choice\?page=2/); assert.match(calls, /\/proposal\?page=2/);
+  } finally {
+    clearTimeout(startup);
+    if (server.exitCode === null && server.signalCode === null) server.kill("SIGTERM");
+    const backstop = setTimeout(() => server.kill("SIGKILL"), 2_000);
+    try { await closed; } finally { clearTimeout(backstop); rmSync(at, { recursive: true, force: true }); }
+  }
 });
 
 test("the resolver shell publishes one snapshot and refuses selected-archive failures", () => {
@@ -336,7 +466,7 @@ test("reruns reuse the validated immutable run artifact and never rechoose a mis
     assert.ok(h.gh.calls().every(c => !c.includes(proposalArtifacts)));
     const finish = h.shell("coverage-ledger", "Require the published", { DIGEST: digest, EXISTING_ID: "88", PUBLISHED_ID: "" });
     assert.equal(finish.status, 0, finish.stderr);
-  }, [{ when: currentArtifacts, stdout: "88" }, { when: "actions/artifacts/88/zip", stdout: "fake archive" }]);
+  }, [{ when: currentArtifacts, stdout: existingChoicePage }, { when: "actions/artifacts/88/zip", stdout: "fake archive" }]);
   shellFixture(h => {
     const lost = h.shell("coverage-ledger", "Resolve one immutable", { GITHUB_RUN_ATTEMPT: "2" });
     assert.equal(lost.status, 1);
@@ -349,13 +479,13 @@ test("reruns reuse the validated immutable run artifact and never rechoose a mis
     assert.match(wrongSource.stderr, /another source SHA/);
     assert.equal(existsSync(join(h.at, "runner/coverage-ledger-publish")), false);
     assert.ok(h.gh.calls().every(c => !c.includes(proposalArtifacts)));
-  }, [{ when: currentArtifacts, stdout: "88" }, { when: "actions/artifacts/88/zip", stdout: "fake archive" }]);
+  }, [{ when: currentArtifacts, stdout: existingChoicePage }, { when: "actions/artifacts/88/zip", stdout: "fake archive" }]);
   shellFixture(h => {
     const lost = h.shell("coverage-ledger", "Resolve one immutable", { GITHUB_RUN_ATTEMPT: "2" });
     assert.equal(lost.status, 1);
     assert.match(lost.stderr, /cannot download already-published choice artifact 88/);
     assert.ok(h.gh.calls().every(c => !c.includes(proposalArtifacts)));
-  }, [{ when: currentArtifacts, stdout: "88" }, { when: "actions/artifacts/88/zip", stderr: "404", exit: 1 }]);
+  }, [{ when: currentArtifacts, stdout: existingChoicePage }, { when: "actions/artifacts/88/zip", stderr: "404", exit: 1 }]);
 });
 
 test("the actual consumer rejects malformed content, identities and bytes before setup", () => {
