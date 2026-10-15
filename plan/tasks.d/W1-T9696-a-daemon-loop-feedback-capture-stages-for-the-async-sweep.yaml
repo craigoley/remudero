@@ -1,0 +1,74 @@
+- id: W1-T9696
+  title: "EVERY DAEMON-LOOP FEEDBACK CAPTURE STILL LANDS INLINE THROUGH THE SYNCHRONOUS PLAN-PR PREFLIGHT — W1-T9615 moved only the SRE lane to stageFeedbackCapture; captureFeedback's inline landFeedback (landPending -> syncPreflightOf -> runInTree's spawnSync checks) still runs on the loop for the issue intake, the ops alert poll, the issue-revalidation garden, the gardens' handoff, the evidence-coverage filer and the repair-feedback capture, so runInTree's census row cannot be deleted"
+  repo: remudero
+  depends_on: [W1-T9695]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — daemon-loop captures stage for the per-poll async sweep instead of landing inline; what is captured, upstreamed and finally landed is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: the rest of W1-T9660's runInTree row once W1-T9695 converts the boot sweep and landContent"
+  plan_refs: [W1-T9615, W1-T9660, W1-T5460, W1-T5525, W1-T5628, W1-T530, W1-T5689]
+  files:
+    - src/lib/feedback.ts
+    - src/lib/issues-intake.ts
+    - src/lib/ops.ts
+    - src/lib/issue-revalidation-garden.ts
+    - src/lib/evidence-coverage-gardener.ts
+    - src/run-task.ts
+    - test/a-daemon-loop-feedback-capture-stages-for-the-async-sweep.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: queued
+  priority: 2  # operator-2026-10-15: the class W1-T9615 measured at 60-190 s loop holds, one capture at a time
+  attempts: 0
+  rationale: |
+    READ at origin/main 03269ad67 (2026-10-15):
+    - src/lib/feedback.ts `captureFeedback` writes the entry, then calls `landFeedback(root, ...)` inline.
+      landFeedback is `landPending`, which runs `driveLanding(..., syncPreflightOf(root, opts))`, the synchronous
+      plan-PR preflight whose checks spawnSync through plan-pr-emitter's `runInTree`.
+    - W1-T9615 (#12030, a9e12139c) added `stageFeedbackCapture(root, stateRoot, opts)`. It writes and upstreams
+      exactly as captureFeedback does, then moves the record into W1-T5460's landing queue under `stateRoot` for
+      the per-poll `sweepFeedbackLandingAsync`. It moved ONLY the SRE lane (runSreLanePass) onto it.
+    - captureFeedback call sites still on daemon paths, by enclosing function:
+      - src/lib/issues-intake.ts `pollIssues`;
+      - src/lib/ops.ts `pollAlerts`;
+      - src/lib/issue-revalidation-garden.ts `productionIssueRevalidationPorts`;
+      - src/lib/evidence-coverage-gardener.ts `feedbackEvidenceCoverageFiler`, for a new entry;
+      - src/run-task.ts `buildRegisteredGarden`, the `handoff` port;
+      - src/run-task.ts `captureRepairFeedbackWithPriorVerdict`, when no landing state root is set.
+      Others are CLI verbs (`feedbackCommand`, `depReviewCommand`) or serve request paths (panel-actions,
+      panel-graph, panel-skill-run). Serve runs in its own process.
+    - The census row comment for runInTree names the boot sweep, landContent and landCiLearningShards, which
+      W1-T9695 converts. With those gone, these captures are what still reach runInTree from daemonCommand
+      (daemonCommand > ... > captureFeedback > landFeedback > syncPreflightOf > planPrPreflightAtCommit >
+      defaultPreflightChecks > runInTree).
+  design: |
+    1. Each daemon-path caller above captures through `stageFeedbackCapture` with the daemon's state root, the
+       W1-T9615 pattern. Its dedup read uses `feedbackCaptured`, so a queued id is not captured twice. When a
+       caller has no state root in hand, its wiring passes one in; it never falls back to an inline landing on
+       the loop.
+    2. The CLI verbs and serve paths keep `captureFeedback`. Serve is another process; a CLI verb is not the loop.
+       If the census walk still reaches one of them from daemonCommand by name only, the census reading decides.
+       A reach the walk cannot cut is named in the row's comment with its path; it is never hidden.
+    3. Re-measure at the build's base. When the census walk no longer reaches `runInTree` from daemonCommand,
+       delete its row from SYNC_SPAWN_LOOP_BASELINE. Its other assertions change with it:
+       - W1-T9660's object-literal test lists runInTree among OBJECT_LITERAL_SPAWNERS and uses it as the walk's
+         positive control. Move that control onto a remaining object-literal-only spawner, or onto a synthetic Fn
+         fixture, so the object-literal reading still reddens by name if it regresses;
+       - W1-T9615's SRE-lane chain test keeps its own seed and needs no change.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - pollIssues and pollAlerts with a capture that would land: each stages the record under the state root,
+         and a throwing sync preflight is never called;
+       - a capture whose id is already queued writes nothing.
+  acceptance:
+    - claim: "a daemon-loop feedback capture stages for the async landing sweep and never drives the synchronous plan-pr preflight"
+      proof: 'unit test: test/a-daemon-loop-feedback-capture-stages-for-the-async-sweep.test.ts'
+    - claim: "the issue intake and the ops alert poll capture through stageFeedbackCapture"
+      proof: 'grep: test("W1-T9696: the issue intake and the alert poll stage their captures for the async sweep" in test/a-daemon-loop-feedback-capture-stages-for-the-async-sweep.test.ts'
+    - claim: "a capture whose id already waits in the landing queue is not written again"
+      proof: 'grep: test("W1-T9696: a queued capture is not captured twice" in test/a-daemon-loop-feedback-capture-stages-for-the-async-sweep.test.ts'
+  falsifier: |
+    At origin/main, pollIssues with a capture that creates a new entry calls captureFeedback. That lands inline
+    through landFeedback's sync preflight, so a throwing planPrPreflight reached through the landing opts fails
+    the first test.
