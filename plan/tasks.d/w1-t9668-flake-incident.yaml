@@ -6,7 +6,8 @@
   verify: human
   risk: low
   priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired  # not a flake: a deterministic main red, superseded by W1-T9551 (the gardener routes a no-recovery red to main-health). #11987 (W1-T9503) and #11997 collided; main was red on this test from 037a58d8f until #12034 (cd482d436); its own evidence reads "0 recovered on retry, 9 also failed"; operator 2026-10-15 via the filing session
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts#W1-T9503: a cause owned by a test alone escalates as no-owner"
