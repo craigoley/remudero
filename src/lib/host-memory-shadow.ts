@@ -282,7 +282,7 @@ export interface ShadowInputs {
   /** `highMib` is memory.high (reclaim and throttling begin there); `reclaimableMib` is inactive_file, page cache the
    *  kernel drops before it swaps anonymous memory. Both are optional, and absent means not subtracted. */
   container: { currentMib: number; maxMib: number | null; highMib?: number | null; reclaimableMib?: number } | { unread: string };
-  ledger: { state: ShadowLedgerState; reason?: string };
+  ledger: { state: ShadowLedgerState; dir?: string; reason?: string };
   entries: ShadowEntryInput[];
   /** The start this verdict is about. Its own reservation is counted even when the ledger could not show it. */
   start: { reservationId?: string; workerClass: WorkerClass; estimateMib: number; typicalMib?: number };
@@ -859,7 +859,7 @@ export interface ShadowStart {
 }
 
 export interface ShadowMemoryPorts {
-  calibrationSamples?: () => PeakSample[];
+  calibrationSamples?: (storeDir?: string) => PeakSample[];
   publishCalibration?: (stateDir: string, forecast: MemoryForecast) => void;
   calibrationObservation?: (at: number) => ReturnType<typeof kernelMemoryObservation>;
   clock: Clock;
@@ -969,7 +969,9 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
     listStateDir: (dir) => readdirSync(dir),
     estimate: (workerClass) => classEstimate(workerClass).estimateMib,
     typical: (workerClass) => classTypical(workerClass).estimateMib,
-    calibrationSamples: () => WORKER_CLASSES.flatMap(workerClass => readPeakSamples(workerClass)),
+    calibrationSamples: storeDir => storeDir ? WORKER_CLASSES.flatMap(workerClass => readPeakSamples(workerClass, {
+      location: () => ({ dir: storeDir }),
+    })) : [],
     publishCalibration: (stateDir, forecast) => {
       if (!existsSync(stateDir)) throw Object.assign(new Error("calibration state directory unavailable"), { code: "ENOENT" });
       publishMemoryForecast(stateDir, forecast);
@@ -1466,7 +1468,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     swapIn,
     psi,
     container,
-    ledger: { state: ledger.state, ...(ledger.reason ? { reason: ledger.reason } : {}) },
+    ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
     entries,
     start: {
       ...(start.reservationId ? { reservationId: start.reservationId } : {}),
@@ -1498,7 +1500,7 @@ export function jointClaimFor(inputs: ShadowInputs, ports: ShadowMemoryPorts, po
   if (!inputs.start.reservationId || !inputs.entries.some(e => e.id === inputs.start.reservationId)) {
     members.push({ workerClass: inputs.start.workerClass, residentRssMib: 0, own: true, released: false });
   }
-  return jointMemoryClaim(members, ports.calibrationSamples?.() ?? [], ports.clock.now(), policy.jointQuantile);
+  return jointMemoryClaim(members, ports.calibrationSamples?.(inputs.ledger.dir) ?? [], ports.clock.now(), policy.jointQuantile);
 }
 
 /** A shared host store is the authority; one that establishes nothing is UNKNOWN, never local silence as stopped. */
