@@ -511,6 +511,17 @@ function feedbackEntryRelPath(root: string, id: string): string {
   return relative(root, feedbackEntryPath(root, id)).split(sep).join("/");
 }
 
+export function readLandedFeedbackEntry(root: string, id: string, git: UpstreamGitExec = defaultUpstreamGit(root)): FeedbackEntry | null {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(git(["show", `origin/main:${feedbackEntryRelPath(root, id)}`]));
+  } catch {
+    return null; // W1-T9624: a lagging HEAD can lack origin/main's entry; a git failure is absent, never "exists"
+  }
+  const entry = parsed as Partial<FeedbackEntry> | null;
+  return entry !== null && typeof entry === "object" && entry.id === id && typeof entry.status === "string" ? (entry as FeedbackEntry) : null;
+}
+
 /** ROOT-FREE repo-relative path of a feedback entry — `plan/feedback/<id>.yaml` — for callers
  * without a checkout root (`lib/triage.ts`'s Acceptance proof). Derived from
  * {@link feedbackEntryPath} rather than re-typed, so a path move cannot leave it stale. */
@@ -866,6 +877,10 @@ export function captureFeedback(root: string, opts: CaptureFeedbackOptions): Fee
     if (existing) return existing;
   }
   if (opts.id !== undefined && existsSync(feedbackEntryPath(root, opts.id))) return readFeedbackEntry(root, opts.id);
+  if (opts.id !== undefined) {
+    const landed = readLandedFeedbackEntry(root, opts.id, opts.upstream?.git);
+    if (landed) return landed;
+  }
   const raw = opts.raw.trim();
   if (!raw) throw new FeedbackError("feedback text must not be empty");
   const origin = opts.origin ?? "cli";
