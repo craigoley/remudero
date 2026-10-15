@@ -623,6 +623,14 @@ export function selectorShadowGardenPass(
     // New evidence is a newly complete CI run stored, or a replay slice of history read; nothing else in
     // this pass changes without one of them.
     let found = false;
+    // W1-T9551: one main-CI read per base sha per pass, shared by the selector-shadow guard and the flake-incident classifier.
+    const mainReads = new Map<string, Promise<readonly string[] | undefined>>();
+    const readMain = selectorShadowMainFailures(owner, repo, io);
+    const mainFailures = (baseSha: string): Promise<readonly string[] | undefined> => {
+      let read = mainReads.get(baseSha);
+      if (read === undefined) mainReads.set(baseSha, read = readMain(baseSha));
+      return read;
+    };
     try {
       const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
         readJson: io.readJson,
@@ -631,7 +639,7 @@ export function selectorShadowGardenPass(
         onFlakes: selectorShadowFlakeLedger(d.log),
       });
       const report = await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss, io.readJson), mintTaskId,
-        undefined, undefined, selectorShadowMainFailures(owner, repo, io),
+        undefined, undefined, mainFailures,
         { replay: { owner, repo, readJson: io.readJson, readText: io.readText } });
       found = report.observations.appended > 0 || (report.replayPass?.attempted ?? 0) > 0;
     } catch (e) {
@@ -644,6 +652,7 @@ export function selectorShadowGardenPass(
       await runFlakeIncidentGardener(d, {
         mintTaskId,
         readChangedPaths: (baseSha, headSha) => readSelectorShadowChangedPaths(owner, repo, { baseSha, headSha }, io.readJson),
+        mainFailures,
       });
     } catch (e) {
       d.log("flake_incident.gardener_failed", { error: String((e as Error)?.message ?? e) });
