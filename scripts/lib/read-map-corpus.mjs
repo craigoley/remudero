@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const READ_MAP_CORPUS_FORMAT = "rmd-read-map-corpus-observation-v1";
@@ -14,12 +14,22 @@ export const corpusDigest = value => digest(JSON.stringify(value));
 const git = (root, args) => execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 30000, maxBuffer: 8 << 20 }).trim();
 const safeSuite = name => typeof name === "string" && SUITE.test(name) && !name.split("/").some(x => x === "." || x === "..");
 
+/** One descriptor answers both the bound and the bytes, so nothing re-resolves the path between check and
+ *  read (js/file-system-race); O_NOFOLLOW refuses a symlink and O_NONBLOCK keeps a FIFO from hanging the open. */
 export function readCorpusBytes(path, maximumBytes = 4 * 1024 ** 2) {
-  const before = lstatSync(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.size < 1 || before.size > maximumBytes) throw Error("read-map corpus needs a bounded regular file");
-  const bytes = readFileSync(path), after = lstatSync(path);
-  if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw Error("read-map corpus file changed during capture");
-  return { bytes, sha256: digest(bytes), modifiedMs: after.mtimeMs };
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); }
+  catch (error) { throw error?.code === "ELOOP" ? Error("read-map corpus needs a bounded regular file") : error; }
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size < 1 || before.size > maximumBytes) throw Error("read-map corpus needs a bounded regular file");
+    const bytes = Buffer.alloc(before.size);
+    let read = 0;
+    for (let n = 1; read < bytes.length && n > 0; read += n) n = readSync(fd, bytes, read, bytes.length - read, read);
+    const after = fstatSync(fd);
+    if (read !== before.size || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw Error("read-map corpus file changed during capture");
+    return { bytes, sha256: digest(bytes), modifiedMs: after.mtimeMs };
+  } finally { closeSync(fd); }
 }
 
 export function validateCorpusManifest(m) {
