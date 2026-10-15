@@ -226,7 +226,7 @@ import { createServeDrain, exitWithin } from "./serve-drain.js";
 import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
 import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
-import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
+import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type WorkerShedOutcome } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
@@ -388,8 +388,8 @@ export interface ServeDeps {
    * go stale). Only meaningful for a gateway implementing {@link GitHub.warm}; a no-op otherwise.
    */
   boardGithubRefreshMs?: number;
-  /** Published off-thread board projection for the production status route. */
-  boardSnapshotSource?: BoardSnapshotSource;
+  /** Published off-thread board projection for the production status route; `pause`/`resume` shed its thread (W1-T9508). */
+  boardSnapshotSource?: BoardSnapshotSource & { pause?(): Promise<boolean>; resume?(): void };
   /**
    * W1-T183: per-phase elapsed-time ANOMALY thresholds (ms), keyed by {@link Phase} (plus a
    * `default` fallback for a phase not listed) — DATA, not a constant baked into the row
@@ -3460,18 +3460,44 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   else startLedgerWriters();
   const githubAuth = { settled: routeAssembly.githubAppReady === undefined };
   void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));
+  // W1-T9508, memory tier 2: the read model's worker (its views lanes, slow lane and oracle with it) and the board
+  // projection exit while a memory-deferred handoff waits; serve answers from the bodies it holds, each with its as-of.
+  // `pause` (read-model-worker.ts) is `stop` without blocking the loop, and a dead worker's pending respawn pauses too.
+  // Each thread's heap is read BEFORE it exits, the threads it spawned included, so the reply sizes what was shed.
+  const shedWorkers = async (): Promise<WorkerShedOutcome> => {
+    const before = liveThreads();
+    const heaps = await Promise.all(before.map((worker) => readWorkerHeaps([worker], WORKER_SHED_HEAP_READ_MS)));
+    await Promise.all([readModel?.pause?.(), deps.boardSnapshotSource?.pause?.()]);
+    const left = new Set(liveThreads().map((worker) => worker.thread));
+    const shed = heaps.filter((_, i) => !left.has(before[i]!.thread)).flat();
+    const outcome = { workers: shed.reduce((n, reading) => n + reading.entries, 0), heapBytes: shed.reduce((n, reading) => n + reading.bytes, 0) };
+    deps.log?.("serve.workers_shed", { ...outcome, kinds: shed.map((reading) => reading.name) });
+    return outcome;
+  };
   serveGenerations.set(server, {
     handover: (reason) => staleExit.handover(reason),
     promote: () => readModel?.reload(),
     shed: () => analyticsCache.shed(),
     restore: (reason) => void analyticsCache.restore(reason),
+    shedWorkers,
+    restoreWorkers: (reason) => {
+      readModel?.resume?.();
+      deps.boardSnapshotSource?.resume?.();
+      deps.log?.("serve.workers_restored", { reason });
+    },
     probes: [planLoadedProbe(() => deps.board.plan, consoleSha), githubAuthProbe(() => githubAuth.settled), gatewayPrimedProbe(github), readModelWarmProbe(readModel)],
   });
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
-type ServeGenerationHooks = { handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; restore: (reason: string) => void; probes: ReadinessProbe[] };
+type ServeGenerationHooks = {
+  handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; restore: (reason: string) => void; probes: ReadinessProbe[];
+  /** Memory tier 2 (W1-T9508): terminates the rebuildable worker threads, resolving once they exited; `restoreWorkers` starts them again. */
+  shedWorkers: () => Promise<WorkerShedOutcome>; restoreWorkers: (reason: string) => void;
+};
+/** BACKSTOP: a thread whose heap is unread by now is shed unsized; the supervisor waits ~10 s for the whole shed. */
+export const WORKER_SHED_HEAP_READ_MS = 1_000;
 const serveGenerations = new WeakMap<Server, ServeGenerationHooks>();
 
 export function serveGeneration(server: Server): ServeGenerationHooks | undefined {

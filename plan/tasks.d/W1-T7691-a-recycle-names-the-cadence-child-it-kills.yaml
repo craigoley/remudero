@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: the 09:55Z core recycle killed the in-flight measurement cadence child, and the 10:06Z restart row could not say so"
   plan_refs: [W1-T5723, W1-T4766, W1-T1046]
   files: [deploy/recycle-container.sh, src/lib/measurement-cadence.ts, src/lib/daemon.ts, test/a-recycle-names-the-cadence-child-it-kills.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

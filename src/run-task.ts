@@ -206,7 +206,7 @@ import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDue, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -225,7 +225,7 @@ import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGa
 import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputs, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
-import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
+import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreOperatorEscalation, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -791,6 +791,7 @@ import {
   onDrainRequest,
   onShedRequest,
   onRestoreRequest,
+  onShedWorkersRequest,
   processChannel,
   supervisedRole,
   type GenerationChannel,
@@ -1861,7 +1862,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { terminalUnionScans } from "./lib/sweep.js";
+import { isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -3190,6 +3191,7 @@ import {
   type ReviewerCodeFreshness,
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
+import { withTouchedDeclarations } from "./lib/advance-declarations.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
@@ -7824,7 +7826,9 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
 /** W1-T5282 — the daemon's two freshness reads of `repoDir`, both awaited: a sync `git fetch` here stalled the
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
-  const read = (): Promise<DaemonFreshness> => checkServiceFreshnessAsync(repoDir, env, deps).then(daemonFreshnessFromService);
+  const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
+  const read = (): Promise<DaemonFreshness> =>
+    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit)).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
@@ -38419,11 +38423,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     }
     case "flow-remedy": {
       const d = deps("flow-remedy", raiseDuplicate);
-      return gardenPass(flowGardenSpec(d, {
+      const spec = flowGardenSpec(d, {
         owner, repo, mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
         admission: { owner, repo, settings: config.contributorAdmission },
         escalate: sreOperatorEscalation({ owner, repo, ledgerPath: join(stateDir, LEDGER_FILENAME), log }),
-      }), d);
+      });
+      const pass = gardenPass(spec, d);
+      return lowYieldGardenPass(stateDir, "flow-remedy", pass, {
+        inputs: () => JSON.stringify([spec.cheapFingerprint(), pass.due!()]),
+      });
     }
     // W1-T7421: the fix lane's own defects (operator interventions, unstated or refused rounds, FIXED-but-red heads)
     // are clustered and priced once a UTC day; the top class is drafted as ONE remedy through the flow ladder.
@@ -38518,13 +38526,16 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
       };
-      return async () => {
+      const paced = lowYieldGardenPass(stateDir, "host-resource", () => runHostResourcePassAsync(ports).then(() => {}), {
+        inputs: () => hostResourceInputStamp(repoRoot, stateDir),
+      });
+      return withDue(async () => {
         try {
-          await runHostResourcePassAsync(ports);
+          await paced();
         } catch (error) {
           log(`${HOST_RESOURCE}.failed`, { error: String((error as Error)?.message ?? error), reason: "a pass that throws is logged and the next tick tries again" });
         }
-      };
+      }, paced.due);
     }
   }
 }
@@ -41836,6 +41847,8 @@ export async function serveCommand(
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
+    // W1-T9508: tier 2, which no generation answered (0 of 122 rows answered on 10-13/14), so every ask timed out.
+    onShedWorkersRequest(channel, { shed: () => generation?.shedWorkers(), restore: (reason) => generation?.restoreWorkers(reason) });
     await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
@@ -48351,7 +48364,8 @@ export function lightPassActionable(
   // 2026-10-14: `conflicted` too, so a merge-conflict round no longer waits for the next full sweep.
   repairFixAllowed: boolean = false,
 ): boolean {
-  if (disposition === "post-review") return true;
+  // W1-T9558: all three review-lane dispositions; the cheap modes otherwise waited on a full pass.
+  if (isReviewLaneDisposition(disposition)) return true;
   if (disposition === "mergeable") return armAllowed;
   // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker. Both
   // take `runSweep`'s per-claim fix-capacity admission (`claimFixAdmission`, after the per-head

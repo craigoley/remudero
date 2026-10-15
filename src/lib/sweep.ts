@@ -5162,6 +5162,10 @@ export type Disposition =
   // alone rather than the whole review.
   | "discriminate-only";
 
+export function isReviewLaneDisposition(disposition: Disposition): boolean { // W1-T9558: every disposition whose action is a review job (see its shard)
+  return disposition === "post-review" || disposition === "review-reused" || disposition === "discriminate-only";
+}
+
 /** W1-T920 — {@link SupersessionStatus} is THREE-VALUED, and "unreadable" is never collapsed into
  *  "unique". Only `"superseded"` may gate a CLOSE, and only carrying {@link SupersessionEvidence};
  *  `"unique"` is a positive "checked, none found" that lets a row YIELD (W1-T932);
@@ -16433,7 +16437,7 @@ export async function runSweep(
       extraDisposedFields?.metadata_repair_outcome !== "not-metadata";
     let reviewerWithheld = false;
     let blockerReadFailure: { reason: string } | undefined;
-    const reviewDisposition = disposition === "post-review" || disposition === "review-reused" || disposition === "discriminate-only";
+    const reviewDisposition = isReviewLaneDisposition(disposition);
     const reviewKey = reviewOutcomeKeyForPr(pr);
     if (reviewDisposition && (deps.reviewerCodeStaleThisPass?.() !== undefined ||
         prior.reviewFreshnessRefusals.get(reviewKey)?.freshness === "stale")) {
@@ -19921,7 +19925,7 @@ export async function runSweepLightPass(
   const outcomeDedupedNumbers = new Set(
     openPrs
       .filter((pr) =>
-        deriveDisposition(pr, policy, now).disposition === "post-review" &&
+        isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
         reviewAdmissionOutcomeKnown(pr, outcomes, policy, now))
       .map((pr) => pr.prNumber),
   );
@@ -19952,12 +19956,12 @@ export async function runSweepLightPass(
               repairAdmissionTelemetry: repairAdmission.snapshot,
               selectAdaptiveReviewWidth: undefined,
               claimFixAdmission,
-              actionable: (d) => (d === "post-review" ? false : baseActionable ? baseActionable(d) : true),
+              actionable: (d) => (isReviewLaneDisposition(d) ? false : baseActionable ? baseActionable(d) : true),
               // W1-T2426: name the mechanism, not just the fact. A `post-review` refused HERE was
               // eligible and lost this pass's bounded admission — a different event from a lane the
               // light pass never runs, and both used to write the same sentence.
               standDownReasonFor: (d) =>
-                d === "post-review"
+                isReviewLaneDisposition(d)
                   ? (heldElsewhere.has(lightPassHeadKey(pr))
                       // W1-T7955: the review is running, admitted by an overlapping pass — not a lost admission.
                       ? "review already in flight for this head (admitted by an overlapping light pass)"
@@ -20040,8 +20044,8 @@ export async function runSweepLightPass(
     selectAdaptiveReviewWidth: undefined,
     claimFixAdmission,
     postReview: passPostReview,
-    actionable: (d) => d === "post-review",
-    standDownReasonFor: (d) => (d === "post-review" ? undefined : "deferred to full sweep (light pass)"),
+    actionable: isReviewLaneDisposition,
+    standDownReasonFor: (d) => (isReviewLaneDisposition(d) ? undefined : "deferred to full sweep (light pass)"),
     detachReviewWait: (work) => {
       detachedRefills.add(pr.prNumber);
       void work.finally(release).catch((error) => {
@@ -20226,7 +20230,7 @@ function observeReviewEligibility(
   const append = deps.appendLine ?? appendLedger;
   for (const pr of openPrs) {
     const key = reviewOutcomeKeyForPr(pr);
-    if (observed.has(key) || deriveDisposition(pr, policy, now).disposition !== "post-review" ||
+    if (observed.has(key) || !isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) ||
         reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)) continue;
     append(deps.ledgerPath, {
       run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.review_eligible",
@@ -20253,7 +20257,7 @@ export function publishLightPassReviewDemand(
   if (deps.dryRun) return;
   const eligible = candidates.filter((pr) =>
     pr.isPlanFiling !== true &&
-    deriveDisposition(pr, policy, now).disposition === "post-review" &&
+    isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
   const root = dirname(dirname(deps.ledgerPath));
   publishReviewDemand({
@@ -20328,7 +20332,7 @@ export function selectReviewAdmissions(
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
   // The action-time lookup stays in `runSweep` as the boundary for a verdict racing this snapshot.
   const eligible = openPrs.filter((pr) =>
-    deriveDisposition(pr, policy, now).disposition === "post-review" &&
+    isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
   const filings = eligible.filter((pr) => pr.isPlanFiling === true);
   const rest = eligible.filter((pr) => pr.isPlanFiling !== true);
@@ -20361,7 +20365,7 @@ function reviewAdmissionQueueDepth(
 ): number {
   return openPrs.filter((pr) =>
     pr.isPlanFiling !== true &&
-    deriveDisposition(pr, policy, now).disposition === "post-review" &&
+    isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)
   ).length;
 }
