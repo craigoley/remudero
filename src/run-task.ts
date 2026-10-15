@@ -662,6 +662,7 @@ import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypeche
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
+  feedbackCaptured,
   feedbackEntryPath,
   listFeedback,
   parseFeedbackAddArgs,
@@ -672,6 +673,7 @@ import {
   resolveDecisionSummaryMount,
   resolveFeedbackExpansionMount,
   setFeedbackStatus,
+  stageFeedbackCapture,
   FeedbackError,
   type FeedbackEntry,
   type FeedbackOrigin,
@@ -1902,8 +1904,11 @@ import {
   detectReviewFalseBlock,
   detectCiLogVerdictUnchanged,
   classifyNoPrShape,
+  shouldRecheckAfterNothingChanged,
+  shouldSelfHealNothingChanged,
 } from "./lib/fix-rung-classify.js";
-export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape };
+export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdictUnchanged, classifyNoPrShape,
+  shouldRecheckAfterNothingChanged, shouldSelfHealNothingChanged };
 
 /**
  * W1-T3618 — reads reviewer-code freshness in FRONT of `next` (production: `reviewCommand`), so a
@@ -2508,6 +2513,7 @@ export function buildSweepEffects(
      *  this field exists. */
     reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
     instanceRegistryTextImpl?: () => string | undefined;
+    feedbackLandingStateRoot?: string;
   },
 ): Pick<
   SweepDeps,
@@ -2594,7 +2600,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, ...libDeps } = deps;
+  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, feedbackLandingStateRoot, ...libDeps } = deps;
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
@@ -2819,7 +2825,7 @@ export function buildSweepEffects(
     localRepoName: deps.localRepoName ?? resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
     updateBranchImpl: updateBranchViaGh,
-    captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
+    captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log, feedbackLandingStateRoot),
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
     reviewCommandImpl: reviewerCodeGate.call,
@@ -14405,10 +14411,10 @@ export async function runFixRung(opts: {
         continue;
       }
       if (mergeCommitRefused || markerCommitRefused) continue;
-      const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
+      const refusedAtHead = fixRoundTally([...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows], opts.taskId, priorHeadSha).refusals.length;
       // W1-T7748: a worker that reported FIXED yet left nothing to commit usually found the head already
       // repaired; re-read the PR once at this head rather than stand down for a person.
-      if (shouldRecheckAfterNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
+      if (shouldSelfHealNothingChanged(fixOutcome?.kind, harnessCommitRefusalReason, refusedAtHead)) {
         deps.say("fix rung: the worker reported FIXED but changed nothing — re-reading the PR once before standing down");
         continue;
       }
@@ -32891,6 +32897,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           runId,
           root: repoRoot,
           dryRun: false,
+          landingStateRoot: config.root,
         });
         return {
           rung,
@@ -32910,6 +32917,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           runId,
           dryRun: false,
           admission: feedbackIntakeAdmission(config, ledgerPath, runId),
+          landingStateRoot: config.root,
         });
         return {
           rung,
@@ -46915,8 +46923,9 @@ export function captureRepairFeedbackWithPriorVerdict(
   root: string,
   filing: RepairFilingCapture,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  landingStateRoot?: string,
 ): void {
-  if (existsSync(feedbackEntryPath(root, filing.id))) return; // already filed this window
+  if (feedbackCaptured(root, filing.id, landingStateRoot)) return; // already filed this window
   let suppressedBy: FeedbackEntry | undefined;
   try {
     const priorEntriesForOrigin = listFeedback(root).filter((e) => e.origin === filing.origin);
@@ -46938,7 +46947,9 @@ export function captureRepairFeedbackWithPriorVerdict(
     }
     return;
   }
-  captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
+  const capture = { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin };
+  if (landingStateRoot === undefined) captureFeedback(root, capture);
+  else stageFeedbackCapture(root, landingStateRoot, capture);
 }
 
 /** The one-shot boundary owns and drains its judgment pool before returning a summary. */
@@ -48384,6 +48395,7 @@ export function buildSweepHook(
         plan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
+        feedbackLandingStateRoot: config.root,
         pacer,
         // W1-T5115: the SAME spawn sweep.ts defaults to, carrying the socket as a git-only handle.
         ...(gitCredentialSocketPath
@@ -48758,6 +48770,7 @@ export function buildSweepLightHook(
         plan: activePlan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
+        feedbackLandingStateRoot: config.root,
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
@@ -58214,8 +58227,3 @@ export {
   type BranchCitationHit,
   type ReverseBranchDrift,
 } from "./lib/branch-reaper.js";
-
-/** W1-T7748: true for the FIRST "the worker changed nothing" refusal at a head where the worker reported FIXED. */
-export function shouldRecheckAfterNothingChanged(fixKind: string | undefined, reason: string | undefined, refusedAtHead: number): boolean {
-  return fixKind === "FIXED" && reason === "the worker changed nothing" && refusedAtHead <= 1;
-}
