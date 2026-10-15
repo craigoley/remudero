@@ -1,0 +1,52 @@
+- id: W1-T9661
+  title: "THE OPS ALERT RECONCILER LANDS ITS STATUS FLIP SYNCHRONOUSLY ON THE DAEMON LOOP — pollAlerts calls setFeedbackStatus(..., { land: deps.land ?? {} }), which runs landContent's sync driveLanding and the sync plan-PR preflight (runInTree), even after W1-T9615 stages the same poll's new captures; the reconciler stages the flip into the landing queue instead"
+  repo: remudero
+  depends_on: [W1-T9615]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — where the daemon's alert reconciler lands its status flip; which entries it rejects is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: found beside W1-T9615 (PR #12030), which staged pollAlerts' captures but left its reconciler on the inline landing"
+  plan_refs: [W1-T9615, W1-T5460, W1-T5628, W1-T5689, W1-T462]
+  files: [src/lib/ops.ts, test/the-ops-alert-reconciler-stages-its-status-flip.test.ts]
+  status: queued
+  priority: 2  # dormant today: plan/policy.yaml intakeCadence.ops.enabled is false, and the retained core ledger holds no INTAKE-ops run and no ops.feedback_reconciled row; it holds the loop on the first poll after ops is enabled
+  attempts: 0
+  rationale: |
+    READ at origin/main 5c5abf070 and at PR #12030's head af4448050 (W1-T9615):
+    - src/lib/ops.ts pollAlerts, the RECONCILE loop: for each staleAlertFeedbackIds entry it calls
+      setFeedbackStatus(deps.root, feedbackId, "rejected", { land: deps.land ?? {} }).
+    - setFeedbackStatus with `land` calls landFeedbackStatusContent. With no `stateRoot`, that calls landContent, which
+      runs driveLanding with syncPreflightOf: the synchronous planPrPreflightAtCommit, whose in-tree checks spawnSync in
+      plan-pr-emitter's runInTree. W1-T9615 measured that preflight at 20-31 s a check.
+    - With `stateRoot` set, landFeedbackStatusContent queues the bytes instead (queueFeedbackLanding, W1-T5460), and
+      setFeedbackStatus reads a queued record first (W1-T5628).
+    - The daemon reaches it: buildIntakeRungsDaemonHooks' "ops" rung awaits pollAlerts with no `land`. #12030 adds
+      `landingStateRoot: config.root` there and stages the CAPTURE loop through stageFeedbackCapture. The reconcile
+      loop, a few lines below, still passes `deps.land ?? {}`.
+    MEASURED (core ledger union, read-only, 2026-10-15): the rung is dormant. intakeCadence.ops.enabled is false in
+    plan/policy.yaml. The retained union (366 archives plus the live file) holds 0 `ops.feedback_reconciled` rows and
+    1 `ops.alerts_polled` row, from an operator CLI run on 2026-09-10. That is why this is P2.
+  design: |
+    1. When pollAlerts is given the daemon's landing state root (W1-T9615's `landingStateRoot`), the reconciler passes
+       `land: { ...deps.land, stateRoot: deps.landingStateRoot }`. The flip is then queued under
+       state/feedback-landing-pending and landed by the per-poll sweepFeedbackLandingAsync. The CLI (`rmd ops`) passes
+       no state root and keeps its inline landing.
+    2. Which entries are rejected does not change. The ledger's priorReconciledAlertFeedbackIds already stops a second
+       poll from staging the same flip again before the sweep lands it.
+    3. The test injects a recording sync preflight and drives one daemon-shaped poll with a stale alert entry. The
+       preflight is never called, the queued record reads `status: rejected`, and the CLI-shaped poll (no state root)
+       still lands inline.
+  acceptance:
+    - claim: "the reconciler's staging suite runs and passes"
+      proof: 'unit test: test/the-ops-alert-reconciler-stages-its-status-flip.test.ts'
+    - claim: "a daemon-shaped alert poll that reconciles a stale entry stages the rejected record and never calls the synchronous plan-PR preflight"
+      proof: 'grep: test("W1-T9661: the daemon alert reconciler stages its status flip and never lands it inline" in test/the-ops-alert-reconciler-stages-its-status-flip.test.ts'
+    - claim: "the CLI alert poll, with no state root, still lands its reconciled flip inline"
+      proof: 'grep: test("W1-T9661: the cli alert reconciler still lands its status flip inline" in test/the-ops-alert-reconciler-stages-its-status-flip.test.ts'
+  falsifier: |
+    At W1-T9615's merge, give pollAlerts a landingStateRoot and one entry whose alert is no longer open, and inject a
+    sync landing seam that records calls: the reconciler calls it (setFeedbackStatus, then landFeedbackStatusContent,
+    then landContent), so the first test fails.
