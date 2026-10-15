@@ -732,6 +732,7 @@ import {
   type PreflightFastDeps,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
+import { discoverSourceTextReaders, readerJoins, type SourceTextReader } from "./lib/source-text-readers.js";
 // W1-T4434 — `rmd census fix`'s own orchestrator: applies each census red's registered
 // MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
 // worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
@@ -26568,7 +26569,13 @@ export function boardCommand(rest: string[], deps: BoardCommandOptions = {}): nu
  */
 export function censusMembershipCommand(
   rest: string[],
-  deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[]; readFile?: (path: string) => string } = {},
+  deps: {
+    repoRoot?: string;
+    spawn?: PreflightSpawn;
+    changedPaths?: readonly string[];
+    readFile?: (path: string) => string;
+    readers?: () => readonly SourceTextReader[];
+  } = {},
 ): number {
   const badArg = unknownArgError("census-membership", rest, ["--base"], ["--files"]);
   if (badArg) {
@@ -26602,6 +26609,9 @@ export function censusMembershipCommand(
   }
 
   const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn, deps.readFile);
+  const joinedReaders = (deps.readers ?? (() => discoverSourceTextReaders(root)))().filter((r) => changed.some((p) => readerJoins(r, p)));
+  const censusReaders = joinedReaders.filter((r) => r.censusShaped).map((r) => r.testFile);
+  const textReaders = joinedReaders.filter((r) => !r.censusShaped).map((r) => r.testFile);
   if (rest.includes("--files")) {
     // W1-T3059 — ONE PREDICATE, NEVER TWO. The pre-push hook that RUNS these suites reads this
     // list; it does not carry its own copy of the table. A second copy is the drift this repo has
@@ -26618,7 +26628,9 @@ export function censusMembershipCommand(
         else files.add(file);
       }
     }
+    for (const file of censusReaders) files.add(file);
     for (const file of [...files].sort()) console.log(file);
+    for (const file of textReaders) if (!files.has(file)) console.error(`reads-as-text: ${file}`);
     // STDOUT stays a clean file list a caller can splice; INCOMPLETENESS goes to stderr, so a
     // partial enumeration cannot be mistaken for a complete one. An unmodelled census is a suite
     // this diff may join and this cannot run — the caller must say so rather than imply coverage.
@@ -26636,13 +26648,20 @@ export function censusMembershipCommand(
   }
   console.log(`rmd census-membership — ${changed.length} changed path(s) against ${base}`);
   const joining = report.entries.filter((e) => e.suites.length > 0);
-  if (joining.length === 0) {
+  if (joining.length === 0 && censusReaders.length === 0) {
     // A MEASURED ABSENCE, not a bare zero: say which corpus was read (P48).
     console.log(`  joins no known census (${CENSUS_MEMBERSHIP_SUITES.length} modelled)`);
   }
   for (const e of joining) {
     console.log(`  ${e.path}`);
     for (const s of e.suites) console.log(`    -> ${s}`);
+  }
+  if (censusReaders.length > 0) {
+    console.log(`  SOURCE-TEXT census suite(s) that read a changed path (${censusReaders.length}):`);
+    for (const file of censusReaders) console.log(`    -> ${file}`);
+  }
+  if (textReaders.length > 0) {
+    console.log(`  also reads a changed path as text (${textReaders.length}): ${textReaders.join(" ")}`);
   }
   if (report.unknownCoverage.length > 0) {
     // NAMED, never dropped: a suite the model cannot place is the difference between "joins
@@ -38697,7 +38716,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
     case "issue-revalidation":
       return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
-        owner, repo, stateDir, repoRoot, operatorLogins: config.operatorGithubLogins, log,
+        owner, repo, stateDir, repoRoot, landingStateRoot: config.root, operatorLogins: config.operatorGithubLogins, log,
         ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }),
       }));
     case "evidence-coverage":
@@ -38757,8 +38776,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         stateDir,
         log,
         readHeartbeats: gitHeartbeatSource(repoRoot),
-        handoff: (h: { id: string; raw: string; origin: string }) => void captureFeedback(repoRoot, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
-        openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
+        handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
+        openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
@@ -54325,6 +54344,7 @@ export async function opsCommand(
     runId,
     root: repoRoot,
     dryRun,
+    capture: captureFeedback,
   });
   console.log(`### rmd ops${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\nalerts: ${renderAlertsSummary(result.summary)}`);
   if (dryRun) {
@@ -55396,6 +55416,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     runId,
     dryRun,
     admission: feedbackIntakeAdmission(config, ledgerPath, runId),
+    capture: captureFeedback,
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {

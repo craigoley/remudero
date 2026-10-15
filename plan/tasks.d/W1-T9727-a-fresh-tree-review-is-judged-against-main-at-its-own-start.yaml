@@ -1,0 +1,89 @@
+- id: W1-T9727
+  title: "A FRESH-TREE REVIEW CHILD TAKES ITS OWN START READING, SO A MERGE DURING ITS MEMORY WAIT NEVER WITHHOLDS ITS VERDICT — `reviewCommand` judges publication against `deps.reviewStartFreshness`, which only the in-process freshness gate hands in; the fresh-tree child gets none and re-reads freshness at post time, so a review held ~20 min in memory admission is refused 'materially behind', the sweep reads the refusal as 'owner proven dead', and re-runs it into the same wait"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — which freshness reading decides publication for a review handed none; the reading itself, the refusal shape and the gate are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 fan-out investigator I1: #12111 and #12115 looped 'checks green, remudero-review owner proven dead — re-running the review lane' from 19:36Z"
+  plan_refs: [W1-T3337, W1-T3723, W1-T913]
+  files:
+    - src/run-task.ts
+    - test/a-review-is-judged-against-main-at-its-start.test.ts
+    - test/a-fresh-tree-review-keeps-the-sweeps-review-options.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-15: every fresh-tree review held by memory admission is withheld and re-run in a loop
+  attempts: 0
+  rationale: |
+    MEASURED on the fleet host's ledger union (live ledger.ndjson plus all 30 ledger.2026-10-1[45]T*.ndjson.gz
+    archives, every one opened), 2026-10-15:
+    - #12106 (f0c22651a, 19:47:28Z) set plan/policy.yaml sweep.hostMemoryBudget.classModes.review to "enforce".
+      memory_budget.enforce_wait rows with worker_class review: 0 on all of 10-14 and 10-15 before 19:49Z, then 8
+      by 20:26Z, holding the reviewer 1-23 min (review-PR12111-1792093733355: wait 19:49:24, admit 20:08:30;
+      review-PR12115-1792093792548: wait 19:50:30, admit 20:13:14).
+    - The daemon runs behind origin/main, so its freshness gate (`buildReviewerCodeFreshnessGate`) runs each review
+      as a fresh-tree child (`buildFreshTreeReviewRunner`, a worktree at origin/main, `rmd review <pr>` in a
+      subprocess). The gate hands its start reading only to the in-process `next(...)`; the child's
+      `reviewCommand` gets `deps.reviewStartFreshness === undefined`, and `reviewerFreshnessForPublication`
+      then returns the JUST-IN-TIME reader (the `ReviewCommandDeps.reviewStartFreshness` doc says so: "Absent
+      (operator CLI, fresh-tree child) keeps the just-in-time read").
+    - So the 2026-10-06 operator ruling (judge at review START) never reaches a fresh-tree review. Both runs above
+      judged on code at origin/main when they began (82870d0, a07726e), the reviewer succeeded, and the post-time
+      read refused: review.post_refused "reviewer code 82870d0b71fd is materially behind origin/main 2142a3425855;
+      withholding a terminal verdict" (20:10:37Z) and "a07726ea7efc ... c11dafa252d8" (20:14:32Z).
+    - The sweep then folds that refusal into `refusedCurrentPending` -> `reviewPendingOwnerDead: true`, and the
+      post-review row reasons "checks green, remudero-review owner proven dead — re-running the review lane on
+      #N" (20:15:34Z for both), which re-enters the same memory wait while main keeps moving.
+    - review.post_refused "materially behind": 6 on 10-14, 3 on 10-15 before 19Z, 5 from 19Z to 20:26Z; three
+      more reviews (#12143, #12161, #12162) were refused 1-2 min after their pending post on 10-15.
+    NOT W1-T9651 (#12058): no LoopBoundedChildTimeout ("loop-available budget") row exists in the live ledger
+    except the text of #12058's own review, and the 19:48 reruns ran to completion under it.
+  design: |
+    1. THE FLAG. A new review option `--judge-at-own-start`, parsed by `reviewOptionsFromFlags` into
+       `ReviewCommandDeps.judgeAtOwnStart: true`. `buildReviewerCodeFreshnessGate` appends it to the args it hands
+       `reviewFromFreshTree` (beside `reviewOptionFlags(reviewDeps)`), so every fresh-tree child carries it. The
+       child runs at origin/main, which holds this change whenever the parent does.
+    2. THE OWN START READING. In `reviewCommand`, where `publicationFreshness` is built: when
+       `deps.reviewStartFreshness` is undefined AND `deps.judgeAtOwnStart` is true, await `reviewerCodeFreshnessDep()`
+       once there, before `postReviewPendingDep` and `runReviewDep` (so before any memory-admission wait or reviewer
+       spawn). A throw becomes `{ status: "unreadable", reason }` naming the thrown message. That reading is passed
+       to `reviewerFreshnessForPublication` exactly as a handed-in one: unreadable ledgers
+       `review.reviewer_freshness_unreadable_at_start` and the just-in-time read decides; stale still withholds
+       (W1-T3337's own case); fresh decides publication.
+    3. WITHOUT THE FLAG NOTHING CHANGES: the operator CLI and every injected reviewCommand fixture keep the
+       just-in-time read and never reach the real `checkReviewerCodeFreshnessAsync` default at start (a start read
+       there would fire a real git fetch in every partial-fake test). Amend the `reviewStartFreshness` doc comment.
+    4. TESTS in test/a-review-is-judged-against-main-at-its-start.test.ts, through the existing `reviewWith` driver
+       extended with a reader whose answer changes when the fake reviewer runs and with extra args:
+       - a review with the flag and no handed reading, fresh when it began, publishes although main materially
+         advanced before it posted (one reader call); at origin/main the post-time read refuses it (posts [], exit 2);
+       - with the flag, a stale own start reading is still withheld, naming main as of the start;
+       - with the flag, a throwing own start reading ledgers the unreadable row and the just-in-time read decides;
+       - the gate passes `--judge-at-own-start` to the fresh-tree runner it calls for a stale reading.
+       The existing "with no start reading the just-in-time read still decides" test stays as it is; the exact
+       fresh-tree args in test/a-fresh-tree-review-keeps-the-sweeps-review-options.test.ts gain the flag.
+    Unchanged: `buildFreshTreeReviewRunner`, `checkReviewerCodeFreshnessAsync`, `postReviewStatusGuarded`'s refusal,
+    the sweep's owner-dead routing, the memory budget policy.
+  acceptance:
+    - claim: "a fresh-tree review fresh at its own start publishes although main materially advanced before it posted"
+      proof: 'grep: test("W1-T9727: a fresh-tree review is judged against main at its own start" in test/a-review-is-judged-against-main-at-its-start.test.ts'
+    - claim: "a fresh-tree review whose own start reading is stale is still withheld"
+      proof: 'grep: test("W1-T9727: a fresh-tree review whose own start reading is stale is still withheld" in test/a-review-is-judged-against-main-at-its-start.test.ts'
+    - claim: "a fresh-tree review whose own start reading throws ledgers it unreadable and the just-in-time read decides"
+      proof: 'grep: test("W1-T9727: a thrown own start reading is unreadable and the just-in-time read decides" in test/a-review-is-judged-against-main-at-its-start.test.ts'
+    - claim: "the freshness gate tells the fresh-tree review it runs to take its own start reading"
+      proof: 'grep: test("W1-T9727: the freshness gate asks a fresh-tree review to judge at its own start" in test/a-review-is-judged-against-main-at-its-start.test.ts'
+  falsifier: |
+    At origin/main, call reviewCommand with no reviewStartFreshness (the fresh-tree child's deps) and a reader that answers
+    fresh until the fake runReview starts and stale ("materially behind", changedPaths src/lib/review.ts) after:
+    the guarded post refuses, posts is [] and the exit is 2. With the fix the verdict posts and the exit is 0.
+  note: |
+    EFFECT, measured after merge and a daemon restart onto it, from the core ledger union: review.post_refused
+    "materially behind" rows whose run also has a review.ran_from_fresh_tree row with exit_code 2 go to near zero
+    while review-class memory_budget.enforce_wait rows continue; sweep.disposed "owner proven dead" per hour returns
+    to the 10-14 rate (1-3 distinct PRs/h). A SEPARATE defect seen in the same window, not in scope here: the 19:20Z
+    freshness drain's own review clock admitted four reviews at 19:17:33Z and the exit abandoned them
+    (daemon.freshness_drain.completed abandoned_in_flight_reviews 4, duration 1217693 ms past a 559000 ms bound).
