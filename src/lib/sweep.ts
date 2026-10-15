@@ -9675,7 +9675,7 @@ function pendingAgeMinutes(pr: OpenPrView, now: number): number | undefined {
   if (!raw) return undefined;
   const parsed = Date.parse(raw);
   if (Number.isNaN(parsed)) return undefined;
-  return (now - parsed) / 60_000;
+  return Math.max(0, now - parsed) / 60_000;
 }
 
 /** W1-T913 — minutes `remudero-review` has read PENDING on this head, posted by this system itself,
@@ -12650,6 +12650,7 @@ export interface SweepDeps {
    *  `publishedAtMs`). `sweep.disposed` rows record `snapshot_age_ms` against it at the moment a PR is
    *  acted on. Omitted, the age is measured from the pass's own start. */
   snapshotPublishedAtMs?: number;
+  markPrelude?: (stage: string, walkStarts?: boolean) => void;
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
@@ -15142,6 +15143,52 @@ export function liveHeadShaFrom(
 
 const rehomeFlights = new Set<string>();
 
+export interface FullPreludeTimer {
+  readonly startedAtMs: number;
+  time<T>(stage: string, run: () => T | Promise<T>): Promise<T>;
+  note(fields: Record<string, unknown>): void;
+  mark(stage: string, walkStarts?: boolean): void;
+  write(walkReached: boolean): void;
+}
+
+export function createFullPreludeTimer(
+  emit: (fields: Record<string, unknown>) => void,
+  clock: () => number = () => systemClock.now(),
+): FullPreludeTimer {
+  const startedAtMs = clock();
+  const stages: Record<string, number> = {};
+  const fields: Record<string, unknown> = {};
+  let cursorMs = startedAtMs;
+  let written = false;
+  const record = (stage: string, ms: number): void => { stages[stage] = (stages[stage] ?? 0) + Math.max(0, ms); };
+  const timer: FullPreludeTimer = {
+    startedAtMs,
+    async time(stage, run) {
+      const began = clock();
+      try {
+        return await run();
+      } finally {
+        const ended = clock();
+        record(stage, ended - began);
+        cursorMs = Math.max(cursorMs, ended);
+      }
+    },
+    note(extra) { Object.assign(fields, extra); },
+    mark(stage, walkStarts = false) {
+      const at = clock();
+      record(stage, at - cursorMs);
+      cursorMs = at;
+      if (walkStarts) timer.write(true);
+    },
+    write(walkReached) {
+      if (written) return;
+      written = true;
+      emit({ ...fields, elapsed_ms: Math.max(0, clock() - startedAtMs), walk_reached: walkReached, stages: { ...stages } });
+    },
+  };
+  return timer;
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   sweepDeps: SweepDeps,
@@ -15167,6 +15214,7 @@ export async function runSweep(
       }
     },
   };
+  sweepDeps.markPrelude?.("sweep_entry");
   // Alias-bound call site (W1-T2393): the bare `readLedgerLines` regex cannot match a name-bound
   // call, so this marker is documentary only — the enforced corpus and the regex are unchanged.
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
@@ -15197,6 +15245,7 @@ export async function runSweep(
       log("reader.agreement.unavailable", { reason: String(error) });
     }
   }
+  deps.markPrelude?.("reader_agreement");
   if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
     for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
   }
@@ -15227,6 +15276,7 @@ export async function runSweep(
   // Dedup is keyed on the ledger, which persists across sweeps even when the input is
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
+  deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
   const priorBlockerByPr = priorBlockersFromLedger(ledgerLines);
@@ -15612,6 +15662,7 @@ export async function runSweep(
   const mergeabilityUnknownWaits = mergeabilityUnknownWaitsFromLedger(ledgerLines);
   // W1-T2620/W1-T3422 — ONE read per pass, never per PR. The SHA-only compatibility seam stays
   // available to direct callers; production's effects cache both fields from one REST response.
+  deps.markPrelude?.("ledger_fold");
   let mainRepair: MainRepairEvidence | undefined;
   try {
     mainRepair = deps.readMainRepair ? await deps.readMainRepair() : undefined;
@@ -15652,6 +15703,7 @@ export async function runSweep(
         log_excerpt: red.logExcerpt });
     }
   }
+  deps.markPrelude?.("main_repair");
   const reproductionHistory = [...ledgerLines];
   const reproductionCache = probeCacheFromLedger(ledgerLines);
   const formerlyFailingOnMain = mainTipSha === undefined ? new Set<string>() : mainFormerlyFailingTestFiles(ledgerLines, mainTipSha);
@@ -15884,6 +15936,7 @@ export async function runSweep(
   // post-review batch, well after the walk that computes this.
   const repeatMeta = new Map<number, { streak: number; escalated: boolean }>();
 
+  deps.markPrelude?.("stale_releases");
   // ── W1-T931 COST-ANOMALY SENTINEL ───────────────────────────────────────────────────────────
   // Hung off THIS pass rather than a new call site: `runSweep` already read the whole ledger and runs
   // on the daemon's cadence. Independent of `openPrs`, guarded by `!deps.dryRun`, and wrapped in the
@@ -15938,6 +15991,7 @@ export async function runSweep(
     }
   }
 
+  deps.markPrelude?.("anomaly_sentinels");
   // ── W1-T4817 MAIN COMMIT WITH NO WORKFLOW RUN ─────────────────────────────────────────────
   // Full passes only: a light pass fans this function out one PR at a time, and the reads below
   // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
@@ -15993,6 +16047,7 @@ export async function runSweep(
     }
   }
 
+  deps.markPrelude?.("fleet_state");
   // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
   if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
     try {
@@ -16003,6 +16058,7 @@ export async function runSweep(
       log("sweep.mutation_verdict_pull.error", { phase: "ingest", error: String((e as Error)?.message ?? e) });
     }
   }
+  deps.markPrelude?.("mutation_verdicts");
   // W1-T7853: the same full passes, deduped on the workflow runs the ledger already settled.
   if (deps.pullFoldDebt && deps.repairAdmissionSurface !== "light") {
     try {
@@ -16014,6 +16070,7 @@ export async function runSweep(
     }
   }
 
+  deps.markPrelude?.("fold_debt");
   // ── W1-T4838 A WORKER'S CATEGORIZED REFUSAL IS AN AMENDMENT, NOT A FAILED ATTEMPT ─────────
   // Full passes only. Only a `no_pr` row whose excerpt `extractRefusal` parses is a candidate: an
   // uncategorized `no_pr` is skipped here and retries exactly as before. `error` outcomes write no
@@ -16048,6 +16105,7 @@ export async function runSweep(
     }
   }
 
+  deps.markPrelude?.("refusal_amendments");
   const byDisposition = ZERO_COUNTS();
   // Filled by INDEX, never pushed — post-review actions are finalized out of pass order, so
   // `actions[i]` is the only way to keep {@link SweepSummary.actions}'s "in input order" invariant
@@ -16667,6 +16725,7 @@ export async function runSweep(
   // pass that dies mid-way writes nothing; written here, "started but never summarised" becomes the
   // legible state `judgeSweepLiveness` reads. RENDER_RELEVANT, rotating on recency (W1-T1237).
 
+  deps.markPrelude?.("walk_setup", true);
   log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
 
   // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
@@ -16700,8 +16759,9 @@ export async function runSweep(
     }
     // W1-T6052: an old pending snapshot is not proof CI is still running. The arm reader
     // proves every required context on a fresh head; only that exact open head can clear it.
+    const actNowMs = rederivedIndices.has(prIndex) ? passClockMs() : now;
     if (pr.checksState === "pending" &&
-        (pendingAgeMinutes(pr, now) ?? 0) >= policy.pendingCeilingMinutes && deps.readArmFacts) {
+        (pendingAgeMinutes(pr, actNowMs) ?? 0) >= policy.pendingCeilingMinutes && deps.readArmFacts) {
       try {
         const fresh = await deps.readArmFacts(pr);
         if (fresh?.prNumber === pr.prNumber && fresh.headSha === pr.headSha &&
@@ -16787,8 +16847,8 @@ export async function runSweep(
     const derived = gardenRecordRefusal !== undefined
       ? { disposition: "stale" as const, blocker: "other" as const,
         reason: `garden plan PR refused its own machine record — ${gardenRecordRefusal}; closing so the gardener can file again on its next pass` }
-      : postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ??
-      deriveDisposition(dispositionView, policy, now, dispositionFacts);
+      : postReviewFailureHistoryDisposition(dispositionView, prior, policy, actNowMs) ??
+      deriveDisposition(dispositionView, policy, actNowMs, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
     if (disposition === "post-review" && harvestIncomplete) {

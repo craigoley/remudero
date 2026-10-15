@@ -36,6 +36,7 @@ import {
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
+import { boundChildByLoopTime, execFileLoopBounded, type LoopBound } from "./lib/loop-bounded-child.js";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
@@ -47,7 +48,7 @@ import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, type GhAsyncExecutor } from "./lib/github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -1872,7 +1873,7 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -3308,7 +3309,7 @@ import {
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
-import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -4768,20 +4769,15 @@ export function planSyncGitRunnerAsync(
   const timeoutMs = opts.timeoutMs ?? PLAN_SYNC_GIT_TIMEOUT_MS;
   return (args, stdin) =>
     new Promise((resolve, reject) => {
-      let timedOut = false;
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: opts.maxBuffer ?? 1 << 26 }, (err, stdout) => {
-        clearTimeout(timer);
-        if (timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
+        bound.cancel();
+        if (bound.timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
         return err ? reject(err) : resolve(stdout);
       });
       // EPIPE when git exits before reading its stdin: the exit itself reports that failure above.
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(stdin ?? "");
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killAfterGrace(child, opts.graceMs);
-      }, timeoutMs);
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
 }
 
@@ -18981,14 +18977,16 @@ export async function checkFixCensusSnapshotAsync(
  *  or never started), `signal` the killing signal, `error` a spawn failure or the bound's kill. */
 export function spawnCensusChild(file: string, args: string[], options: SpawnSyncOptionsWithStringEncoding): Promise<CensusChildResult> {
   return new Promise((resolveChild) => {
-    execFile(file, args, { cwd: options.cwd, env: options.env, encoding: "utf8", timeout: options.timeout, maxBuffer: options.maxBuffer },
+    const child = execFile(file, args, { cwd: options.cwd, env: options.env, encoding: "utf8", maxBuffer: options.maxBuffer },
       (error, stdout, stderr) => {
-        const failed = error as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
+        bound?.cancel();
+        const failed = (bound?.timedOut ? bound.timeoutError(file, { stdout, stderr }) : error) as (Error & { code?: unknown; signal?: NodeJS.Signals | null }) | null;
         const status = failed === null ? 0 : typeof failed.code === "number" ? failed.code : null;
         const signal = failed?.signal ?? null;
         resolveChild({ status, signal, stdout: String(stdout), stderr: String(stderr),
           ...(failed !== null && status === null && signal === null ? { error: failed } : {}) } as CensusChildResult);
       });
+    const bound = options.timeout ? boundChildByLoopTime(child, options.timeout) : undefined;
   });
 }
 
@@ -19132,10 +19130,8 @@ const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
 const coverageSandboxText = (reason: unknown): string => new ProofSandboxUnavailableError(String((reason as Error)?.message ?? reason).slice(0, 300)).message;
 const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status: null, output: "", timedOut: false, spawnError: coverageSandboxText(reason) });
 const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
-  new Promise((resolve) => {
-    execFile(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, timeout: 10_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) =>
-      resolve(error ? String(stderr).trim().split("\n")[0] || error.message : undefined));
-  });
+  execFileLoopBounded(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
+    () => undefined, (error: { stderr?: unknown; message: string }) => String(error.stderr ?? "").trim().split("\n")[0] || error.message);
 const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
   const status = proofSandboxStatus();
   if (status.mode !== "bwrap") return coverageSandboxRefusal(status.reason);
@@ -19165,11 +19161,11 @@ export const spawnCoverageChild = (file: string, args: string[], wt: string, env
     let timedOut = false;
     let spawnError: string | undefined;
     let settled = false;
-    let timer: NodeJS.Timeout | undefined;
+    let bound: LoopBound | undefined;
     const finish = (status: number | null) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      bound?.cancel();
       const decode = (chunks: Buffer[]) => {
         const decoder = new StringDecoder("utf8");
         return decoder.write(Buffer.concat(chunks)) + (outputLimitExceeded ? "" : decoder.end());
@@ -19194,18 +19190,14 @@ export const spawnCoverageChild = (file: string, args: string[], wt: string, env
       if (chunk.byteLength > remaining) {
         outputLimitExceeded = true;
         spawnError = "maxBuffer exceeded (ENOBUFS)";
-        if (timer) clearTimeout(timer);
+        bound?.cancel();
         child.kill();
         killAfterGrace(child);
       }
     };
     child.stdout?.on("data", (c: Buffer) => collect(c, "out"));
     child.stderr?.on("data", (c: Buffer) => collect(c, "err"));
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-      killAfterGrace(child);
-    }, timeoutMs);
+    bound = boundChildByLoopTime(child, timeoutMs, { onExpire: () => void (timedOut = true), escalateAfterMs: GIT_FETCH_KILL_GRACE_MS });
     child.on("error", (e) => {
       spawnError ??= e.message;
       finish(null);
@@ -26927,7 +26919,7 @@ const gardenMintBudgets = new Map<string, GardenMintBudget>();
  *  Budgets survive rebuilding a spec; a timeout never releases an id that may already be held. */
 
 export function ciLearningTaskIdMinter(root: string, log?: (step: string, fields: Record<string, unknown>) => void,
-  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = execFilePromise,
+  executeAsync: (file: string, args: string[], options: { maxBuffer: number; timeout: number; killSignal: "SIGKILL"; signal: AbortSignal }) => Promise<{ stdout: string; stderr?: string }> = (file, args, options) => execFileLoopBounded(file, args, { ...options, encoding: "utf8" }),
   opts: { budget?: GardenMintBudget; clock?: Pick<Clock, "now">; pollIntervalMs?: () => number;
     loadPolicy?: () => { values: Pick<Policy["values"], "pollIntervalMs"> } } = {}):
   ((filingBranch?: string) => string) & { async: (filingBranch: string) => Promise<string>; heldSha: (taskId: string) => string | undefined } & GardenTaskIdRelease {
@@ -35992,7 +35984,7 @@ export function readPushedRunBranchesOutput(
 /** W1-T5805 — the same read as an awaited child, for the daemon's tick and each lane refill: killed past
  *  `timeoutMs`, and REJECTING on any failure so the daemon ledgers it and keeps its fail-open direction. */
 export async function readPushedRunBranchesOutputAsync(
-  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }> = execFilePromise as never,
+  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }> = execFileLoopBounded,
   timeoutMs = GATEWAY_FETCH_TIMEOUT_MS,
 ): Promise<string> {
   const opts = { encoding: "utf8", cwd: repoRoot, timeout: timeoutMs, killSignal: "SIGKILL" } as const;
@@ -48399,28 +48391,41 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
-    const tickRead = await tickReadFor?.();
+    const prelude = createFullPreludeTimer((fields) => log("sweep.full_prelude", fields));
     const triageRuntime = buildEscalationTriageRuntime({ root: targetCheckoutRoot ?? repoRoot, config, owner, repo },
       { evidenceHistory: escalationTriageEvidence });
     if (!github) configureEscalationTriage(triageRuntime);
-    // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
-    if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
-    try {
-      await mainHealthRung?.();
-    } catch (e) {
-      log("main.health.error", { error: String((e as Error)?.message ?? e) });
-    }
-    // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
-    // so a reply steers this same tick. Contained like `mainHealthRung` above.
-    if (escalationAnswerGateway) {
-      try {
-        const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
-          { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
-        if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
-      } catch (e) {
-        log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
-      }
-    }
+    const [tickRead] = await Promise.all([
+      prelude.time("tick_read", () => tickReadFor?.()),
+      // W1-T9406: the evidence slice's new rotations load off the loop before this tick triages anything.
+      prelude.time("triage_evidence", async () => {
+        if (!github) await refreshEscalationTriageEvidence(triageRuntime, ledgerPath, log);
+      }),
+      prelude.time("main_health", async () => {
+        try {
+          await mainHealthRung?.();
+        } catch (e) {
+          log("main.health.error", { error: String((e as Error)?.message ?? e) });
+        }
+      }),
+      // W1-T4471: land owner replies in `plan/questions.ndjson` BEFORE `buildOpenPrViews` reads it,
+      // so a reply steers this same tick. Contained like `mainHealthRung` above.
+      prelude.time("escalation_answers", async () => {
+        if (!escalationAnswerGateway) return;
+        try {
+          const answers = await readEscalationAnswers(repoRoot, runId, escalationAnswerGateway,
+            { ledgerPath, ...(escalationFeedbackReply ? { feedback: escalationFeedbackReply } : {}) });
+          if (answers.unreadable > 0) log("escalation_answers.unreadable", { ...answers });
+        } catch (e) {
+          log("escalation_answers.error", { error: String((e as Error)?.message ?? e) });
+        }
+      }),
+    ]);
+    prelude.note({
+      tick_read_source: tickRead === undefined ? "none"
+        : (tickRead.servedPublishedAtMs ?? prelude.startedAtMs) < prelude.startedAtMs ? "served" : "own_read",
+      ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshot_published_at_ms: tickRead.servedPublishedAtMs } : {}),
+    });
     // W1-T3618: this pass's own reviewer-code freshness discovery, if any — read by `effects`
     // (`buildSweepEffects`'s own once-per-call cache) below and surfaced here so the daemon's tick
     // loop can end the cycle through its EXISTING pre-admission freshness re-check rather than
@@ -48430,20 +48435,21 @@ export function buildSweepHook(
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
-      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
-        pacer,
-        planFilingFileCache,
-        onPlanFilingClassification: reportPlanFilingClassification,
-        isMerged,
+      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
+        buildOpenPrViewsAsync(owner, repo, ledgerPath, {
+          pacer,
+          planFilingFileCache,
+          onPlanFilingClassification: reportPlanFilingClassification,
+          isMerged,
           readMainPlan: resolvedReadMainPlan,
-      });
+        }));
       // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
       thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
-      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log,
-        tickRead ? tickReadReverificationDeps(tickRead) : {});
+      const reverifySummary = await prelude.time("post_fix_reverification", () => sweepPostFixReverification(owner, repo,
+        openPrs, ledgerPath, runId, log, tickRead ? tickReadReverificationDeps(tickRead) : {}));
       const redrivenThisPass = new Set(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
@@ -48470,20 +48476,23 @@ export function buildSweepHook(
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
       const inflightDir = join(config.root, "state", "inflight");
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
-      const staleGateWorkflowsByPr = tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
-      const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
+      const staleGateWorkflowsByPr = await prelude.time("stale_gate_workflows", () =>
+        tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung));
+      const updatedForWorkflow = await prelude.time("updated_for_workflow", () => updatedForWorkflowFromLedger(ledgerPath));
       const freshBaseChangedFiles = new Map<number, BaseChangedFiles>();
-      const behindMainByPr = tickRead?.behindMainByPr
-        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles);
+      const behindMainByPr = await prelude.time("behind_main", () => tickRead?.behindMainByPr
+        ?? buildBehindMainByPr(owner, repo, prsForFixRung, undefined, undefined, freshBaseChangedFiles));
       const baseChangedFilesByPr = tickRead?.baseChangedFilesByPr ?? freshBaseChangedFiles;
-      await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
+      await prelude.time("merge_probes", () =>
+        probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr }));
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
       // AFTER `runSweep` had already disposed every open PR. That ordering is what left #3877 open
       // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-      const creditCandidates = tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
+      const creditCandidates = await prelude.time("credit_candidates", () =>
+        tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub));
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
@@ -48496,6 +48505,7 @@ export function buildSweepHook(
               readMainPlan: resolvedReadMainPlan },
           }),
           ...(tickRead?.servedPublishedAtMs !== undefined ? { snapshotPublishedAtMs: tickRead.servedPublishedAtMs } : {}),
+          markPrelude: prelude.mark,
           ledgerPath,
           runId,
           log,
@@ -48572,6 +48582,7 @@ export function buildSweepHook(
     } catch (e) {
       log("sweep.error", { error: String((e as Error)?.message ?? e) });
     }
+    prelude.write(false);
     // W1-T192: the draft rung (fail-soft internally, its own try/catch) — a fired trigger
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
@@ -57880,7 +57891,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["skill-eval", async (rest) => await skillEvalCommand(rest,
     skillEvalProductionInput(repoRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk))],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
-  ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
+  ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
   [

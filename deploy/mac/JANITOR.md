@@ -1,7 +1,7 @@
 # Account-aware workspace retirement
 
 Install code with `bash deploy/mac/install-janitor.sh`. This preserves the previous
-script and installs both guards beside `~/bin/remudero-janitor.sh`; it does not
+script and installs both guards and the cache helper beside `~/bin/remudero-janitor.sh`; it does not
 change schedules. Existing Craig launchd and agent cron jobs can use the same
 binary: account paths are derived from the account running it.
 
@@ -19,9 +19,24 @@ has at least six hours of mtime **and ctime** inactivity. Git administrative
 metadata is excluded. Dependency/coverage directories count as activity too.
 The Git HEAD file is checked separately so a metadata-only branch switch is
 protected without letting routine fetch/status refreshes hold a tree forever.
-A shell in the operator checkout does not hold every nested disposable worktree;
-specific job-parent/child CWDs still do. Git-tracked nested directories and
+A launcher in a parent directory does not hold every inactive child. A cwd
+inside a child still holds it, as does a parent process whose command names
+that child through a relative path. PID/command visibility failures hold the
+candidate. Artifact cleanup uses its enclosing Git checkout as the activity
+scope, so an active repository retains its dependencies. Git-tracked nested directories and
 submodule/gitlink sources are never retired.
+
+Every scheduled janitor pass also calls the installed helper in cache-only
+mode for its configured temporary roots, `~/Remudero` and `~/rmd-work`.
+Discovery reaches historical job TMPDIRs up to eight levels deep, without
+following symlinks or entering Git metadata, dependencies or runtime/state
+directories. Both the regular temporary cleaner and this delegated mode
+discover nested numeric `tsx-<uid>` caches. Only recognized generated cache
+files are eligible in discovered caches; Git-owned, retained, seed or
+unrecognized contents stay protected. Each file needs six hours of both mtime
+and ctime inactivity, with fresh process/CWD/open-file checks before removal.
+Cache roots and sibling fixtures/source/state stay in place. Delegated cache
+counts are logged separately from workspace-removal counts.
 
 Fresh `git ls-remote` advertisements establish recoverability. Current heads/tags
 can prove ancestry when their commit objects are available locally; PR head refs

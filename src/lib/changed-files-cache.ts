@@ -11,11 +11,10 @@
  *    snapshot has it.
  * An OPEN PR's list can change with a push, so it is memoised in memory only, never on disk.
  */
-import { execFile } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 
 import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
@@ -26,7 +25,6 @@ const DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_FAILURE_TTL_MS = 5 * 60_000;
 
-const execFileAsync = promisify(execFile);
 
 /** The board-path changed-files provider handed to `buildBatchedGithub` as `changedFilesCache`. */
 export interface ChangedFilesCache {
@@ -82,7 +80,7 @@ export function createChangedFilesCache(
   const fetchFiles =
     options.fetch ??
     (async (prNumber: string): Promise<string[] | undefined> => {
-      const { stdout } = await execFileAsync(
+      const { stdout } = await execFileLoopBounded(
         options.ghBin ?? "gh",
         ["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/files`, "--jq", ".[].filename"],
         { encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS },

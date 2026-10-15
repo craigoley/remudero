@@ -20,6 +20,7 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/ledger.ts",
   "src/lib/live-write-guard.ts",
   "src/lib/log-rotation.ts",
+  "src/lib/loop-bounded-child.ts",
   "src/lib/plan-scope.ts",
   "src/lib/producer-identity.ts",
   "src/lib/repo-layout.ts",

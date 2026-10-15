@@ -28,13 +28,14 @@
  * it is older than the age ceiling. Either check failing keeps the directory.
  */
 import { execFile, execFileSync } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import { tmpdir as osTmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { systemClock } from "./clock.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { claudeScratchRoot, isReapableScratchTarget } from "./worker-scratch.js";
 
 /** A clone is ours iff its `origin` remote names this repo. */
@@ -119,17 +120,13 @@ interface BoundedRun {
 /** One awaited spawn: SIGTERM at `timeoutMs`, SIGKILL after the grace. Never rejects. */
 function runBounded(file: string, args: readonly string[], timeoutMs: number): Promise<BoundedRun> {
   return new Promise((resolve) => {
-    let timedOut = false;
     const child = execFile(file, [...args], { encoding: "utf8" }, (err, stdout) => {
-      clearTimeout(timer);
+      bound.cancel();
       const code = (err as { code?: unknown } | null)?.code;
-      resolve({ stdout, timedOut, exitCode: err === null ? 0 : typeof code === "number" ? code : null });
+      resolve({ stdout, timedOut: bound.timedOut, exitCode: err === null ? 0 : typeof code === "number" ? code : null });
     });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killAfterGrace(child);
-    }, timeoutMs);
+    // W1-T9651: loop-available time, so a held loop never reports a finished probe as timed out.
+    const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: GIT_FETCH_KILL_GRACE_MS });
   });
 }
 
