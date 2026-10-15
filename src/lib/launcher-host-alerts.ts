@@ -14,7 +14,7 @@ import {
   withdrawSpooledEscalation,
   type SpoolMeta,
 } from "./host-escalation-spool.js";
-import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
+import { isTestRunner } from "./live-write-guard.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 
@@ -341,7 +341,7 @@ const res = await fetch(url, {
   headers: { Authorization: "Bearer " + jwt, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
   signal: AbortSignal.timeout(timeoutMs),
 });
-const body = await res.json().catch(() => ({}));
+const body = await res.json().catch((err) => ({ error: String(err) }));
 if (!res.ok || typeof body.token !== "string") {
   process.stderr.write("installation token exchange answered HTTP " + res.status);
   process.exit(1);
@@ -388,8 +388,8 @@ export function hostGithubToken(deps: Partial<HostTokenDeps> = {}): string {
     if (r.status === 0) {
       try {
         return (JSON.parse(r.stdout) as { token: string }).token;
-      } catch {
-        throw new Error("the installation token exchange printed no token");
+      } catch (err) {
+        throw new Error(`the installation token exchange printed no token (${(err as Error).message})`);
       }
     }
     const why = r.error ? r.error.message : (r.stderr ?? "").trim().split("\n").pop() || `exit ${r.status}`;
@@ -410,12 +410,13 @@ export function hostAlertRepo(run: SpawnSyncFn = realSpawnSync): { owner: string
 }
 
 /** The production delivery: docker for the down check, the host credential, the needs-human
- *  transport. Refused under the test runner before it touches docker, git or the network. */
+ *  transport, whose `create` is the gated write (escalate.ts's ghIssueGateway, in AUTHORITY_TABLE).
+ *  Refused under the test runner before the credential, git or the gateway's dedup READ run. */
 export function realHostDirectDelivery(stateDir: string): HostDirectDelivery {
   return {
     containerState: (instance) => dockerContainerState(instance),
     post: (e) => {
-      assertLiveWriteAllowed("gh-issue-create", `the host posting ${e.taskId}`);
+      if (isTestRunner()) throw new Error(`refused under the test runner: the host posting ${e.taskId} would reach the live repo`);
       const token = hostGithubToken();
       const { owner, repo } = hostAlertRepo();
       const env = { ...process.env, GH_TOKEN: token };

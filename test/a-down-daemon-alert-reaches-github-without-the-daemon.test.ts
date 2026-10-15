@@ -244,7 +244,7 @@ test("the host credential is a minted App installation token, else GH_TOKEN, els
     () => hostGithubToken({ env: app, spawn: () => spawned({ status: null, error: new Error("spawnSync ETIMEDOUT") }) }),
     /exchange failed \(spawnSync ETIMEDOUT\)/,
   );
-  assert.throws(() => hostGithubToken({ env: app, spawn: () => spawned({ status: 0, stdout: "not json" }) }), /printed no token/);
+  assert.throws(() => hostGithubToken({ env: app, spawn: () => spawned({ status: 0, stdout: "not json" }) }), /printed no token \(Unexpected token/);
   assert.throws(() => hostGithubToken({ env: app, spawn: () => spawned({ status: 3 }) }), /exchange failed \(exit 3\)/);
   // An unreadable or unusable key is named, never a stack.
   assert.throws(() => hostGithubToken({ env: { ...app, [GH_APP_PRIVATE_KEY_PATH_ENV]: join(keyDir, "absent.pem") } }), /could not sign a JWT/);
@@ -266,7 +266,7 @@ test("the post goes to the checkout's own github repo, and is refused under the 
   // The production post never reaches docker, git or GitHub from a suite.
   const dir = scratch(t, "real-post");
   const e = { class: "BLOCKED", taskId: "HOST-WATCHDOG-x-crash-loop", summary: "s", detail: "d", options: [], recommendation: "", consequence: "" } as unknown as Escalation;
-  assert.throws(() => realHostDirectDelivery(dir).post(e), /gh-issue-create/);
+  assert.throws(() => realHostDirectDelivery(dir).post(e), /refused under the test runner: the host posting HOST-WATCHDOG-x-crash-loop/);
 
   // The verb's default under the test runner wires no delivery: spool-only, nothing probed.
   withStubDocker(t, 'touch "$(dirname "$0")/probed"; echo false');
