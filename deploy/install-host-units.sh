@@ -406,7 +406,9 @@ deploy_code_idle() {
 }
 
 deploy_code_clean() {
-  local code="$STATE_DIR/remudero" edits
+  local code edits
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   if [ ! -e "$code/.git" ]; then
     echo "rmd-relaunch: deploy code -- checkout missing; deferring." >&2
     return 1
@@ -444,13 +446,16 @@ deploy_code_clean() {
 # One rung of the ladder for one live tree, through the same CLI the progress verdict uses. Returns 0
 # only when it restored that tree; prints its one-line verdict either way.
 live_edits_ladder() {
-  local tree="$1" dir="$2" rmd="$STATE_DIR/remudero/bin/rmd" out line tmo=()
+  local tree="$1" dir="$2" code rmd out line tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
   if [ ! -x "$rmd" ]; then
     echo "rmd-relaunch: live edits -- $rmd missing; the ${tree} defers unrecorded." >&2
     return 1
   fi
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" live-edits \
+  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" live-edits \
       --tree "$tree" --checkout "$dir" --state-root "$STATE_DIR/state" --json 2>/dev/null)"; then
     echo "rmd-relaunch: live edits -- the ladder for the ${tree} failed; deferring." >&2
     return 1
@@ -462,7 +467,9 @@ live_edits_ladder() {
 }
 
 refresh_deploy_code() {
-  local container="$1" code="$STATE_DIR/remudero" install_head
+  local container="$1" code install_head
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   DEPLOY_CODE_BUSY=0
   deploy_code_idle "$container" || return 1
   deploy_code_clean || return 1
@@ -502,8 +509,8 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
   src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts
   src/lib/deploy-judge.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts
   src/lib/fs-race-safe.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts
-  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/plan-scope.ts
-  src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
+  src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/loop-bounded-child.ts
+  src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/worker-containment.ts)
 
 # W1-T6249 -- A REFRESH DEFERRED ONLY ON ACTIVE WORK STILL ASKS deploy-run. Busy ticks ended at
 # `|| exit 0` before deploy-run, so core's image recycle starved for hours on 2026-10-07; deploy-run
@@ -513,7 +520,9 @@ DEPLOY_LOGIC_PATHS=(deploy/ bin/ src/lib/deployer.ts src/lib/action-reconciliati
 # install head moved on every merge, so the tree stayed one merge behind for 80+ min); only the
 # deploy-logic paths must match, which keeps W1-T4917's "deploy code never older than it deploys".
 deploy_code_busy_handoff() {
-  local container="${1:-}" code="$STATE_DIR/remudero" install_head daemon_head rc=0
+  local container="${1:-}" code install_head daemon_head rc=0
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   [ "${DEPLOY_CODE_BUSY:-0}" = 1 ] || return 1
   deploy_code_clean || return 1
   if ! install_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
@@ -700,11 +709,16 @@ verdict_field() {
 # RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
 # workers run on -- the very mutation refresh_deploy_code's idle gate exists to withhold.
 read_progress_verdict() {
-  local rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  local code rmd out tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
   PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+  # W1-T9627: the revival log is the verdict's evidence of a container that died before node wrote
+  # any ledger row, so the verb reads it by name (src/lib/progress-watchdog.ts preNodeDeathRun).
+  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 RMD_REVIVAL_LOG="$REVIVAL_LOG" ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
     echo "rmd-relaunch: progress-watchdog -- verdict unreadable; acting as before." >&2
     return 0
   fi
@@ -773,7 +787,9 @@ watchdog_recycle() {
 
 # "sha=<origin/main> digest=<image id>" -- the two inputs a revive starts from; unreadable = unknown.
 revive_input() {
-  local code="$STATE_DIR/remudero" sha digest
+  local code sha digest
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   git -C "$code" fetch --quiet origin main >/dev/null 2>&1 || true
   sha="$(git -C "$code" rev-parse --verify --quiet origin/main 2>/dev/null || true)"
   digest="$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
@@ -811,13 +827,16 @@ last_steps_before_exit() {
 
 # Returns 0 when the revive must NOT happen this tick.
 hold_revive_on_verdict() {
-  local was now fb steps line
+  local was now fb pnd steps line
   if [ ! -f "$WATCHDOG_HOLD" ]; then
     [ "$PROGRESS_ACTION" = "hold-revive" ] || return 1
     now="$(revive_input)"
     fb="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"failedBoots15m":\([0-9]*\).*/\1/p')"
+    pnd="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"preNodeDeaths":\([0-9]*\).*/\1/p')"
     steps="$(last_steps_before_exit "${fb:-0}")"
-    line="$(watchdog_stamp) crash-loop-hold failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
+    # W1-T9627: a loop that dies before node writes no failed boot, so it names its own count.
+    case "$pnd" in ''|0) pnd="" ;; *) pnd="pre_node_deaths=$pnd " ;; esac
+    line="$(watchdog_stamp) crash-loop-hold ${pnd}failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
     mkdir -p "$STATE_DIR/state" 2>/dev/null || true
     printf '%s\n' "$now" > "$WATCHDOG_HOLD" 2>/dev/null || true
     printf '%s\n' "$line" >> "$REVIVAL_LOG" 2>/dev/null || true
@@ -866,6 +885,28 @@ host_tmpdir_on_scratch() {
 }
 host_tmpdir_on_scratch
 HOST_TMPDIR
+}
+
+# W1-T9617 -- THE LIVE CHECKOUT, RESOLVED ONCE PER TICK. With the hot checkouts on scratch
+# (deploy/scratch-mounts.sh, /etc/remudero/scratch-checkouts.on) "$STATE_DIR/remudero" is a stale
+# copy, so every host read of the daemon's tree below -- live edits, the code refresh, the progress
+# verdict, host alerts, deploy-run -- goes to the checkout the RUNNING container binds
+# (scratch_live_checkout), resolved on first use so a STOP or boot tick asks docker nothing. With no
+# library, or an unreadable answer, it stays the literal path.
+render_daemon_code() {
+  cat <<'DAEMON_CODE'
+DAEMON_CODE=""
+daemon_code_resolve() {
+  local lib="$CHECKOUT/deploy/scratch-mounts.sh" live
+  [ -z "$DAEMON_CODE" ] || return 0
+  DAEMON_CODE="$STATE_DIR/remudero"
+  [ -r "$lib" ] || lib="$DAEMON_CODE_LIB"
+  [ -r "$lib" ] || return 0
+  live="$(. "$lib" && scratch_live_checkout "$STATE_DIR" "$DAEMON_CODE_CONTAINER" 2>/dev/null)" || return 0
+  [ -z "$live" ] || DAEMON_CODE="$live"
+  return 0
+}
+DAEMON_CODE
 }
 
 render_watchdog_tick_snapshot() {
@@ -964,11 +1005,14 @@ EDGE_HEAL
 render_host_alerts() {
   cat <<'HOST_ALERTS'
 host_alert() {
-  local condition="$1" rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  local condition="$1" code rmd out tmo=()
+  daemon_code_resolve 2>/dev/null || :
+  code="${DAEMON_CODE:-$STATE_DIR/remudero}"
+  rmd="$code/bin/rmd"
   shift
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
+  if out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
       --instance "${HOST_ALERT_INSTANCE:-}" --condition "$condition" "$@" --json 2>/dev/null)"; then
     echo "rmd-relaunch: host alert -- $(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1)"
   else
@@ -1022,6 +1066,10 @@ BOOT=0
 [ "\${1:-}" = "--boot" ] && BOOT=1
 
 $(render_host_tmpdir)
+
+DAEMON_CODE_LIB=${BIN_DIR}/rmd-scratch-mounts
+DAEMON_CODE_CONTAINER='${CONTAINER_NAME}'
+$(render_daemon_code)
 
 # W1-T3233 — THE REVIVAL LOG'S READER. The record below has been written since W1-T2877 and read by
 # nothing. On 2026-09-09 a core.bare flag in the state checkout made entrypoint.sh exit 1, and this
@@ -1289,7 +1337,11 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # here runs before the revive decision; boot is excluded because a host coming up is the worst
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
-  if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
+  [ "\$BOOT" -eq 1 ] || daemon_code_resolve
+  if [ "\$BOOT" -eq 0 ] && [ ! -x "\$DAEMON_CODE/bin/rmd" ]; then
+    # W1-T9617: a cold scratch checkout is still being cloned and installed by the entrypoint.
+    echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do: its checkout \$DAEMON_CODE has no bin/rmd yet (a scratch re-clone in progress, or missing)."
+  elif [ "\$BOOT" -eq 0 ]; then
     # W1-T5688: THE VERDICT IS READ BEFORE refresh_deploy_code, whose \`|| exit 0\` ends every tick
     # with workers in flight -- exactly the ticks a wedged daemon produces.
     [ "\$WATCHDOG_VERDICT_READ" = 1 ] || read_progress_verdict
@@ -1300,15 +1352,15 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
     # Refresh the source CLI before loading it; standalone executable entrypoints own their
     # runtime and retain the supervisor invocation without requiring a source checkout.
-    if [ -f "\$STATE_DIR/remudero/src/run-task.ts" ]; then
+    if [ -f "\$DAEMON_CODE/src/run-task.ts" ]; then
       refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
-    if watchdog_deploy_out="\$(cd "\$STATE_DIR/remudero" && \\
+    if watchdog_deploy_out="\$(cd "\$DAEMON_CODE" && \\
       RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
+      "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
       printf '%s\\n' "\$watchdog_deploy_out"
       host_alert_clear deploy-run-problem
       # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.
@@ -1346,13 +1398,34 @@ read_progress_verdict
 note_progress_verdict
 if hold_revive_on_verdict; then exit 0; fi
 
+# W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On
+# 2026-10-15 every revive removed a container that had died in deploy/entrypoint.sh about a second
+# in, so the only copy of "cannot check out main" went with it, 25 times. Its bounded log tail
+# goes to a per-revive file under state/diagnostics/, which the revive line below names (log=).
+# Never fatal: a failed capture names log=none and the revive goes ahead. The newest
+# REVIVE_LOG_KEEP files are kept (bound kind: physical -- each is at most 200 lines).
+REVIVE_LOG_KEEP=200
+REVIVE_LOG_FILE=none
+if docker inspect ${CONTAINER_NAME} >/dev/null 2>&1; then
+  REVIVE_LOG_FILE="\$STATE_DIR/state/diagnostics/revive-\$(date -u +%Y%m%dT%H%M%SZ)-${CONTAINER_NAME}.log"
+  mkdir -p "\$STATE_DIR/state/diagnostics" 2>/dev/null || true
+  REVIVE_LOG_TMO=(); command -v timeout >/dev/null 2>&1 && REVIVE_LOG_TMO=(timeout 30)
+  { printf '# docker logs --tail 200 %s, kept before the revive removed it\n' '${CONTAINER_NAME}'
+    \${REVIVE_LOG_TMO[@]+"\${REVIVE_LOG_TMO[@]}"} docker logs --tail 200 ${CONTAINER_NAME} 2>&1 || true
+  } > "\$REVIVE_LOG_FILE" 2>/dev/null || true
+  [ -s "\$REVIVE_LOG_FILE" ] || REVIVE_LOG_FILE=none
+  ls -1t "\$STATE_DIR/state/diagnostics"/revive-*-${CONTAINER_NAME}.log 2>/dev/null | tail -n +\$((REVIVE_LOG_KEEP + 1)) |
+    while IFS= read -r old_revive_log; do rm -f "\$old_revive_log"; done
+fi
+
 # A REVIVAL MUST LEAVE A TRACE. Recreating the container RESETS docker's RestartCount, so without
 # this record a crash loop is invisible: every beat is fresh and every daemon is young.
-printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s\n' \\
+printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s log=%s\n' \\
   "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$BOOT" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.Status}}' 2>/dev/null || echo none)" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.ExitCode}}' 2>/dev/null || echo none)" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.RestartCount}}' 2>/dev/null || echo none)" \\
+  "\$REVIVE_LOG_FILE" \\
   >> "\$REVIVAL_LOG" 2>/dev/null || true
 
 # THE COUNT IS TAKEN AFTER the STOP refusal, the idempotence check and the mount checks, so none of

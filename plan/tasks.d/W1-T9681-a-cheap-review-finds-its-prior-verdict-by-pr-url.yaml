@@ -1,0 +1,53 @@
+- id: W1-T9681
+  title: "CHEAP-MODE REVIEW IS 0% EFFECTIVE — every discriminate-only admission since 2026-10-14 23:19Z (10 of 10) fell back to a full review 'prior verdict, task identity, or current reuse facts are unreadable', because reviewReuseRunner refuses any PR with no pr.taskId, and every one of them was a plan filing or hand PR (task_id SWEEP); the prior verdict is found by PR URL, which reviewRowNamesPr already accepts"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — how a discriminate-only review finds its prior verdict for a PR with no task id; what reuse proves is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-15/RESULTS.txt section 8 and finding 4): a W1-T9558 / W1-T3901 follow-up"
+  plan_refs: [W1-T9558, W1-T3901, W1-T5839, W1-T5713]
+  files: [src/run-task.ts, src/lib/review.ts, test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts, test/review-reuse-discrimination-outcome.test.ts, test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts]
+  status: queued
+  priority: 2  # operator-2026-10-15: costs review lane time, not correctness; every cheap head still gets a full review
+  attempts: 0
+  rationale: |
+    AMENDED 2026-10-15 (builder B7's finding): the original claim 2 named a PLAN FILING, but assessReviewReuse in src/lib/sweep.ts (W1-T4423) refuses to discriminate any plan-only verdict ("a plan-only verdict needs a full review to re-run lint-plan"), so a plan filing still takes a full review after this task; it now finds its verdict by URL and names that cause. Claim 2 therefore names a HAND PR, the case the fix makes cheap. The helpers live in src/lib/review.ts and the runner wiring is proven in the existing review-reuse suite, because a new suite importing src/run-task.ts trips the affected-reach ratchet.
+    MEASURED 2026-10-15 (core ledger union, read-only; cheap-review-out.txt):
+    - In window A: 7 discriminate-only admissions, 0 review-reused, and 124 full-review admissions on the light
+      pass. Since 10-14 23:19Z, 10 of 10 discriminate-only admissions wrote
+      sweep.review_reuse_discrimination_fallback "prior verdict, task identity, or current reuse facts are
+      unreadable" and ran a full review.
+    - Every one of their sweep.review_admitted rows has task_id "SWEEP" (`job.pr.taskId ?? "SWEEP"`). They were
+      #11882, #11930, #11933, #11986, #11995, #12005 and #12014: plan filings and hand PRs with no task trailer.
+    READ at origin/main ee1cf822d, src/run-task.ts reviewReuseRunner (discriminate-only branch):
+    - The prior verdict is read by `reviewRowNamesPr(line, pr.taskId, pr.prUrl)`, which matches on pr_url whenever
+      the row has one (src/lib/review.ts). So the URL alone finds it.
+    - The guard then refuses on `!pr.taskId` before anything else. For a PR with no task id, cheap mode cannot run.
+    - The guard lumps four facts into one reason, so a fallback never says which was unreadable.
+    - The prior verdict is read from readLedgerLines(deps.ledgerPath), the live file only. A verdict rotated into an
+      archive reads as unreadable too (doctrine ledger-and-evidence-discipline/read-the-ledger-union).
+  design: |
+    1. reviewReuseRunner does not require pr.taskId. The prior verdict is the newest review.posted row
+       reviewRowNamesPr matches by PR URL. The task id is used only where it is really needed: the plan's declared
+       files, for which a plan filing or hand PR has none, and the ledger key, through reviewLedgerKeyFor's
+       existing PR-number form.
+    2. Each fallback names the fact that was missing: no-prior-verdict, prior-not-terminal, criteria-unreadable,
+       own-diff-digest-unread or merge-base-unread. The cost row then counts the real causes.
+    3. The prior-verdict read goes through the bounded ledger-union reader the sweep already uses for review rows,
+       never the live file alone.
+    4. What reuse proves, and when it must fall back, is unchanged for a PR that has a task id.
+  acceptance:
+    - claim: "a discriminate-only review of a PR with no task id reuses its prior verdict found by PR URL"
+      proof: 'unit test: test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts'
+    - claim: "a hand PR with no task id and a prior success verdict runs the discriminate-only path, not a full review"
+      proof: 'grep: test("W1-T9681: a hand PR with no task id runs its cheap review from the verdict its url names" in test/review-reuse-discrimination-outcome.test.ts'
+    - claim: "a fallback names which reuse fact was missing"
+      proof: 'grep: test("W1-T9681: a cheap review fallback names the one fact it could not read" in test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts'
+  falsifier: |
+    At origin/main, a discriminate-only job for a PR whose view has no taskId, with a review.posted success row
+    carrying its pr_url, writes sweep.review_reuse_discrimination_fallback and runs the full review, so the second
+    test fails.

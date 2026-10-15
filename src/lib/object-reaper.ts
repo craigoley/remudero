@@ -1,5 +1,6 @@
 /** Repository maintenance cadence; legacy reaper exports are unreachable from production dispatch. */
 import { execFileSync, spawn } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -720,9 +721,7 @@ export function runMaintenanceGit(repo: string, args: readonly string[], timeout
       env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    let timedOut = false;
     let spawnError: string | undefined;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
     const signal = (kind: NodeJS.Signals): void => {
       try {
         if (grouped && child.pid !== undefined) process.kill(-child.pid, kind);
@@ -736,18 +735,13 @@ export function runMaintenanceGit(repo: string, args: readonly string[], timeout
     child.stdout.on("data", (chunk) => { stdout = (stdout + String(chunk)).slice(-64 * 1024 * 1024); });
     child.stderr.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-65536); });
     child.on("error", (error) => { spawnError = error.message; });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      signal("SIGTERM");
-      killTimer = setTimeout(() => signal("SIGKILL"), 1000);
-    }, timeoutMs);
+    // W1-T9651: the group is signalled at a loop-available budget, so a held loop never stops a finished git.
+    const bound = boundChildByLoopTime({ kill: (kind) => (signal(kind as NodeJS.Signals), true) }, timeoutMs, { escalateAfterMs: 1000 });
     child.on("close", (code) => {
       process.removeListener("exit", teardown);
-      clearTimeout(timer);
-      if (killTimer) {
-        clearTimeout(killTimer);
-        signal("SIGKILL");
-      }
+      const timedOut = bound.timedOut;
+      bound.cancel();
+      if (timedOut) signal("SIGKILL");
       const skipped = maintenanceRun && /^warning: lock file '[^\r\n]+' exists, skipping maintenance\r?$/m.test(stderr);
       resolve(code === 0 && !timedOut && !spawnError && !skipped ? { ok: true, stdout } :
         { ok: false, timedOut, error: spawnError ?? (stderr.trim() || `git exited ${code}`) });

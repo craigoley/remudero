@@ -50,13 +50,14 @@ test("formatTail redacts secrets, including one that straddles the cut", () => {
   // Built at runtime so no literal credential-shaped string sits in the source for leak-grep.
   const awsKey = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
   const skKey = ["sk", "-", "abcdefghijklmnop1234"].join("");
+  const privateKeyLabel = ["RSA", "PRIVATE", "KEY"].join(" ");
   const raw = [
     `fetch https://user:hunter2@example.com/x`,
     `Authorization: Bearer abcdef1234567890`,
     `GITHUB_TOKEN=${token}`,
     `password = "p@ss word"`,
     `key ${awsKey} and ${skKey}`,
-    `-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJB\n-----END RSA PRIVATE KEY-----`,
+    `-----BEGIN ${privateKeyLabel}-----\nMIIBOgIBAAJB\n-----END ${privateKeyLabel}-----`,
     `author: bob`,
   ].join("\n");
   const out = formatTail(raw);
