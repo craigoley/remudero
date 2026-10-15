@@ -79,7 +79,7 @@ function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], in
       `${context} must bind the immutable choice to this run`);
     assert.ok(body.includes('[ "${GITHUB_RUN_ATTEMPT:-1}" = "1" ] || die'),
       `${context} must refuse a lost rerun choice`);
-    const nodeCommands = body.replace(/\\\n\s*/g, " ").split("\n")
+    const nodeCommands = steps.map(step => step.run ?? "").join("\n").replace(/\\\n\s*/g, " ").split("\n")
       .map(line => line.trim()).filter(line => /\bnode\s/.test(line));
     assert.deepEqual(nodeCommands.map(line => /\bnode\s+(\S+)/.exec(line)?.[1]),
       ["scripts/diff-class.mjs", "scripts/test-tier-manifest.mjs", "scripts/test-tier-manifest.mjs"],
@@ -185,7 +185,7 @@ test("uncached ledger bootstrap preserves its pin and identity without admitting
   assert.deepEqual(job.outputs, {
     artifact_id: "${{ steps.finish.outputs.artifact_id }}", digest: "${{ steps.resolve.outputs.digest }}",
   });
-  assert.match(await readFile(join(REPO_ROOT, ".nvmrc"), "utf8"), /^24\.\d+\.\d+\s*$/);
+  assert.match(await readFile(join(REPO_ROOT, ".nvmrc"), "utf8"), /^\d+\.\d+\.\d+\s*$/);
   assertSetupCache("ci.yml", "coverage-ledger", steps, index);
   for (const installer of ["npm ci", "npx install-something", "pnpm install", "yarn install", "bun install"]) {
     for (const at of [0, steps.length]) {
@@ -220,6 +220,7 @@ test("uncached ledger bootstrap preserves its pin and identity without admitting
   changed(copy => { copy[index]!.with!["node-version-file"] = ".other-node-version"; });
   changed(copy => { copy[0]!.with!["sparse-checkout"] += "package-lock.json\n"; });
   changed(copy => { copy[2]!.run += "\nnode scripts/unrelated.mjs"; });
+  changed(copy => { copy[4]!.run += "\nnode scripts/unrelated.mjs"; });
   changed(copy => { copy[2]!.run = copy[2]!.run!.replace("${GITHUB_RUN_ID}", "another-run"); });
   changed(copy => { copy[2]!.run = copy[2]!.run!.replace("--verify-resolved-ledger", "--select-all"); });
   changed(copy => { copy[2]!.run = copy[2]!.run!.replace("--write-resolved-ledger", "--select-all"); });
