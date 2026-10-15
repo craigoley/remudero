@@ -173,7 +173,7 @@ function withConstantsInlined(args: string, text: string): string {
   // Names inside a string literal or after a `.` are not references; only the code between literals is rewritten.
   const inline = (code: string) =>
     code.replace(/(?<![.\w$])[A-Za-z_$][\w$]*/g, (name) => {
-      const def = new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?(?:const|let)\\s+${name.replace(/\$/g, "\\$")}\\s*(?::[^=\\n]+)?=\\s*([^;\\n]+)`).exec(text);
+      const def = new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?(?:const|let)\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*(?::[^=\\n]+)?=\\s*([^;\\n]+)`).exec(text);
       return def ? def[1] : name;
     });
   let out = "";
