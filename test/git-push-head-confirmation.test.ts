@@ -436,6 +436,6 @@ test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRoun
   assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
   assert.match(prechecked, /await push\(wt, branch, expectedHeadSha, priorHeadSha\);/, "the precheck preserves the expected head and prior-head lease");
   assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
-  assert.match(runTask, /pushFixRoundImpl: pushFixRound,/, "the sweep entrypoint injects the same helper");
+  assert.match(runTask, /pushFixRoundPrechecked\(deps\.log, wt, branch, sha, \{\}, pushFixRound, prior\),/, "the sweep entrypoint injects the run loop's prechecked push over the same helper (W1-T8833)");
   assert.match(runTask, /await gitPushRunBranchAsync\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
 });
