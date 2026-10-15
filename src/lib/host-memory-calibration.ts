@@ -14,7 +14,7 @@ const CONVOLUTION_OPS = 250_000;
 /** The acceptance's future outcome window and qualification history, not a polling cadence. */
 export const BACKTEST_WINDOW_MS = 30 * 60_000;
 export const CALIBRATION_DAY_MS = 24 * 60 * 60_000;
-/** PRIMARY CONTROL, proposed: one missed3minute memory reading makes coverage unknown, never a successful prediction. */
+/** PRIMARY CONTROL, proposed: over4minutes between heartbeat readings is unknown coverage (the default poll is60s). */
 export const OBSERVATION_MAX_GAP_MS = 4 * 60_000;
 /** BACKSTOP: pending forecasts normally cover only30minutes; overload is named and never drops a start. */
 const PENDING_MAX = 4096;
