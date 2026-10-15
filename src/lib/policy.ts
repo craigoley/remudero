@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { LANE_GOVERNOR_MODES, type LaneGovernorMode } from "./lane-governor.js";
 
 /**
  * The fleet's operating-constants policy, loaded as data rather than scattered source literals
@@ -118,6 +119,10 @@ export interface PolicyValues {
      *  dispatch defers. Ships at 0. See {@link checkMemoryGovernor}. Why:
      *  docs/forensics/policy.md#sweepmemoryfloormib. */
     memoryFloorMib: number;
+    /** W1-T9097: whether the build lane count follows the memory governor (`laneTarget`, lane-governor.ts):
+     *  `shadow` ledgers `dispatch.lane_target` beside `dispatchLanes` and changes nothing; `enforce` sizes
+     *  new-lane admission by it. Optional; absent is `shadow`. */
+    laneGovernor: { mode: LaneGovernorMode };
   };
   drain: {
     max: number;
@@ -475,6 +480,25 @@ function booleanField(
   return value;
 }
 
+/** W1-T9097: `sweep.laneGovernor.mode`. Absent block or row: `shadow`, the shipped mode. Like its sibling
+ *  `sweep.hostMemoryBudget.mode`, its origin is a `proposal` awaiting an operator ruling, not a lifted or net-new
+ *  number, so it is checked present here and never enters the origin census. */
+export function laneGovernorModeField(raw: unknown): LaneGovernorMode {
+  const path = "sweep.laneGovernor.mode";
+  if (raw === undefined) return "shadow";
+  if (!isPlainObject(raw) || !isPlainObject(raw.mode)) {
+    throw new PolicyError(`policy.yaml: '${path}' must be a mapping with 'value'/'origin'.`);
+  }
+  const { value, origin } = raw.mode;
+  if (!LANE_GOVERNOR_MODES.includes(value as LaneGovernorMode)) {
+    throw new PolicyError(`policy.yaml: '${path}.value' must be "shadow" or "enforce", got ${JSON.stringify(value)}.`);
+  }
+  if (typeof origin !== "string" || origin.length === 0) {
+    throw new PolicyError(`policy.yaml: '${path}.origin' must be a non-empty string, got ${JSON.stringify(origin)}.`);
+  }
+  return value as LaneGovernorMode;
+}
+
 function githubEventWakeSemanticModeField(
   raw: unknown,
   origins: Record<string, PolicyFieldOrigin>,
@@ -794,6 +818,7 @@ export function validatePolicy(raw: unknown): Policy {
     ? false
     : booleanField("sweep.recordableRatchetRepairEnabled", sweepRaw.recordableRatchetRepairEnabled, origin);
   const memoryFloorMib = numberField("sweep.memoryFloorMib", sweepRaw.memoryFloorMib, origin);
+  const laneGovernor = { mode: laneGovernorModeField(sweepRaw.laneGovernor) };
 
   const drainRaw = raw.drain;
   if (!isPlainObject(drainRaw)) throw new PolicyError("policy.yaml: 'drain' must be a mapping.");
@@ -968,6 +993,7 @@ export function validatePolicy(raw: unknown): Policy {
         supersessionDisposal,
         recordableRatchetRepairEnabled,
         memoryFloorMib,
+        laneGovernor,
       },
       drain: { max: drainMax },
       retro: { mergesThreshold: retroMergesThreshold, daysThreshold: retroDaysThreshold },

@@ -110,6 +110,7 @@ import {
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
+import { laneTarget, laneTargetRow, readLaneGovernor, LANE_TARGET_STEP, type LaneGovernorMode, type LaneGovernorReading } from "./lane-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
@@ -984,6 +985,9 @@ export interface DaemonOpts {
    *  floor, and at 1 the selection, callbacks and ordering are byte-identical to before this parameter
    *  existed. W1-T344 owns raising the row that flips it (W1-T343). Forensics: docs/forensics/daemon.md. */
   laneCount?: number;
+  /** W1-T9097: `sweep.laneGovernor.mode`. Absent: no lane target is read and `laneCount` alone sizes dispatch. `shadow`
+   *  ledgers `dispatch.lane_target` once per tick and changes nothing; `enforce` sizes new-lane admission by it. */
+  laneGovernorMode?: LaneGovernorMode;
   /** `SweepPolicy.wipLimit` (W1-T121), threaded through only to size a batch of two or more lanes, exactly as
    * `runDrainLanes` does. Distinct from `checkQueueGovernor`, which stops new dispatch outright for the whole tick;
    * this is how many lanes still fit under the ceiling right now. Without it a wide batch could overshoot by up to
@@ -1261,6 +1265,9 @@ export interface DaemonDeps {
    *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
    *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T9097: the lane governor's memory arms, pressure and CPU count, read once per dispatch tick (see
+   *  lane-governor.ts). A throw is ledgered as an unread reading, which holds the previous target. Optional. */
+  readLaneGovernor?: () => LaneGovernorReading;
   /** W1-T7720: the streak tracker the unreadable memory probe / reservation store report to, and the
    *  store read itself. Both are consulted only through `checkDispatchGovernors`. Optional. */
   memoryReadTracker?: MemoryReadTracker;
@@ -3630,6 +3637,27 @@ export async function runDaemon(
   // never 0, so a misconfigured lane count can never silently mean "dispatch nothing"; the budget helper floors its
   // own input the same way, so a value below 1 clamps up here rather than producing two disagreeing floors (W1-T343).
   const laneCount = Math.max(1, opts.laneCount ?? 1);
+  // W1-T9097: the width NEW lanes are admitted against. `laneCount` unless an enforcing lane governor set it this tick;
+  // a lower target never stops a running lane, it only holds refill and the next batch.
+  let admissionLanes = laneCount;
+  let previousLaneTarget: number | undefined;
+  // Read once per tick; an enforcing refill re-reads it so pressure arising mid-phase holds the next start, but a
+  // refill never grows it (growth is one lane per tick).
+  const governLanes = (admission: QueueAdmissionReading | undefined, at: "tick" | "refill"): number => {
+    const mode = opts.laneGovernorMode;
+    if (mode === undefined || deps.readLaneGovernor === undefined) return laneCount;
+    if (at === "refill" && mode !== "enforce") return admissionLanes;
+    const decision = laneTarget({
+      reading: readLaneGovernor(deps.readLaneGovernor),
+      previousTarget: previousLaneTarget,
+      fixedLanes: laneCount,
+      wipBound: admission?.wipLimit ?? opts.wipLimit,
+      holdGrowth: at === "refill",
+    });
+    previousLaneTarget = decision.target;
+    log(LANE_TARGET_STEP, { ...laneTargetRow(decision, mode), at });
+    return mode === "enforce" ? decision.target : laneCount;
+  };
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
   const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
@@ -5854,15 +5882,17 @@ export async function runDaemon(
     if (forcedNext) {
       dispatchSet = [forcedNext];
     } else {
+      // W1-T9097: once per tick; the refills of this tick's phase are admitted against the same width.
+      admissionLanes = governLanes(tickQueueAdmission, "tick");
       const budget =
-        laneCount <= 1
-          ? laneCount
-          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
-      if (laneCount >= 2 && budget <= 0) {
+        admissionLanes <= 1
+          ? admissionLanes
+          : laneDispatchBudget({ laneCount: admissionLanes, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
+      if (admissionLanes >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
         log("dispatch.wip_deferred", {
-          lane_count: laneCount,
+          lane_count: admissionLanes,
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: deps.openPrCount?.() ?? null,
           ...wipDeferredAdmissionFields(tickQueueAdmission),
@@ -6294,11 +6324,15 @@ export async function runDaemon(
         const refillDeferrals: PriorityDeferral[] = [];
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
+          const refillAdmission = deps.readQueueAdmission?.();
+          admissionLanes = governLanes(refillAdmission, "refill");
+          // W1-T9097: an enforcing target at or below the running lanes holds this one; the running ones run on.
+          if (opts.laneGovernorMode === "enforce" && admissionLanes <= inFlightTasks.size) reason ??= `lane target: ${admissionLanes}`;
           const budget = laneDispatchBudget({
-            laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
+            laneCount: admissionLanes, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: refillAdmission,
           });
           const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
-          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
+          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? admissionLanes : 0, {
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
@@ -6425,7 +6459,7 @@ export async function runDaemon(
         // Concurrent proposals cannot spend the same task, overlap, max or WIP slot at handoff.
         // A throwing reader/logger is a pool fault, not a success-shaped refusal.
         const budget = laneDispatchBudget({
-          laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
+          laneCount: admissionLanes, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
         });
         const reason = refillClosed ??
           (inFlightFreshness && !restartStillWaitingOnHoldout() ? "stale code" : undefined) ??

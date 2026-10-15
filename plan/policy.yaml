@@ -882,6 +882,17 @@ sweep:
     origin: "net-new"
     min: 0
     max: 8192
+  # W1-T9097 — THE BUILD LANE COUNT FOLLOWS THE MEMORY GOVERNOR (ADR 0007 decision C, src/lib/lane-governor.ts).
+  # `laneTarget` is the largest n >= 1 whose projection (the shadow budget's in-flight claims plus n run trees at
+  # the next build's learned class tail) stays under the container's lift-gated onset and the host's; it shrinks at
+  # once under pressure, grows one lane per quiet tick, and is bounded by the adaptive WIP bound and the CPU count.
+  # "shadow" (shipped) ledgers `dispatch.lane_target` {target, fixed: dispatchLanes, binding, projection_mib,
+  # onset_mib} once per tick and changes nothing. "enforce" admits new lanes against the target; a running lane is
+  # never stopped by a lower one. dispatchLanes is retired in the plan change that sets enforce.
+  laneGovernor:
+    mode:
+      value: "shadow"
+      origin: "proposal"
   # W1-T7094 — the host-wide memory budget (src/lib/host-memory-shadow.ts). Every row is a PROPOSAL
   # to calibrate from `memory_budget.shadow` rows, not a ruling. mode accepts off, shadow or enforce.
   # "shadow" (shipped) records a verdict per start and delays nothing. "enforce"
