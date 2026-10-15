@@ -2854,6 +2854,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "step (W1-T7853), which it runs against stub tools in a temp dir; it walks no tracked population and asserts no " +
       "per-file property. The `src/` strings are its own import paths.",
   ),
+  refusedForPredicate(
+    "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
+    "a",
+    "W1-T9565's own suite. The `ls-files` the recognizer sees is a stubbed execFile answer inside a temp-dir census " +
+      "runner, and its readdirSync walks scripts/ (no module loads tsx/cjs/api) and a child's coverage dir, never the " +
+      "tracked src/ population. The `src/` strings are its import path and the gardener path it expects mapped.",
+  ),
 ];
 
 export const RULE_SUITE_NAME_RE = /(?:census|ratchet|baseline)/i;

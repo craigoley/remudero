@@ -826,6 +826,17 @@ export const PRECHECK_TRIGGERED_SUITES = [
     remedy: "route the site through worktreeAdd (src/lib/worker.ts), or add a NAMED exempt row with its reason to WORKTREE_SITE_REGISTRY (src/lib/worktree-sites.ts)" },
 ];
 
+/** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
+ *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
+export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  { testFile: "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
+    trigger: ({ changed }) => changed.some((p) => [
+      "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs",
+      "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
+    ].includes(p)),
+    remedy: "load src/lib/gate-gardener.ts through tsImport (ESM), never tsx/cjs/api" },
+];
+
 /**
  * Admitted suites join by `walks` prefixes; triggered suites join by new literals or registry changes.
  * They run through `runSuites` (the structural ones each in their own call); each failure is one row in the shape censusPushRefusal reads.
@@ -843,7 +854,8 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
   let triggered;
   try {
     members = loadMembers();
-    triggered = PRECHECK_TRIGGERED_SUITES.filter((m) => m.trigger({ changed, readHead, readBase }));
+    triggered = [...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES]
+      .filter((m) => m.trigger({ changed, readHead, readBase }));
   } catch (e) {
     return { violations: [], unmeasured: String(e?.message ?? e) };
   }
@@ -867,7 +879,7 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
     violations.push(
       ...group
         .filter((m) => failing.has(m.testFile))
-        .map((m) => `census-suite: ${m.testFile} fails — run npm run ${m.script}${m.remedy ? `; ${m.remedy}` : ""}`),
+        .map((m) => `census-suite: ${m.testFile} fails — run ${m.script ? `npm run ${m.script}` : `node --test --import tsx ${m.testFile}`}${m.remedy ? `; ${m.remedy}` : ""}`),
     );
   }
   return { violations, unmeasured: unmeasured.length === 0 ? null : unmeasured.join("; ") };
@@ -914,6 +926,7 @@ export const PRECHECK_PARITY = {
   "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": { run: "census:no-draft-pr" },
   ...Object.fromEntries(PRECHECK_ADDITIONAL_RUNS.map((m) => [m.testFile, { run: m.script }])),
   ...Object.fromEntries(PRECHECK_TRIGGERED_SUITES.map((m) => [m.testFile, { run: m.script }])),
+  ...Object.fromEntries(PRECHECK_PATH_TRIGGERED_SUITES.map((m) => [m.testFile, { modeled: evaluateAdmittedCensusSuites }])),
 };
 
 /** Census suites CI runs only in its ci/coverage shards, because no census name puts them in

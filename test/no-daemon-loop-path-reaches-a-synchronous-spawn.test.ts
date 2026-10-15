@@ -192,7 +192,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   prepareDefuseTaskIds: 1,
   preserveFixHead: 3,
   probeProofSandbox: 1,
-  productionCiJudgePorts: 1,
   productionGardenerOverseerPorts: 1,
   productionMachineFilingJudgePorts: 1,
   productionOpportunityOutcomePorts: 1,
