@@ -9,6 +9,8 @@ import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-r
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { baseReproductionFiles } from "./base-reproduction.js";
 import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
@@ -1254,6 +1256,97 @@ interface RepairContext {
   readonly evidence?: RepairEvidence;
 }
 
+/** The flake-incident gardener's FLAKE_INCIDENT_MAIN_INHERITED_STEP, spelled here so this module (imported by
+ *  sweep.ts) never loads the gardener's filing graph; a test pins the two equal. */
+export const MAIN_INHERITED_HINT_SOURCE_STEP = "flake_incident.main_inherited";
+const FLAKE_INCIDENT_MAIN_INHERITED_STEP = MAIN_INHERITED_HINT_SOURCE_STEP;
+
+/** W1-T9551: a `flake_incident.main_inherited` row — a red no retry recovered — that this rung has not answered. */
+export interface MainInheritedHint {
+  origin: string;
+  file: string;
+  title: string;
+  prs: number[];
+  prsCount: number;
+}
+
+/** The rows that answer a hint, each once per PR count: covered by a repair, main green on it, or main still red on it. */
+export const MAIN_INHERITED_HINT_STEPS = Object.freeze({
+  covered: "main.health.inherited_hint_covered",
+  resolved: "main.health.inherited_hint_resolved",
+  confirmed: "main.health.inherited_hint_confirmed",
+});
+
+/** Reads only the bytes appended since its last call and parses only hint and answer lines, so a pass
+ *  every two minutes never re-parses the ledger. A file that shrank (compaction) is re-read from 0. */
+export function mainInheritedHintReader(ledgerPath: string): () => { pending: MainInheritedHint[]; torn: number } {
+  let offset = 0;
+  let decoder = new StringDecoder("utf8");
+  let carry = "";
+  let torn = 0;
+  const latest = new Map<string, MainInheritedHint>();
+  const answered = new Map<string, number>();
+  const take = (line: string): void => {
+    if (!line.includes(FLAKE_INCIDENT_MAIN_INHERITED_STEP) && !line.includes("main.health.inherited_hint_")) return;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch (error) {
+      torn++; // counted and returned: a torn line is not an absent one
+      void error;
+      return;
+    }
+    const prsCount = typeof row.prs_count === "number" ? row.prs_count : 0;
+    if (typeof row.origin !== "string") return;
+    if (row.step === FLAKE_INCIDENT_MAIN_INHERITED_STEP && typeof row.file === "string") {
+      if ((latest.get(row.origin)?.prsCount ?? -1) > prsCount) return;
+      const prs = Array.isArray(row.prs) ? row.prs.filter((n): n is number => typeof n === "number") : [];
+      latest.set(row.origin, { origin: row.origin, file: row.file, title: typeof row.title === "string" ? row.title : "", prs, prsCount });
+    } else if (typeof row.step === "string" && row.step.startsWith("main.health.inherited_hint_")) {
+      answered.set(row.origin, Math.max(answered.get(row.origin) ?? -1, prsCount));
+    }
+  };
+  return () => {
+    // Size the descriptor it reads, never the path (CodeQL js/file-system-race): the ledger rotates under the daemon.
+    let fd: number | undefined;
+    try { fd = openSync(ledgerPath, "r"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
+      const size = fd === undefined ? 0 : fstatSync(fd).size;
+      if (size < offset) {
+        offset = 0;
+        decoder = new StringDecoder("utf8");
+        carry = "";
+        latest.clear();
+        answered.clear();
+      }
+      const chunk = Buffer.alloc(fd !== undefined && size > offset ? 1 << 20 : 0);
+      while (fd !== undefined && offset < size) {
+        const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset), offset);
+        if (n <= 0) break;
+        offset += n;
+        const lines = (carry + decoder.write(chunk.subarray(0, n))).split("\n");
+        carry = lines.pop() ?? "";
+        for (const line of lines) take(line);
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    return { pending: [...latest.values()].filter((h) => (answered.get(h.origin) ?? -1) < h.prsCount), torn };
+  };
+}
+
+/** Whether a repair's red names the hint's test: its `not ok <title>` line, or for a file-level hint, the file. */
+function repairCoversHint(record: MainRepairRecord, hint: MainInheritedHint): boolean {
+  if (hint.title !== "") return record.red?.detail?.includes(`not ok ${hint.title}`) === true;
+  return record.inherited?.testFiles.includes(hint.file) === true;
+}
+
+/** Whether main's own red, read this pass, still fails the hint's test. */
+function redNamesHint(red: MainRedSignature, failures: readonly CiFailure[], hint: MainInheritedHint): boolean {
+  if (hint.title !== "") return red.detail?.includes(`not ok ${hint.title}`) === true;
+  return failures.some((failure) => failure.logTail.includes(hint.file));
+}
+
 function isMainHealthIssue(issue: OpenIssue): boolean {
   return /^\*\*Task:\*\*\s+MAIN-HEALTH\s*$/m.test(issue.body ?? "");
 }
@@ -1312,6 +1405,29 @@ export function buildMainHealthRung(
   let ratchetPrUrl: string | undefined;
   let ratchetDeclinedSignature: string | undefined;
   const ratchetOpened = new Set<string>();
+  const readHints = mainInheritedHintReader(deps.ledgerPath);
+  const hintFields = (hint: MainInheritedHint): Record<string, unknown> =>
+    ({ origin: hint.origin, file: hint.file, title: hint.title, prs: hint.prs, prs_count: hint.prsCount });
+  /** W1-T9551: answer each pending main-inherited hint once. A repair whose red names it covers it; on a
+   *  green main it is resolved; on a red main that still fails it, the red path below repairs it. */
+  const answerHints = (sha: string, state: string, red?: { signature: MainRedSignature; failures: readonly CiFailure[] }): void => {
+    const { pending, torn } = readHints();
+    if (torn > 0 && pending.length > 0) deps.log("main.health.inherited_hint_torn", { torn });
+    if (pending.length === 0) return;
+    const records = [...mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath)).values()];
+    for (const hint of pending) {
+      const covering = records.find((record) => repairCoversHint(record, hint));
+      if (covering) {
+        deps.log(MAIN_INHERITED_HINT_STEPS.covered, {
+          ...hintFields(hint), offending_sha: covering.offendingSha, fix_pr_url: covering.fixPrUrl ?? null, repair_resolved: covering.resolved,
+        });
+      } else if (state === "green") {
+        deps.log(MAIN_INHERITED_HINT_STEPS.resolved, { ...hintFields(hint), head_sha: sha });
+      } else if (red && redNamesHint(red.signature, red.failures, hint)) {
+        deps.log(MAIN_INHERITED_HINT_STEPS.confirmed, { ...hintFields(hint), head_sha: sha, red_signature: describeMainRed(red.signature) });
+      }
+    }
+  };
   const repairRow = (step: string, fields: Record<string, unknown>): void => {
     appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: MAIN_HEALTH_TASK_ID, step, surface: "main", ...fields });
     repairsMayBeActive = true;
@@ -2347,6 +2463,7 @@ export function buildMainHealthRung(
         ...(advisoryFailing.length > 0 ? { advisory_failing_checks: [...advisoryFailing].sort() } : {}),
         ...metPrFields(metLookup),
       });
+      if (observation.state !== "red") answerHints(sha, observation.state);
 
       if (observation.state === "red") {
         resolvedSignature = undefined;
@@ -2500,6 +2617,7 @@ export function buildMainHealthRung(
             shards.length > 0 && shardFailures.length > 0 ? shardFailures : failures,
           );
         }
+        answerHints(sha, "red", { signature: mainRedSignature([...observation.failingChecks], repairFailures), failures: repairFailures });
         if (deps.repair && (await repairRedMain(deps.repair, observation, sha, branch, repairFailures, startedAtMs))) {
           repairedSignature = signature;
           lastSuccessfulObservationAtMs = startedAtMs;
