@@ -464,6 +464,7 @@ import {
   resolveFleetControlHold,
   runDaemon,
   RESTART_HISTORY_WINDOW_MS,
+  SWEEP_SETTLED_STEP,
   restartWorkHistory,
   type CrashLoopVerdict,
   type DaemonFreshness,
@@ -52934,7 +52935,7 @@ export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.no
   const read = readLedgerUnionRecordsSync(stateDir, {
     refuseIncomplete: true, sinceTs: new Date(nowMs - RESTART_HISTORY_WINDOW_MS).toISOString(),
     rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
-    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause"],
+    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP],
   });
   if (!read.ok) throw new Error(`restart history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}`);
   return read.rows.map((row) => JSON.stringify(row));

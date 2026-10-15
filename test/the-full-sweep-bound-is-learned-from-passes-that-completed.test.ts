@@ -101,10 +101,11 @@ test("W1-T9563: at 10-14 12-24Z's measured sample the learned bound clears the s
 
 test("W1-T9563: below the learner's sample floor the policy value is the bound, and the window keeps the newest passes", () => {
   const learner = { fallbackMs: 559_000, settledMs: [] as number[] };
+  // W1-T9632: below the floor the bound is never under 3x the longest held pass; 30 min passes give 90 min.
   for (let i = 0; i < SWEEP_BOUND_MIN_SAMPLES - 1; i++) recordSettledSweep(learner, 30 * MIN);
   recordSettledSweep(learner, 0); // a non-positive duration measures nothing
   recordSettledSweep(learner, Number.NaN);
-  assert.deepEqual(learnedSweepBound(learner), { boundMs: 559_000, basis: "no_history_fallback", samples: SWEEP_BOUND_MIN_SAMPLES - 1 });
+  assert.deepEqual(learnedSweepBound(learner), { boundMs: 90 * MIN, basis: "settled_max_fallback", samples: SWEEP_BOUND_MIN_SAMPLES - 1 });
   for (let i = 0; i < SWEEP_BOUND_WINDOW; i++) recordSettledSweep(learner, 10 * MIN);
   assert.equal(learner.settledMs.length, SWEEP_BOUND_WINDOW);
   assert.equal(learnedSweepBound(learner).boundMs, 30 * MIN, "older 30 min passes fell out of the window; p90 of 10 min x 3");
