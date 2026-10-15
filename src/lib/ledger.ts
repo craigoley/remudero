@@ -688,6 +688,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.base_red.refresh",
   "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
   "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
+  "sweep.base_red.refresh_admission", // W1-T9595: the light pass replays its held heads; pacing reads its cohort.
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",

@@ -170,7 +170,8 @@ test("W1-T4351: a base red spends ONE update-branch press per pass, and a thrown
   assert.deepEqual(r.dispatched, []);
   assert.equal(ledger.filter((l) => l.step === BASE_RED_REFRESH_STEP).length, 1);
   assert.match(String(r.disposed(6854)?.stand_down_reason), /requested \(error: 422 merge conflict\)/);
-  assert.match(String(r.disposed(6855)?.stand_down_reason), /one branch refresh is spent or unwired/);
+  // W1-T9595: the press goes through the refresh admission, which starts slow with no uptake signal.
+  assert.match(String(r.disposed(6855)?.stand_down_reason), /waiting for refresh admission behind #6854 \(slow start/);
 });
 
 test("W1-T4351: a red that is the PR's own still dispatches the fix lane", async () => {
