@@ -131,6 +131,15 @@ test("W1-T9069: a freed lane admits a task whose class span ends before the latc
     assert.equal(h.rows.some((row) => row.step === "dispatch.lane_refill_held" && String(row.fields.reason).startsWith("stale code")), false,
       "the first holdout no longer closes refill for the rest of the latch");
     assert.equal(h.count("dispatch.lane_parked"), 0);
+    h.boundary("A", "preopen_gate"); // a changed answer exposes the actual accepted refill's accounting
+    const inFlight = h.rows.findLast((row) => row.step === "daemon.restart_holdout")!.fields.in_flight as
+      Array<{ task_id: string; holdout: boolean; admitted_under_latch: boolean; expected_finish_ms: number }>;
+    const refill = inFlight.find((entry) => entry.task_id === "D");
+    assert.ok(refill, "the accepted refill appears in the real holdout decision");
+    assert.equal(refill.holdout, false);
+    assert.equal(refill.admitted_under_latch, true);
+    assert.equal(refill.expected_finish_ms, epoch + 16 * minute,
+      "the refill's accepted start at minute 6 plus its 10-minute class span is retained");
   } finally { await h.close(); }
 });
 

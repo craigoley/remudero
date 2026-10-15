@@ -254,6 +254,11 @@ export function evaluateNetBytes(headBytes, baseBytes, operands = {}) {
   ];
 }
 
+/** Boolean net-byte verdict for cheap checks; fold-debt routing remains a CLI concern. */
+export function checkNetByteBudget(headBytes, baseBytes) {
+  return evaluateNetBytes(headBytes, baseBytes).length === 0;
+}
+
 function main(argv) {
   const { values } = parseArgs({
     args: argv,

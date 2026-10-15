@@ -1359,7 +1359,11 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       gh_lock="$gh_stamp.lock"
       gh_lock_owned=0
       gh_lock_started="$gh_now"
-      while ! mkdir "$gh_lock" 2>/dev/null; do
+      while :; do
+        if mkdir "$gh_lock" 2>/dev/null; then
+          gh_lock_owned=1
+          break
+        fi
         gh_lock_mtime="$(stat -c %Y "$gh_lock" 2>/dev/null || true)"
         case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime="$(stat -f %m "$gh_lock" 2>/dev/null || true)" ;; esac
         case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime=0 ;; esac
@@ -1374,7 +1378,7 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
         fi
         sleep 0.025
       done
-      [ -d "$gh_lock" ] && gh_lock_owned=1
+      # Existence is not ownership: after the bounded wait this may still be a sibling's lock.
       gh_now="$(date +%s 2>/dev/null || echo 0)"
       gh_prev=0
       if [ -f "$gh_stamp" ]; then
