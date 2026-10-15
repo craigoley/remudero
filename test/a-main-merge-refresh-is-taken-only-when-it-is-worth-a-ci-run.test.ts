@@ -22,6 +22,7 @@ import {
   closenessToMerge,
   decideRefresh,
   dueRefreshOutcomes,
+  forcedRefreshFields,
   observedRefreshBenefitWeight,
   parseRefreshJudgeReply,
   productionRefreshJudge,
@@ -269,6 +270,12 @@ test("W1-T7735: overlap classification, requests, outcomes and the benefit weigh
     { prNumber: 5, headSha: "h5" }, "ci-timeout");
   assert.equal(forced[0]?.forced_by, "ci-timeout");
   assert.equal(forced[0]?.decision, "refresh");
+  // The fix lane's `log` stamps run, task and step itself, and a head it never read is null, never guessed.
+  const rebase = forcedRefreshFields({ prNumber: 6, forcedBy: "fix-rebase", nowMs: NOW });
+  assert.equal(rebase.head_sha, null);
+  assert.equal(rebase.forced_by, "fix-rebase");
+  assert.equal("step" in rebase || "run_id" in rebase || "task_id" in rebase, false);
+  assert.equal(forcedRefreshFields({ prNumber: 6, headSha: "h6", forcedBy: "fix-base-refresh", nowMs: NOW }).head_sha, "h6");
 });
 
 test("W1-T7735: a full pass joins a decision with its outcome once", async () => {

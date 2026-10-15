@@ -11222,12 +11222,8 @@ export function recordForcedRefresh(
   forcedBy: string,
 ): void {
   const nowMs = deps.now ? deps.now() : Date.now();
-  const row = refreshDecidedRow({ runId: deps.runId, taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha,
-    path: forcedBy, forcedBy, strict: undefined, ciInFlight: false, overlapFiles: [], nowMs,
-    value: { decision: "refresh", reason: `forced: the ${forcedBy} path repairs a fault, so it keeps its own trigger`,
-      predictedCostCiMin: decideRefresh({ path: "general", overlap: "none", overlapFiles: [], repairNeeded: true,
-        strict: undefined, ciInFlight: false }).predictedCostCiMin, predictedBenefit: 1 } });
-  (deps.appendLine ?? appendLedger)(deps.ledgerPath, row as Record<string, unknown> & { run_id: string; task_id: string; step: string });
+  (deps.appendLine ?? appendLedger)(deps.ledgerPath, forcedRefreshRow({ runId: deps.runId, taskId: pr.taskId,
+    prNumber: pr.prNumber, headSha: pr.headSha, forcedBy, nowMs }));
 }
 
 /** W1-T7735 — joins each owed decision with what the open set now shows. A full pass only: a light
@@ -20796,7 +20792,7 @@ import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
 import { isTaskShardName } from "./task-shard-name.js";
 import {
-  askRefreshJudge, decideRefresh, dueRefreshOutcomes, judgedVerdicts, observedRefreshBenefitWeight,
+  askRefreshJudge, decideRefresh, dueRefreshOutcomes, forcedRefreshRow, judgedVerdicts, observedRefreshBenefitWeight,
   productionRefreshJudge, refreshDecidedRow, selectPacedRefreshRequest, REFRESH_DECIDED_STEP, REFRESH_OUTCOME_STEP,
   type RefreshJudge, type RefreshJudgeVerdict, type RefreshOverlap, type RefreshPath,
 } from "./refresh-value.js";

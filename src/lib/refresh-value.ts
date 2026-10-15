@@ -220,6 +220,26 @@ export function refreshDecidedRow(input: {
   };
 }
 
+/** W1-T7735 — the row a repair-driven refresh writes. It keeps its own trigger, so its decision
+ *  is `refresh` with `forced_by: <path>`, and the row carries the cost the tuning must see. */
+export function forcedRefreshRow(input: {
+  runId: string; taskId?: string; prNumber: number; headSha: string; forcedBy: string; nowMs: number;
+}): Record<string, unknown> & { run_id: string; task_id: string; step: string } {
+  const value = decideRefresh({ path: "general", overlap: "none", overlapFiles: [], repairNeeded: true, strict: undefined, ciInFlight: false });
+  return refreshDecidedRow({ runId: input.runId, taskId: input.taskId, prNumber: input.prNumber, headSha: input.headSha,
+    path: input.forcedBy, forcedBy: input.forcedBy, strict: undefined, ciInFlight: false, overlapFiles: [], nowMs: input.nowMs,
+    value: { ...value, reason: `forced: the ${input.forcedBy} path repairs a fault, so it keeps its own trigger`, predictedBenefit: 1 } }) as
+    Record<string, unknown> & { run_id: string; task_id: string; step: string };
+}
+
+/** W1-T7735 — {@link forcedRefreshRow}'s fields for a caller whose `log` stamps run, task and step
+ *  itself (the fix lane). A head the caller never read is `head_sha: null`, never a guessed sha. */
+export function forcedRefreshFields(input: { prNumber: number; headSha?: string; forcedBy: string; nowMs: number }): Record<string, unknown> {
+  const { run_id: _run, task_id: _task, step: _step, ...fields } = forcedRefreshRow({ runId: "", prNumber: input.prNumber,
+    headSha: input.headSha ?? "unread", forcedBy: input.forcedBy, nowMs: input.nowMs });
+  return input.headSha === undefined ? { ...fields, head_sha: null } : fields;
+}
+
 /** What the judge reads: the PR's files, main's delta, and why the overlap is ambiguous. */
 export interface RefreshJudgeQuestion {
   prNumber: number;
