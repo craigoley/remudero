@@ -36,7 +36,7 @@ function fixture(mode: string | null = "shadow", legacy: "shadow" | "live" = "li
   const logs: Array<{ step: string; fields: Record<string, unknown> }> = [];
   let arms = 0;
   const deps = { owner: "owner", repo: "repo", config, ledgerPath: join(root, "ledger.ndjson"),
-    runId: "SWEEP-selected-mode-fixture", plan: loadPlanFromYaml("[]"),
+    runId: "SWEEP-selected-mode-fixture", plan: loadPlanFromYaml("[]", "selected-mode consumer fixture"),
     instanceRegistryTextImpl: () => registry(legacy),
     log: (step: string, fields: Record<string, unknown> = {}) => logs.push({ step, fields }),
     armImpl: async () => { arms += 1; return "armed" as const; },
