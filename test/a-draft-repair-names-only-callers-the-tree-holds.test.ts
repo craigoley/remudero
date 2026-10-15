@@ -8,7 +8,6 @@
  * site, and the remedies now offer real paths or a drop, never an invention.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,20 +25,21 @@ import { parseTasksFromYaml } from "../src/lib/plan.js";
 import { callSiteCandidates } from "../src/lib/relint.js";
 import { callSiteViolations, proofScopeViolations } from "../src/lib/task-linter.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const KNOWN = new Set(["remudero", "none"]);
 const PROPOSAL_ID = "standing-debt:5";
 
 // A fixture checkout: an existing module, one real caller of its symbol, and a test.
-const ROOT = mkdtempSync(join(tmpdir(), "rmd-w1-t9307-"));
+const repo = gitRepo({ kind: "w1-t9307", seedCommit: false });
+const ROOT = repo.dir;
 mkdirSync(join(ROOT, "src", "lib"), { recursive: true });
 mkdirSync(join(ROOT, "test"), { recursive: true });
 writeFileSync(join(ROOT, "src", "lib", "ledger.ts"), "export function rowActorOf(row: unknown): string {\n  return String(row);\n}\n");
 writeFileSync(join(ROOT, "src", "lib", "panel.ts"), "import { rowActorOf } from './ledger.js';\nrowActorOf(1);\n");
 writeFileSync(join(ROOT, "test", "ledger.test.ts"), "// fixture\n");
-execFileSync("git", ["init", "-q"], { cwd: ROOT });
-execFileSync("git", ["add", "-A"], { cwd: ROOT });
-after(() => rmSync(ROOT, { recursive: true, force: true }));
+repo.git("add", "-A");
+after(() => repo.cleanup());
 
 const exists = (path: string): boolean => existsSync(join(ROOT, path));
 const facts: DraftRepoFacts = {
@@ -149,6 +149,31 @@ test("W1-T9307: a proof-scope remedy for an absent path never says add it to fil
   const [heldTask] = parseTasksFromYaml(draft(["src/lib/ledger.ts"], ["grep: rowActorOf( in src/lib/panel.ts"]), "fixture");
   const [present] = proofScopeViolations(heldTask, { moduleExists: exists });
   assert.match(present.message, /Add "src\/lib\/panel\.ts" to files: or rewrite the proof/);
+});
+
+test("call-site candidates use the real checkout and refuse an unreadable git tree", () => {
+  assert.deepEqual(callSiteCandidates(ROOT, "rowActorOf"), ["src/lib/ledger.ts", "src/lib/panel.ts"]);
+  assert.deepEqual(callSiteCandidates(ROOT, undefined), []);
+  assert.deepEqual(callSiteCandidates(ROOT, undefined, {
+    exclude: "src/lib/ledger.ts",
+    declared: ["src/lib/ledger.ts", "src/lib/*.ts", "test/ledger.test.ts", "src/app.ts", "src/lib/panel.ts"],
+  }), ["src/lib/panel.ts"]);
+  assert.deepEqual(callSiteCandidates(ROOT, "rowActorOf", { limit: 1 }), ["src/lib/ledger.ts"]);
+  const unreadable = mkdtempSync(join(tmpdir(), "rmd-callers-no-git-"));
+  try {
+    assert.throws(() => callSiteCandidates(unreadable, "rowActorOf"), /worktree-git: refusing/);
+  } finally {
+    rmSync(unreadable, { recursive: true, force: true });
+  }
+});
+
+test("a malformed redraft still gets call-site guidance without invented declared paths", () => {
+  const prompt = inboxDraftRelintPrompt({ id: PROPOSAL_ID, summary: "repair", evidenceAnchors: [] }, "[broken", [
+    { check: "call-site", severity: "block", message: "task NEW-1 adds new module src/lib/newmod.ts but no acceptance criterion proves a CALL SITE" },
+    { check: "draft-parse", severity: "block", message: "invalid yaml" },
+  ], ROOT);
+  assert.match(prompt, /drop the call-site claim/);
+  assert.doesNotMatch(prompt, /may name as the caller/);
 });
 
 function worker(text: string): WorkerResult {

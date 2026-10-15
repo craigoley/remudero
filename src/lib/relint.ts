@@ -2,7 +2,6 @@ import { hostWorktreeGit } from "./worktree-git.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { spawnSync } from "node:child_process";
 import { loadPlan, parseTasksFromYaml } from "./plan.js";
 import { lintTask, type LintOpts } from "./task-linter.js";
 
@@ -72,9 +71,7 @@ export function relintGuidanceLines(violations: ReadonlyArray<RelintViolation>):
   ];
 }
 
-/** W1-T9307: the existing src/*.ts files a call-site proof may name, read off the checkout `root` a draft is linted
- *  against. With a symbol: files already holding `<symbol>(` (git grep), the module itself excluded. Without one (a
- *  new module): the task's declared src files the tree holds. Never a path the tree lacks. */
+/** Existing src callers in `root`, or held declared paths for a new module; exclude the module itself. */
 export function callSiteCandidates(
   root: string,
   symbol: string | undefined,
@@ -85,13 +82,15 @@ export function callSiteCandidates(
   if (symbol === undefined) {
     return (opts.declared ?? []).filter((f) => srcFile(f) && f !== opts.exclude && existsSync(join(root, f))).slice(0, limit);
   }
-  // spawnSync never throws: git grep exits 1 on no match, and any failure offers NO candidate — the remedy then
-  // says drop the claim, never invent a caller.
-  const res = spawnSync("git", ["grep", "-I", "-l", "-F", "-e", `${symbol}(`, "--", "src/*.ts"], {
-    cwd: root, encoding: "utf8", maxBuffer: 1 << 24, stdio: ["ignore", "pipe", "ignore"],
-  });
-  if (res.status !== 0) return [];
-  return res.stdout.split("\n").filter((f) => f && srcFile(f) && f !== opts.exclude).sort().slice(0, limit);
+  try {
+    const output = hostWorktreeGit(root, ["grep", "-I", "-l", "-F", "-e", `${symbol}(`, "--", "src/*.ts"], {
+      maxBuffer: 1 << 24,
+    });
+    return output.split("\n").filter((f) => f && srcFile(f) && f !== opts.exclude).sort().slice(0, limit);
+  } catch (error) {
+    if ((error as { status?: unknown }).status === 1) return [];
+    throw error;
+  }
 }
 
 /**
