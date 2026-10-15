@@ -62,7 +62,7 @@ test("W1-T7699: fix-lane-commit-refused-the-task-declares-no-files-so-there-is-n
         { task_id: taskId, step: "fix.commit_refused", reason },
         { task_id: taskId, step: "fix.done", subtype: "commit_refused" },
       ],
-      spawn: async ({ prompt }) => {
+      spawn: async ({ prompt }: { prompt: string }) => {
         const feedback = prompt.split("LAST ROUND'S COMMIT WAS REFUSED")[1];
         assert.ok(feedback, "the prior refusal reaches the repair worker");
         assert.ok(feedback.includes(`Declared files: ${inherited}.`),
@@ -74,12 +74,12 @@ test("W1-T7699: fix-lane-commit-refused-the-task-declares-no-files-so-there-is-n
       fetchPrBody: async () => "REPORT\nRemudero-Task: W1-T7699",
       fetchPrDiffFiles: async () => [inherited],
       issues: { create: () => { throw new Error("must not ask an operator"); }, listOpen: () => [], comment: () => {} },
-      ledgerPath: join(root, "ledger.ndjson"), log: () => {}, say: () => {}, account: (value) => value,
+      ledgerPath: join(root, "ledger.ndjson"), log: () => {}, say: () => {}, account: (value: unknown) => value,
       readHeadShaForProvenance: () => "head-a", commitsAhead: () => 0,
       worktreeHasUncommittedChanges: () => false,
-      harnessCommitForShellLessWorker: (input) => {
+      harnessCommitForShellLessWorker: (input: { declaredPaths: string[] }) => {
         const committed = commitWorkerEdits(root, input.declaredPaths, "fix(docs): repair the check", {
-          runGit: (args) => {
+          runGit: (args: string[]) => {
             if (args[0] === "status") return ` M ${inherited}\0 M ${outside}\0`;
             if (args[0] === "add") staged.push(args.slice(3));
             if (args[0] === "rev-parse") return "head-b";
