@@ -6,7 +6,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+// @ts-expect-error — native script ESM is outside this project's tsconfig source roots.
 import { assessReadMapCorpus, collectReadMapCorpus, corpusDigest, prepareReadMapCorpus, readCorpusBytes, readMapSummary, validateCorpusManifest } from "../scripts/lib/read-map-corpus.mjs";
+// @ts-expect-error — native CLI ESM is outside this project's tsconfig source roots.
 import { main } from "../scripts/read-map-corpus.mjs";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -116,8 +118,8 @@ test("real Node per-file summaries and real fs reads produce a committed two-sui
     assert.equal(run.status, 0, run.stderr); assert.match(run.stdout, /# tests 2/); assert.match(run.stdout, /# fail 0/);
     const report = collectReadMapCorpus(fx.directory);
     assert.equal(report.state, "OBSERVED_NOT_QUALIFIED", report.problems.join("\n"));
-    assert(report.observations.find(x => x.suite === "test/a-reader.test.ts")!.record.reads.includes("deploy/unit.json"));
-    assert(!report.observations.find(x => x.suite === "test/b-other.test.ts")!.record.reads.includes("deploy/unit.json"));
+    assert(report.observations.find((x: {suite: string}) => x.suite === "test/a-reader.test.ts")!.record.reads.includes("deploy/unit.json"));
+    assert(!report.observations.find((x: {suite: string}) => x.suite === "test/b-other.test.ts")!.record.reads.includes("deploy/unit.json"));
     assert.equal(report.liveNarrowingAllowed, false);
     writeFileSync(join(fx.root, "deploy/unit.json"), "changed");
     assert.equal(collectReadMapCorpus(fx.directory).state, "INCOMPLETE");
