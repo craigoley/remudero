@@ -266,8 +266,7 @@ export interface ReadModelLaneMove {
 
 export interface ReadModelViewContext {
   now: number;
-  /** Shared home store, retained when a view's instance inputs are scoped to one repository. */
-  sourceStore?: ReadModelDb;
+  sourceStore?: ReadModelDb; // Home snapshots stay shared when instances are scoped.
   instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb; lease?: ReadModelLease }>;
   switches?: ReadModelSwitches;
   /** Each shadowed view's diff counters and cutover readiness (view-shadow.ts). */
