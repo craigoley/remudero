@@ -25,7 +25,7 @@
     A controlled subject sweep reads main and ALL16 OPEN head trees, more than
     3000 plan shards and500 source/script paths per head, actual source blobs,
     W4227 title controls and real merge-base own diffs. The100 closed/merged-PR
-    window11701..11855 covers predecessor filing11826 and source11845; merged
+    window11702..11855 covers predecessor filing11826 and source11845; merged
     exact canonical trailers UNION run branches credit9435/9493/9559 and9500.
     W4198 app/heap forwarding and W9500 instance-name forwarding already exist.
     W7727 owns pause scoping; retired W6095 is not reopened. The open installer
