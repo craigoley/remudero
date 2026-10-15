@@ -662,6 +662,7 @@ import { mergedHeadTypechecks, probeMerge, probeOpenPrMerges, type MergedTypeche
 import { surveyPullRequestBoard, type PullRequestBoard } from "./lib/pr-board.js";
 import {
   captureFeedback,
+  feedbackCaptured,
   feedbackEntryPath,
   listFeedback,
   parseFeedbackAddArgs,
@@ -672,6 +673,7 @@ import {
   resolveDecisionSummaryMount,
   resolveFeedbackExpansionMount,
   setFeedbackStatus,
+  stageFeedbackCapture,
   FeedbackError,
   type FeedbackEntry,
   type FeedbackOrigin,
@@ -2512,6 +2514,7 @@ export function buildSweepEffects(
      *  this field exists. */
     reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
     instanceRegistryTextImpl?: () => string | undefined;
+    feedbackLandingStateRoot?: string;
   },
 ): Pick<
   SweepDeps,
@@ -2598,7 +2601,7 @@ export function buildSweepEffects(
 
   export function fixRungTaskFor(
   */
-  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, ...libDeps } = deps;
+  const { reviewerCodeFreshnessImpl, instanceRegistryTextImpl, feedbackLandingStateRoot, ...libDeps } = deps;
   // W1-T3723: WIRED, not merely exported. A fresh-tree runner nothing passes is the
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
@@ -2823,7 +2826,7 @@ export function buildSweepEffects(
     localRepoName: deps.localRepoName ?? resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
     updateBranchImpl: updateBranchViaGh,
-    captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log),
+    captureRepairFeedbackImpl: (filing) => captureRepairFeedbackWithPriorVerdict(repoRoot, filing, deps.log, feedbackLandingStateRoot),
     reclaimWorkerImpl: (info) => reclaimAbandonedWorker(info, { log: deps.log }),
     registeredWorktreeOwnerImpl: registeredFixWorktreeOwner,
     reviewCommandImpl: reviewerCodeGate.call,
@@ -32868,6 +32871,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           runId,
           root: repoRoot,
           dryRun: false,
+          landingStateRoot: config.root,
         });
         return {
           rung,
@@ -32887,6 +32891,7 @@ export function buildIntakeRungsDaemonHooks(deps: {
           runId,
           dryRun: false,
           admission: feedbackIntakeAdmission(config, ledgerPath, runId),
+          landingStateRoot: config.root,
         });
         return {
           rung,
@@ -46892,8 +46897,9 @@ export function captureRepairFeedbackWithPriorVerdict(
   root: string,
   filing: RepairFilingCapture,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  landingStateRoot?: string,
 ): void {
-  if (existsSync(feedbackEntryPath(root, filing.id))) return; // already filed this window
+  if (feedbackCaptured(root, filing.id, landingStateRoot)) return; // already filed this window
   let suppressedBy: FeedbackEntry | undefined;
   try {
     const priorEntriesForOrigin = listFeedback(root).filter((e) => e.origin === filing.origin);
@@ -46915,7 +46921,9 @@ export function captureRepairFeedbackWithPriorVerdict(
     }
     return;
   }
-  captureFeedback(root, { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin });
+  const capture = { id: filing.id, raw: filing.raw, origin: filing.origin as FeedbackOrigin };
+  if (landingStateRoot === undefined) captureFeedback(root, capture);
+  else stageFeedbackCapture(root, landingStateRoot, capture);
 }
 
 /** The one-shot boundary owns and drains its judgment pool before returning a summary. */
@@ -48361,6 +48369,7 @@ export function buildSweepHook(
         plan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
+        feedbackLandingStateRoot: config.root,
         pacer,
         // W1-T5115: the SAME spawn sweep.ts defaults to, carrying the socket as a git-only handle.
         ...(gitCredentialSocketPath
@@ -48735,6 +48744,7 @@ export function buildSweepLightHook(
         plan: activePlan,
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
+        feedbackLandingStateRoot: config.root,
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
