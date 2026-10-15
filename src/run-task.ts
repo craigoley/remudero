@@ -30989,13 +30989,19 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * gateway construction. BATCHED, never per-call `ghGateway`: one fetch answers every lookup (W1-T5649).
  */
 export function retroShippedGithubGateway(
-  opts: { ownerRepo?: { owner: string; repo: string }; exec?: (args: string[]) => string; commitCwd?: string } = {},
+  opts: {
+    ownerRepo?: { owner: string; repo: string };
+    exec?: (args: string[]) => string;
+    commitCwd?: string;
+    snapshotFor?: (owner: string, repo: string) => BoardSnapshotCache;
+  } = {},
 ): ShippedGithub {
   const { owner, repo } = opts.ownerRepo ?? resolveOwnerRepo();
   // `opts` is a test seam: production passes none, so `exec` is the gateway's own `gh` and the commit index reads
   // the process cwd, exactly as the bare construction did.
   const commitTrailerIndex = buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: opts.commitCwd });
-  const baseGithub = buildBatchedGithub(owner, repo, { exec: opts.exec, commitTrailerIndex });
+  const snapshotCache = retroShippedSnapshot(owner, repo, opts.snapshotFor);
+  const baseGithub = buildBatchedGithub(owner, repo, { exec: opts.exec, commitTrailerIndex, snapshotCache });
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
@@ -31012,6 +31018,18 @@ export function retroShippedGithubGateway(
           maxBuffer: RETRO_MERGED_COMMITS_MAX_BUFFER,
         }),
       ),
+  };
+}
+
+/** Capture once; the board gateway remains the durable snapshot's only writer. */
+function retroShippedSnapshot(owner: string, repo: string, snapshotFor?: (owner: string, repo: string) => BoardSnapshotCache): BoardSnapshotCache {
+  const seed = (snapshotFor ? snapshotFor(owner, repo) : createBoardSnapshotCache(loadConfig().root, owner, repo)).closedSeed();
+  return {
+    closedSeed: () => seed,
+    issueSeed: () => undefined,
+    commitClosed: () => false,
+    commitIssues: () => false,
+    commitOpen: () => false,
   };
 }
 
@@ -31038,9 +31056,15 @@ export async function retroShippedGithubGatewayAsync(
     pageTimeoutMs?: number;
     commitCwd?: string;
     commitTimeoutMs?: number;
+    snapshotFor?: (owner: string, repo: string) => BoardSnapshotCache;
+    log?: (step: string, fields: Record<string, unknown>) => void;
   } = {},
 ): Promise<ShippedGithub> {
   const { owner, repo } = opts.ownerRepo ?? (await resolveOwnerRepoAtAsync(repoRoot));
+  const snapshotCache = retroShippedSnapshot(owner, repo, opts.snapshotFor);
+  const seed = snapshotCache.closedSeed();
+  const log = opts.log ?? ((step: string, fields: Record<string, unknown>) =>
+    appendLedger(ledgerPathFor(loadConfig()), { run_id: "RETRO-SHIPPED", task_id: "retro", step, ...fields }));
   const pageTimeoutMs = opts.pageTimeoutMs ?? RETRO_SHIPPED_PAGE_TIMEOUT_MS;
   const commitTimeoutMs = opts.commitTimeoutMs ?? RETRO_MERGED_COMMITS_TIMEOUT_MS;
   const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: 1 << 24 });
@@ -31080,7 +31104,9 @@ export async function retroShippedGithubGatewayAsync(
     try {
       if (miss.tool === "gh") {
         const half = miss.args[1]?.includes("state=open&") ? "open" : "closed";
-        await fetchBoardPrsRestAsync(owner, repo, async (args) => JSON.parse(await ghPage(args)), undefined, half);
+        const known = half === "closed" ? seed : undefined;
+        const fetched = await fetchBoardPrsRestAsync(owner, repo, async (args) => JSON.parse(await ghPage(args)), known, half);
+        log("retro_trigger.shipped_read", { half: fetched.half, mode: fetched.mode, calls: fetched.calls, seeded: known?.size ?? 0 });
       } else {
         answers.set(keyOf("git", miss.args), { out: await boundGitCall(boundedGit, miss.args, commitTimeoutMs) });
       }
@@ -31098,6 +31124,7 @@ export async function retroShippedGithubGatewayAsync(
       exec: (args) => replay("gh", args),
       commitTrailerIndex: buildCommitTrailerIndex({ slug: `${owner}/${repo}`, exec: (args) => replay("git", args) }),
       pacer: REPLAY_PACER,
+      snapshotCache,
     });
     const answer = query(replayed);
     const miss = missed;

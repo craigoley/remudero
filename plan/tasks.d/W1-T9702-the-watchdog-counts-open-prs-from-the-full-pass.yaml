@@ -1,0 +1,67 @@
+- id: W1-T9702
+  title: "THE PROGRESS WATCHDOG COUNTS OPEN PRS FROM THE NEWEST FULL PASS, NEVER A LIGHT PASS'S PER-PR ROW — on 2026-10-15 the 17:09:32Z verdict said '1 open PR(s)' while the full pass at 17:19:37Z enumerated 31, because a light pass writes one sweep.pass row per PR (each enumerated 1), and an empty light pass writes enumerated 0, which reads IDLE and could hide a real stall"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — which sweep.pass row the watchdog takes its open-PR count from
+  band_meaning: span
+  origin: "operator session 2026-10-15: fan-out lead F3-1, the 17:09:32Z progress-watchdog verdict (read-only on the host)"
+  plan_refs: [W1-T100, W1-T5687, W1-T6598, W1-T1236, W1-T463, W1-T3202, W1-T9627]
+  files: [src/lib/progress-watchdog.ts, src/lib/sweep.ts, src/run-task.ts, docs/cli-reference.md, test/the-watchdog-counts-open-prs-from-the-full-pass.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only, niced, streamed to the Mac):
+    - state/diagnostics/progress-20261015T170932Z/verdict.json: state STALLED, action capture-diagnostics, reason
+      "newest progress row is 16 min old with 1 open PR(s)".
+    - The live ledger's sweep.pass rows for DAEMON-1792080586993: 16:48:56Z and 16:48:57Z enumerated 1, then 31 rows
+      from 17:14:51Z to 17:15:02Z each enumerated 1, then 17:19:37Z enumerated 31. In the 17:18:26Z archive, every
+      sweep.pass row from 16:40Z to 17:18Z is enumerated 1 (48 at 16:47, 7 at 16:48, 26 at 17:14, 5 at 17:15).
+    READ at origin/main 1902d67a4:
+    - openPrCountFromRows (src/lib/progress-watchdog.ts) returns the newest sweep.pass row's `enumerated`, and
+      progressWatchdogCommand (src/run-task.ts) feeds it to decideProgressWatchdog. A count of 0 returns IDLE with
+      action none before any age is read.
+    - runSweep (src/lib/sweep.ts) logs `sweep.pass` with `enumerated: openPrs.length` and nothing else about the pass.
+    - runSweepLightPass (src/lib/sweep.ts) calls runSweep once PER open PR (W1-T463), so each row reads enumerated 1.
+      With no PRs left after the light pass's filters, it calls runSweep([]) once, so the row reads 0. That happens when
+      buildSweepLightHook's restPrs is empty because its only PRs went to the ready refresh, the refresh admission or
+      the requeue-only batch.
+    - Both full entry points pass through withFullSweepRepairAdmission (repairAdmissionSurface "full"). Every light
+      per-PR call sets repairAdmissionSurface "light". The empty light call sets neither.
+    - Effect: the watchdog's count follows whichever pass wrote last. It reads 1 most of the time, and 0 on an empty
+      light pass. A 0 says IDLE while the full pass is wedged with 31 PRs open, so the stall is never named.
+    RELATED, NOT OVERLAPPING:
+    - W1-T9627 (run-W1-T9627-1792065434776, open) also edits src/lib/progress-watchdog.ts, to count pre-node deaths.
+      It does not touch openPrCountFromRows. A builder merges origin/main first.
+    - W1-T6598 ages a new generation from its boot. This task only changes where the open-PR count comes from.
+    - W1-T100 also declares src/lib/sweep.ts and src/run-task.ts as the sweep's home. This task adds one field to the
+      sweep.pass row and changes one line of the progress-watchdog verb, nothing W1-T100 owns.
+  design: |
+    1. Writer: runSweep's `sweep.pass` row also carries `surface` when deps.repairAdmissionSurface is set ("full" or
+       "light"). It is one field on the existing row, with no new step. The empty light pass keeps writing no surface.
+    2. Reader: openPrCountReadingFromRows(rows) returns `{ count, source }`:
+       - "full_pass": the newest sweep.pass row with surface "full" gives the count.
+       - "full_pass_raised": a sweep.pass row newer than that full pass enumerated more, so its count is used. A PR
+         opened after the full pass and seen by a light pass is never read as zero.
+       - "max_over_window": no full row was read (rows written before this ships), so the count is the largest
+         `enumerated` among the rows the verb read.
+       openPrCountFromRows stays and returns `.count`.
+    3. The verdict carries `openPrCountSource`. renderProgressWatchdogVerdict prints `open_prs=<n> (<source>)`, so
+       a bundle's verdict.json and the journal line both say where the count came from.
+    4. No new bound: the window is the 24 h the verb already reads.
+  acceptance:
+    - claim: "a light pass's per-PR rows never set the watchdog's open-PR count, an empty light pass never reads IDLE beside a full pass that saw open PRs, and runSweep names its surface on sweep.pass"
+      proof: "unit test: test/the-watchdog-counts-open-prs-from-the-full-pass.test.ts"
+    - claim: "the suite names the false-IDLE case in a test title"
+      proof: "grep: W1-T9702: an empty light pass's enumerated 0 never reads IDLE in test/the-watchdog-counts-open-prs-from-the-full-pass.test.ts"
+    - claim: "the suite names the writer's surface field in a test title"
+      proof: "grep: W1-T9702: runSweep names its surface on the sweep\\.pass row in test/the-watchdog-counts-open-prs-from-the-full-pass.test.ts"
+    - claim: "the verdict says where its open-PR count came from"
+      proof: "grep: openPrCountSource in src/lib/progress-watchdog.ts"
+  falsifier: |
+    At origin/main, feed openPrCountFromRows a full row enumerated 31 followed by a light row enumerated 0: it returns
+    0, decideProgressWatchdog says IDLE, and the second test fails.
