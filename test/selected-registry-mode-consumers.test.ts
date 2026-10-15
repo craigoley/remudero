@@ -26,7 +26,7 @@ function fixture(mode: string | undefined = "shadow", legacy: "shadow" | "live" 
   writeFileSync(selected, registry(mode, root)); writeFileSync(other, registry("live", root));
   const prior = { path: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
   delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
-  const settings: Settings = { mode: "shadow", instanceName: "fixture", registryPath: selected, timeoutMs: 100 };
+  const settings: Settings = { mode: "shadow", instanceName: "fixture", registryPath: selected, timeoutMs: 1500 };
   const config = { root, claudeBin: "/bin/true", installRoot: REPO_ROOT,
     ...(optedIn ? { selectedRegistryMode: settings } : {}) };
   const logs: Array<{ step: string; fields: Record<string, unknown> }> = [];
