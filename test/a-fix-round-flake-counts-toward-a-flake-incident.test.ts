@@ -16,6 +16,7 @@ const TEST_FILE = "test/the-state-snapshot-actually-runs-on-this-host.test.ts";
 const NOW = Date.parse("2026-10-14T14:00:00Z");
 
 type Row = Record<string, unknown>;
+const RECOVERED: Row = { retry_outcome: "recovered", headline: "recovered on retry" };
 
 function harness() {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-round-flake-`));
@@ -66,7 +67,8 @@ function harness() {
 test("W1-T9589: fix-round flake rows from three unrelated PRs file one flake incident", async () => {
   const h = harness();
   try {
-    for (const pr of [101, 102, 103]) { h.reroute(pr); h.fixRoundRetry(pr); }
+    // W1-T9551: one retry recovers, or a red no retry recovered is main-inherited, not a flake.
+    for (const pr of [101, 102, 103]) { h.reroute(pr); h.fixRoundRetry(pr, pr === 101 ? RECOVERED : {}); }
     assert.ok(FLAKE_INCIDENT_EVIDENCE_STEPS.includes("fix.scope_rerouted"));
     assert.notEqual(FLAKE_INCIDENT_DIGEST_VERSION, "1", "the evidence steps changed, so the digest key moved");
 
@@ -78,7 +80,7 @@ test("W1-T9589: fix-round flake rows from three unrelated PRs file one flake inc
     assert.equal(filed[0]!.origin, `flake-incident:${TEST_FILE}`);
     assert.deepEqual(filed[0]!.prs, [101, 102, 103]);
     assert.deepEqual(filed[0]!.run_ids, [], "no CI run id is fabricated");
-    assert.equal(filed[0]!.also_failed, 3);
+    assert.deepEqual([filed[0]!.recovered, filed[0]!.also_failed], [1, 2]);
     const shard = readFileSync(join(h.root, h.landed[0]!.paths[0]!), "utf8");
     for (const pr of [101, 102, 103]) assert.ok(shard.includes(`#${pr}`), `the shard names #${pr}`);
     assert.match(shard, /CI runs: none; every observation came from a fix round/);
@@ -99,7 +101,7 @@ test("W1-T9589: a fix-round flake row without its diff-cannot-reach reroute is n
   for (const [name, seed] of variants) {
     const h = harness();
     try {
-      h.reroute(101); h.fixRoundRetry(101);
+      h.reroute(101); h.fixRoundRetry(101, RECOVERED);
       h.reroute(102); h.fixRoundRetry(102);
       seed(h); h.fixRoundRetry(103);
       await runFlakeIncidentGardener(h.deps, h.sources());
@@ -122,7 +124,7 @@ test("W1-T9589: one retry seen by a fix round and a coverage shard counts once",
       retry_outcome: "also_failed", head_sha: "head-101", base_sha: "base-101", pr_numbers: [101],
     });
     h.reroute(101); h.fixRoundRetry(101);
-    for (const pr of [102, 103]) { h.reroute(pr); h.fixRoundRetry(pr); }
+    for (const pr of [102, 103]) { h.reroute(pr); h.fixRoundRetry(pr, pr === 102 ? RECOVERED : {}); }
 
     await runFlakeIncidentGardener(h.deps, h.sources(() => ["src/lib/unrelated.ts"]));
     assert.deepEqual(h.reads, ["base-101...head-101"], "only the coverage-shard row spends a read");

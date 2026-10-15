@@ -221,7 +221,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readyDraftViaGh: 1,
   realArmDeps: 7, // +1 2026-10-11: the closing-reference guard reads the PR body before a sync arm (ghJson handed over); +1 W1-T9536: the sync own-files compare reader (realArmDepsAsync overrides it)
   realDeployDeps: 1,
-  realGitRemoteDeps: 1, // W1-T9660: daemonCommand > realDeps > composeRealDeps; no conversion filed
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
   reapBranchesSteps: 1,
@@ -252,7 +251,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
-  runInTree: 1, // W1-T9660: via defaultPreflightChecks, driven sync by the boot sweep, landContent and landCiLearningShards (syncPreflightOf); W1-T9615 converted the SRE capture, W1-T9638 the per-poll landing
+  runInTree: 1, // W1-T9660: via defaultPreflightChecks. W1-T9695 awaited the boot sweep and the daemon's landContent and CI-learning landings; still sync: captureFeedback's inline landFeedback (W1-T9696), recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by name only, the `planPrPreflight` option and the `sweepFeedbackLanding` dep
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
@@ -566,7 +565,7 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
 });
 
 /** Reached only through a column-0 object-literal const, so the function-only walk never saw them (W1-T9660). */
-const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody", "realGitRemoteDeps"] as const;
+const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody"] as const;
 
 test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
   const fns = censusFunctions();

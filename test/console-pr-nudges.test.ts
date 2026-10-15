@@ -19,10 +19,73 @@ import { loadPlan } from "../src/lib/plan.js";
 import { createService } from "../src/lib/service.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { requestedFixView, routeFix, type RunResult } from "../src/run-task.js";
+import { readLedgerLines } from "../src/lib/status.js";
+import type { Config } from "../src/lib/config.js";
+import { ghShim } from "./helpers/gh-shim.js";
+import { buildSweepEffects, fixCommand, requestedFixView, routeFix, type RegisteredFixOwnerSnapshot, type RunResult } from "../src/run-task.js";
 
 const WRITE = "console-write-token";
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("W1-T9682 the requested fix command preserves a real checkout refusal", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w9682-command-`));
+  mkdirSync(join(root, "state"));
+  const head = "a".repeat(40), branch = "run-W1-T500-1792000000000";
+  const prUrl = "https://github.com/acme/scratch-w9682/pull/9001";
+  const shim = ghShim([
+    { when: "headRefName", stdout: JSON.stringify({ headRefName: branch, headRefOid: head, body: "" }) },
+    { when: "pulls/9001", stdout: JSON.stringify({ state: "open", merged: false,
+      head: { sha: head, ref: branch }, base: { sha: "b".repeat(40) } }) },
+    { when: "required_status_checks", stdout: JSON.stringify({ contexts: ["ci-gate"] }) },
+    { when: "", stdout: "{}" },
+  ], { kind: "w9682-command-gh" });
+  const oldPath = process.env.PATH, oldError = console.error, oldLog = console.log;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+  const said: string[] = [];
+  console.error = (...args: unknown[]) => { said.push(args.join(" ")); };
+  console.log = (...args: unknown[]) => { said.push(args.join(" ")); };
+  t.after(() => {
+    process.env.PATH = oldPath; console.error = oldError; console.log = oldLog;
+    rmSync(shim.dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
+  });
+  const ownerPath = join(root, "registered-owner");
+  const snapshot: RegisteredFixOwnerSnapshot = { path: ownerPath, pathState: "managed", attachmentState: "exact",
+    treeState: "clean", remoteState: "exact", historyState: "contained", claimState: "clear",
+    processState: "unknown", processProbeReason: "cwd_unreadable", ageMs: 60_000, localSha: head, remoteSha: head };
+  const logs: Array<{ step: string; fields?: Record<string, unknown> }> = [];
+  const config = { root, claudeBin: "/bin/true" } as Config;
+  const task = { id: "W1-T500", title: "test task", risk: "low", acceptance: [], verify: "auto", files: [] } as never;
+  const effects = buildSweepEffects({ owner: "acme", repo: "scratch-w9682", config,
+    ledgerPath: join(root, "adapter-ledger.ndjson"), runId: "W9682-ADAPTER",
+    plan: { tasks: [task], byId: new Map([["W1-T500", task]]) }, policy: DEFAULT_SWEEP_POLICY,
+    log: (step, fields) => { logs.push({ step, fields }); },
+    resolveTaskContractAtHeadImpl: () => ({ criteria: [] }), registeredWorktreeOwnerImpl: () => ownerPath,
+    registeredOwnerRecovery: { capture: () => snapshot, remove: () => assert.fail("never reclaim an unread owner") },
+    spawnImpl: async () => { throw new Error("never dispatch a worker after owner refusal"); },
+  });
+  const code = await fixCommand(["9001", "--requested"], { config, self: { owner: "acme", repo: "scratch-w9682" },
+    fetch: (args) => /\/pulls\/9001$/.test(args[1]!) ? { number: 9001, html_url: prUrl, state: "open", merged: false,
+      body: "Remudero-Task: W1-T500\n", updated_at: new Date().toISOString(), head: { ref: branch, sha: head }, auto_merge: null }
+      : /\/check-runs\?/.test(args[1]!) ? { check_runs: [{ id: 2, name: "ci-gate", status: "completed", conclusion: "failure" }] }
+      : { statuses: [] },
+    route: (state, pr, commandEffects, policy) => {
+      assert.equal(pr.priorStrikes, 0, "the requested owner override still reaches ordinary routing");
+      return routeFix(state, pr, { ...commandEffects, dispatchFix: effects.dispatchFix,
+        escalate: () => assert.fail("an unread owner cannot become a speculative escalation") }, policy);
+    },
+  });
+  const declined = logs.find(row => row.step === "sweep.fix.checkout_claim_declined");
+  assert.equal(declined?.fields?.owner_recovery_reason, "process_cwd_probe_unreadable",
+    "the real shared adapter, not a fabricated route verdict, supplies the refusal");
+  assert.equal(code, 1);
+  const rows = readLedgerLines(join(root, "state", "ledger.ndjson"));
+  assert.ok(rows.some(row => row.step === "fix.refused" && row.outcome === "refused" && row.operator_requested === true &&
+    String(row.reason).includes("process_cwd_probe_unreadable")));
+  assert.ok(!rows.some(row => row.step === "fix.disposed" && row.outcome === "fixed"));
+  assert.ok(said.some(line => line.includes("process_cwd_probe_unreadable")));
+  assert.ok(shim.calls().some(call => call.includes("headRefName")), "the actual default gh child ran");
+  assert.ok(!shim.calls().some(call => /pr (?:merge|close)|--method (?:POST|PATCH|DELETE)/.test(call)), "no outward mutation");
+});
 
 async function withRoute<T>(fn: (base: string, root: string) => Promise<T>): Promise<T> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4077-route-`));

@@ -41,7 +41,7 @@
 //
 // Why: recon-2026-09-05 R-40 — plan/tasks.d/W1-T2904-*.yaml; plan/tasks.d/W1-T3699-*.yaml.
 
-import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { POOL_ISOLATION_FLAG, runShardWithPool, spawnJudgedRun } from "./pure-test-pool.mjs";
@@ -408,10 +408,62 @@ export function foldDurationsEwma(manifest, measured, { alpha = DURATION_EWMA_AL
   return { thresholdMs: manifest.thresholdMs, files, history: nextHistory, outliers };
 }
 
-/** W1-T4071 — the instrumented ledger the shards weigh: the CI snapshot at `snapshotPath` when it
- *  is a readable `{ files }` document of finite non-negative numbers, else the committed ledger.
- *  Every shard of a run reads the same bytes, so `digest` names what the split was computed from. */
-export function loadInstrumentedLedger(committedPath, snapshotPath) {
+/** A usable ledger contains finite, non-negative instrumented durations. */
+function parseInstrumentedLedger(raw) {
+  const parsed = JSON.parse(raw);
+  const files = parsed?.files;
+  if (!files || typeof files !== "object" || Array.isArray(files) ||
+      Object.values(files).some((d) => typeof d !== "number" || !Number.isFinite(d) || d < 0)) {
+    throw new Error("not a { files: { path: ms } } ledger");
+  }
+  const manifest = { thresholdMs: typeof parsed.thresholdMs === "number" ? parsed.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS, files };
+  const history = parsed.history;
+  if (history && typeof history === "object" && !Array.isArray(history)) {
+    manifest.history = Object.fromEntries(Object.entries(history).filter(([, v]) => Array.isArray(v)));
+  }
+  return manifest;
+}
+
+const coverageLedgerDigest = (raw) => createHash("sha256").update(raw).digest("hex");
+
+/** The producer alone chooses a ledger. Consumers bind its immutable bytes to this run's source. */
+export function validateCoverageLedgerChoice(choice, expected = {}) {
+  if (choice?.version !== 1 || typeof choice.runId !== "string" || !/^\d+$/.test(choice.runId) ||
+      typeof choice.sourceSha !== "string" || !/^[0-9a-f]{40}$/.test(choice.sourceSha) ||
+      typeof choice.digest !== "string" || !/^[0-9a-f]{64}$/.test(choice.digest) ||
+      !["snapshot", "committed"].includes(choice.source) ||
+      (choice.source === "snapshot" && (typeof choice.artifactId !== "string" || !/^\d+$/.test(choice.artifactId))) ||
+      (choice.source === "committed" && choice.artifactId !== undefined)) {
+    throw new Error("resolved coverage ledger choice is malformed");
+  }
+  if (expected.runId !== undefined && choice.runId !== expected.runId) throw new Error("resolved coverage ledger belongs to another run");
+  if (expected.sourceSha !== undefined && choice.sourceSha !== expected.sourceSha) throw new Error("resolved coverage ledger belongs to another source SHA");
+  return choice;
+}
+
+export function makeCoverageLedgerChoice(raw, identity) {
+  parseInstrumentedLedger(raw);
+  return validateCoverageLedgerChoice({ version: 1, ...identity, digest: coverageLedgerDigest(raw) });
+}
+
+function readCoverageLedgerChoice(path, env) {
+  if (!env.GITHUB_RUN_ID || !env.GITHUB_SHA) throw new Error("resolved coverage ledger requires GITHUB_RUN_ID and GITHUB_SHA");
+  return validateCoverageLedgerChoice(JSON.parse(readFileSync(path, "utf8")), { runId: env.GITHUB_RUN_ID, sourceSha: env.GITHUB_SHA });
+}
+
+/** W1-T9448: a resolved choice is mandatory and never falls back. Without one, preserve the
+ *  W1-T4071 optional-snapshot contract for local/manual consumers. */
+export function loadInstrumentedLedger(committedPath, snapshotPath, resolvedChoice) {
+  if (resolvedChoice !== undefined) {
+    validateCoverageLedgerChoice(resolvedChoice);
+    const label = resolvedChoice.artifactId ?? resolvedChoice.source;
+    let raw;
+    try { raw = readFileSync(snapshotPath); }
+    catch (error) { throw new Error(`resolved coverage ledger ${label} unreadable (${error.message}); refusing a different ledger`); }
+    if (coverageLedgerDigest(raw) !== resolvedChoice.digest) throw new Error(`resolved coverage ledger ${label} digest mismatch; refusing a different ledger`);
+    try { return { manifest: parseInstrumentedLedger(raw), source: resolvedChoice.source, digest: resolvedChoice.digest }; }
+    catch (error) { throw new Error(`resolved coverage ledger ${label} invalid (${error.message}); refusing a different ledger`); }
+  }
   const committed = () => ({ manifest: loadManifest(committedPath), source: "committed", digest: "committed" });
   if (!snapshotPath) return committed();
   let raw;
@@ -421,18 +473,7 @@ export function loadInstrumentedLedger(committedPath, snapshotPath) {
     return { ...committed(), warning: `snapshot ${snapshotPath} is absent; weighing the committed ledger` };
   }
   try {
-    const parsed = JSON.parse(raw);
-    const files = parsed?.files;
-    if (!files || typeof files !== "object" || Array.isArray(files) ||
-        Object.values(files).some((d) => typeof d !== "number" || !Number.isFinite(d) || d < 0)) {
-      throw new Error("not a { files: { path: ms } } ledger");
-    }
-    const manifest = { thresholdMs: typeof parsed.thresholdMs === "number" ? parsed.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS, files };
-    // W1-T7810: the raw per-file history the previous fold carried, when it is well formed.
-    const rawHistory = parsed.history;
-    if (rawHistory && typeof rawHistory === "object" && !Array.isArray(rawHistory)) {
-      manifest.history = Object.fromEntries(Object.entries(rawHistory).filter(([, v]) => Array.isArray(v)));
-    }
+    const manifest = parseInstrumentedLedger(raw);
     return { manifest, source: "snapshot", digest: createHash("sha256").update(raw).digest("hex").slice(0, 16) };
   } catch (error) {
     return { ...committed(), warning: `snapshot ${snapshotPath} is unusable (${error.message}); weighing the committed ledger` };
@@ -441,10 +482,14 @@ export function loadInstrumentedLedger(committedPath, snapshotPath) {
 
 /** W1-T4071 — the coverage shards' selections must partition `testFiles` exactly and come from
  *  one ledger. Returns the problems found; an empty list is a clean partition. */
-export function partitionProblems(testFiles, selections) {
+export function partitionProblems(testFiles, selections, resolvedDigest) {
   const problems = [];
   const digests = new Set(selections.map((s) => s.digest));
-  if (digests.size > 1) problems.push(`shards weighed different ledgers: ${[...digests].sort().join(", ")}`);
+  const expected = resolvedDigest ?? selections[0]?.digest;
+  if (digests.size > 1 || (resolvedDigest !== undefined && selections.some((s) => s.digest !== resolvedDigest))) {
+    const diverged = selections.filter((s) => s.digest !== expected).map((s) => `shard ${s.shard}=${s.digest} (expected ${expected})`);
+    problems.push(`shards weighed different ledgers: ${[...digests].sort().join(", ")}; ${diverged.join("; ")}`);
+  }
   const owner = new Map();
   for (const { shard, files } of selections) {
     for (const file of files) {
@@ -796,6 +841,30 @@ function parseShard(raw) {
 
 export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   const root = resolve(getFlagValue(argv, "--root") ?? ".");
+  if (argv.includes("--write-resolved-ledger") || argv.includes("--verify-resolved-ledger")) {
+    try {
+      const snapshot = resolve(root, getFlagValue(argv, "--snapshot") ?? "coverage/ledger-snapshot.manifest");
+      const choicePath = resolve(root, getFlagValue(argv, "--resolved-ledger") ?? "coverage/ledger-choice.json");
+      let choice;
+      if (argv.includes("--write-resolved-ledger")) {
+        choice = makeCoverageLedgerChoice(readFileSync(snapshot), {
+          runId: env.GITHUB_RUN_ID, sourceSha: env.GITHUB_SHA,
+          source: getFlagValue(argv, "--ledger-source"), artifactId: getFlagValue(argv, "--artifact-id"),
+        });
+        writeFileSync(choicePath, `${JSON.stringify(choice)}\n`, { flag: "wx" });
+      } else {
+        choice = readCoverageLedgerChoice(choicePath, env);
+        loadInstrumentedLedger(undefined, snapshot, choice);
+      }
+      const output = getFlagValue(argv, "--github-output");
+      if (output) appendFileSync(output, `digest=${choice.digest}\nsource=${choice.source}\n`);
+      console.log(`resolved coverage ledger: run=${choice.runId} source=${choice.source} artifact=${choice.artifactId ?? "committed"} digest=${choice.digest}`);
+      return 0;
+    } catch (error) {
+      console.error(`test-tier-manifest: ${error.message}`);
+      return 1;
+    }
+  }
   const manifestPath = resolve(root, getFlagValue(argv, "--manifest") ?? DEFAULT_MANIFEST_RELATIVE_PATH);
   const manifest = loadManifest(manifestPath);
   const testFiles = listTestFiles(root);
@@ -1021,9 +1090,18 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.error(`test-tier-manifest: --workers requires a positive integer, got ${JSON.stringify(workersRaw)}`);
       return 2;
     }
-    const ledger = instrumentedPath === undefined
-      ? undefined
-      : loadInstrumentedLedger(resolve(root, instrumentedPath), snapshotPath === undefined ? undefined : resolve(root, snapshotPath));
+    const resolvedPath = getFlagValue(argv, "--resolved-ledger");
+    let ledger;
+    try {
+      if (argv.includes("--resolved-ledger") && !resolvedPath) throw new Error("resolved coverage ledger requires a choice path");
+      if (resolvedPath !== undefined && (instrumentedPath === undefined || snapshotPath === undefined)) throw new Error("resolved coverage ledger requires an instrumented manifest and the chosen snapshot path");
+      const choice = resolvedPath === undefined ? undefined : readCoverageLedgerChoice(resolve(root, resolvedPath), env);
+      ledger = instrumentedPath === undefined ? undefined : loadInstrumentedLedger(resolve(root, instrumentedPath),
+        snapshotPath === undefined ? undefined : resolve(root, snapshotPath), choice);
+    } catch (error) {
+      console.error(`test-tier-manifest: ${error.message}`);
+      return 1;
+    }
     if (ledger?.warning) console.error(`test-tier-manifest: warning: ${ledger.warning}`);
     const weighed = ledger === undefined ? manifest : instrumentedManifest(manifest, ledger.manifest);
     const balanced = workers === undefined
@@ -1063,7 +1141,12 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.error(`test-tier-manifest: --check-partition could not read a selection (${error.message})`);
       return 1;
     }
-    const problems = paths.length === 0 ? ["no shard selections were given"] : partitionProblems(testFiles, selections);
+    const resolvedDigest = getFlagValue(argv, "--resolved-digest");
+    if (argv.includes("--resolved-digest") && (typeof resolvedDigest !== "string" || !/^[0-9a-f]{64}$/.test(resolvedDigest))) {
+      console.error("test-tier-manifest: resolved coverage ledger digest is missing or malformed");
+      return 1;
+    }
+    const problems = paths.length === 0 ? ["no shard selections were given"] : partitionProblems(testFiles, selections, resolvedDigest);
     for (const problem of problems.slice(0, 50)) console.error(`test-tier-manifest: partition: ${problem}`);
     if (problems.length > 0) {
       console.error(`test-tier-manifest: the coverage shards do NOT partition the ${testFiles.length} test file(s): ${problems.length} problem(s).`);

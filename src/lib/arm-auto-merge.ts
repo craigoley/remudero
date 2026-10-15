@@ -38,6 +38,7 @@ import { recordBranchUpdate, type BranchUpdateRecorder } from "./branch-update.j
 import {
   decidePlanPrMergeSafety,
   mainChangedOwnFiles,
+  mergedTreeGitStderr,
   mergedTreeUnread,
   planPrRefreshesFromLedger,
   planSafetyGitAsync,
@@ -986,6 +987,8 @@ export interface DirectMergePreflightEvidence {
   planMergeSafe?: PlanMergeSafeBasis;
   /** W1-T5748 — why it was not, when it was refreshed or escalated instead. */
   planMergeUnsafe?: string;
+  /** W1-T9670 — git's stderr tail behind an unreadable merged tree. */
+  gitStderr?: string;
   /** W1-T5748 — the heads its earlier refreshes replaced, then the current one, once escalated. */
   refreshedHeads?: string[];
   /** W1-T5615 — GitHub's `mergeable_state` behind a `plan-pr-held` outcome. */
@@ -1229,6 +1232,7 @@ function* directMergePreflightSteps(
         remedy: "retry-later",
         reason: "plan_pr_refresh_bound",
         planMergeUnsafe: safety.why,
+        ...gitStderrEvidence(readings),
         refreshedHeads,
       };
       return { proceed: false, result: { outcome: "plan-pr-held", ...context, directMergePreflight } };
@@ -1239,11 +1243,11 @@ function* directMergePreflightSteps(
           l.reason === "plan_merge_unread" && l.pr_url === prUrl && l.prior_head_sha === observedHead)) {
       deps.say(`automerge.direct_merge_preflight_refused: ${safety.why} — re-reading head ${observedHead} next pass: ${prUrl}`);
       const directMergePreflight: DirectMergePreflightEvidence = {
-        ...baseEvidence, planTouch, remedy: "retry-later", reason: "plan_merge_unread", planMergeUnsafe: safety.why,
+        ...baseEvidence, planTouch, remedy: "retry-later", reason: "plan_merge_unread", planMergeUnsafe: safety.why, ...gitStderrEvidence(readings),
       };
       return { proceed: false, result: { outcome: "direct-merge-preflight-refused", ...context, directMergePreflight } };
     }
-    if (safety.action === "refresh") planEvidence = { planTouch, reason: "plan_pr_behind", planMergeUnsafe: safety.why };
+    if (safety.action === "refresh") planEvidence = { planTouch, reason: "plan_pr_behind", planMergeUnsafe: safety.why, ...gitStderrEvidence(readings) };
   }
   // W1-T5921's one update per (PR, head): a refresh already asked of this head awaits its new head.
   if (planEvidence.reason === "main_changed_own_files" && observedHead !== undefined &&
@@ -1309,6 +1313,11 @@ function* readOwnFilesOrError(prUrl: string, deps: DirectMergePreflightDeps): St
   } catch (e) {
     return { error: String((e as Error)?.message ?? e) };
   }
+}
+
+function gitStderrEvidence(readings: PlanMergeSafetyReadings | undefined): Pick<DirectMergePreflightEvidence, "gitStderr"> {
+  const gitStderr = mergedTreeGitStderr(readings);
+  return gitStderr === undefined ? {} : { gitStderr };
 }
 
 function ownFilesEvidence(own: NonNullable<ReturnType<typeof mainChangedOwnFiles>>): Partial<DirectMergePreflightEvidence> {
@@ -1950,6 +1959,7 @@ export function logArmAttribution(
         ...(directMergePreflight.mergeabilityUnknownElapsedMs !== undefined ? { mergeability_unknown_elapsed_ms: directMergePreflight.mergeabilityUnknownElapsedMs } : {}),
         ...(directMergePreflight.planMergeSafe !== undefined ? { plan_pr_merge_safe: directMergePreflight.planMergeSafe } : {}),
         ...(directMergePreflight.planMergeUnsafe !== undefined ? { plan_merge_unsafe: directMergePreflight.planMergeUnsafe } : {}),
+        ...(directMergePreflight.gitStderr !== undefined ? { git_stderr: directMergePreflight.gitStderr } : {}),
         ...(directMergePreflight.refreshedHeads !== undefined ? { refreshed_heads: directMergePreflight.refreshedHeads } : {}),
         ...(directMergePreflight.ownFilesCause !== undefined ? { own_files_cause: directMergePreflight.ownFilesCause } : {}),
         ...(directMergePreflight.mainChangedOwnFiles !== undefined ? { main_changed_own_files: directMergePreflight.mainChangedOwnFiles } : {}),
