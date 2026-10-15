@@ -716,7 +716,9 @@ read_progress_verdict() {
   PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+  # W1-T9627: the revival log is the verdict's evidence of a container that died before node wrote
+  # any ledger row, so the verb reads it by name (src/lib/progress-watchdog.ts preNodeDeathRun).
+  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 RMD_REVIVAL_LOG="$REVIVAL_LOG" ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
     echo "rmd-relaunch: progress-watchdog -- verdict unreadable; acting as before." >&2
     return 0
   fi
@@ -825,13 +827,16 @@ last_steps_before_exit() {
 
 # Returns 0 when the revive must NOT happen this tick.
 hold_revive_on_verdict() {
-  local was now fb steps line
+  local was now fb pnd steps line
   if [ ! -f "$WATCHDOG_HOLD" ]; then
     [ "$PROGRESS_ACTION" = "hold-revive" ] || return 1
     now="$(revive_input)"
     fb="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"failedBoots15m":\([0-9]*\).*/\1/p')"
+    pnd="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"preNodeDeaths":\([0-9]*\).*/\1/p')"
     steps="$(last_steps_before_exit "${fb:-0}")"
-    line="$(watchdog_stamp) crash-loop-hold failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
+    # W1-T9627: a loop that dies before node writes no failed boot, so it names its own count.
+    case "$pnd" in ''|0) pnd="" ;; *) pnd="pre_node_deaths=$pnd " ;; esac
+    line="$(watchdog_stamp) crash-loop-hold ${pnd}failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
     mkdir -p "$STATE_DIR/state" 2>/dev/null || true
     printf '%s\n' "$now" > "$WATCHDOG_HOLD" 2>/dev/null || true
     printf '%s\n' "$line" >> "$REVIVAL_LOG" 2>/dev/null || true
@@ -997,17 +1002,30 @@ EDGE_HEAL
 # escalation once it persists (the deployer's REFUSAL_ESCALATE_AT), and withdraws or closes it when
 # the step next succeeds. A clear spawns rmd only while that condition has an open run, so a healthy
 # tick spawns nothing. Never fatal: the journal line stays, and the heartbeat reads the marker itself.
+# W1-T9669 -- host-alert runs on the HOST, so its GitHub App credential is the container's with the key
+# path mapped back to the host: the explicit mount source, else the CLAUDE_DIR file behind
+# /home/node/.claude. Neither maps: no key path, and hostGithubToken names the gap. The key is never read here.
+host_alert_key_path() {
+  if [ -n "$GH_APP_KEY_HOST_V" ]; then printf '%s' "$GH_APP_KEY_HOST_V"; return 0; fi
+  case "$GH_APP_KEY_V" in /home/node/.claude/?*) printf '%s/%s' "${CLAUDE_DIR%/}" "${GH_APP_KEY_V#/home/node/.claude/}" ;; esac
+}
+
 render_host_alerts() {
+  printf 'HOST_ALERT_GH_APP_ID=%q\nHOST_ALERT_GH_APP_INSTALLATION_ID=%q\nHOST_ALERT_GH_APP_PRIVATE_KEY_PATH=%q\n' \
+    "$GH_APP_ID_V" "$GH_APP_INST_V" "$(host_alert_key_path)"
   cat <<'HOST_ALERTS'
 host_alert() {
-  local condition="$1" code rmd out tmo=()
+  local condition="$1" code rmd out tmo=() cred=()
   daemon_code_resolve 2>/dev/null || :
   code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   rmd="$code/bin/rmd"
   shift
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
+  if [ -n "${HOST_ALERT_GH_APP_ID:-}" ]; then cred+=("GH_APP_ID=$HOST_ALERT_GH_APP_ID"); fi
+  if [ -n "${HOST_ALERT_GH_APP_INSTALLATION_ID:-}" ]; then cred+=("GH_APP_INSTALLATION_ID=$HOST_ALERT_GH_APP_INSTALLATION_ID"); fi
+  if [ -n "${HOST_ALERT_GH_APP_PRIVATE_KEY_PATH:-}" ]; then cred+=("GH_APP_PRIVATE_KEY_PATH=$HOST_ALERT_GH_APP_PRIVATE_KEY_PATH"); fi
+  if out="$(cd "$code" && env RMD_SELF_SYNC_DONE=1 ${cred[@]+"${cred[@]}"} ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
       --instance "${HOST_ALERT_INSTANCE:-}" --condition "$condition" "$@" --json 2>/dev/null)"; then
     echo "rmd-relaunch: host alert -- $(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1)"
   else
@@ -1393,13 +1411,34 @@ read_progress_verdict
 note_progress_verdict
 if hold_revive_on_verdict; then exit 0; fi
 
+# W1-T9627 -- THE DEAD CONTAINER'S LAST WORDS ARE KEPT BEFORE \`docker rm -f\` DELETES THEM. On
+# 2026-10-15 every revive removed a container that had died in deploy/entrypoint.sh about a second
+# in, so the only copy of "cannot check out main" went with it, 25 times. Its bounded log tail
+# goes to a per-revive file under state/diagnostics/, which the revive line below names (log=).
+# Never fatal: a failed capture names log=none and the revive goes ahead. The newest
+# REVIVE_LOG_KEEP files are kept (bound kind: physical -- each is at most 200 lines).
+REVIVE_LOG_KEEP=200
+REVIVE_LOG_FILE=none
+if docker inspect ${CONTAINER_NAME} >/dev/null 2>&1; then
+  REVIVE_LOG_FILE="\$STATE_DIR/state/diagnostics/revive-\$(date -u +%Y%m%dT%H%M%SZ)-${CONTAINER_NAME}.log"
+  mkdir -p "\$STATE_DIR/state/diagnostics" 2>/dev/null || true
+  REVIVE_LOG_TMO=(); command -v timeout >/dev/null 2>&1 && REVIVE_LOG_TMO=(timeout 30)
+  { printf '# docker logs --tail 200 %s, kept before the revive removed it\n' '${CONTAINER_NAME}'
+    \${REVIVE_LOG_TMO[@]+"\${REVIVE_LOG_TMO[@]}"} docker logs --tail 200 ${CONTAINER_NAME} 2>&1 || true
+  } > "\$REVIVE_LOG_FILE" 2>/dev/null || true
+  [ -s "\$REVIVE_LOG_FILE" ] || REVIVE_LOG_FILE=none
+  ls -1t "\$STATE_DIR/state/diagnostics"/revive-*-${CONTAINER_NAME}.log 2>/dev/null | tail -n +\$((REVIVE_LOG_KEEP + 1)) |
+    while IFS= read -r old_revive_log; do rm -f "\$old_revive_log"; done
+fi
+
 # A REVIVAL MUST LEAVE A TRACE. Recreating the container RESETS docker's RestartCount, so without
 # this record a crash loop is invisible: every beat is fresh and every daemon is young.
-printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s\n' \\
+printf '%s revive boot=%s prev_status=%s prev_exit=%s prev_restarts=%s log=%s\n' \\
   "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$BOOT" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.Status}}' 2>/dev/null || echo none)" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.State.ExitCode}}' 2>/dev/null || echo none)" \\
   "\$(docker inspect ${CONTAINER_NAME} --format '{{.RestartCount}}' 2>/dev/null || echo none)" \\
+  "\$REVIVE_LOG_FILE" \\
   >> "\$REVIVAL_LOG" 2>/dev/null || true
 
 # THE COUNT IS TAKEN AFTER the STOP refusal, the idempotence check and the mount checks, so none of

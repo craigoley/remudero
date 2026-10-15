@@ -12,13 +12,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { planPrPreflight, planPrPreflightAsync } from "../src/lib/plan-pr-emitter.js";
 import { runSuiteShifted } from "../src/lib/gate-gardener.js";
-import { spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
+import { runOpenWeightCheck, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 
@@ -107,6 +107,9 @@ async function unitTestCheck(repo: GitRepo, sandboxDir: string): Promise<{ resul
     runId: "w1-t8380-run",
     taskId: "W1-T8380",
     env: { RMD_OPENWEIGHT_API_KEY: "fixture", PATH: `${sandboxDir}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+    // The fixture already replaces bwrap. Off Linux, explicitly simulate that same Linux boundary;
+    // native Linux still takes the production default, which never receives a platform override.
+    runCheck: process.platform === "linux" ? undefined : input => runOpenWeightCheck({ ...input, platform: "linux" }),
     fetchImpl: async (_input, init) => {
       if (++turn === 1) {
         return Response.json({ choices: [{ message: { tool_calls: [{
@@ -129,8 +132,17 @@ async function unitTestCheck(repo: GitRepo, sandboxDir: string): Promise<{ resul
   return { result, row: rows[0]! };
 }
 
+test("the real cash check still refuses an unsupported host before executing a fixture sandbox", async (t) => {
+  const dir = scratch(t, "unsupported-host"), marker = join(dir, "sandbox-ran");
+  writeFileSync(join(dir, "bwrap"), `#!/bin/sh\nprintf touched > ${JSON.stringify(marker)}\nexit 99\n`, { mode: 0o755 });
+  await assert.rejects(runOpenWeightCheck({ argv: ["/bin/true"], cwd: dir, workerHome: dir,
+    env: { PATH: `${dir}:/usr/bin:/bin` }, ...(process.platform === "linux" ? { platform: "darwin" as const } : {}),
+  }), /cash RunCheck requires Linux bubblewrap/);
+  assert.equal(existsSync(marker), false, "the non-Linux default cannot execute even a fixture bwrap");
+});
+
 test("W1-T8380: an open-weight unit_test check that stops before its summary reports a failure", async (t) => {
-  // The namespace wrapper is the one thing replaced: a `bwrap` on the check's PATH that drops its own flags and execs the
+  // The namespace wrapper is replaced: a `bwrap` on the check's PATH that drops its own flags and execs the
   // fixed argv in the worktree, so the real runner, the real `node --test` child and the real judge all run.
   const sandboxDir = scratch(t, "sandbox");
   writeFileSync(join(sandboxDir, "bwrap"), '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n');

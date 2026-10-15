@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-14 (Craig approved all three stall-0048 follow-ups for the operator session); standing rulings: no hard fixed thresholds, automated flow"
   plan_refs: [W1-T7746, W1-T7745, W1-T9352, W1-T9362]
   files: [src/lib/loop-stall-profiler.ts, test/a-stall-profile-covers-the-whole-stall-and-names-callers.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
