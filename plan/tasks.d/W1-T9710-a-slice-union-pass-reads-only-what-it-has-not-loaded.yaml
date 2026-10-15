@@ -1,0 +1,72 @@
+- id: W1-T9710
+  title: "A LEDGER-SLICE READER'S UNION PASS ON THE LOOP READS ONLY WHAT IT HAS NOT ALREADY LOADED, AND PARSES ONLY ITS OWN STEPS — createEscalationTriageHistoryReader loads every new rotation off the loop and then discards the load, so the synchronous union pass re-reads each digest (24.8 MB on the loop in the first quiet bound after the 17:32Z boot on 2026-10-15), and createIncrementalLedgerUnion JSON-parses every live-file line although 1.6% of them are in the slice"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what the slice union's synchronous pass reads and parses; the rows it answers are unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9527 (#12065) follow-ups 1 and 2'
+  plan_refs: [W1-T9527, W1-T9406, W1-T9390, W1-T9105, W1-T9647]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/ledger-union.ts
+    - test/a-slice-union-pass-reads-only-what-it-has-not-loaded.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/lib/sweep.ts createEscalationTriageHistoryReader: each call stats the rotations, builds a fresh
+      createLedgerRotationMemo for the unseen ones, awaits `memo.load(fresh)` (off the loop), and then returns
+      `current(stateDir)`. The memo, and the rows it loaded, go out of scope there.
+    - current() is the reader's createIncrementalLedgerUnion (src/lib/ledger-union.ts). A rotation it has not
+      kept is answered by its rotationRecords hook through ledgerRotationDigests, which reads the durable digest
+      the load just wrote, synchronously, on the loop.
+    - The same union's liveRecords reads the live file from its watermark and runs scanLedgerBuffer with NO
+      pattern, so every new line is JSON-parsed before stepMatches drops it. The rotation load path passes a
+      step pattern (io.pattern) for exactly this reason; the live path does not.
+    - Three holders build a reader each: sweep.escalation-triage-history (buildSweepHook),
+      run-task.escalation-triage-evidence, and run-task.quiet-worker-bound (W1-T9527). Each pays its own first
+      pass after every daemon restart. Other createIncrementalLedgerUnion users (dispatch selection, inbox-replay)
+      also parse every live line.
+    OBSERVED, core ledger, worker.quiet_bound rows written by the daemon booted 17:32:34Z on 2026-10-15:
+    - 17:51:43Z (first bound): history_rotations_unseen 368, history_rotation_bytes_unseen 249,062,571,
+      history_ms 358,832 (off the loop), history_loop_read_bytes 24,815,735 (ON the loop).
+    - 18:43:07Z: 0 rotations unseen, history_ms 250, history_loop_read_bytes 4,630,055 (the live file's growth
+      since the last pass, all of it parsed).
+    OBSERVED offline (2026-10-15, a copy of the core live ledger, 16.6 MB, 28,060 lines, read with node): 446 lines
+    are in the evidence slice's steps. Parsing every line took 127 ms; a step pre-filter then parse took 35 ms and
+    kept 472 candidates.
+    INFERRED: after each restart ~25 MB per holder is read on the loop (~75 MB for three); between restarts each pass
+    parses ~60 times more lines than it keeps. The restart count is ~12-17 a day on core (daemon.boot rows 10-14/10-15).
+  design: |
+    1. Seed, do not re-read. createEscalationTriageHistoryReader hands the rotations its memo just loaded to its
+       union (a new optional `seed(path, key, read)` on the createIncrementalLedgerUnion reader, or an equivalent
+       shared memo), so the union keeps them under the same size:mtime key and never asks ledgerRotationDigests
+       for them. A rotation whose load failed is still read as today.
+    2. Pre-filter the live file. liveRecords passes a pattern built from the asked steps to scanLedgerBuffer,
+       as the rotation load does. A line naming a step only in another field is still parsed and dropped by
+       stepMatches, so the answer is unchanged. The watermark and anchor logic are unchanged.
+    3. Measure. worker.quiet_bound already carries history_loop_read_bytes. Add history_loop_parsed_lines and
+       history_seeded_rotations, and give the other two holders' rows (or their memo_sizes entry) the same three
+       fields, so the fleet sees the before and after per restart from the ledger.
+    4. No time window, no new constant, and refuseIncomplete is unchanged.
+    NOTE: src/lib/ledger-union.ts is in BAKED_RUNTIME_SOURCE_PATHS, so this PR rebuilds the image once.
+    Tests go in test/a-slice-union-pass-reads-only-what-it-has-not-loaded.test.ts, titled verbatim as in the
+    proofs, over a temp state dir with real rotations and digests and a counting fs seam.
+  acceptance:
+    - claim: "after a reader call loads new rotations off the loop, its synchronous union pass reads no digest bytes for them"
+      proof: 'grep: test("W1-T9710: a loaded rotation is never re-read from its digest on the loop" in test/a-slice-union-pass-reads-only-what-it-has-not-loaded.test.ts'
+    - claim: "the live-file pass parses only lines that can name an asked step, and answers the same rows as a full parse"
+      proof: 'grep: test("W1-T9710: the live pass parses only candidate lines and answers the same rows" in test/a-slice-union-pass-reads-only-what-it-has-not-loaded.test.ts'
+    - claim: "the quiet-bound row names the lines parsed and the rotations seeded on the loop"
+      proof: 'grep: test("W1-T9710: the bound row names its loop parse and seeded rotations" in test/a-slice-union-pass-reads-only-what-it-has-not-loaded.test.ts'
+  falsifier: |
+    On origin/main, count readRangeSync/readFileSync bytes during current() right after a reader call that loaded
+    three new rotations: their digests are read again, so the first test fails. Count JSON.parse calls in a live
+    pass over 1,000 lines of which 10 are in the slice: main parses 1,000 and the second test fails. Drop the
+    stepMatches check after adding the pattern, with one line naming the step only in last_step_before_block:
+    that row is answered and the equality half of the second test fails.
