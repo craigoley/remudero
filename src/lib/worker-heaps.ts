@@ -10,7 +10,8 @@
  *
  * FALSIFIERS: test/serve-memory-names-where-rss-lives.test.ts,
  * test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts,
- * test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts.
+ * test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts; a bundle-started worker's threads (#11859):
+ * test/serve-starts-its-workers-from-current-worker-bundles.test.ts.
  */
 
 import diagnosticsChannel from "node:diagnostics_channel";
