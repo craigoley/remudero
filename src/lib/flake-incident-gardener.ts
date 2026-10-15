@@ -18,8 +18,13 @@
  * A test counts toward an incident on a PR only when that PR's diff touches neither the test file nor a
  * source module the test itself imports — a PR that edits the test is a candidate cause, not evidence of
  * a flake. A PR whose file list cannot be read counts as touching, so it is never counted.
+ *
+ * W1-T9708: a census walks the tree and imports none of it, so a PR adding a site it reports reds it
+ * untouched (W1-T7532, W1-T7765). A retry that also failed, on a PR whose diff enters the census's
+ * walk ({@link censusWalksOf}), is that PR's own red; a recovered retry is timing and keeps the rule above.
  */
 import { dirname, join, normalize } from "node:path/posix";
+import { censusWalksOf } from "./ci-parity.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
@@ -257,7 +262,10 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
 
   const evidenceOf = async (group: readonly FlakeObservation[]): Promise<Evidence> => {
     const { file } = group[0]!;
-    const own = new Set([file, ...testSourcePaths(file, readSource(file))]);
+    const source = readSource(file);
+    const own = new Set([file, ...testSourcePaths(file, source)]);
+    const walks = censusWalksOf(file, source);
+    const entersWalk = (paths: ReadonlySet<string>) => [...paths].some((p) => walks.some((w) => p.startsWith(w)));
     // A PR counts only when EVERY row it has in the group is clear of the test and its source.
     const verdict = new Map<number, boolean>();
     for (const o of group) {
@@ -266,7 +274,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
         clear = o.taskId !== undefined && o.headSha !== undefined && rerouted.has(JSON.stringify([o.taskId, o.headSha, o.file]));
       } else if (o.baseSha !== undefined && o.headSha !== undefined) {
         const paths = await changedPaths(o.baseSha, o.headSha);
-        clear = paths !== undefined && ![...own].some((p) => paths.has(p));
+        clear = paths !== undefined && ![...own].some((p) => paths.has(p)) && !(o.outcome === "also_failed" && entersWalk(paths));
       }
       for (const pr of o.prs) verdict.set(pr, (verdict.get(pr) ?? true) && clear);
     }

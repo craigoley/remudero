@@ -3004,6 +3004,9 @@ export const CENSUS_DIR_WALK_STOPGAP =
   "making discovery an exact import query that retires both matchers. Adopting the seam across " +
   "the measured ~84 dir-walk suites is its own filing, not a rider on this task.";
 
+/** The enumeration idiom a census-shaped suite carries: the probe below greps it, {@link censusWalksOf} re-tests it. */
+const CENSUS_ENUMERATION_IDIOM = "ls-files|readdirSync|globSync";
+
 /** THE ONE PROBE, exported so a test asserts the real argv rather than restating it. An
  *  ALTERNATION kept to a SINGLE `git grep` spawn: the idiom is decided from each hit's own text,
  *  which the `src/` filter had to read anyway — one recognizer with two idioms. */
@@ -3027,7 +3030,7 @@ export const CENSUS_DISCOVERY_PROBE_ARGV: readonly string[] = [
   // is NOT returned), so scratch files cannot enter the population.
   "--untracked",
   "-lE",
-  "ls-files|readdirSync|globSync",
+  CENSUS_ENUMERATION_IDIOM,
   "--",
   "test/*.test.ts",
 ];
@@ -3383,6 +3386,14 @@ export const CENSUS_MEMBERSHIP_SUITES: readonly KnownCensusSuite[] = [
   ...CENSUS_WALKED_POPULATION_SUITES,
   ...REGISTRY_CENSUS_SUITES,
 ];
+
+/** W1-T9708 — the prefixes `testFile` walks as a census, or [] when it walks none: its
+ *  {@link CENSUS_MEMBERSHIP_SUITES} row's, else the candidate recognizer's, as `rmd census-membership` reports. */
+export function censusWalksOf(testFile: string, text: string | undefined): readonly string[] {
+  const modelled = CENSUS_MEMBERSHIP_SUITES.find((s) => s.testFile === testFile);
+  if (modelled !== undefined) return modelled.walks;
+  return text !== undefined && new RegExp(CENSUS_ENUMERATION_IDIOM).test(text) ? censusCandidateWalks(text) : [];
+}
 
 /** A changed path and the job names it enters — `suites` is `[]` when it joins none, never omitted. */
 export interface CensusMembershipEntry {
