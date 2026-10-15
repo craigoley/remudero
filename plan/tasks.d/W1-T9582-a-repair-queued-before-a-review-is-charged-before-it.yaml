@@ -1,0 +1,69 @@
+- id: W1-T9582
+  title: "A REPAIR QUEUED BEFORE A REVIEW IS STILL CHARGED AFTER IT — the full sweep's fix admission charges every planned review before any repair claim, so under a steady review queue a conflict or own-red repair that has waited 2 h loses to reviews of heads pushed minutes ago; after W1-T9498 landed (22:10Z on 2026-10-14) 34 capacity refusals hit 9 PRs and 5 fix.dispatch rows ran against 55 review starts by 00:56Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the order the full pass charges review reservations and repair claims against one headroom; high because it changes which worker the host admits
+  band_meaning: span
+  origin: "operator session 2026-10-15: #11785 (W1-T8446) conflicted from 22:43Z; its full-pass row at 00:42:26Z read 'headroom 2406 MiB over the floor; charged 2651 MiB for 3 reviews at 1130 ... a fix needs 1283 MiB (measured); 2 active, 0 fixes admitted' at blocker age 114 min"
+  plan_refs: [W1-T9498, W1-T8086, W1-T7243, W1-T1211, W1-T7095]
+  files:
+    - src/lib/sweep.ts
+    - test/a-repair-queued-before-a-review-is-charged-before-it.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main c386eab77. Symbols, not lines.
+    MEASURED 2026-10-14T22:11Z..2026-10-15T00:56Z, the core ledger streamed read-only from the Azure host. The daemon
+    ran W1-T9498 (#11779) from its 23:07Z boot and #11837 (conflicted on the light pass) from its 23:47Z boot, per the
+    live checkout's reflog. In that window: 55 sweep.review_started, 5 fix.dispatch, 34 sweep.disposed rows reading
+    "live host capacity exhausted" over 9 PRs (30 blocked-fixable, 4 conflicted). The oldest blocker refused was 117 min
+    old. 51 of 91 sweep.fix_capacity rows read zero admissions with a repair queued.
+    WHY. In runSweep's full pass, `fullReviews.planned` is Math.min(fullReviewQueueDepth, fullReviewLanes). It is
+    passed to createSweepFixAdmissionController as `reviewReservations`, and every fix claim is admitted only on the
+    headroom left after those planned reviews (`reviewChargeMib`). How long each PR has waited plays no part. A review
+    of a head pushed a minute ago is charged before a repair whose blocker_since is hours old. W1-T9498 fixed what
+    each reservation costs, not which goes first. The light pass cannot take up the slack under load: daemon.ts runs
+    the review clock's passes `reviewOnly` whenever a pass or a review is in flight, and lightPassActionable then
+    stands every repair down ("deferred to full sweep (light pass)"). So the full pass is where a repair is admitted
+    under a steady review queue, and there it always comes last. #11755 and #11785 read exactly that from 22:43Z to
+    00:56Z.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for createSweepFixAdmissionController, reviewReservations,
+    review_charge_mib, fullReviewLanes, "capacity exhausted", starvation and outrank. W1-T9498 (cost, merged),
+    W1-T8086 and #11837 (light-pass admission, merged), W1-T7095 (review versus build admission) and W1-T3202 (review
+    pool start, merged) are adjacent. None orders a repair against a review. Swept the plan/ diffs of the 171
+    origin heads with a commit in the last 3 days. No head adds one.
+  design: |
+    No fixed share, no slot count, no age cap. One order, by how long each PR has waited.
+    1. ORDER BY WAIT. The full pass orders its planned reviews and its repair claims by the blocker_since of each PR's
+       current blocker (priorBlockersFromLedger, the field sweep.disposed already writes), oldest first. A review is
+       charged against the headroom only when its PR began waiting before the repair claiming now. A repair is then
+       admitted when the headroom left after the charges ahead of it covers the fix estimate (W1-T9498's arithmetic,
+       unchanged).
+    2. A REVIEW A REPAIR OVERTAKES STAYS QUEUED. When a repair takes the headroom a later-queued review would have
+       used, the review pool does not start that review this pass. It stays in the queue with its own blocker_since,
+       so it goes first next pass against any repair queued after it.
+    3. TIES AND UNKNOWNS. A PR with no recorded blocker_since sorts by its PR's last activity. Equal waits keep today's
+       order (reviews, then repairs).
+    4. ROW. sweep.fix_capacity adds `ordered_ahead` (the PR numbers charged ahead of this claim) and the claim's own
+       `blocker_since`, so a refusal row shows why it lost.
+    Tests go in the new file, `test(` titles verbatim as in the proofs below. Use the 00:42:26Z row as a fixture
+    (headroom 2406 MiB, three reviews at 1130, a fix at 1283), with injected blocker ages.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-repair-queued-before-a-review-is-charged-before-it.test.ts"
+    - claim: "a repair whose PR has waited longer than every planned review is admitted on headroom the reviews would otherwise have taken"
+      proof: 'grep: test("W1-T9582: a repair queued before every planned review is admitted ahead of them" in test/a-repair-queued-before-a-review-is-charged-before-it.test.ts'
+    - claim: "a review queued before the repair is still charged first"
+      proof: 'grep: test("W1-T9582: a review queued before the repair is still charged first" in test/a-repair-queued-before-a-review-is-charged-before-it.test.ts'
+    - claim: "a review a repair overtook is not started this pass and keeps its place"
+      proof: 'grep: test("W1-T9582: a review the repair overtook stays queued with its own wait" in test/a-repair-queued-before-a-review-is-charged-before-it.test.ts'
+  falsifier: |
+    Against main, the 00:42:26Z fixture with a repair blocked 114 min and three reviews blocked under 10 min refuses the
+    repair ("charged 2651 MiB for 3 reviews"), so the first title test fails. Order by class instead of by wait, and
+    the second test (an older review) or the first fails. Start the overtaken review anyway, and the third test reads
+    it charged twice.

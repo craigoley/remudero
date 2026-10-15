@@ -1,0 +1,50 @@
+- id: W1-T9573
+  title: "THE OPT-IN WORKER MCP ISOLATION NEVER DENIES SUCCESS CREDIT — src/lib/worker.ts sets isError on an opted-in run whose inventory is unknown or violated but keeps subtype \"success\", and run-task.ts grades {isError: true, subtype: \"success\"} as clean; the opt-in path takes W1-T9489's error_mcp_exposure rule"
+  repo: remudero
+  depends_on: [W1-T9489]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern (the opt-in denial takes the subtype rule) across worker.ts and worker-mcp-isolation.ts; no caller opts in today
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 (approved \"go\"): read of #11666 and #11841 on main"
+  plan_refs: [W1-T9489]
+  files: [src/lib/worker.ts, src/lib/worker-mcp-isolation.ts, test/worker-mcp-isolation.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED on main at f59f4a2a1. #11666 staged an opt-in `mcpIsolation: "repo-knowledge-only"`
+    (src/lib/worker-mcp-isolation.ts). After the spawn, src/lib/worker.ts runs
+    `if (result.mcpIsolation.inventory !== "observed-only") result.isError = true;` and leaves `result.subtype` alone,
+    so the subtype stays "success". src/run-task.ts grades
+    `!r.isError || (r.subtype === "success" && !r.apiError)` as success (the worker-outcome fold), so an opted-in
+    run with unknown or leaked inventory still earns full success credit. The comment above that line says the
+    opposite. W1-T9489 (#11841, e02d46df5) fixed this for the default boundary a few lines later: an exposed run
+    keeps `original_subtype` and takes `subtype = "error_mcp_exposure"`. #11841 does NOT cover the opt-in path. Its
+    tripwire `workerMcpExposure` only judges servers outside the spawn's own map and account-connector tools, so
+    three opt-in verdicts still pass as success. These are `incomplete-inventory` (an unknown inventory reads
+    `state: "unknown"`, which changes no subtype), `expected-knowledge-missing`, and `unexpected-capability` from an
+    extra tool on the allowed `knowledge` server. test/worker-mcp-isolation.test.ts ("opted-in unknown or leaked
+    inventory cannot earn success credit") asserts `isError` only, so it passes today.
+    SHARED SURFACE. W1-T9489 declares the same three files and is merged (#11841). This task changes only the
+    opt-in branch's credit denial, which W1-T9489 left out.
+  design: |
+    1. One helper in src/lib/worker-mcp-isolation.ts denies credit on a result. It keeps the worker's own
+       subtype on the evidence (`original_subtype`) and sets `isError = true` and `subtype = "error_mcp_exposure"`.
+       The W1-T9489 exposure branch and the opt-in branch in src/lib/worker.ts both call it, so there is one rule.
+    2. When both fire on one run, the first denial's `original_subtype` is the one kept, never "error_mcp_exposure".
+    3. The existing opt-in test also asserts the subtype, and a new test drives the real spawn boundary with an
+       opted-in run whose inventory is unknown. The result must read `subtype: "error_mcp_exposure"`, and the
+       run-task success fold must grade it as not a success.
+    Out of scope: switching any caller onto the opt-in (still staged), and Codex spawns.
+  acceptance:
+    - claim: "an opted-in run with unknown or violated inventory takes subtype error_mcp_exposure and is not graded a success"
+      proof: 'grep: test("an opted-in run with unknown inventory takes the error_mcp_exposure subtype and earns no credit" in test/worker-mcp-isolation.test.ts'
+    - claim: "the opt-in and default-boundary denials share one helper"
+      proof: 'grep: denyMcpSuccessCredit( in src/lib/worker.ts'
+  falsifier: |
+    Remove the subtype change from the opt-in branch (restore `result.isError = true` alone): the new test reads
+    subtype "success" and the run-task fold grades it a success, so it fails. At origin/main neither the test title
+    nor the helper exists.

@@ -1,0 +1,55 @@
+- id: W1-T9585
+  title: "A STALLED-STAGE ALERT NEVER FREEZES THE REPAIR IT REPORTS — #11821 (W1-T7739) sat own-red with no fix round ever dispatched (every pass deferred on host capacity), the stalled-stage rung escalated it to a human as \"unknown signature\" (#11853), and from then on every fix strike stood down on that open issue until a session pushed a new head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — whether an open stalled-stage escalation stands a fix strike down; the question-shaped escalations keep their stand-down
+  band_meaning: blast-radius
+  origin: "operator request 2026-10-14: \"get them green, resolve the root causes that prevented automated flow… We need the pr queue to be automated.\" #11821 froze behind #11853. Operator approved this filing 2026-10-15 (\"go with all recommended follow ups\")"
+  plan_refs: [W1-T78, W1-T2799, W1-T3579, W1-T9533]
+  files:
+    - src/run-task.ts
+    - test/a-stalled-stage-alert-never-freezes-the-repair-it-reports.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main ccec3f20f. Symbols, not lines.
+    THE INCIDENT, from the core ledger on host remudero, 2026-10-14/15. #11821 (run-W1-T7739-1792014654970, head
+    936a81f13) went own-red on coverage-shard (2/8) and coverage-ratchet at 22:43:46Z. Each sweep pass judged "fix round 1
+    — judge: continue" and then "NOT DISPATCHED this pass: live host capacity exhausted …" (`repeat_streak` 15 by 00:43Z);
+    no `fix.dispatch` row was ever written. At 53 minutes (BACKSTOP 45) the stalled-stage rung (`reportStuckStage`,
+    src/lib/sweep.ts) escalated it as MANUAL issue #11853, "PR stage stalled … own-red … DIAGNOSIS: unknown signature".
+    From the next strike on, `openEscalationStandDownReason` (src/run-task.ts) matched #11853 on (task, PR, head, cause) and
+    wrote `fix.stood_down`: "a needs-human escalation for this exact (task, PR, head …, cause) is ALREADY OPEN and awaiting a
+    human … standing down until it is closed, the head moves, or the task contract changes". The PR was frozen until a
+    session pushed a merge of main (3615b784f, 2026-10-15T01:06Z). #11831 had the same shape with #11854.
+    WHY IT IS A DEFECT. The stand-down exists so a strike does not re-ask a question a person is already answering
+    (W1-T2799). A stalled-stage escalation asks no such question: it reports that a stage outlived its backstop, and its
+    own options are "repair the stalled stage" or "close the PR". Standing the repair down on it turns a report of slow
+    progress into no progress at all.
+    NOT COVERED ELSEWHERE. W1-T9533 (queued, src/lib/fix-lane-gardener.ts) is the "one branch refresh is spent" gap after
+    main turns green. It does not touch `openEscalationStandDownReason` or the stalled-stage issue.
+  design: |
+    1. `openEscalationStandDownReason` returns undefined for a candidate that is a stalled-stage escalation, recognised by
+       the same summary `stalledStageEscalationSummary` (src/lib/sweep.ts) writes: its question starts `PR stage stalled:`.
+       Read that from the issue the way `escalationHeadSha` reads the head, never from a second copy of the text.
+    2. Every other open escalation keeps today's stand-down, including W1-T3579's contract-revision rule and the
+       conflict-cause clearance.
+    3. The issue stays open; the stage's own `pr.stuck.resolved` path is unchanged.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-stalled-stage-alert-never-freezes-the-repair-it-reports.test.ts"
+    - claim: "an open stalled-stage escalation on the same head and cause no longer stands a fix strike down (the #11853 shape)"
+      proof: "grep: W1-T9585: an open stalled-stage alert lets the fix strike run in test/a-stalled-stage-alert-never-freezes-the-repair-it-reports.test.ts"
+    - claim: "an open question-shaped escalation on the same key still stands the strike down"
+      proof: "grep: W1-T9585: an open question escalation still stands the strike down in test/a-stalled-stage-alert-never-freezes-the-repair-it-reports.test.ts"
+  falsifier: |
+    Remove the stalled-stage arm and the #11853-shaped fixture returns the "ALREADY OPEN and awaiting a human" stand-down
+    again. Apply the arm to every candidate and the question-escalation test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: count `fix.stood_down` rows whose reason names an open issue titled
+    "PR stage stalled". Healthy shape: none.

@@ -59,7 +59,10 @@ test("scratch dry run reports reclaimable bytes and the hourly wrapper enables t
   assert.ok(dry.stdout.includes(`REMOVE ${idle}`), dry.stdout);
   assert.match(dry.stdout, /would reclaim [1-9][0-9]* bytes/);
   assert.equal(existsSync(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT), false);
-  const r = spawnSync("bash", ["deploy/rmd-tmp-sweep.sh"], { encoding: "utf8", env: { ...process.env, ...fx.env, ...options, RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT) } });
+  // Empty roots make the wrapper choose the real host /tmp. Keep its lender
+  // inventory inside this fixture, including when parallel suites delete trees.
+  const r = spawnSync("bash", ["deploy/rmd-tmp-sweep.sh"], { encoding: "utf8", env: { ...process.env, ...fx.env, ...options,
+    RMD_CLEANUP_TMP_ROOTS: fx.scratch, RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT) } });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(idle), false, r.stdout);
 });

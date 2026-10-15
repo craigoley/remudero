@@ -141,12 +141,27 @@ workerAbandon:
   min: 1200000
   max: 7200000
 # W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND). The bound on `await deps.sweep()`
-# (src/lib/daemon.ts's poll loop). MEASURED, not a round figure: this task's own rationale
-# re-derived healthy sweep ticks at 61.8s median / 111.8s p90, against 21 confirmed hangs
-# longer than 20 minutes (1200000ms), the shortest one 165.5 minutes. value: 559000 is 5x
-# the measured p90 (111800ms) — comfortably past the whole healthy population's own tail,
-# and still 2.15x BELOW the shortest confirmed hang, so the bound cannot fire on a
-# merely-slow-but-healthy tick and cannot wait as long as even the shortest observed one.
+# (src/lib/daemon.ts's poll loop). W1-T1044 derived 559000 as 5x a 111.8s p90 of healthy
+# ticks, against 21 confirmed hangs, the shortest one 165.5 minutes.
+#
+# W1-T9563 (THAT POPULATION IS GONE, AND THIS ROW IS NO LONGER THE FULL PASS'S BOUND). On
+# 2026-10-14 12-24Z completed full passes measured 6.6 / 16.6 / 33.7 / 35.3 min (min / p50 /
+# p90 / max, n=20), and 21 healthy passes were abandoned at 559s; no hang was observed. This
+# value now FIRES ON HEALTHY PASSES and is not claimed otherwise. The full pass's bound is
+# LEARNED instead: `learnedSweepBound` (src/lib/daemon.ts) takes nearest-rank p90 x 3 of the
+# last 40 `daemon.sweep.settled` durations, seeded at boot from the live ledger file, and
+# writes `bound_basis` on every `daemon.sweep.started`/`.abandoned` row. At 10-14 12-24Z's
+# sample that is 101.1 min, under the 165.5 min hang. The learned value is never clamped to
+# this row's max.
+#
+# WHAT THIS ROW STILL BOUNDS: (1) the COLD START, only while fewer than 5 passes have settled
+# (`bound_basis: no_history_fallback`); after the abandon stopped closing the review pool, a
+# cold-start abandon costs only that pass's attributed outcome, and the pass still settles and
+# seeds the learner. (2) `drainInFlightReviews` in the stop and restart paths (W1-T8172), a
+# review drain, not a pass. The value is deliberately NOT raised to the measured population:
+# that would lengthen every restart's review drain, which W1-T9563 leaves out of scope. Re-
+# derive it, and the drain bound with it, only as its own task. min/max below now bound only an
+# operator retune of these two uses.
 #
 # W1-T1219 (ONE POLICY ROW BOUNDS TWO UNRELATED POPULATIONS): until this task, this SAME
 # field also bounded ONE fix-rung worker spawn inside `runFixRung` (src/run-task.ts) — a
@@ -163,11 +178,8 @@ workerAbandon:
 # `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`), never a load failure, so an existing `policy.yaml`
 # fixture that predates this task keeps loading clean.
 #
-# min: 180000 (3 minutes) sits comfortably above the measured p90 (111.8s) with its own
-# margin — a tighter operator retune still cannot abandon a healthy-but-slow tick. max:
-# 900000 (15 minutes) stays safely under the shortest confirmed hang (20 minutes) even at
-# the loosest retune, so the bound cannot be widened past the point where it stops firing on
-# the class of hang it was measured against.
+# min: 180000 (3 minutes) and max: 900000 (15 minutes) are W1-T1044's retune range, kept for
+# the cold start and the review drain above; neither bounds the learned full-pass value.
 sweepWallClockBoundMs:
   value: 559000
   origin: "net-new"
