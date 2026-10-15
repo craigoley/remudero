@@ -26,7 +26,7 @@
  * holds for the now view's readers outside the derive: per key, never per row ever ingested (board:core held 663,486
  * entries on 2026-10-14). `keepEveryRow` keeps the old behaviour as an equality test's reference arm.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { projectionAgesWithTheClock } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -192,8 +192,10 @@ export function githubAnswerOf(value: unknown): string {
   try {
     return `j${JSON.stringify(value)}`;
   } catch (error) {
-    // A value JSON cannot hold (a cycle, a BigInt) matches nothing, so the task re-derives on every snapshot move.
-    return `x${String(error)}`;
+    // A value JSON cannot hold (a cycle, a BigInt) is not comparable: a unique answer equals no other, even its own
+    // replay, so the task re-derives on every snapshot move rather than being reused on a guess.
+    void error;
+    return `x${randomUUID()}`;
   }
 }
 
@@ -1115,16 +1117,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { projections: projectPlan(plan, deps), reads };
   }
 
-  /** Takes each derived plan task's GitHub reads as its own, digested under `view`, the gateway the pass read. */
-  function keepReads(plan: Plan, view: GithubView, reads: ReadonlyMap<string, GithubReadLog>, ids: Iterable<string>): void {
-    for (const id of ids) {
-      const log = reads.get(id);
-      const h = held.get(id);
+  /** Takes the GitHub reads of each task in `ids` the pass derived as its own, digested under `view`, the gateway the
+   *  pass read. `reads` holds exactly the plan tasks the pass derived, each now held. */
+  function keepReads(plan: Plan, view: GithubView, reads: ReadonlyMap<string, GithubReadLog>, ids: ReadonlySet<string>): void {
+    for (const [id, log] of reads) {
+      if (!ids.has(id)) continue;
+      const h = held.get(id)!;
       githubStale.delete(id);
-      if (!log || !h) {
-        githubReads.delete(id);
-        continue;
-      }
       // One entry per distinct read and answer: a derive asks `readFailed()` many times over.
       const seen = new Set<string>();
       const keys: string[] = [];
@@ -1236,7 +1235,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const removed = mismatches.filter((m) => !fresh.has(m.taskId)).map((m) => m.taskId);
       for (const [id, h] of healed) held.set(id, h);
       for (const id of removed) held.delete(id);
-      keepReads(plan, view, pass.reads, healed.map(([id]) => id).filter((id) => plan.byId.has(id)));
+      keepReads(plan, view, pass.reads, new Set(healed.map(([id]) => id)));
       for (const id of removed) githubReads.delete(id);
       persist(healed, removed);
       healedCount = mismatches.length;
@@ -1314,7 +1313,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         githubReads.delete(id);
         githubStale.delete(id);
       }
-      keepReads(plan, view, reads, rederived);
+      keepReads(plan, view, reads, new Set(rederived));
       derivedLatestTsMs = latestTsMs;
       persist(changed, removed);
       pending = false;

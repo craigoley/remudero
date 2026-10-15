@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { canonicalProjection, createBoardProjection, githubDigest, githubViewOf, type BoardDirtRules, type BoardProjection } from "../src/lib/board-projection.js";
+import { canonicalProjection, createBoardProjection, githubAnswerOf, githubDigest, githubViewOf, type BoardDirtRules, type BoardProjection } from "../src/lib/board-projection.js";
 import type { Clock } from "../src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -40,6 +40,8 @@ interface Snapshot {
   issues: BatchedIssue[];
   files: Record<string, string[]>;
   unavailable?: boolean;
+  /** The escalation issue read throws, as an unanticipated gateway might (resolveEscalation catches it). */
+  issueThrows?: boolean;
 }
 
 function initial(): Snapshot {
@@ -61,7 +63,7 @@ const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
 /** A gateway over one snapshot, as the now view's `snapshotGithub` builds one: a new snapshot is a new gateway. */
 function gatewayOf(s: Snapshot): GitHub {
-  return buildBatchedGithub("o", "r", {
+  const github = buildBatchedGithub("o", "r", {
     ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER,
     fetchAll: () => {
       if (s.unavailable) throw new Error("github snapshot unavailable");
@@ -74,6 +76,8 @@ function gatewayOf(s: Snapshot): GitHub {
     commitTrailerIndex: () => new Map(),
     changedFilesCache: { lookup: (url) => s.files[url], settle: async () => {} },
   });
+  if (!s.issueThrows) return github;
+  return { ...github, issueByUrl: () => { throw new Error("issue read refused"); } };
 }
 
 interface World {
@@ -166,6 +170,8 @@ const STEPS: Array<{ name: string; edit: (s: Snapshot) => void; rederives: strin
     rederives: ["W1-T6"],
   },
   { name: "W1-T8's escalation issue closes", edit: (s) => void (s.issues[0]!.state = "CLOSED"), rederives: ["W1-T8"] },
+  { name: "W1-T8's escalation issue read starts throwing: a thrown read is an answer too", edit: (s) => void (s.issueThrows = true), rederives: ["W1-T8"] },
+  { name: "the escalation issue reads again", edit: (s) => void (s.issueThrows = false), rederives: ["W1-T8"] },
   { name: "the merged trailer PR for W1-T2 loses its trailer", edit: (s) => void (s.rows.find((r) => r.number === 102)!.body = "done"), rederives: ["W1-T2"] },
   { name: "W1-T7's merged run branch is renamed away", edit: (s) => void (s.rows.find((r) => r.number === 107)!.headRefName = "elsewhere"), rederives: ["W1-T7"] },
   { name: "W1-T1's PR merges", edit: (s) => Object.assign(s.rows.find((r) => r.number === 101)!, { state: "MERGED", mergedAt: "2026-10-15T02:30:00Z" }), rederives: ["W1-T1"] },
@@ -215,7 +221,7 @@ test("test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts: a board
   const board = w.board({ github: false });
   board.update({ force: true });
   const caught: string[] = [];
-  for (const step of STEPS.slice(0, 11)) {
+  for (const step of STEPS.filter((s) => s.rederives.length < TASKS.length)) {
     w.change(step.edit);
     const u = board.update({ force: true });
     assert.deepEqual(u.rederived, [], `${step.name}: with the rule off, nothing re-derives`);
@@ -235,4 +241,15 @@ test("test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts: reachab
   const digest = (s: Snapshot): string => githubDigest(githubViewOf(gatewayOf(s), "g"), "W1-T9", PLAN.byId.get("W1-T9"), projection, []);
   assert.equal(digest(ok), digest(initial()), "the same snapshot, the same digest");
   assert.notEqual(digest(failed), digest(ok), "an unreadable snapshot moves every task, whatever it read");
+});
+
+test("test/a-github-change-re-derives-only-the-tasks-it-touches.test.ts: an answer JSON cannot hold equals no other answer, not even its own replay", () => {
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  for (const value of [10n, cycle]) {
+    const first = githubAnswerOf(value);
+    assert.match(first, /^x/);
+    assert.notEqual(githubAnswerOf(value), first, "a replay of the same value never matches, so its task re-derives");
+  }
+  assert.equal(githubAnswerOf({ a: 1 }), githubAnswerOf({ a: 1 }), "a comparable answer still equals itself");
 });
