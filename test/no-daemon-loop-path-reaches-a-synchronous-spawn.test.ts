@@ -45,7 +45,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   captureImportedModule: 1, // W1-T9660: daemonCommand > runTask > workerBoundaryStack; no conversion filed
   changeView: 1,
   changedShardProofs: 2,
-  checkAlertFixAcceptance: 1, // W1-T9660: mainRepairLaneFor > dispatchMainRepairFixRun > REAL_MAIN_REPAIR_FIX_DEPS > REAL_ALERT_FIX_DISPATCH_DEPS; no conversion filed
   checkCliFreshness: 1,
   checkProofAtAuthorTime: 1,
   ciLearningTaskIdMinter: 1,
@@ -202,7 +201,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   publishAbandonedFixOwnerAhead: 1,
   readAffectedListings: 1,
   readAffectedSuitesInput: 1,
-  readAlertFixPrBody: 1, // W1-T9660: REAL_ALERT_FIX_DISPATCH_DEPS, through checkAlertFixAcceptance; no conversion filed
   readCheckoutDepth: 2,
   readCiFrictionHandFixes: 2,
   readCiFrictionPlanState: 1,
@@ -643,7 +641,7 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
 });
 
 /** Reached only through a column-0 object-literal const, so the function-only walk never saw them (W1-T9660). */
-const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "checkAlertFixAcceptance", "readAlertFixPrBody", "realGitRemoteDeps"] as const;
+const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "realGitRemoteDeps"] as const;
 
 test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
   const fns = censusFunctions();

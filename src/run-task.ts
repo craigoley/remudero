@@ -54380,12 +54380,13 @@ export interface AlertFixDispatchDeps {
    *  drive both the refusal and the positive-control branch without a real `gh` call — see the
    *  real binding ({@link checkAlertFixAcceptance}) and `PR_AUTHORING_PATHS`'s "alert-fix" row
    *  (lib/review.ts) for why THIS lane, specifically, cannot fall back to a plan-side lookup. */
-  checkAcceptance: (prUrl: string) => AcceptanceAuthorTimeResult;
+  checkAcceptance: (prUrl: string, body?: string) => AcceptanceAuthorTimeResult | Promise<AcceptanceAuthorTimeResult>;
   /** W1-T8625: the opened PR's body, which the dispatcher parses ITSELF for inert proofs — `checkAcceptance`'s trailer
    *  arm returns `ok` before it reads the block, and every alert-fix body carries a trailer. Optional so the dispatch
    *  fakes that predate it keep driving only what they drove; omitted, the inert-proof count does not run (no real
-   *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. */
-  readPrBody?: (prUrl: string) => string;
+   *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. W1-T9698: the dispatch reads it
+   *  ONCE, awaited, and hands that body to `checkAcceptance`. */
+  readPrBody?: (prUrl: string) => string | Promise<string>;
   /** W1-T8572: the main-repair fix dispatch's no-test-file open (that lane reuses this seam rather than declaring
    *  another): the REST PR create, the pushed branch's diff against origin/main and its head subject. Optional, so a
    *  fake that omits them gets the real reads; the alert-fix lane never calls them. */
@@ -54395,11 +54396,11 @@ export interface AlertFixDispatchDeps {
 }
 
 /** W1-T8625: the opened PR's body over `gh` — the ONE body read both {@link checkAlertFixAcceptance} and the
- *  dispatcher's inert-proof count go through. `read` is appended LAST and defaults to the real {@link ghJson}; an
- *  absent `body` field reads as `""`. */
-export function readAlertFixPrBody(prUrl: string, read: (args: string[]) => unknown = ghJson): string {
-  const view = read(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
-  return view.body ?? "";
+ *  dispatcher's inert-proof count go through. `read` is appended LAST and defaults to the awaited
+ *  {@link ghJsonAsync} (W1-T9698); an absent `body` field reads as `""`. */
+export async function readAlertFixPrBody(prUrl: string, read: (args: string[]) => unknown = ghJsonAsync): Promise<string> {
+  const view = (await read(["pr", "view", prUrl, "--json", "body"])) as { body?: string } | undefined;
+  return view?.body ?? "";
 }
 
 /**
@@ -54410,15 +54411,26 @@ export function readAlertFixPrBody(prUrl: string, read: (args: string[]) => unkn
  * `ALERT-<source>-<id>`-shaped id, not a filed task), so no `expectedTaskId` is passed — the general,
  * body-only check applies (a resolvable `Remudero-Task:` trailer OR a judgeable body-level block).
  */
-export function checkAlertFixAcceptance(
+export async function checkAlertFixAcceptance(
   prUrl: string,
   /** Injectable `gh` reader, appended LAST so no positional caller shifts (the W1-T268 shape).
-   *  Omitted ⇒ the real {@link ghJson}. Exists because every dispatch test injects
+   *  Omitted ⇒ the awaited {@link ghJsonAsync}. Exists because every dispatch test injects
    *  `deps.checkAcceptance` and would otherwise leave THIS binding — the only thing that actually
    *  reads the PR body in production — unexecuted. */
-  read: (args: string[]) => unknown = ghJson,
-): AcceptanceAuthorTimeResult {
-  return acceptanceAuthorTimeCheck(readAlertFixPrBody(prUrl, read));
+  read: (args: string[]) => unknown = ghJsonAsync,
+): Promise<AcceptanceAuthorTimeResult> {
+  return acceptanceAuthorTimeCheck(await readAlertFixPrBody(prUrl, read));
+}
+
+/** W1-T9698: the real body seams over one reader. The check judges the body the dispatch already read, and reads
+ *  it itself only when handed none. */
+export function alertFixBodyDeps(
+  read: (args: string[]) => unknown = ghJsonAsync,
+): Pick<AlertFixDispatchDeps, "checkAcceptance" | "readPrBody"> {
+  return {
+    checkAcceptance: (prUrl, body) => (body === undefined ? checkAlertFixAcceptance(prUrl, read) : acceptanceAuthorTimeCheck(body)),
+    readPrBody: (prUrl) => readAlertFixPrBody(prUrl, read),
+  };
 }
 
 const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
@@ -54429,8 +54441,7 @@ const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
   resolveMount,
   spawn: ledgeredNonDispatchSpawn("alert-fix"),
   ensureTaskTrailer,
-  checkAcceptance: checkAlertFixAcceptance,
-  readPrBody: readAlertFixPrBody,
+  ...alertFixBodyDeps(),
 };
 
 /**
@@ -54508,8 +54519,17 @@ export async function dispatchAlertFixRun(
       // above. The mutation check (test/acceptance-block-diagnostics.test.ts) targets THIS exact
       // `deps.checkAcceptance` call — removing it must fail "a body with no acceptance header is
       // refused at author time" without touching anything else in this lane.
+      // W1-T9698: the body is read ONCE, awaited, for both the check and the inert-proof count below.
+      let body: { read: string } | { error: unknown } | undefined;
+      if (deps.readPrBody) {
+        try {
+          body = { read: await deps.readPrBody(report.prUrl) };
+        } catch (error) {
+          body = { error };
+        }
+      }
       try {
-        const check = deps.checkAcceptance(report.prUrl);
+        const check = await deps.checkAcceptance(report.prUrl, body && "read" in body ? body.read : undefined);
         if (!check.ok) {
           log("alert-fix.acceptance_defect", { pr_url: report.prUrl, defect: check.defect, message: check.message });
         }
@@ -54519,9 +54539,10 @@ export async function dispatchAlertFixRun(
       // W1-T8625: THE INERT-PROOF COUNT, on the body itself. `deps.checkAcceptance` returns `ok` at its trailer arm
       // before it reads the block, and only REPORTS an inert proof when it does read it, so a prose-proof body ledgered
       // nothing. Separately guarded: a failed body read is a named check error, never a clean body.
-      if (deps.readPrBody) {
+      if (body) {
         try {
-          const inert = inertAcceptanceProofs(deps.readPrBody(report.prUrl));
+          if ("error" in body) throw body.error;
+          const inert = inertAcceptanceProofs(body.read);
           if (inert.length > 0) {
             log("alert-fix.acceptance_defect", {
               pr_url: report.prUrl,
