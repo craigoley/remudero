@@ -38,7 +38,7 @@ function write(repo: GitRepo, path: string, body: string): void {
 }
 
 /** main and the run branch each rewrite the same line of one file: a real content conflict. */
-function conflictRepo(): { repo: GitRepo; head: string } {
+function seedConflict(): { repo: GitRepo; head: string } {
   const repo = gitRepo({ kind: "w1-t9723" });
   repo.git("config", "user.name", "remudero test fixture");
   repo.git("config", "user.email", "fixture@remudero.invalid");
@@ -121,7 +121,7 @@ function disposedRows(path: string): Array<Record<string, unknown>> {
 }
 
 test("W1-T9723: a dirty head whose mergeability goes unread keeps the conflicting files a prior pass captured", async () => {
-  const { repo, head } = conflictRepo();
+  const { repo, head } = seedConflict();
   const merge = spawnSync("git", ["-C", repo.dir, "merge-tree", "--write-tree", "main", head], { encoding: "utf8" });
   assert.equal(merge.status, 1, "git reports the merge as conflicted");
   assert.match(merge.stdout, new RegExp(`CONFLICT \\(content\\): Merge conflict in ${PATH}`));

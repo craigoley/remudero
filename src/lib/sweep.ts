@@ -5857,7 +5857,6 @@ export function conflictRefusalCause(
     : "conflict repair was not admitted";
 }
 
-/** W1-T9723 — why a dirty PR's conflict evidence is empty, named rather than collapsed into absence. */
 export function conflictEvidenceGap(pr: Pick<OpenPrView, "mergeConflict" | "mergeConflictGap">): string | undefined {
   const files = pr.mergeConflict?.files;
   if (files?.length === 0) return "GitHub's compare found no path changed on both sides since the merge base";
@@ -6476,7 +6475,6 @@ export interface OpenPrView {
    *  the merge base (W1-T94's new mode, design note iii). Populated when `mergeState === "dirty"`,
    *  mirroring how `ciFailures` is populated only when `checksState === "red"`. */
   mergeConflict?: MergeConflictEvidence;
-  /** W1-T9723 — why a dirty PR has no conflict evidence: a failed or capped compare, or an unread pass. */
   mergeConflictGap?: string;
   /** What each recorded fix-rung strike TRIED for this PR's task, ledger ground truth only
    *  (W1-T78) — the clarification rung's input. `[]`/undefined when no strike is recorded, as for
@@ -8660,11 +8658,9 @@ export interface KnownMergeState {
   /** The ledger row's own `ts`, when present — carried into the inheriting pass's reason so a
    *  flapping read is legible rather than a silent override (W1-T4470 design (iv)). */
   observedAt?: string;
-  /** W1-T9723 — the conflict files that same `dirty` row recorded, carried with its state. */
   conflictFiles?: ConflictFileDiff[];
 }
 
-/** W1-T9723 — the `conflict_files` a dirty row records, so a pass that cannot read them inherits them. */
 export function conflictEvidenceRowFields(
   pr: Pick<OpenPrView, "mergeState" | "mergeConflict">,
 ): { conflict_files?: Array<{ path: string; ours_deleted: number; theirs_deleted: number }> } {
@@ -8720,7 +8716,7 @@ export function lastKnownMergeStateFromLedger(
  * SAME `pr` object when nothing changes, so an unaffected PR costs nothing downstream. The returned
  * `pr` is used for EVERYTHING the rest of this PR's reconciliation reads — disposition, the
  * zero-check-run remedies, and the ledgered `sweep.disposed` row itself — so the inheritance is not
- * a second opinion layered on top of the ordinary path, it IS this pass's mergeability fact.
+ * a second opinion, it IS this pass's fact. W1-T9723: a dirty head also takes its last recorded conflict_files.
  */
 export function withInheritedMergeState(
   pr: OpenPrView,
@@ -8731,7 +8727,6 @@ export function withInheritedMergeState(
   const known = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
   const inherited = pr.mergeState === undefined ? known : undefined;
   let next = inherited ? { ...pr, mergeState: inherited.state } : pr;
-  // W1-T9723: a dirty head with no evidence of its own takes the files this exact head last recorded.
   if (next.mergeState === "dirty" && !captured) {
     const files = known?.state === "dirty" ? known.conflictFiles : undefined;
     const gap = next.mergeConflictGap ?? (inherited
