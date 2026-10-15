@@ -40318,7 +40318,6 @@ export async function daemonCommand(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
                       root: repoRoot,
-                      landingStateRoot: config.root,
                       ledgerPath,
                       owner: self.owner,
                       repo: self.repo,
