@@ -120,7 +120,7 @@ test("W1-T4414: an unreachable origin is UNKNOWN and withholds the verdict rathe
   assert.equal(v.taskIdOwnership?.[0]?.kind, "unknown");
   assert.equal(v.state, "failure", "never a pass");
   assert.equal(v.taskIdOwnershipWithheld, v.summary);
-  assert.equal(v.summary, "remudero-review: FAIL — id CONSOLE-T60 reservation unreadable (UNKNOWN) — verdict withheld");
+  assert.equal(v.summary, "remudero-review: FAIL — id CONSOLE-T60 reservation unreadable (UNKNOWN): ls-remote failed — verdict withheld");
   const noHead = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir });
   assert.deepEqual(noHead.taskIdOwnership, [], "no head ref means no holder to compare, so the check does not run");
 });
@@ -151,7 +151,7 @@ test("W1-T4414: readReservationAnchors reads a present ref and reports a failed 
     return { status: 0, stdout: r, stderr: "" };
   };
   assert.deepEqual(readReservationAnchors([], run), new Map());
-  assert.deepEqual(readReservationAnchors(["CONSOLE-T60"], run).get("CONSOLE-T60"), { status: "unknown", reason: "fatal: fetch refused" });
+  assert.deepEqual(readReservationAnchors(["CONSOLE-T60"], run).get("CONSOLE-T60"), { status: "unknown", reason: "fetch failed: fatal: fetch refused" });
 });
 
 test("a reservation minted with --branch names that branch as its holder", async () => {

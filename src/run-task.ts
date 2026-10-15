@@ -1593,7 +1593,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
@@ -9215,7 +9215,7 @@ async function runReview(args: {
   // comment for the full design.
   if (verdict.taskIdOwnershipWithheld) {
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
-    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld });
+    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld, unknown_reservations: unknownReservationReads(verdict.taskIdOwnership) });
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }

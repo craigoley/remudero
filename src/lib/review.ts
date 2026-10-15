@@ -6658,6 +6658,25 @@ export function postedArmFactsFromLedger(
 const STATUS_DESC_MAX = 140;
 const FAIL_PREFIX = "remudero-review: FAIL — ";
 
+/** W1-T9674: the failed step an UNKNOWN ownership reason names, short enough for the 140-character status. */
+export function unknownReservationStep(reason: string): string {
+  const timedOut = /timed out/.test(reason) ? " (timed out)" : "";
+  const step: Record<string, string> = {
+    "head-ref-unavailable": "no head ref", "head-checkout-unavailable": "no head checkout",
+    "base-unreadable": "base read timed out", "baseline-unreadable": "baseline read timed out",
+  };
+  const verb = /^(ls-remote|fetch|log) failed\b/.exec(reason);
+  if (verb) return `${verb[1] === "log" ? "anchor log" : verb[1]} failed${timedOut}`;
+  return step[reason.split(":")[0]] ?? (reason.trim() || "no reason recorded");
+}
+
+const clipTo = (text: string, room: number): string => (text.length > room ? `${text.slice(0, Math.max(1, room - 1))}…` : text);
+
+/** W1-T9674: each UNKNOWN finding's id and full reason, for the `review.post_refused` row a withheld verdict writes. */
+export function unknownReservationReads(findings: readonly TaskIdOwnershipFinding[] | undefined): { id: string; reason: string }[] {
+  return (findings ?? []).flatMap((f) => (f.kind === "unknown" ? [{ id: f.id, reason: f.reason }] : []));
+}
+
 /** Build a failure summary that TEACHES: it NAMES the first unmet criterion rather than a bare count (the W1-T2/#18
  * refusal said "1 criterion/criteria unmet" and cost a human round-trip), truncating with an ellipsis and `(+N more)`
  * inside the status-description limit, with the full list in the `review.posted` line and the PR review comment.
@@ -6704,10 +6723,12 @@ export function failSummary(
   const owned = idOwnership.find((f) => f.kind !== "unknown") ?? idOwnership[0];
   if (owned) {
     const more = idOwnership.length > 1 ? ` (+${idOwnership.length - 1} more)` : "";
-    if (owned.kind !== "foreign") {
-      const why = owned.kind === "unreserved" ? "is not reserved — mint it with rmd next-task-id --prefix" : "reservation unreadable (UNKNOWN) — verdict withheld";
-      return `${FAIL_PREFIX}id ${owned.id} ${why}${more}`.slice(0, STATUS_DESC_MAX);
+    if (owned.kind === "unknown") {
+      const head = `${FAIL_PREFIX}id ${owned.id} reservation unreadable (UNKNOWN): `;
+      const tail = ` — verdict withheld${more}`;
+      return `${head}${clipTo(unknownReservationStep(owned.reason), STATUS_DESC_MAX - head.length - tail.length)}${tail}`;
     }
+    if (owned.kind === "unreserved") return `${FAIL_PREFIX}id ${owned.id} is not reserved — mint it with rmd next-task-id --prefix${more}`.slice(0, STATUS_DESC_MAX);
     const tail = `, not this PR — renumber${more}`;
     const room = STATUS_DESC_MAX - `${FAIL_PREFIX}id ${owned.id} is reserved by ${tail}`.length;
     const holder = owned.holder.length > room ? `${owned.holder.slice(0, Math.max(1, room - 1))}…` : owned.holder;
