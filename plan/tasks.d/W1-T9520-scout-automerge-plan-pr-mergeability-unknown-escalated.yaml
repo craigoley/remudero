@@ -20,3 +20,11 @@
     The ledger step automerge.plan_pr_mergeability_unknown_escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 5 in the older half, 9 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares test/scout-automerge-plan-pr-mergeability-unknown-escalated.test.ts, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-15T00:53:46.763Z"
+    pin: "b67cbe87e55f174565b0f2769603c5506060cc44643a82557d67c686bc7bf97d"

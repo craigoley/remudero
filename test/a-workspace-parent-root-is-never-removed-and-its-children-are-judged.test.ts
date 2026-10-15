@@ -32,7 +32,7 @@ test("test/a-workspace-parent-root-is-never-removed-and-its-children-are-judged.
   assert.ok(r.stdout.includes(`KEEP ${kept}: scratch keep marker`), r.stdout);
 });
 
-test("live linked worktrees use git removal; orphaned ones require their parent to be gone", () => {
+test("published linked worktrees use git removal; unreadable orphans stay even when their parent is gone", () => {
   const fx = fixture();
   const { main } = repos(fx);
   const live = join(fx.scratch, "live-linked");
@@ -53,7 +53,7 @@ test("live linked worktrees use git removal; orphaned ones require their parent 
   assert.ok(!git(main, "worktree", "list", "--porcelain").includes(live), "Git registration is removed too");
   assert.equal(existsSync(locked), true);
   assert.equal(existsSync(missingRegistration), true);
-  assert.equal(existsSync(orphan), false, r.stdout);
+  assert.equal(existsSync(orphan), true, "a missing parent is not proof that the payload has no unpublished work");
   assert.match(r.stdout, /Git worktree is locked/);
   assert.match(r.stdout, /Git metadata is unreadable/);
 });
