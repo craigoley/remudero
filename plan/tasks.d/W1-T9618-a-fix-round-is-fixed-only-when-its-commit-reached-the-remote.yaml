@@ -1,0 +1,93 @@
+- id: W1-T9618
+  title: "A FIX ROUND IS FIXED ONLY WHEN ITS COMMIT REACHED THE REMOTE — on 2026-10-15 #11918's round 1 committed 70b73ea83, its push died on 'could not read Username', and fix.done still recorded FIXED at the old head, so a strike burned and the PR stalled about 2 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # the fix rung's round outcome feeds the strike tally, the progress judge and the routing learner
+  band_meaning: span
+  origin: "operator session 2026-10-15 after the 08:22-10:29Z core outage: #11918 (W1-T8950) fix round 1 forensics"
+  plan_refs: [W1-T8833, W1-T4693, W1-T5528, W1-T7096, W1-T2610, W1-T8950]
+  files: [src/run-task.ts, src/lib/fix-progress-judge.ts, src/lib/fix-routing-learner.ts, test/a-fix-round-is-fixed-only-when-its-commit-reached-the-remote.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on #11918 (W1-T8950), core ledger union (live ledger plus archive ledger.2026-10-15T08-04-51-092Z):
+      07:30:56Z fix.dispatch round DAEMON-1792042718195:1:1792048592785, head_sha f1f3f1654, diff_stat 1 file +113.
+                The round's commit was 70b73ea83 (made locally at 07:30:55Z).
+      07:36:47.332Z fix.push_failed site rung.strike, cause git-push-failed: the leased push of 70b73ea83 to
+                run-W1-T8950-1792031234931 failed with "fatal: could not read Username for 'https://github.com/...':
+                No such device or address".
+      07:36:47.332Z fix.done fix_outcome FIXED, subtype success, head_sha f1f3f1654, no pushed_head_sha.
+      The PR head stayed f1f3f1654 until a hand push. The strike was spent, and the sweep read the PR as a fix
+      round already taken ("fix round 1 — judge: continue").
+    #11939 (W1-T9086) failed the same way in the same second (07:36:46.810Z, commit 283f898c5).
+    The class, measured over the live ledger (2026-09-28 onward): 155 FIXED fix.done rows. 12 have subtype success
+    and no pushed_head_sha, all in round "resume". Each matches a fix.push_failed row in the 10-11..10-15 archives
+    (13 rows: 9 "To https://github.com/...", 2 pre-push hook refusals, 2 "could not read Username").
+    Three defects, verified on origin/main 32cfb064f:
+    (1) runFixRung's push path (landRoundPush, then logFixDone in its finally) writes fix.done with the worker's
+        own fix_outcome and subtype whatever the push did. pushed_head_sha is just left out when the push stood
+        down. Nothing checks that the remote branch now holds the round's commit. A push that exits 0 is
+        trusted: the un-leased path (gitPushRunBranchAsync, `git push origin HEAD`) does no post-push read.
+    (2) fix.push_failed and fix.push_refused are not in ledger.ts's retained steps, so compaction moves them out
+        of the live ledger within hours: 0 rows in the live ledger against 13 in the archives. Every live reader
+        sees only fix.done, which says FIXED.
+    (3) fix-routing-learner.ts gives a fix.done that is not commit_refused and has no pushed_head_sha the
+        `accepted` reward. A credential outage is credited to the model arm as a success.
+    W1-T8833 (queued, not built) records subtype push_failed when landRoundPush stands down after a LEASE
+    REJECTION, and re-applies the round after a base refresh. This task is the general invariant: positive
+    remote verification for every round, any failure cause, plus the strike, the judge and the learner.
+    Use W1-T8833's exact `subtype: "push_failed"` name, so whichever lands second finds it already there.
+    NOT IN SCOPE: why git had no credential at 07:36:46Z (a token-supply defect, reported separately), and
+    re-pushing the stranded commit on the next round.
+  design: |
+    1. src/run-task.ts runFixRung: after landRoundPush returns, read the remote branch head once with
+       `git ls-remote origin refs/heads/<branch>`, through a new optional deps seam `readRemoteBranchHead`
+       defaulting to hostWorktreeGitAsync. The round LANDED only when that head equals the round's commit
+       (expectedHeadShaForPush). Otherwise it did NOT land. That covers a push that threw or stood down
+       (FixRoundPushError, push_failed or push_refused), a push that returned but left another head, and an
+       unreadable remote.
+    2. fix.done for a round that did not land carries:
+         subtype "push_failed"; worker_subtype set to the worker's own subtype;
+         fix_outcome "NOT_LANDED"; worker_fix_outcome set to the worker's claim (e.g. "FIXED");
+         push_outcome "failed" | "refused" | "not_on_remote" | "remote_unreadable";
+         push_failure_cause, from FixRoundPushError.pushCause when there is one;
+         push_failure_reason, the first 500 chars of the error or of the ls-remote result;
+         remote_head_sha, when the read succeeded.
+       fix.done is already a retained step, so the failure survives compaction. A landed round's fix.done is
+       unchanged except that it gains push_outcome "landed" and remote_head_sha. Only a landed round may carry
+       fix_outcome FIXED.
+    3. A round that did not land spends no strike. Write `fix.strike_refunded {strike, head_sha, reason:
+       "push-not-landed", push_outcome}` beside its fix.done, the row W1-T5528's fixLedgerRowsForHead already
+       drops strikes by. The round is not silent and is not free: fix-progress-judge.ts buildFixProgressInput
+       reads a fix.done with subtype "push_failed" as a completed NO-OP round (it counts in noOpRounds, never
+       in reviewerOnlyFailurePersists), and adds `pushFailedRounds` to signals so the judge can escalate a
+       repeated push failure. There is no fixed cap.
+    4. src/lib/fix-routing-learner.ts excludes a fix.done with subtype "push_failed" from the arm statistics,
+       as endedBySignalWithNothingPushed already does, counted in a new `pushFailedExcluded` tally.
+    Tests go in the new file, titled verbatim as in the proofs. Drive runFixRung with injected deps:
+    (a) a push that throws FixRoundPushError("git-push-failed") with the 07:36:47Z "could not read Username" text;
+    (b) a push that resolves while readRemoteBranchHead still returns the prior head.
+    One more test runs the real default seam against a gitRepo() bare remote, so the default is covered.
+  acceptance:
+    - claim: "a round whose push failed records fix.done subtype push_failed with the failure's cause and reason, and never fix_outcome FIXED"
+      proof: 'grep: test("W1-T9618: a round whose push failed records the failure on its done row and is never FIXED" in test/a-fix-round-is-fixed-only-when-its-commit-reached-the-remote.test.ts'
+    - claim: "a push that returned while the remote branch still holds another head is recorded as not landed"
+      proof: 'grep: test("W1-T9618: a push that returned but left the remote on another head is not landed" in test/a-fix-round-is-fixed-only-when-its-commit-reached-the-remote.test.ts'
+    - claim: "a round that did not land refunds its strike and reads as a no-op round to the progress judge"
+      proof: 'grep: test("W1-T9618: a round that did not land refunds its strike and the judge reads it as a no-op" in test/a-fix-round-is-fixed-only-when-its-commit-reached-the-remote.test.ts'
+    - claim: "the routing learner excludes a round whose commit never reached the remote"
+      proof: 'grep: test("W1-T9618: the routing learner excludes a round that never reached the remote" in test/a-fix-round-is-fixed-only-when-its-commit-reached-the-remote.test.ts'
+    - claim: "the default remote read sees a landed push in a real git remote"
+      proof: 'grep: test("W1-T9618: the default remote read sees a landed round in a real remote" in test/a-fix-round-is-fixed-only-when-its-commit-reached-the-remote.test.ts'
+  falsifier: |
+    Drive runFixRung with a worker that reports FIXED and commits, and a push that throws
+    FixRoundPushError("git-push-failed", undefined, "fatal: could not read Username ..."). On origin/main the
+    fix.done row reads fix_outcome FIXED, subtype success, no push field; no strike is refunded; and the learner
+    scores the round `accepted`. With the change it reads subtype push_failed, fix_outcome NOT_LANDED and
+    push_outcome failed, with the reason, and a fix.strike_refunded row follows. Remove the ls-remote comparison
+    and the second test goes red. Drop the refund and the third goes red.

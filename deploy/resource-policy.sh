@@ -49,8 +49,12 @@ RMD_BUILD_CPU_SHARES="${RMD_BUILD_CPU_SHARES:-512}"
 RMD_HOST_RESERVE_MIB="${RMD_HOST_RESERVE_MIB:-${RMD_HOST_OVERHEAD_MIB}}"
 RMD_MEMORY_WEIGHTS="${RMD_MEMORY_WEIGHTS:-remudero-daemon=16 remudero-serve=10 remudero-console-daemon=3 remudero-site-daemon=2}"
 # Observed steady working sets plus headroom (MiB): core 4.5 GB main + one 3.5 GB tsc run; serve
-# ~5 GB before #10349; console ~1.5 GB; site ~1 GB.
-RMD_MEMORY_HIGH_FLOORS="${RMD_MEMORY_HIGH_FLOORS:-remudero-daemon=8192 remudero-serve=5632 remudero-console-daemon=2048 remudero-site-daemon=1536}"
+# ~5 GB before #10349; console ~1.5 GB; site ~1 GB. SITE IS SIZED BY ITS RESTART LINE, NOT ITS
+# WORKING SET (2026-10-15): the daemon's memory governor restarts at daemonMemory.restartShare 0.5
+# of memory.high, and an idle site boot is charged 769-942 MiB rss+swap (189 heap_pressure exits,
+# 10-14 08:38Z to 10-15 10:28Z). At 1536 the line was 768 MiB, so it restarted in a loop doing no
+# work; 2304 puts it at 1152 MiB (#11971).
+RMD_MEMORY_HIGH_FLOORS="${RMD_MEMORY_HIGH_FLOORS:-remudero-daemon=8192 remudero-serve=5632 remudero-console-daemon=2048 remudero-site-daemon=2304}"
 RMD_MEMORY_WEIGHT_UNLISTED="${RMD_MEMORY_WEIGHT_UNLISTED:-2}"
 RMD_MEMORY_HIGH_MAX_PCT="${RMD_MEMORY_HIGH_MAX_PCT:-95}" # a high never reaches its own memory.max
 

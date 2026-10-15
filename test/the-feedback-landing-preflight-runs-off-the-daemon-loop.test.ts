@@ -180,7 +180,7 @@ test("W1-T5620: a preflight that throws is read the same by the sync and the awa
 
   for (const [f, r] of [[sync, r1], [awaited, r2]] as const) {
     assert.equal(r.landed, false, JSON.stringify(r));
-    assert.match(r.error ?? "", /^refused to force-replace feedback-landing: .*\(preflight could not start\); original failure: preflight could not start$/);
+    assert.match(r.error ?? "", /^feedback-landing was not pushed, and no lease was lost, so nothing was re-derived: preflight could not start$/);
     assert.deepEqual(f.heads(), ["main"], "a throwing preflight pushes nothing");
     assert.equal(f.creates().length, 0);
   }

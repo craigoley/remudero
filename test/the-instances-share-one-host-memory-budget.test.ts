@@ -22,6 +22,7 @@ import {
   resourcePolicyDriftFrom,
   type ResourcePolicyDrift,
 } from "../src/lib/deployer.js";
+import { readDaemonMemoryPolicy } from "../src/lib/daemon-memory-policy.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
@@ -36,6 +37,15 @@ const INSTANCES = [
   { container: "remudero-console-daemon", role: "build", workingSet: 1.5 * GB },
   { container: "remudero-site-daemon", role: "build", workingSet: 1.0 * GB },
 ] as const;
+/**
+ * The most an IDLE site daemon was charged when its memory governor restarted it: the largest rss+swap
+ * across all 189 site daemon.heap_pressure_exit rows from 2026-10-14T08:38Z to 2026-10-15T10:28Z
+ * (share x budget_bytes; used heap 274 MiB at most, so no work in flight). Earlier rows on 10-14 ran
+ * a 0.7 GB heap and are not an idle boot.
+ */
+const SITE_IDLE_BOOT_MAX_MIB = 942;
+/** A host big enough that every weighted share clears its floor (site's 2/31 needs a 35.7 GiB budget). */
+const BIG_HOST_MIB = 40 * 1024;
 /** A container created before any policy: no limits, no annotations (Docker reports null). */
 const BARE = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0, Annotations: null };
 
@@ -62,7 +72,7 @@ function policyOf(root: string, env: NodeJS.ProcessEnv, role: "serve" | "build",
 
 test("each instance's memory.high sits above its working set and below an unchanged memory.max, summing to the host budget where the working sets fit", () => {
   const { root, env } = install();
-  const big = install(32 * 1024 * 1024);
+  const big = install(BIG_HOST_MIB * 1024);
   try {
     const hostMib = Math.floor(HOST_KB / 1024);
     // SOFT LIMITS ONLY: memory.max and swap are byte-identical to the policy before memory.high existed.
@@ -76,8 +86,8 @@ test("each instance's memory.high sits above its working set and below an unchan
       assert.ok(p.high > workingSet, `${container}: memory.high ${p.high / MIB} MiB above its ${workingSet / GB} GB working set`);
     }
 
-    // Where the working sets fit (a 32 GiB host), the weighted shares decide and sum to the budget.
-    const budget = (32 * 1024 - HOST_RESERVE_MIB) * MIB;
+    // Where the working sets fit (a 40 GiB host), the weighted shares decide and sum to the budget.
+    const budget = (BIG_HOST_MIB - HOST_RESERVE_MIB) * MIB;
     const highs = INSTANCES.map(({ container, role }) => policyOf(big.root, big.env, role, container).high);
     const sum = highs.reduce((n, h) => n + h, 0);
     assert.ok(sum <= budget, `memory.high sums to ${sum / MIB} MiB against a ${budget / MIB} MiB budget`);
@@ -86,6 +96,24 @@ test("each instance's memory.high sits above its working set and below an unchan
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(big.root, { recursive: true, force: true });
+  }
+});
+
+test("the site daemon's restart line clears an idle boot, so an idle site daemon does not restart in a loop", () => {
+  // OBSERVED 2026-10-13 to 10-15: memory.high 1536 MiB put the governor's restart line at 768 MiB,
+  // under an idle boot, so the site daemon restarted every few minutes doing no work. The memory-high
+  // tuner never goes below the policy value, so the policy is the lowest line the daemon can see.
+  const { root, env } = install();
+  try {
+    const { restartShare } = readDaemonMemoryPolicy(join(REPO_ROOT, "plan", "policy.yaml")).policy;
+    const { high } = policyOf(root, env, "build", "remudero-site-daemon");
+    const lineMib = (high / MIB) * restartShare;
+    assert.ok(
+      lineMib > SITE_IDLE_BOOT_MAX_MIB,
+      `site memory.high ${high / MIB} MiB x restartShare ${restartShare} = ${lineMib} MiB, at or under an idle boot's ${SITE_IDLE_BOOT_MAX_MIB} MiB`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

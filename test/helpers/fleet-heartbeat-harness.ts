@@ -32,6 +32,9 @@ export interface Beat {
   published: string;
   /** The tree entry piped to `git mktree`. */
   treeInput: string;
+  /** With `recordGzip`: the file each `gzip` invocation was handed, in order — which rotations the
+   *  beat actually OPENED, since every gzipped read goes through `gzip` on PATH. */
+  gzipCalls: string[];
 }
 
 /**
@@ -103,6 +106,10 @@ export interface BeatOpts {
   dfStub?: string;
   /** Applied to the copied script as [find, replace], with `find` asserted UNIQUE. */
   mutate?: [string, string];
+  /** Extra rotations under `state/`, by file name; a name ending `.gz` is written gzipped. */
+  rotations?: Record<string, string[]>;
+  /** Put a recording `gzip` on PATH ahead of the real one; see {@link Beat.gzipCalls}. */
+  recordGzip?: boolean;
 }
 
 export function runBeat(opts: BeatOpts = {}): Beat {
@@ -149,6 +156,10 @@ export function runBeat(opts: BeatOpts = {}): Beat {
       gzipSync(Buffer.from(opts.gzippedLedger.join("\n") + "\n", "utf8")),
     );
   }
+  for (const [name, lines] of Object.entries(opts.rotations ?? {})) {
+    const body = Buffer.from(lines.join("\n") + (lines.length > 0 ? "\n" : ""), "utf8");
+    writeFileSync(join(root, "state", name), name.endsWith(".gz") ? gzipSync(body) : body);
+  }
   if (opts.prevBeat !== false) {
     writeFileSync(join(root, "state", "heartbeat-last.txt"), `${opts.prevBeatTs ?? "2020-01-01T00:00:00Z"}\n`);
   }
@@ -170,6 +181,19 @@ export function runBeat(opts: BeatOpts = {}): Beat {
   if (opts.hostnameStub) {
     writeFileSync(join(binDir, "hostname"), opts.hostnameStub, { mode: 0o755 });
     chmodSync(join(binDir, "hostname"), 0o755);
+  }
+  if (opts.recordGzip) {
+    const realGzip = String(spawnSync("bash", ["-c", "command -v gzip"], { encoding: "utf8" }).stdout).trim();
+    assert.ok(realGzip.startsWith("/"), `a real gzip must exist to record through, got ${realGzip}`);
+    const shim = [
+      "#!/usr/bin/env bash",
+      'for a in "$@"; do last="$a"; done',
+      'printf "%s\\n" "${last:-}" >> "$STUB_REC/gzip-calls"',
+      `exec ${JSON.stringify(realGzip)} "$@"`,
+      "",
+    ].join("\n");
+    writeFileSync(join(binDir, "gzip"), shim, { mode: 0o755 });
+    chmodSync(join(binDir, "gzip"), 0o755);
   }
   if (opts.dfStub) {
     writeFileSync(join(binDir, "df"), opts.dfStub, { mode: 0o755 });
@@ -220,6 +244,7 @@ export function runBeat(opts: BeatOpts = {}): Beat {
     duCalls: du.calls(),
     published: read("payload"),
     treeInput: read("treeinput"),
+    gzipCalls: read("gzip-calls").split("\n").filter(Boolean),
   };
   rmSync(dir, { recursive: true, force: true });
   rmSync(rec, { recursive: true, force: true });

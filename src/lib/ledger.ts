@@ -597,8 +597,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "repair.lease_posted",
   "pr.opened",
   "pr.open_satisfied_by_main", // the backlog gardener retires the task from it; rotated away, a satisfied task is rebuilt.
-  "pr.rehome.started", // W1-T7448: a resumed re-home reuses its started branch name; rotated away, it opens a second.
-  "pr.rehomed", // W1-T7448: a completed re-home is never repeated for the same head.
+  "pr.identity_trailer.started", // W1-T9055: a retried trailer commit on the same head reuses its started row; rotated away, it writes a second.
+  "pr.identity_trailered", // W1-T9055: a completed trailer commit is never repeated for the same head.
   "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
   "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
   "selector-shadow.observation", // W1-T5925: the shadow verdict folds every row; rotated away, it forgets.
