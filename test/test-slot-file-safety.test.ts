@@ -20,6 +20,14 @@ test("a host test slot lease is readable by peer accounts but never group or wor
     fx.lease.refresh(); assert.equal(JSON.parse(readFileSync(fx.path, "utf8")).pid, process.pid);
   } finally { fx.cleanup(); }
 });
+test("a permissive caller umask cannot make an owned test slot group or world writable", () => {
+  const previous = process.umask(0); let fx: ReturnType<typeof fixture> | undefined;
+  try {
+    fx = fixture();
+    assert.equal(statSync(fx.path).mode & 0o777, 0o644);
+    fx.lease.refresh(); assert.equal(statSync(fx.path).mode & 0o022, 0);
+  } finally { try { fx?.cleanup(); } finally { process.umask(previous); } }
+});
 test("a refreshed test slot never follows a replacement symlink or overwrites its owned sentinel", () => {
   const fx = fixture(); try {
     const sentinel = join(fx.root, "sentinel.json"); writeFileSync(sentinel, '{"owned-sentinel":true}');
