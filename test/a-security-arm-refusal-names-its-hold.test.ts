@@ -6,7 +6,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { finalBlocker, securityArmRefusalAtHead, securityHoldReason } from "../src/lib/pr-blocker.js";
+// A namespace import, so the file still loads at a base without these exports and each test fails on its own.
+import * as blockers from "../src/lib/pr-blocker.js";
 import { runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
@@ -64,7 +65,7 @@ test("W1-T9633: a new high alert arm refusal names a security-alert-hold owned b
   assert.match(String(row?.reason), /security merge blocked: new-high-or-critical-security-alert/);
   assert.match(String(row?.reason), /alert #412 js\/path-injection at src\/lib\/x\.ts:7/);
   // An alert read at another head is never named as this head's.
-  assert.doesNotMatch(securityHoldReason({ state: "blocked", reason: "r" }), /alert #/);
+  assert.doesNotMatch(blockers.securityHoldReason({ state: "blocked", reason: "r" }), /alert #/);
 });
 
 test("W1-T9633: a stalled security hold escalates with the policy verdict", async () => {
@@ -94,12 +95,12 @@ test("W1-T9633: a later arm or another head's refusal leaves awaiting-arm", asyn
     assert.equal(row?.blocker, "awaiting-arm", JSON.stringify(rows));
     assert.equal(row?.blocker_cause, undefined);
   }
-  assert.equal(securityArmRefusalAtHead([armFailed(UNKNOWN), later], 11936, HEAD), undefined);
-  assert.deepEqual(securityArmRefusalAtHead([later, armFailed(UNKNOWN)], 11936, HEAD),
+  assert.equal(blockers.securityArmRefusalAtHead([armFailed(UNKNOWN), later], 11936, HEAD), undefined);
+  assert.deepEqual(blockers.securityArmRefusalAtHead([later, armFailed(UNKNOWN)], 11936, HEAD),
     { state: "unknown", reason: "security-analysis-failed-or-unrecognized" });
   // An armed PR, or one under an operator hold, keeps its own blocker.
   const refusal = { state: "unknown" as const, reason: "r" };
-  assert.equal(finalBlocker("awaiting-arm", { mergeable: true, autoMergeArmed: true, securityArmRefusal: refusal }), "armed-idle");
-  assert.equal(finalBlocker("awaiting-arm", { mergeable: true, operatorHold: true, securityArmRefusal: refusal }), "operator-hold");
-  assert.equal(finalBlocker("own-red", { securityArmRefusal: refusal }), "own-red");
+  assert.equal(blockers.finalBlocker("awaiting-arm", { mergeable: true, autoMergeArmed: true, securityArmRefusal: refusal }), "armed-idle");
+  assert.equal(blockers.finalBlocker("awaiting-arm", { mergeable: true, operatorHold: true, securityArmRefusal: refusal }), "operator-hold");
+  assert.equal(blockers.finalBlocker("own-red", { securityArmRefusal: refusal }), "own-red");
 });
