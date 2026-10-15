@@ -12,7 +12,7 @@
   plan_refs: [W1-T5689, W1-T9615, W1-T9638, W1-T9651, W1-T5521, W1-T5965]
   files:
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a sync spawner the census cannot see is the class W1-T9615 measured holding the loop 60-190 s
   attempts: 0
   rationale: |
