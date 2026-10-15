@@ -19,10 +19,12 @@
  * W1-T9487: W1-T9094 stopped the build daemon recycling for serve-only image inputs, so the daemon's
  * image stopped being serve's measure: serve is judged against the newest PUBLISHED image for its own
  * inputs, read from its `/etc/rmd-build-sha`; only when that cannot be read does the daemon's decide.
+ * W1-T9509: the handoff hold read the live ledger.ndjson alone, so a rotation (17:00:22Z on 2026-10-14) left
+ * it no handoff row and the next tick replaced serve; it now reads the live file and the newest rotations.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import {
   IMAGE_BUILD_SHA_PATH,
@@ -46,6 +48,7 @@ import { ghIssueGateway, tryEscalate, type Escalation, type IssueGateway } from 
 import { isPaused } from "./fleet-control.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { loadHostMemoryBudgetPolicy, type HostMemoryBudgetPolicy } from "./host-memory-shadow.js";
+import { ledgerLivePath, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 
 export const SERVE_POLICY_CONTAINER = "remudero-serve";
 export const SERVE_POLICY_FAILED_FILE = "SERVE_POLICY_FAILED";
@@ -139,6 +142,53 @@ export function serveHandoffOpen(ledgerText: string): boolean {
     else if (HANDOFF_CLOSED_STEPS.includes(step)) open = false;
   }
   return open;
+}
+
+/** W1-T9509 — how far before the NEWEST rotation's cut the handoff hold still opens rotations. The newest one is
+ *  always read, so a handoff opened before any one rotation stays visible; rotations ran every ~1.5-2 h on
+ *  2026-10-14, so this is one or two files, and a size-forced burst of rotations is bounded by 2 h of writes. */
+export const SERVE_HANDOFF_ROTATION_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+/** Each row in `lines` in ts order; a row with no readable ts keeps the place of the row before it. */
+function inTsOrder(lines: readonly string[]): string[] {
+  let at = Number.NEGATIVE_INFINITY;
+  const keyed = lines.map((line) => {
+    const ts = Date.parse(String((JSON.parse(line) as { ts?: unknown }).ts));
+    if (!Number.isNaN(ts)) at = ts;
+    return { line, at };
+  });
+  return keyed.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).map((r) => r.line);
+}
+
+/**
+ * Whether a serve handoff is open, read from the handoff rows of the live ledger and the rotations cut within
+ * {@link SERVE_HANDOFF_ROTATION_WINDOW_MS} of the newest (at least the newest), in ts order. An unread rotation, an
+ * absent or unreadable live file, or a read that throws is unknown — undefined, which holds the replace.
+ */
+export function serveHandoffInProgressFromLedger(stateDir: string, fsDeps: LedgerGrepFsDeps = realLedgerFs): boolean | undefined {
+  const livePath = ledgerLivePath(stateDir);
+  let liveRead = false;
+  const tracked: LedgerGrepFsDeps = {
+    ...fsDeps,
+    readFileSync: (path) => {
+      const buf = fsDeps.readFileSync(path);
+      if (path === livePath) liveRead = true;
+      return buf;
+    },
+  };
+  try {
+    const union = readLedgerUnionRawLinesSync(stateDir, {
+      step: [...HANDOFF_OPEN_STEPS, ...HANDOFF_CLOSED_STEPS],
+      rotationWindowMs: SERVE_HANDOFF_ROTATION_WINDOW_MS,
+      minRotations: 1,
+      refuseIncomplete: true,
+    }, tracked);
+    // the union skips an unreadable live file silently; here it is unknown, as it was before the union
+    if (!union.ok || !liveRead) return undefined;
+    return serveHandoffOpen(inTsOrder(union.rawLines).join("\n"));
+  } catch {
+    return undefined; // a read that throws leaves the handoff state unknown, which holds the replace
+  }
 }
 
 export function decideServePolicyConvergence(i: ServePolicyInputs): { replace: boolean; reason: string } {
@@ -323,13 +373,7 @@ export function realServePolicyDeps(
       return { buildSha, behind: baked + (playwrightCoreVersionCommitsBehind(buildSha, git) ?? 0) + (workerSdkCommitsBehind(buildSha, git) ?? 0) };
     },
     pausePresent: () => isPaused(o.stateRoot),
-    serveHandoffInProgress: () => {
-      try {
-        return serveHandoffOpen(readFileSync(ledgerPath, "utf8"));
-      } catch {
-        return undefined; // unreadable ledger — the handoff state is unknown, which holds the replace
-      }
-    },
+    serveHandoffInProgress: () => serveHandoffInProgressFromLedger(dirname(ledgerPath)),
     serveHealthy: () => {
       try {
         return exec("docker", ["inspect", SERVE_POLICY_CONTAINER, "--format", "{{.State.Running}} {{.State.Restarting}}"]).trim() === "true false";
