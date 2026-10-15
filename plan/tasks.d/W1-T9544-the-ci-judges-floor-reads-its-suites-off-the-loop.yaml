@@ -64,6 +64,7 @@
       proof: 'grep: test("W1-T9544: a failed floor read is a FULL run naming its cause" in test/the-ci-judges-floor-reads-its-suites-off-the-loop.test.ts'
     - claim: "the daemon's CI judge ports default to the awaited affected-suites reader"
       proof: 'grep: readAffectedSuitesInputAsync in src/lib/ci-escalation-judge.ts'
+      satisfied_by: "#11822"
   falsifier: |
     Keep the sync default: with execFileSync, spawnSync and execSync trapped to throw, the first test's floor comes back
     a FULL run naming the trap. Back the floor with a real child that sleeps about a second and call it synchronously:
