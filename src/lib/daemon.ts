@@ -210,10 +210,58 @@ export interface IntakeRungRunResult {
   [key: string]: unknown;
 }
 
-/** Default wall-clock bound on the full reconciliation pass, mirroring `plan/policy.yaml`'s
- *  `sweepWallClockBoundMs` row, which carries the healthy-versus-hung derivation. Same fs-free
- *  fallback reasoning as {@link DEFAULT_POLL_INTERVAL_MS} above (W1-T1044). */
+/** Default cold-start bound on the full reconciliation pass and the review-drain bound, mirroring
+ *  `plan/policy.yaml`'s `sweepWallClockBoundMs` row, which carries the derivation. Same fs-free
+ *  fallback reasoning as {@link DEFAULT_POLL_INTERVAL_MS} above (W1-T1044, W1-T9563). */
 export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
+
+/** PRIMARY CONTROL (W1-T9563): the full pass's bound is learned from passes that SETTLED, abandoned-then-settled
+ *  ones included: they are the healthy-slow population a fixed bound misread as hangs (10-14 12-24Z: 21 of 41
+ *  passes abandoned at 559 s, p50 16.6 min, none hung). Bound = nearest-rank p90 of the last
+ *  {@link SWEEP_BOUND_WINDOW} settled durations x {@link SWEEP_BOUND_HEADROOM}. On 10-14 12-24Z's sample that is 3 x 33.7 = 101.1 min: 2.9x the slowest
+ *  settled pass (35.3 min), 0.61x the shortest confirmed hang (165.5 min); on 10-13 00-12Z, 3 x 9.8 = 29.4 min still
+ *  clears that window's slowest (15.0 min). Never clamped to the policy row's max: no fixed ceiling. A hang never
+ *  settles, so it never widens the sample. Below {@link SWEEP_BOUND_MIN_SAMPLES} the policy value is the bound. */
+export const SWEEP_BOUND_QUANTILE = 0.9;
+/** PRIMARY CONTROL: headroom over the quantile; the 10-14 12-24Z sample admits 1.05x (slowest settled) to 4.9x (shortest hang). */
+export const SWEEP_BOUND_HEADROOM = 3;
+/** PRIMARY CONTROL: about one 12 h window of settled passes at 10-14's rate (20-40), so the bound follows a
+ *  slowdown within half a day. */
+export const SWEEP_BOUND_WINDOW = 40;
+/** BACKSTOP: fewest settled passes the quantile is read from; below it nearest-rank p90 is only the newest few maxima. */
+export const SWEEP_BOUND_MIN_SAMPLES = 5;
+
+/** The learner's state: the policy cold-start value and the most recent settled full-pass durations, oldest first. */
+export interface SweepBoundLearner { fallbackMs: number; settledMs: number[] }
+
+export interface LearnedSweepBound { boundMs: number; basis: "observed_passes" | "no_history_fallback"; samples: number }
+
+export function learnedSweepBound(learner: SweepBoundLearner): LearnedSweepBound {
+  const samples = learner.settledMs.length;
+  if (samples < SWEEP_BOUND_MIN_SAMPLES) return { boundMs: learner.fallbackMs, basis: "no_history_fallback", samples };
+  const sorted = [...learner.settledMs].sort((a, b) => a - b);
+  const p = sorted[Math.min(samples, Math.max(1, Math.ceil(SWEEP_BOUND_QUANTILE * samples))) - 1];
+  return { boundMs: Math.round(p * SWEEP_BOUND_HEADROOM), basis: "observed_passes", samples };
+}
+
+/** Appends one settled duration, keeping the newest {@link SWEEP_BOUND_WINDOW}; a non-positive one measures nothing. */
+export function recordSettledSweep(learner: SweepBoundLearner, elapsedMs: number): void {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return;
+  learner.settledMs.push(elapsedMs);
+  if (learner.settledMs.length > SWEEP_BOUND_WINDOW) learner.settledMs.splice(0, learner.settledMs.length - SWEEP_BOUND_WINDOW);
+}
+
+/** The boot seed: `daemon.sweep.settled` durations from the live ledger file's raw lines (never the union). */
+export function settledSweepDurations(rawLines: readonly string[]): number[] {
+  const out: number[] = [];
+  for (const raw of rawLines) {
+    if (!raw.includes('"daemon.sweep.settled"')) continue;
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw); } catch (error) { /* a torn ledger row supplies no measurement */ continue; }
+    if (row?.step === "daemon.sweep.settled" && typeof row.elapsed_ms === "number" && row.elapsed_ms > 0) out.push(row.elapsed_ms);
+  }
+  return out;
+}
 
 /** Default minimum gap between two full passes started by the in-flight ticker's retrigger; it never
  *  throttles the once-per-iteration call. Why: without a retrigger, a boot whose phase held the loop
@@ -944,7 +992,8 @@ export interface DaemonOpts {
   /** The wall-clock bound in ms on the full reconciliation pass. Policy data (rule 2): the real entry threads the
    * policy value, never a literal at the call site. A pass still in flight after this many real ms is abandoned — the
    * tick ledgers it and returns control rather than awaiting forever. Why: a fix-rung worker's shell loop with no
-   * exit condition parked the daemon up to 165 minutes (W1-T1044). */
+   * exit condition parked the daemon up to 165 minutes (W1-T1044). W1-T9563: a full pass uses it only as the cold
+   * start; once enough passes settle the bound is learned ({@link learnedSweepBound}). Review drains keep this value. */
   sweepWallClockBoundMs?: number;
   /** The minimum gap in ms between two retriggers fired while an in-flight ticker holds the loop.
    *  Distinct from the bound above, which limits how long any one pass may run; this limits how
@@ -1128,7 +1177,8 @@ export interface DaemonDeps {
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
-    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number };
+    sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
+      by_caller?: unknown[]; unnamed_ms?: number }; // W1-T9577: the interval's callers by total, and the rest
     /** W1-T7746: each tick's lag, the history the loop-stall profiler's bound is a quantile of. */
     observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: (step: string, extra?: Record<string, unknown>) => void) => void };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
@@ -1780,10 +1830,11 @@ function startMemoryReadAfterRow(deps: Pick<DaemonDeps, "readMemoryTelemetry">, 
 /** W1-T7745: what the spawns of THIS consumer's own interval were, read and closed so the next row starts clean.
  *  Spread into a `reportLoopLag` sample; a daemon without the sampler contributes neither field. */
 function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consumer: string):
-  { syncSpawnTop?: unknown; syncSpawnMs?: number } {
+  { syncSpawnTop?: unknown; syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number } {
   try {
     const taken = deps.readLoopTelemetry?.takeLagInterval?.(consumer);
-    return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms };
+    return taken === undefined ? {} : { syncSpawnTop: taken.top, syncSpawnMs: taken.sync_spawn_ms,
+      syncSpawnByCaller: taken.by_caller, syncSpawnUnnamedMs: taken.unnamed_ms };
   } catch { return {}; /* Reason: observability only. */ }
 }
 
@@ -1824,7 +1875,7 @@ export function reportLoopLag(
     /** W1-T5718: the longest synchronous spawn of the interval this lag closes (W1-T7745: its own interval's). */
     syncSpawnTop?: unknown;
     /** W1-T7745: the synchronous spawn time of that same interval, so a row says how much of its lag was spawn. */
-    syncSpawnMs?: number },
+    syncSpawnMs?: number; syncSpawnByCaller?: unknown[]; syncSpawnUnnamedMs?: number }, // W1-T9577
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1838,6 +1889,8 @@ export function reportLoopLag(
       last_step_before_block: sample.lastStepBeforeBlock,
       ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
       ...(sample.syncSpawnMs === undefined ? {} : { sync_spawn_ms: sample.syncSpawnMs }),
+      ...(sample.syncSpawnByCaller === undefined ? {} : { sync_spawn_by_caller: sample.syncSpawnByCaller }),
+      ...(sample.syncSpawnUnnamedMs === undefined ? {} : { sync_spawn_unnamed_ms: sample.syncSpawnUnnamedMs }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -2460,8 +2513,8 @@ interface SweepRetrigger {
   onDispatchTick?: () => void | Promise<void>;
   /** W1-T5343: the dispatch phase's live lane count, set per dispatch like `onDispatchTick` and read only there. */
   lanesInFlight?: () => number;
-  /** Mirrors `DaemonOpts.sweepWallClockBoundMs` — the SAME bound the top-of-iteration call uses. */
-  sweepWallClockBoundMs: number;
+  /** `DaemonOpts.sweepWallClockBoundMs`'s learner: the SAME learned bound the top-of-iteration call uses (W1-T9563). */
+  sweepWallClockBoundMs: SweepBoundLearner;
   /** `DaemonOpts.sweepRetriggerIntervalMs` (resolved), the minimum gap between two retriggers. */
   intervalMs: number;
   /** SHARED across every call site — see this interface's own doc. */
@@ -2479,9 +2532,9 @@ interface SweepRetrigger {
 /** The gate itself, extracted so the bound and the light-pass ticker apply identically at every call
  * site: the once-per-iteration call, the stale-freshness call, and a mid-flight retrigger. A second
  * inlined copy is how they could silently drift, and behaviour is byte-identical to the inline block
- * it replaced (W1-T1272). The pass also receives a continuation callback that the timeout flips
- * before resolving the abandoned arm, so a still-settling pass finishes running reviewers but admits
- * no more (W1-T2584). Callers must check the hook is defined; this assumes it is. */
+ * it replaced (W1-T1272). The pass also receives a continuation callback that re-reads STOP and PAUSE.
+ * The bound no longer closes it (W1-T9563 reverses W1-T2584): an abandoned pass is healthy-slow, and
+ * SweepLiveness plus `reviewAdmissionBound` already bound overlap. Callers must check the hook is defined. */
 /** The one piece of state that makes "one pass at a time" true (W1-T2582). `inFlight` is set when a
  * pass starts and cleared when its promise SETTLES — deliberately not when the wall-clock bound stops
  * awaiting it, because the bound stops waiting and never stops the work, and every re-entry the fleet
@@ -2498,7 +2551,7 @@ export interface SweepLiveness {
 async function runGatedSweep(
   deps: DaemonDeps,
   pollIntervalMs: number,
-  sweepWallClockBoundMs: number,
+  sweepBound: SweepBoundLearner,
   log: (step: string, extra?: Record<string, unknown>) => void,
   diskHeadroomLatch: { escalated: boolean },
   // Threaded to the pass's own ticker. This is the phase that motivated the sampler: it carries the
@@ -2529,9 +2582,10 @@ async function runGatedSweep(
   // and must never be attributed to a LATER tick's cycle.
   let outcome: SweepCycleOutcome | undefined;
   try {
-    let reviewAdmissionsOpen = true;
+    const bound = learnedSweepBound(sweepBound);
+    log("daemon.sweep.started", { bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
     const continueReviewAdmissions = (() =>
-      reviewAdmissionsOpen && deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
+      deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
     const workerAdmissionHold = (): string | undefined => {
       const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       if (!hold) return undefined;
@@ -2540,28 +2594,33 @@ async function runGatedSweep(
       return reason;
     };
     continueReviewAdmissions.workerAdmissionHold = workerAdmissionHold;
+    const startedAtMs = Date.now();
+    const elapsedSinceStart = (): number => Date.now() - startedAtMs;
+    let abandoned = false;
     const sweepPromise: Promise<SweepCycleOutcome | void | undefined> = Promise.resolve().then(() => deps.sweep!(continueReviewAdmissions));
     // Cleared on settle, never on abandon. Attaching this to the pass promise itself, rather than to the
     // `finally` below, which runs when the await ends, is what keeps the flag true through the
     // abandon-to-settle window every observed re-entry landed in. `then(onOk, onErr)` rather than
     // `finally`, so this derived promise can never become an unhandled rejection of its own.
-    if (liveness) void sweepPromise.then(() => {
-      liveness.inFlight = false;
-      liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
-    }, () => { liveness.inFlight = false; });
-    const startedAtMs = Date.now();
+    void sweepPromise.then(() => {
+      if (liveness) {
+        liveness.inFlight = false;
+        liveness.lastCompletedAtMs = clockFromDateFn(deps.now).now();
+      }
+      const elapsedMs = elapsedSinceStart();
+      recordSettledSweep(sweepBound, elapsedMs); // W1-T9563: a pass past its bound is still a healthy sample
+      log("daemon.sweep.settled", { elapsed_ms: elapsedMs, abandoned, bound_ms: bound.boundMs, bound_basis: bound.basis });
+    }, () => { if (liveness) liveness.inFlight = false; });
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const bound = new Promise<"abandoned">((resolve) => {
-      timer = setTimeout(() => {
-        reviewAdmissionsOpen = false;
-        resolve("abandoned");
-      }, sweepWallClockBoundMs);
+    const boundTimer = new Promise<"abandoned">((resolve) => {
+      timer = setTimeout(() => resolve("abandoned"), bound.boundMs);
     });
     try {
-      const winner = await Promise.race([sweepPromise, bound]);
+      const winner = await Promise.race([sweepPromise, boundTimer]);
       if (winner === "abandoned") {
-        const elapsedMs = Date.now() - startedAtMs;
-        log("daemon.sweep.abandoned", { elapsed_ms: elapsedMs, bound_ms: sweepWallClockBoundMs });
+        abandoned = true;
+        const elapsedMs = elapsedSinceStart();
+        log("daemon.sweep.abandoned", { elapsed_ms: elapsedMs, bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
         // Never leave the real pass's eventual outcome unhandled — it may resolve or throw well after this
         // call has moved on, which the reconciler's shared mutex is what makes safe.
         sweepPromise.catch((e) => {
@@ -3126,6 +3185,7 @@ export async function runDaemon(
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
   const sweepWallClockBoundMs = opts.sweepWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
+  const sweepBound: SweepBoundLearner = { fallbackMs: sweepWallClockBoundMs, settledMs: [] }; // W1-T9563, seeded at boot
   // One mutable ref for when a full pass last actually ran, shared by every call site below — see {@link
   // SweepRetrigger} for why a shared reference, not a fresh object per site, is load-bearing. It starts undefined so
   // the first pass of this process's life runs unconditionally (W1-T1272). One liveness flag for this daemon's whole
@@ -3154,7 +3214,7 @@ export async function runDaemon(
   let staleReviewerAction: StaleReviewerRecurrenceAction = { kind: "silent" };
   const sweepRetriggerState: { lastRunAtMs: number | undefined } = { lastRunAtMs: undefined };
   const sweepRetrigger: SweepRetrigger = {
-    sweepWallClockBoundMs,
+    sweepWallClockBoundMs: sweepBound,
     intervalMs: opts.sweepRetriggerIntervalMs ?? DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS,
     state: sweepRetriggerState,
     liveness: sweepLiveness,
@@ -3455,6 +3515,7 @@ export async function runDaemon(
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
   const measuredRuns: MeasuredRun[] = [];
   const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
+  for (const ms of settledSweepDurations(bootLedgerLines)) recordSettledSweep(sweepBound, ms);
   // W1-T8514: the measured run lengths behind a priority reservation's backfill release. The lane clock is the
   // current dispatch phase's, bound once that phase exists; before it, no task is in flight.
   let laneElapsedMs: (taskId: string) => number | undefined = () => undefined;
@@ -3925,7 +3986,7 @@ export async function runDaemon(
       preExitPass = "skipped_ran_since_latch";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      await runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
+      await runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
     }
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
     // The caller stops its interphase clock before the final pass (W1-T2865).
@@ -4994,7 +5055,7 @@ export async function runDaemon(
         if (deps.sweep && !backgroundSweep) {
           sweepRetriggerState.lastRunAtMs = daemonClock.now();
           sweepRetrigger.slot.adopt(
-            runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness, true),
+            runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, true),
           );
         }
       }
@@ -5125,7 +5186,7 @@ export async function runDaemon(
     if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));
     if (deps.sweep && !backgroundSweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness));
+      sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness));
     }
     // One scheduler turn, so a pass that settles at once is read by the tick that started it.
     if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));

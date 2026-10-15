@@ -12,11 +12,11 @@ raw: "Triage verdict liveness defect observed 2026-09-21: rmd triage
   can progress without manual intervention."
 attachments: []
 origin: cli
-status: grilling
+status: answered
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
-answered_by: null
+answered_by: fb-1792030219758-0e7137

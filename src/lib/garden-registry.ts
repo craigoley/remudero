@@ -84,8 +84,10 @@ export const GARDEN_DUE_FAILED_STEP = "garden.due_failed";
 /** The child's flag for "this pass also refreshes its hourly evidence" (the test garden's feed). */
 export const GARDEN_HOURLY_FLAG = "--hourly";
 
-/** Runs ONE pass of the named garden and resolves with its exit code (null when it died on a signal). */
-export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void }) => Promise<number | null>;
+/** A resource hold did not start a process; it is neither a signal exit nor a successful pass. */
+export type GardenPassOutcome = number | null | { kind: "deferred"; reason: "memory-budget-shortfall" };
+/** Runs ONE pass, preserving pre-spawn admission deferral separately from its process exit. */
+export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void }) => Promise<GardenPassOutcome>;
 
 /** Share a small host budget across all garden starters. A busy garden keeps its own pending
  * pass rather than spawning a second child, while queued passes from other gardens wait here. */
@@ -95,7 +97,7 @@ export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number
     name: RegisteredGardenName;
     args: readonly string[];
     signal: Parameters<GardenPassSpawn>[2];
-    resolve: (exit: number | null) => void;
+    resolve: (exit: GardenPassOutcome) => void;
     reject: (error: unknown) => void;
   };
   const pending: Pending[] = [];
@@ -122,7 +124,7 @@ export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number
         });
     }
   };
-  return (name, args, signal) => new Promise<number | null>((resolve, reject) => {
+  return (name, args, signal) => new Promise<GardenPassOutcome>((resolve, reject) => {
     pending.push({ name, args, signal, resolve, reject });
     admit();
   });
@@ -311,22 +313,24 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
         observe(event("running", { passId, nextDueAt: null, queueMs: Math.max(0, admittedMs - startedMs) }));
       },
     };
-    const settle = (exit: number | null, error?: string): void => {
+    const settle = (outcome: GardenPassOutcome, error?: string): void => {
+      const deferred = typeof outcome === "object" && outcome !== null;
+      const exit = deferred ? null : outcome;
       running = false;
       if (hourly && exit === 0) reportedBucket = bucket;
       // One completion timestamp for both destinations: the logger's own latency
       // is not child execution, and the persisted card can correlate this row.
       const finishedMs = clock.now();
       const queueMs = admittedMs === undefined ? null : Math.max(0, admittedMs - startedMs);
-      const executionMs = admittedMs === undefined ? null : Math.max(0, finishedMs - admittedMs);
+      const executionMs = deferred || admittedMs === undefined ? null : Math.max(0, finishedMs - admittedMs);
       wiring.log(GARDEN_PASS_STEP, { name, passId, ms: finishedMs - startedMs, queueMs, executionMs, exit,
-        ...(error === undefined ? {} : { error }) });
-      const phase = error !== undefined || (exit !== null && exit !== 0) ? "failed" : exit === 0 ? "completed" : "cancelled";
+        ...(deferred ? { reason: outcome.reason } : {}), ...(error === undefined ? {} : { error }) });
+      const phase = deferred ? "idle" : error !== undefined || (exit !== null && exit !== 0) ? "failed" : exit === 0 ? "completed" : "cancelled";
       observe(event(phase, { passId, exit,
         queueMs, executionMs,
-        reason: error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
+        reason: deferred ? outcome.reason : error !== undefined ? "spawn-failed" : exit === 0 ? "process-completed" : exit === null ? "signal-or-cancelled" : "process-failed" }));
     };
-    let pass: Promise<number | null>;
+    let pass: Promise<GardenPassOutcome>;
     try {
       pass = wiring.spawnPass(name, hourly ? [GARDEN_HOURLY_FLAG] : [], passSignal);
     } catch (e) {
@@ -490,7 +494,7 @@ export function childGardenPassSpawn(
   return async (name, args, signal) => {
     const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve,
       onShortfall: "defer" }, opts.admission);
-    if (admission.kind === "deferred") return null;
+    if (admission.kind === "deferred") return { kind: "deferred", reason: "memory-budget-shortfall" };
     const reservation = "reservation" in admission ? admission.reservation :
       admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
     // The same counterfactual row a worker start writes, so a garden start's fit is measured before any ruling.

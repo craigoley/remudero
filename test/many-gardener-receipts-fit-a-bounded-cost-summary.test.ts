@@ -174,8 +174,9 @@ test("compact source serialization can overflow independently of its pass accumu
   const inventory = runtime();
   inventory.gardens = Array.from({ length: 32 }, (_, i) => ({ ...inventory.gardens[0]!,
     name: `garden-${String(i).padStart(2, "0")}-${"x".repeat(48)}` }));
-  const receipt = { ...parent, name: inventory.gardens[0]!.name, passId: "x".repeat(128) };
-  const control = await capture(t, [receipt], inventory);
+  const receipt = { ...parent, name: inventory.gardens[0]!.name, passId };
+  const priced = (row: typeof receipt) => ({ ...child, gardener_origin: { ...origin, name: row.name, passId: row.passId } });
+  const control = await capture(t, [receipt, priced(receipt)], inventory);
   assert.equal(control.source.reason, undefined);
   assert.equal(control.spend.gardens.length, 32);
   assert.ok(control.source.compact);
@@ -184,10 +185,11 @@ test("compact source serialization can overflow independently of its pass accumu
   const population = Math.floor((GARDENER_SPEND_MAX_BYTES - overhead) / width) + 1;
   assert.ok(population * width < GARDENER_SPEND_MAX_BYTES,
     "pass evidence fits; runtime and source metadata cause the serialization overflow");
-  const rows = Array.from({ length: population }, (_, i) => ({ ...receipt,
-    passId: String(i).padStart(128, "x") }));
-  assert.equal((await capture(t, rows, inventory)).source.reason, "over_budget");
-  assert.equal((await capture(t, rows.slice(0, -1), inventory)).source.reason, undefined);
+  const parents = Array.from({ length: population }, (_, i) => ({ ...receipt,
+    passId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}` }));
+  const costs = (rows: typeof parents) => rows.flatMap(row => [row, priced(row)]);
+  assert.equal((await capture(t, costs(parents), inventory)).source.reason, "over_budget");
+  assert.equal((await capture(t, costs(parents.slice(0, -1)), inventory)).source.reason, undefined);
 });
 
 async function retainedCostCorpus(t: { after(fn: () => void): void }) {

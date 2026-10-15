@@ -1,0 +1,123 @@
+- id: W1-T9602
+  title: "A PUSH-GATE VERDICT ON A TREE IS REUSED, NOT RE-RUN, AND ONLY A VERDICT THE HARNESS OBSERVED ITSELF COUNTS: the push gate (hooks/pre-push) runs on every push with no memory of a pass the harness already watched on the identical tree. The pre-open fast gate's pass cannot stand in for it, because the branch's own code computes that verdict and the harness reads it from a file inside the worker's tree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern, when a harness-observed push-gate pass may stand in for a re-run; high for blast radius: the push leaf gates every fleet push and the pre-open gate gates every build PR's open
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: read-only investigation of the core daemon's CPU and memory, 02:25-02:57Z (coordinator brief, task B). The brief asks that no worker-written result is ever trusted, and that the record names that trust boundary"
+  plan_refs: [W1-T8778, W1-T8920, W1-T8945, W1-T9556, W1-T6120, W1-T6138, W1-T3222, W1-T3225, W1-T3280, W1-T4403]
+  files: [src/lib/gate-verdict-record.ts, src/lib/git-push.ts, src/lib/preopen-gate.ts, test/a-build-is-gated-on-the-fast-preflight-before-its-pr-opens.test.ts, test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    THE TRUST BOUNDARY, READ at origin/main. This record keeps to it.
+    - A verdict is reusable only if the harness observed it: the daemon process awaited the exit status of the
+      harness's own gate code, and that code ran with the worktree as data.
+    - The push gate meets this. The push leaf (git-push.ts worktreePushExec and worktreePushExecAsync) runs the
+      HARNESS's hooks/pre-push. Its scripts run from the hook's own code root, never from the tree being pushed
+      (W1-T6120). Code the branch owns runs in the proof sandbox (W1-T6138). The env is an allowlist
+      (prePushGateEnv). The leaf awaits the hook's exit status.
+    - The pre-open fast gate does not meet it. When the worktree holds bin/rmd, which every core build does,
+      preopenGateLaunch runs the worktree's own bin/rmd, or that worktree's run-task bundle. So the branch's code
+      computes the verdict. defaultRunGate's execFile is given no env and no sandbox. readGateSummary then reads
+      coverage/preflight-summary.json inside the worker's worktree. That verdict is worker-controlled. It is never
+      recorded as reusable, and nothing here may let it skip the push gate.
+    - Worker runs are not harness verdicts either. prompt-render.ts asks the worker to run census-precheck
+      and the affected-suite reach ratchet itself.
+    OBSERVED. Core ledger union, 41 rotations named 2026-10-13 to 2026-10-15 plus ledger.ndjson. Every file
+    contributed rows (the coverage control).
+    - implement.preopen_gate, 2026-10-14T16:00Z to 2026-10-15T03:00Z: 29 gates on 28 tasks (21 pass, 8 fail).
+      Mean 501 s, median 498 s, max 732 s, 4.04 h in all. Over 24 h there were 55 gates and 8.51 h.
+    - Examples: 01:42:02Z W1-T8241 pass, 610,566 ms. 02:23:51Z W1-T9341 fail (rule-checks), 684,462 ms.
+      02:27:23Z W1-T5334 fail (comment-load-ratchet, census-precheck), 731,940 ms. 02:47:56Z W1-T8138 pass, 526,029 ms.
+    - No run wrote two gate rows in the window. The gate is not re-run within a run today (W1-T8945 covers the re-run
+      after a repair).
+    - Process samples (the investigation's samp*.json), with each gate child matched to its gate row: start time =
+      the row's ts minus duration_ms, which equals the preflight --fast child_entry.spawned row.
+      - W1-T8138's gate child (02:39:10Z) used 121.3 CPU-s in a 240 s window. Its subtree held 43 esbuild
+        processes and npm run census: processes.
+      - W1-T9341's gate child (02:12:27Z) used 187.7 CPU-s in a 300 s window, with 57 esbuild processes.
+      - One push-gate tree inside a 300 s window (started 02:35:42Z) used 43.4 CPU-s: 52 processes, 11 of them
+        esbuild, peak 595 MB.
+      - Two tsc processes in the daemon's cgroup peaked at 3.29 GB and 3.40 GB RSS.
+    - The same check runs at both stages. census-precheck is a fast-gate step (W1-T5334's gate named it failing at
+      02:27:23Z). hooks/pre-push also runs `node "$gate_root/scripts/census-precheck.mjs" --base origin/main`.
+      W1-T5334's fallback push at 02:29:54Z ran the push gate after the worker's repair, and no gate had passed that
+      tree before.
+    NOT MEASURED: how often the identical tree reaches the push gate twice, or the push gate after a harness-observed
+    pass. No ledger row names a tree hash at either gate. The first design step records one, so the saving is
+    measured instead of assumed. The investigation's figure of about 23 pushes in 11 h was not reproducible from the
+    ledger (no per-push row) and is dropped.
+    RELATED, NOT OVERLAPPING:
+    - W1-T4403 (retired) proposed a per-tree CI pass cache on GitHub.
+    - W1-T8945 re-runs the pre-open gate after a repair.
+    - W1-T9556 bounds the gate child's deadline. It is in build at filing (head run-W1-T9556-1792033049211) and also
+      edits src/lib/preopen-gate.ts, so whichever lands second rebases.
+    - W1-T3280 makes a preflight summary name the tree it read. That summary is still a file in the worktree, so it is
+      not a harness-observed verdict.
+  design: |
+    1. Key. The harness reads, through the hardened leaf (hostWorktreeGit or hostWorktreeGitAsync, never a
+       synchronous spawn on the daemon loop):
+       - tree: `git rev-parse HEAD^{tree}`
+       - head: HEAD's sha
+       - base: the sha of origin/main the gate judges against
+       - the push line the hook receives: local ref, remote ref and remote sha
+       - recipe: `git rev-parse HEAD^{tree}` of the harness's own code root. A changed hook or script is a new recipe.
+       The worktree must be clean: `git status --porcelain --untracked-files=all` is empty, because the hook's
+       checks read the working directory as data. A dirty tree records nothing and reuses nothing.
+       head and the push line are part of the key because hooks/pre-push's head-identity-gate and
+       worker-branch-shape read the commit and the remote sha, not only the tree.
+    2. Record (new src/lib/gate-verdict-record.ts, exporting recordPushGatePass and reusablePushGatePass). It lives under <config.root>/state/gate-verdicts/,
+       outside every worktree. The daemon process writes it atomically (temp file, then rename), and only for a
+       pass. Fields: the key, result, duration_ms, ts, observed_by (the harness function that awaited the exit
+       status) and trust: "harness-observed". A record is never read from, or derived from, any path under a
+       worktree, including coverage/preflight-summary.json. Retention: writing a record drops every record whose
+       tree is not the HEAD tree of a registered worktree. No constant is added.
+    3. The push gate reuses. Before running the hook, worktreePushExec and worktreePushExecAsync compute the key. An
+       exact pass record skips the hook and ledgers push_gate.reused (tree, head, base, recipe, the record's ts and
+       observed_by). A missing, unreadable, malformed or mismatched record runs the hook as today, and a pass is
+       recorded. So a repeated push of the identical tree reuses its earlier pass.
+    4. The pre-open gate asks the push gate early. After its fast gate, runPreopenGate runs the same harness push gate
+       on the clean committed tree. It uses an exported runner from git-push.ts, so the hook, env allowlist, gate HOME
+       and sandbox are the same as the push leaf's. A refusal joins the failed steps handed to the worker, named
+       push-gate, before the PR opens. A pass is recorded, and the push of the identical tree that follows reuses it
+       under step 3. Add a runPushGate seam to PreopenGateOptions. Its default is the real runner, and one test runs
+       that default for real (doctrine/coverage-traps/partial-fakes-fire-defaults.md).
+    5. Ledger. implement.preopen_gate and every push-gate run, whether reused or run, carry tree, head, base and
+       recipe, so the reuse rate can be read from the ledger.
+    6. Not changed: the fast gate's own steps and their verdict, which stays advisory to reuse. The worker's prompt.
+       CI. The hook's checks and RMD_PREPUSH_GATES. The restart checkpoint push (prGates: false). A record never
+       turns a refusal into a pass. A hook failure is never recorded.
+    Census suites the builder joins: run `rmd census-membership` and the leaf censuses
+    (test/a-host-git-call-into-a-worker-worktree-runs-no-worker-code.test.ts,
+    test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts,
+    test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts).
+    Tests go in test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts, with each title written as test("<title>", verbatim as in the proofs.
+  acceptance:
+    - claim: "a push whose key matches a harness-observed pass record skips the hook and ledgers push_gate.reused naming the record"
+      proof: 'grep: test("W1-T9602: a push of a tree the push gate already passed skips the hook" in test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts'
+    - claim: "a changed tree, head, base, remote sha or harness recipe runs the push gate again"
+      proof: 'grep: test("W1-T9602: a changed key runs the push gate again" in test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts'
+    - claim: "a dirty worktree records nothing and reuses nothing"
+      proof: 'grep: test("W1-T9602: a dirty worktree records and reuses nothing" in test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts'
+    - claim: "a passing summary or a forged record planted inside the worktree never skips the push gate"
+      proof: 'grep: test("W1-T9602: a verdict written inside the worktree is never reused" in test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts'
+    - claim: "the pre-open gate's push-gate pass is reused by the push of the identical tree, and its refusal is handed to the worker as push-gate"
+      proof: 'grep: test("W1-T9602: the pre-open push-gate pass is reused by the push of the same tree" in test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts'
+    - claim: "the new suite passes as a whole"
+      proof: "unit test: test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts"
+    - claim: "the push leaf asks the record store before it runs the hook"
+      proof: "grep: reusablePushGatePass( in src/lib/git-push.ts"
+    - claim: "the push leaf ledgers a reuse"
+      proof: "grep: push_gate\\.reused in src/lib/git-push.ts"
+  falsifier: |
+    On origin/main, push a clean fixture worktree twice at one head through worktreePushExecAsync with a counting
+    fake hook. The hook runs twice, and the first test fails. Key on the tree alone: a second push of the same tree
+    under a new remote sha reuses, and the second test fails. Read the verdict from
+    <worktree>/coverage/preflight-summary.json, or from any path under the worktree, instead of
+    <config.root>/state/gate-verdicts/: a planted passing summary skips the hook, and the fourth test fails.

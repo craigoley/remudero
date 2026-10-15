@@ -1,0 +1,118 @@
+- id: W1-T9596
+  title: "A DAEMON WHOSE IDLE BOOT IS ALREADY OVER ITS RESTART SHARE DOES NOT RESTART IN A LOOP: the governor restarts at restartShare 0.5 of memory.high, and the site daemon's memory.high is 1536 MiB, so its line is 768 MiB, while an idle site daemon is charged 0.8-0.9 GB about 90 s after boot; every boot tightens, then exits heap_pressure on its next tick, and the restart lands it right back over the line; the governor records its boot baseline and holds, with a ledgered reason, when a restart cannot get below the line"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — when the daemon's memory governor asks for a heap_pressure restart
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: read-only investigation of the site daemon's restart loop (02:27-02:35Z); filing requested"
+  plan_refs: [W1-T3335, W1-T8401, W1-T9031, W1-T9106, W1-T8889, W1-T6782]
+  files: [src/lib/daemon-memory-policy.ts, src/lib/daemon.ts, test/the-daemon-heap-stays-proportional-to-its-live-set.test.ts, test/a-daemon-whose-idle-boot-is-over-its-restart-share-does-not-restart-in-a-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15, site daemon (container remudero-site-daemon). Source: its ledger union, 68 gzip rotations plus
+    ledger.ndjson, 767,479 rows, newest row 02:38:01Z. Window 01:05:00Z to 02:38:02Z. Positive control: 18 daemon.boot
+    rows and 18 distinct actor_pids in that window.
+    - Budget: every daemon.heap_pressure_exit row since 01:05Z has budget_bytes 1610612736 (memory.high 1536 MiB).
+      The memory-high tuner set that floor at 2026-10-15T00:11:14Z (memory-high-tuned-remudero-site-daemon.json).
+      The floor is RMD_MEMORY_HIGH_FLOORS remudero-site-daemon=1536 in deploy/resource-policy.sh. memory.high was
+      also 1536 MiB on 133 of the 162 exits on 10-14.
+    - The line: plan/policy.yaml daemonMemory.restartShare is 0.5, one value for every instance. 0.5 x 1536 MiB is
+      768 MiB (805 MB).
+    - An idle boot is already over it. The last six daemon.alive rows, 02:15Z to 02:38Z, at uptime 84-131 s:
+      rss 633-915 MB, rss+VmSwap 848-927 MB, heap_used 215-238 MB. All 146 daemon.alive rows since 10-14 with
+      uptime 140 s or less: rss+swap p10 798, p50 855, p90 977 MB; heap_used p50 223 MB; heap_used is p50 0.26 of
+      rss+swap.
+    - So every boot exits. In the window: 16 daemon.heap_pressure_exit rows, basis cgroup_share, share 0.50-0.59,
+      used_heap_size 193-242 MB, 13 of them at ticks 2. daemon.memory_pressure transitions: clear>tighten 17,
+      tighten>restart 16. Time between boots: p50 192 s. The summary rows say attempted [] and merged [], for example
+      02:37:03Z: "daemon rss+swap 819 MB is 53% of the container's memory.high 1536 MB with the tightest heap growth
+      already in force". The exit code is 75, which the entrypoint restarts after 5 s.
+    - heap_pressure exits per day: none before 2026-10-13T15:05:43Z, then 25 on 10-13, 162 on 10-14, and 28 on 10-15
+      up to 02:37Z. daemon.boot per day, 10-10 to 10-14: 109, 92, 112, 127, 183. Up to 10-12 the summaries were
+      idle_starved: 106, 88 and 109 a day (W1-T9031's wake loop). From 10-13, heap_pressure takes over.
+    OBSERVED 2026-10-15, console daemon (its own ledger union, 256 files, newest 02:38:58Z). memory.high is 2304 MiB
+    (2415919104 bytes), so its line is 1152 MiB. The tuner's policy is 2048 MiB (memory-high-tuned-remudero-console-
+    daemon.json, 2026-10-13T10:01:32Z). Four heap_pressure exits so far on 10-15, at share 0.50-0.52. daemon.alive at
+    uptime 87-95 s: rss+swap 1169-1197 MB.
+    OBSERVED, core daemon (40 newest rotations plus ledger.ndjson, 10-13 01:07Z to 10-15 02:05Z): 2 cgroup_share exits,
+    at share 0.78 and 0.83 against about 8 GiB. Its restarts come after growth, not on an idle boot.
+    Coordinator's read-only analysis, cited as such and not re-measured here: each cycle costs about 68 core-seconds.
+    The site cgroup averages 0.34-0.41 cores, with 0.8-1.4 core peaks, while doing no work (the sweep enumerated 0
+    and attempted none). Each boot also makes about 2 gh reads on the shared core limiter.
+    READ at origin/main:
+    - decideMemoryPressure (src/lib/daemon-memory-policy.ts): at share >= restartShare it first sets the tightest
+      percent, TIGHTEST_HEAP_GROWING_PERCENT 10. On the next reading, still at or above restartShare with 10 in
+      force, it returns tier restart. Nothing compares the reading with what the process held at boot.
+    - createDaemonMemoryGovernor keeps only inForce and tier between steps. The daemon loop (src/lib/daemon.ts,
+      the W1-T3335 block after memoryGovernor.step()) takes tier restart to daemon.heap_pressure_exit, then
+      drainBeforeRestart, then summary("heap_pressure"). daemonExitCode maps heap_pressure to 75.
+    - The daemon's governor is built in src/run-task.ts as createDaemonMemoryGovernor({ policy }). daemon.ts falls
+      back to createDaemonMemoryGovernor({}).
+    - test/the-daemon-heap-stays-proportional-to-its-live-set.test.ts "the daemon loop drains and restarts on the
+      cgroup share" feeds one constant over-the-line reading from the first tick and expects a restart. Under this
+      design that fixture is the futile case, so its fixture must grow from a lower first reading.
+    INFERRED:
+    - A restart cannot bring a daemon below what it is charged at idle boot. When the first reading is already over
+      the line, every restart is futile and the loop never ends.
+    - About three quarters of the charged bytes are outside the V8 heap (heap_used 0.26 of rss+swap). So growth
+      percent 10 adds GC CPU and frees little.
+    - Console sits at its line (0.48-0.50 at boot). If the tuner shrinks console to its 2048 MiB floor, its line
+      becomes 1024 MiB, below its idle boot, and console enters the same loop.
+    RELATED TASKS:
+    - W1-T9031 (queued) is still needed. With this fix the site daemon stays up, and the idle_starved wake loop
+      (106/88/109 a day before 10-13) becomes the restart driver again.
+    - W1-T9106 (queued) does not help. It learns a V8 heap ceiling, and the excess here is not heap.
+    - W1-T8889 (queued) CONFLICTS. It sizes a satellite's memory.high as clamp(p95 x 1.15, floor 1.25 GB). At
+      restartShare 0.5, a 1.25 GB floor puts site's line at about 640 MB, further below its idle boot. W1-T8889's
+      design must account for restartShare (a floor of at least the idle boot charge / restartShare), or it must
+      land after this task. This filing does not edit W1-T8889's record.
+  design: |
+    1. The governor records a boot baseline: rss plus swap at its first reading after boot. Read it with the same
+       reader it already uses, through the existing read port, so tests inject it.
+    2. When the share is at or above restartShare and charged is at most k x baseline, a restart cannot get the
+       daemon below the line. The governor then holds: no restart, a named hold tier or flag, and no
+       heap_pressure exit. It ledgers daemon.memory_restart_futile with baseline_bytes, charged_bytes, line_bytes
+       (restartShare x budget), share, restart_share, the margin k, budget_bytes and budget_source. It ledgers that
+       once when the hold begins and again only when the hold ends or changes, never every tick.
+    3. When charged rises above k x baseline, the restart path is unchanged: the tightest factor first, then
+       restart. A daemon whose first reading was under the line (core) behaves exactly as today.
+    4. While held, if heap_used is under a share H of charged, the governor keeps the policy's own growth percent
+       instead of TIGHTEST_HEAP_GROWING_PERCENT, because a tighter GC cannot reach bytes outside the heap. It ledgers
+       heap_share on the futile row. Outside the hold, tightest-first is unchanged, so core's restart path is too.
+       The governor's default reads its own heap statistics, so the wiring in src/run-task.ts does not change.
+    5. OPERATOR DECISIONS, open at filing. The build ships each as a named, exported constant and its PR names them
+       for a ruling:
+       - k, the baseline margin. Suggested 1.25. It must sit above a boot's own early growth and below core's
+         effective-restart ratio.
+       - H, the heap share below which the tightest factor is skipped while held. Suggested 0.4. The site p90 at
+         boot is 0.41.
+       - An optional cross-boot backstop: stop after N consecutive heap_pressure exits within M ticks. It is not in
+         this task, because the baseline hold ends the loop in-process. It is named as the fallback if the hold
+         proves insufficient.
+    6. This task changes no threshold. restartShare, tightenShare, heapGrowingPercent, the V8-limit backstop
+       (heapPressureDetail, HEAP_PRESSURE_RESTART_FRACTION), exit codes and the drain stay unchanged. A V8-limit
+       exit is never held.
+    7. Update the existing loop test's fixture so it grows from a first reading under the line, and keeps proving
+       that a real growth restarts.
+  acceptance:
+    - claim: "a governor whose first reading is already at or above restartShare holds instead of restarting while charged stays within k x the boot baseline, across many steps"
+      proof: 'grep: test("W1-T9596: an idle boot already over its restart share holds instead of restarting" in test/a-daemon-whose-idle-boot-is-over-its-restart-share-does-not-restart-in-a-loop.test.ts'
+    - claim: "growth past k x the boot baseline still tightens to the tightest factor and then restarts, as before"
+      proof: 'grep: test("W1-T9596: growth past the boot baseline still restarts as before" in test/a-daemon-whose-idle-boot-is-over-its-restart-share-does-not-restart-in-a-loop.test.ts'
+    - claim: "the daemon loop with an over-the-line idle boot ledgers daemon.memory_restart_futile with baseline, line and share once, and never exits heap_pressure"
+      proof: 'grep: test("W1-T9596: the daemon loop ledgers a futile restart once and keeps running" in test/a-daemon-whose-idle-boot-is-over-its-restart-share-does-not-restart-in-a-loop.test.ts'
+    - claim: "while held with heap a small share of charged, the governor keeps the policy's growth percent instead of the tightest"
+      proof: 'grep: test("W1-T9596: a held daemon whose heap is a small share keeps its growth percent" in test/a-daemon-whose-idle-boot-is-over-its-restart-share-does-not-restart-in-a-loop.test.ts'
+    - claim: "the new suite passes"
+      proof: 'unit test: test/a-daemon-whose-idle-boot-is-over-its-restart-share-does-not-restart-in-a-loop.test.ts'
+  falsifier: |
+    Remove the baseline comparison. A fixture whose every reading is 0.54 of the budget then tightens on step 1 and
+    restarts on step 2, and the first and third tests fail. Hold unconditionally instead, and the second test's
+    growth from 0.35 to 0.7 never restarts and fails. Keep the tightest factor while held, and the fourth test's
+    setFlags records --heap-growing-percent=10.
