@@ -4,8 +4,10 @@
 // acceptance check and the inert-proof count.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { alertFixBodyDeps, checkAlertFixAcceptance, judgeOpenedAlertFixBody, readAlertFixPrBody } from "../src/lib/alert-fix-body.js";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
+
+/** Loaded inside each test, so at a base without the module the test itself fails rather than the file. */
+const bodyModule = () => import("../src/lib/alert-fix-body.js");
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/96981";
 const HEALTHY_BODY = "Acceptance:\n- the guard is wired | grep: readFileIfExists( in src/lib/fs-safe.ts\n\nRemudero-Task: alert-code-scanning-9698\n";
@@ -21,6 +23,7 @@ function asyncReader(body: string, calls: string[][] = []): (args: string[]) => 
 }
 
 test("W1-T9698: the alert-fix acceptance check awaits an async body read", async () => {
+  const { alertFixBodyDeps, checkAlertFixAcceptance, readAlertFixPrBody } = await bodyModule();
   const calls: string[][] = [];
   const pending = checkAlertFixAcceptance(PR_URL, asyncReader(HEALTHY_BODY, calls));
   assert.ok(pending instanceof Promise, "the check returns a promise over the awaited read");
@@ -43,6 +46,7 @@ test("W1-T9698: the alert-fix acceptance check awaits an async body read", async
 
 async function judgedRows(read: (args: string[]) => unknown): Promise<Array<Record<string, unknown>>> {
   const rows: Array<Record<string, unknown>> = [];
+  const { alertFixBodyDeps, judgeOpenedAlertFixBody } = await bodyModule();
   const seams = alertFixBodyDeps(read);
   await judgeOpenedAlertFixBody(PR_URL, seams.checkAcceptance, seams.readPrBody, (step, extra = {}) => rows.push({ step, ...extra }));
   return rows;
@@ -77,6 +81,7 @@ test("W1-T9698: one open reads the pr body once", async () => {
 
   // Without a body reader (the fakes that predate W1-T8625), only the check runs.
   const checkOnly: Array<Record<string, unknown>> = [];
+  const { judgeOpenedAlertFixBody } = await bodyModule();
   await judgeOpenedAlertFixBody(PR_URL, () => acceptanceAuthorTimeCheck("no header"), undefined, (step, extra = {}) => checkOnly.push({ step, ...extra }));
   assert.deepEqual(checkOnly.map((r) => r.defect), ["no-header"]);
 });
