@@ -11,7 +11,8 @@
  * Anything else, or an unreadable input: refresh, up to
  * {@link PLAN_PR_REFRESH_BOUND} times, then escalate to the operator.
  */
-import { execFile, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { join, relative } from "node:path";
 import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
@@ -208,10 +209,13 @@ export function planSafetyGitSync(cwd: string): PlanSafetyGit {
 export function planSafetyGitAsync(cwd: string): PlanSafetyGit {
   return (args, stdin) =>
     new Promise((resolve) => {
-      const child = execFile("git", [...args], { cwd, encoding: "utf8", timeout: GIT_CALL_MS, maxBuffer: 1 << 26 }, (error, stdout) => {
-        const code = (error as { code?: unknown } | null)?.code;
-        resolve({ status: error ? (typeof code === "number" ? code : null) : 0, stdout: stdout ?? "" });
-      });
+      const command = execFileLoopBounded("git", [...args], { cwd, encoding: "utf8", timeout: GIT_CALL_MS, maxBuffer: 1 << 26 });
+      command.then(
+        ({ stdout }) => resolve({ status: 0, stdout: stdout ?? "" }),
+        (error: { code?: unknown; stdout?: unknown }) =>
+          resolve({ status: typeof error.code === "number" ? error.code : null, stdout: typeof error.stdout === "string" ? error.stdout : "" }),
+      );
+      const child = command.child;
       // a verb that exits before reading stdin must not surface as an EPIPE on the daemon.
       child.stdin?.on("error", () => {});
       child.stdin?.end(stdin);

@@ -133,15 +133,25 @@ export function partitionPool(files, { fast, root = ".", readFile } = {}) {
  * the rest never run. The shard's verdict is now complete before any probe starts, and every probe
  * logs a line, so a slow location reads as progress, never as a hang.
  *
- * @returns {{ status: number, poolDefect: null | { leaker: string | null, victim: string | null } }}
+ * BOUNDED BY WHAT THE SHARD MEASURED (W1-T9426, 2026-10-14 #11629): with the verdict final, one
+ * locate probe still ran 18 minutes and the job's 35-minute cancel turned a 1358/1358 green shard
+ * into SHARD HANG. So each probe's `deadlineMs` is the full pool run's own measured wall time (a probe
+ * runs a subset of it), and a probe starts only while the job's remaining time ({@link jobCancelAtMs})
+ * holds one average probe plus as much again for the job to finish. A probe past its deadline, or one
+ * the budget cannot fit, ends location at once: the leak is reported not isolated, with the files the
+ * search had narrowed to, and the shard's final status is returned unchanged.
+ *
+ * @returns {{ status: number, poolDefect: null | { leaker: string | null, victim: string | null, stopped?: true, narrowed?: string[] } }}
  */
-export function runShardWithPool(files, { fast, root = ".", readFile, run, log = (line) => console.error(line) }) {
+export function runShardWithPool(files, { fast, root = ".", readFile, run, log = (line) => console.error(line), now = Date.now, env = process.env }) {
   const { pooled, isolated } = partitionPool(files, { fast, root, readFile });
   if (pooled.length < 2) return { status: run(files, { pool: false, role: "rest" }), poolDefect: null };
 
   let status = 0;
   let leaked = false;
+  const poolStarted = now();
   const poolStatus = run(pooled, { pool: true, role: "pool" });
+  const poolMs = Math.max(1, now() - poolStarted);
   if (poolStatus !== 0) {
     log(`pure-test-pool: the pool of ${pooled.length} file(s) failed (status ${poolStatus}); re-running them isolated once.`);
     const again = run(pooled, { pool: false, role: "rerun" });
@@ -159,18 +169,44 @@ export function runShardWithPool(files, { fast, root = ".", readFile, run, log =
   let poolDefect = null;
   if (leaked) {
     log(`pure-test-pool: every pooled file passes isolated; locating the leak among ${pooled.length} file(s) (shard status ${status} is already final).`);
+    const cancelAtMs = jobCancelAtMs(env);
+    const seconds = (ms) => Math.round(ms / 1000);
     let probes = 0;
+    let probeMsTotal = 0;
     poolDefect = locateLeak(pooled, (subset) => {
+      const ending = `${subset.length} file(s) ending ${subset.at(-1)}`;
+      const averageMs = probes > 0 ? probeMsTotal / probes : poolMs;
+      const leftMs = cancelAtMs === undefined ? Infinity : cancelAtMs - now();
+      const deadlineMs = Math.min(poolMs, leftMs - averageMs);
+      if (deadlineMs < averageMs) {
+        log(
+          `pure-test-pool: locate probe ${probes + 1} NOT STARTED (${ending}): the job has ${seconds(leftMs)}s left, ` +
+            `and a probe needs ~${seconds(averageMs)}s plus as much again for the job to finish — location stops.`,
+        );
+        return null;
+      }
       probes += 1;
-      const probeStatus = run(subset, { pool: true, quiet: true, role: "locate" });
-      log(`pure-test-pool: locate probe ${probes}: ${subset.length} file(s) ending ${subset.at(-1)} -> status ${probeStatus}`);
+      const started = now();
+      const probeStatus = run(subset, { pool: true, quiet: true, role: "locate", deadlineMs: Math.ceil(deadlineMs) });
+      probeMsTotal += now() - started;
+      if (probeStatus === RUN_PAST_DEADLINE) {
+        log(
+          `pure-test-pool: locate probe ${probes} HUNG (${ending}): killed at its ${seconds(deadlineMs)}s deadline ` +
+            `(the full pool run took ${seconds(poolMs)}s) — location stops.`,
+        );
+        return null;
+      }
+      log(`pure-test-pool: locate probe ${probes}: ${ending} -> status ${probeStatus}`);
       return probeStatus;
     });
+    const narrowed = poolDefect.narrowed
+      ? `; location stopped, the leak lies among these ${poolDefect.narrowed.length} file(s): ${poolDefect.narrowed.join(" ")}`
+      : "";
     log(
       `pure-test-pool: POOL DEFECT — every pooled file passes isolated but the pool failed; ` +
         `leaking file: ${poolDefect.leaker ?? "not isolated to one file"}` +
         (poolDefect.victim ? ` (first failing alongside it: ${poolDefect.victim})` : "") +
-        ` after ${probes} probe(s). Add the leak to the census in scripts/pure-test-pool.mjs.`,
+        ` after ${probes} probe(s)${narrowed}. Add the leak to the census in scripts/pure-test-pool.mjs.`,
     );
   }
   return { status, poolDefect };
@@ -184,30 +220,59 @@ export function runShardWithPool(files, { fast, root = ".", readFile, run, log =
  * still fails with the victim appended; a victim that fails pooled ALONE is its own leaker. Both are
  * binary searches: the linear "drop one file at a time" search this replaced cost up to one full pool
  * run per predecessor (2026-10-11: past 33 minutes on one shard).
- * @returns {{ leaker: string | null, victim: string | null }}
+ *
+ * A `runPool` that returns `null` was stopped (W1-T9426): the search ends there and reports, as
+ * `narrowed`, the fewest files it had seen fail together, which still hold the leak.
+ * @returns {{ leaker: string | null, victim: string | null, stopped?: true, narrowed?: string[] }}
  */
 export function locateLeak(pooled, runPool) {
+  const stoppedAt = (narrowed) => ({ leaker: null, victim: null, stopped: true, narrowed });
   let lo = 1;
   let hi = pooled.length;
   while (lo < hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if (runPool(pooled.slice(0, mid)) !== 0) hi = mid;
+    const probe = runPool(pooled.slice(0, mid));
+    if (probe === null) return stoppedAt(pooled.slice(0, hi));
+    if (probe !== 0) hi = mid;
     else lo = mid + 1;
   }
   const prefix = pooled.slice(0, hi);
-  if (runPool(prefix) === 0) return { leaker: null, victim: null }; // the failure did not reproduce
+  const reproduced = runPool(prefix);
+  if (reproduced === null) return stoppedAt(prefix);
+  if (reproduced === 0) return { leaker: null, victim: null }; // the failure did not reproduce
   const victim = prefix[prefix.length - 1];
   const before = prefix.slice(0, -1);
-  if (runPool([victim]) !== 0) return { leaker: victim, victim };
+  const alone = runPool([victim]);
+  if (alone === null) return stoppedAt(prefix);
+  if (alone !== 0) return { leaker: victim, victim };
   // With every predecessor it is the failing prefix itself; find the fewest that still fail.
   let low = 1;
   let high = before.length;
   while (low < high) {
     const mid = Math.floor((low + high) / 2);
-    if (runPool([...before.slice(0, mid), victim]) !== 0) high = mid;
+    const probe = runPool([...before.slice(0, mid), victim]);
+    if (probe === null) return stoppedAt([...before.slice(0, high), victim]);
+    if (probe !== 0) high = mid;
     else low = mid + 1;
   }
   return { leaker: before[high - 1], victim };
+}
+
+/** What a run killed at its `deadlineMs` returns in place of an exit status (W1-T9426). */
+export const RUN_PAST_DEADLINE = "past-deadline";
+
+/**
+ * The epoch ms at which this CI job is cancelled: ci.yml hands the job's start (RMD_JOB_STARTED_MS,
+ * the admission step's stamp) and its own timeout-minutes (RMD_JOB_TIMEOUT_MINUTES) in as env.
+ * `undefined` when either is absent or unreadable — outside CI nothing bounds the job, so only each
+ * probe's own deadline applies.
+ */
+export function jobCancelAtMs(env = process.env) {
+  const started = Number(env.RMD_JOB_STARTED_MS);
+  const minutes = Number(env.RMD_JOB_TIMEOUT_MINUTES);
+  if (!env.RMD_JOB_STARTED_MS || !env.RMD_JOB_TIMEOUT_MINUTES) return undefined;
+  if (!Number.isFinite(started) || started <= 0 || !Number.isFinite(minutes) || minutes <= 0) return undefined;
+  return started + minutes * 60_000;
 }
 
 /**
@@ -397,19 +462,23 @@ export function unreportedFilesIn(output) {
 /**
  * Spawn ONE judged `node --test` child: `args` are the runner arguments up to the file list (reporters
  * included); the judge's marker and tally are appended. Returns the judged status, which is non-zero
- * for a child that exited 0 without completing every file.
+ * for a child that exited 0 without completing every file. Given `deadlineMs`, a child still running
+ * then is SIGKILLed (a pooled file spawns nothing, so the child is the whole tree) and the run returns
+ * {@link RUN_PAST_DEADLINE}.
  */
-export function spawnJudgedRun(files, { spawn, cwd, args, pool, quiet = false, role, prefix = "pure-test-pool", log = (line) => console.error(line), env = process.env }) {
+export function spawnJudgedRun(files, { spawn, cwd, args, pool, quiet = false, role, prefix = "pure-test-pool", log = (line) => console.error(line), env = process.env, deadlineMs }) {
   const judged = prepareJudgedRun();
   try {
     const result = spawn(process.execPath, [...args, ...judged.args, ...files], {
       cwd,
       stdio: quiet ? "ignore" : "inherit",
       env: { ...env, ...judged.env },
+      ...(deadlineMs > 0 ? { timeout: deadlineMs, killSignal: "SIGKILL" } : {}),
     });
     const status = result.status ?? (result.signal ? 1 : 0);
     const verdict = judgeRun(files, { status, pool, root: cwd, ...judged.read() });
     log(describeJudgedRun(role, verdict, { prefix, pool }));
+    if (deadlineMs > 0 && result.error?.code === "ETIMEDOUT") return RUN_PAST_DEADLINE;
     return verdict.status;
   } finally {
     judged.cleanup();
