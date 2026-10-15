@@ -79,9 +79,10 @@ function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], in
       `${context} must bind the immutable choice to this run`);
     assert.ok(body.includes('[ "${GITHUB_RUN_ATTEMPT:-1}" = "1" ] || die'),
       `${context} must refuse a lost rerun choice`);
-    const nodeCommands = steps.map(step => step.run ?? "").join("\n").replace(/\\\n\s*/g, " ").split("\n")
+    const runBodies = steps.map(step => step.run ?? "").join("\n").replace(/\\\n\s*/g, " ");
+    const nodeCommands = runBodies.split("\n")
       .map(line => line.trim()).filter(line => /\bnode\s/.test(line));
-    assert.deepEqual(nodeCommands.map(line => /\bnode\s+(\S+)/.exec(line)?.[1]),
+    assert.deepEqual([...runBodies.matchAll(/\bnode\s+(\S+)/g)].map(match => match[1]),
       ["scripts/diff-class.mjs", "scripts/test-tier-manifest.mjs", "scripts/test-tier-manifest.mjs"],
       `${context} must run only the dependency-free classifier and strict ledger CLI`);
     assert.match(nodeCommands[0]!, /--coverage-class\b/);
@@ -221,6 +222,12 @@ test("uncached ledger bootstrap preserves its pin and identity without admitting
   changed(copy => { copy[0]!.with!["sparse-checkout"] += "package-lock.json\n"; });
   changed(copy => { copy[2]!.run += "\nnode scripts/unrelated.mjs"; });
   changed(copy => { copy[4]!.run += "\nnode scripts/unrelated.mjs"; });
+  changed(copy => {
+    const verifierFlags = '--snapshot "$INCOMING/ledger-snapshot.manifest" --github-output "$GITHUB_OUTPUT"';
+    assert.ok(copy[2]!.run!.includes(verifierFlags), "the same-line plant must follow the complete verifier flags");
+    copy[2]!.run = copy[2]!.run!.replace(verifierFlags,
+      verifierFlags + "; node scripts/unrelated.mjs");
+  });
   changed(copy => { copy[2]!.run = copy[2]!.run!.replace("${GITHUB_RUN_ID}", "another-run"); });
   changed(copy => { copy[2]!.run = copy[2]!.run!.replace("--verify-resolved-ledger", "--select-all"); });
   changed(copy => { copy[2]!.run = copy[2]!.run!.replace("--write-resolved-ledger", "--select-all"); });
