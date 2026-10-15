@@ -130,7 +130,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
-import { clockFromDateFn, clockFromIsoFn, systemClock, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, fixedClock, systemClock, type Clock } from "../lib/clock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -330,7 +330,7 @@ export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
  *  it carries the settled full passes too, so the sweep-bound seed survives a restart (W1-T9632). */
 export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
   const read = readLedgerUnionRecordsSync(stateDir, {
-    refuseIncomplete: true, sinceTs: new Date(nowMs - RESTART_HISTORY_WINDOW_MS).toISOString(),
+    refuseIncomplete: true, sinceTs: fixedClock(nowMs - RESTART_HISTORY_WINDOW_MS).iso(),
     rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
     step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP],
   });
