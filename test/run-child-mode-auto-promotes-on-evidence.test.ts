@@ -75,6 +75,16 @@ test("W1-T9087: auto promotes only after a clean boot cycle with an adoption", a
 
   // No round trip in the window: nothing to promote on, however clean.
   assert.equal(decideRunChildMode(runChildModeEvidence([boot(), adoption(), boot(), adoption()])).to, "shadow");
+  // A child's settlement is a round trip, a failure through the contract too; a lost child's settlement is not.
+  const settled = (outcome: string, reason?: string): Row => ({ step: "run_child.settled", ts: at(), outcome, ...(reason ? { reason } : {}) });
+  const settledCycle = runChildModeEvidence([boot(), adoption(), settled("fulfilled"), settled("rejected", "gh 502"),
+    settled("rejected", "run child run-A-1 lost: pid 9 is gone"), boot(), adoption()]);
+  assert.equal(decideRunChildMode(settledCycle).evidence.roundTrips, 2);
+  assert.equal(decideRunChildMode(settledCycle).to, "on");
+  assert.equal(decideRunChildMode(runChildModeEvidence([boot(), adoption(), settled("rejected", "contract_mismatch: schema 2"), boot(), adoption()])).to, "shadow");
+  // A probe that failed the contract any other way holds.
+  assert.match(decideRunChildMode(runChildModeEvidence([boot(), adoption(), probe(300), probe(300, 512, "unknown"), boot(), adoption()])).reason,
+    /1 probe\(s\) failed the contract/);
 
   // The daemon's tracker ledgers the change once, and runChildModeFor hands the dispatch `on`.
   const ledgered: Row[] = [];
