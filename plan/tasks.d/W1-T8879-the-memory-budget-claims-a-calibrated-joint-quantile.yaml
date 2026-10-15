@@ -65,6 +65,10 @@
   acceptance:
     - claim: "the shadow budget sizes concurrent claims with a calibrated joint quantile, ledgers its back-test miss rate, and refuses an enforce mode that its own back-test does not support"
       proof: 'grep: test("W1-T8879: the memory budget claims a calibrated joint quantile" in test/the-memory-budget-claims-a-calibrated-joint-quantile.test.ts'
+    - claim: "the production shadow-budget path calls the calibrated joint estimator rather than leaving its new module test-only"
+      proof: "grep: jointMemoryClaim( in src/lib/host-memory-shadow.ts"
+    - claim: "the existing daemon heartbeat invokes the passive calibration collector without a new timer"
+      proof: "grep: collectMemoryCalibration( in src/lib/daemon-footprint.ts"
   falsifier: |
     Restore the sum of per-claim p90s: the fixture with five live claims projects 6.1 GB instead of ≤4.6 GB, and the test
     fails. Drop the enforce refusal: the config with a 42% miss rate is accepted, and the test fails.
