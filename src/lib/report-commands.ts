@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 /**
  * THE READ-AND-PRINT CLI VERBS — moved out of `src/run-task.ts` (W1-T2888, decomposition step 5).
  *
@@ -460,7 +461,7 @@ export function judgeInflightLocks(inflightDir: string, probes: InflightLockProb
     const info = readInflightLock(inflightDir, taskId);
     if (!info) continue;
     const run: LiveInflightRun = { taskId, runId: info.run_id, pid: info.pid };
-    if (info.host === myHost) {
+    if (sameHost(info.host, myHost)) {
       if (isPidAlive(info.pid)) live.push(run);
       continue;
     }

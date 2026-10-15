@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
@@ -365,7 +366,7 @@ export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): bo
   // was never asked. A container restart replaces the host id, not necessarily the holder.
   if (held.host !== undefined) {
     const myHost = (opts.hostname ?? hostname)();
-    if (held.host !== myHost) {
+    if (!sameHost(held.host, myHost)) {
       const inContainer = (opts.inContainer ?? defaultInContainer)();
       return inContainer && looksLikeContainerId(held.host);
     }

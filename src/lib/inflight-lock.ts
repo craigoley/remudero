@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -258,7 +259,7 @@ export function sweepStaleInflightLocks(
       // Mirror isHolderStale's rung 1 EXACTLY (same `myHost`, same "absent host ⇒ skip the
       // check" reading) so the split can never disagree with the predicate that already decided
       // this lock was not reaped: a foreign host is UNVERIFIABLE, not confirmed alive.
-      if (reclaim.holder.host !== undefined && reclaim.holder.host !== myHost) {
+      if (reclaim.holder.host !== undefined && !sameHost(reclaim.holder.host, myHost)) {
         result.unverifiableForeignHost.push(taskId);
       } else {
         result.live.push(taskId);

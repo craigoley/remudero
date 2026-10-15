@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 /**
  * test-slot — a test-suite run on the shared fleet host takes a HOST-WIDE slot, at LOW priority,
  * with a BOUNDED concurrency, so one operator or worker coverage run cannot starve reviews/serve.
@@ -304,7 +305,7 @@ function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: str
     if (realpathSync(join(claim.path, "..")) !== realpathSync(dir)) return { rejected: "different-slot-directory" };
     const held = parseTestSlotHolder(readFileSync(claim.path, "utf8"));
     if (!held || held.pid !== claim.pid || held.ownerNonce !== claim.nonce ||
-        held.processStart !== claim.start || held.host !== hostname() ||
+        held.processStart !== claim.start || !sameHost(held.host, hostname()) ||
         held.concurrency !== claim.concurrency || !Number.isSafeInteger(held.concurrency) || held.concurrency! < 1) return { rejected: "different-holder" };
     if (testSlotProcessFacts(held.pid)?.start !== held.processStart) return { rejected: "dead-or-reused-owner" };
     if (!testSlotHasAncestor(held.pid)) return { rejected: "owner-is-not-an-ancestor" };
@@ -416,7 +417,7 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
   const foreignNs = held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs;
   // Same hostname but another pid namespace (two sandboxed workers in one container): the pid probe would read a
   // live peer as dead, so it is aged like a foreign host's holder — boot id, then lease.
-  if (held.host === opts.hostname() && !foreignNs) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
+  if (sameHost(held.host, opts.hostname()) && !foreignNs) return isHolderStale(held, { isPidAlive: opts.isPidAlive, hostname: opts.hostname });
   const mine = opts.bootId();
   if (held.bootId !== undefined && mine !== undefined && held.bootId !== mine) return true;
   return now - Date.parse(held.heartbeatAt) > TEST_SLOT_LEASE_MS;
@@ -581,11 +582,11 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
               const bytes = Buffer.alloc(open.size);
               if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return false;
               const holder = parseTestSlotHolder(bytes.toString("utf8"));
-              return holder?.ownerNonce === ownerNonce && holder.pid === (opts.pid ?? process.pid) && holder.host === host();
+              return holder?.ownerNonce === ownerNonce && holder.pid === (opts.pid ?? process.pid) && sameHost(holder.host, host());
             };
             return {
               outcome: "acquired", concurrency, waitedMs,
-              ...((opts.pid ?? process.pid) === process.pid && host() === hostname() && processStart ? {
+              ...((opts.pid ?? process.pid) === process.pid && sameHost(host(), hostname()) && processStart ? {
                 childEnvironment: { [TEST_SLOT_PARENT_ENV]: JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency }),
                   [TEST_SLOT_DIR_ENV]: dir },
               } : {}),
@@ -607,7 +608,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                 try {
                   reclaimStaleLock(path, {
                     parseHolder: parseTestSlotHolder,
-                    isStale: (h) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce,
+                    isStale: (h) => h.pid === (opts.pid ?? process.pid) && sameHost(h.host, host()) && h.ownerNonce === ownerNonce,
                     onReclaim: () => {},
                     onLostReclaim: () => {},
                   });

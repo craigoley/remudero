@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -250,7 +251,7 @@ export function assessTriageClaimLiveness(i: {
   let lastHostMs = Number.NEGATIVE_INFINITY;
   let lastHolderMs = Number.NEGATIVE_INFINITY;
   for (const row of i.rows) {
-    if (row.host !== i.holder.host || typeof row.ts !== "string") continue;
+    if (typeof row.host !== "string" || !sameHost(row.host, i.holder.host) || typeof row.ts !== "string") continue;
     const t = Date.parse(row.ts);
     if (Number.isNaN(t) || t < claimedMs - TRIAGE_CLAIM_HOST_LOOKBACK_MS) continue;
     hostSeen = true;

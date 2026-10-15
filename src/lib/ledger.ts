@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 import {
   appendFileSync,
   chmodSync,
@@ -1419,7 +1420,7 @@ export function isRotationLockHolderStale(
   opts: { hostname?: () => string; inContainer?: () => boolean; nowMs?: number; isPidAlive?: (pid: number) => boolean } = {},
 ): boolean {
   const myHost = (opts.hostname ?? hostname)();
-  if (held.host !== myHost) {
+  if (!sameHost(held.host, myHost)) {
     const startedMs = Date.parse(held.startedAt);
     return !Number.isFinite(startedMs) || (opts.nowMs ?? systemClock.now()) - startedMs > LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
   }

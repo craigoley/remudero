@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readSync, realpathSync, renameSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
@@ -156,7 +157,7 @@ export function releaseHeavyNewBuilds(handle: HeavyReservationHandle, opts: { no
   const current = validateHeavyRequest(readOptionalHeavyRecord(heavyRecordPath(handle.dir, handle.request.id)));
   const actual = heavyOwnerIdentity();
   if (heavyRecordDigest(current) !== heavyRecordDigest(handle.request) || current.owner.pid !== actual.pid || current.owner.start !== actual.start ||
-      current.owner.host !== actual.host || current.owner.namespace !== actual.namespace) return false;
+      !sameHost(current.owner.host, actual.host) || current.owner.namespace !== actual.namespace) return false;
   if (!Number.isSafeInteger(now) || now < current.readyAtMs) throw new Error("invalid heavy READY release time");
   closeHeavyRequest(handle.dir, current, now);
   assertHeavyDirectoryIdentity(handle.dir, identity);

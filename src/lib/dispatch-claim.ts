@@ -1,3 +1,4 @@
+import { sameHost } from "./host-identity.js";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
@@ -142,7 +143,7 @@ export function staleDispatchClaimEscalations(
   const escalations = new Map<string, DispatchClaimEscalation>();
   for (const claim of claims) {
     const ageMs = dispatchClaimAgeMs(claim.identity, nowMs);
-    if (ageMs === undefined || ageMs <= DISPATCH_CLAIM_STALE_THRESHOLD_MS || claim.identity?.host === localHost) continue;
+    if (ageMs === undefined || ageMs <= DISPATCH_CLAIM_STALE_THRESHOLD_MS || sameHost(claim.identity?.host, localHost)) continue;
     const ref = dispatchClaimRef(claim.taskId);
     const id = `${ref}@${claim.holder}`;
     escalations.set(id, {
@@ -235,7 +236,7 @@ export function decideDispatchClaimRelease(i: {
   // ARM 3 — every clause must hold. Any absent input declines to arm 4 rather than guessing.
   const a = i.anchorIdentity;
   const l = i.liveness;
-  if (a && l && a.host === l.localHost && a.mintedAtMs < l.namespaceBootMs && !l.pidPresent) {
+  if (a && l && sameHost(a.host, l.localHost) && a.mintedAtMs < l.namespaceBootMs && !l.pidPresent) {
     return {
       arm: "dead-claimant",
       release: true,
@@ -252,7 +253,7 @@ export function decideDispatchClaimRelease(i: {
   }
   const r = i.replaced;
   const m = r?.mintRow;
-  if (a && r && m && a.host !== r.localHost && m.host === a.host && m.actor === "daemon" && a.mintedAtMs < r.lockHeldSinceMs) {
+  if (a && r && m && !sameHost(a.host, r.localHost) && sameHost(m.host, a.host) && m.actor === "daemon" && a.mintedAtMs < r.lockHeldSinceMs) {
     return {
       arm: "dead-claimant",
       release: true,
@@ -641,7 +642,7 @@ export function findClaimMintRow(
       if (parsed.kind !== "row") continue;
       const row = parsed.row;
       if (row.step !== "dispatch.claim" || row.ref !== ref || row.outcome !== "created") continue;
-      if (typeof row.ts !== "string" || row.ts < anchor.mintedAtIso || row.host !== anchor.host) continue;
+      if (typeof row.ts !== "string" || row.ts < anchor.mintedAtIso || typeof row.host !== "string" || !sameHost(row.host, anchor.host)) continue;
       const runId = typeof row.run_id === "string" ? row.run_id : undefined;
       return { host: String(row.host), actor: String(row.actor ?? "unknown"), ts: row.ts, source: file.name, ...(runId ? { runId } : {}) };
     }
@@ -728,7 +729,7 @@ export async function releaseLandedDispatchClaims(
     const row = { ref, surface: "tick-sweep", holder: claim.holder, pr_url: deps.prUrlFor?.(claim.taskId) };
     if (deps.isRerunClaim) {
       const anchor = parseClaimAnchorMessage(await reserver.anchorMessage?.(claim.taskId));
-      const local = anchor !== undefined && (deps.localHost === undefined || anchor.host === deps.localHost);
+      const local = anchor !== undefined && (deps.localHost === undefined || sameHost(anchor.host, deps.localHost));
       if (anchor && local && (await deps.isRerunClaim(claim.taskId, anchor))) {
         const left = {
           ...claim,
