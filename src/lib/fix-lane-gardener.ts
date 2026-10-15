@@ -106,6 +106,9 @@ const prOfRow = (r: LedgerRecord, byHead: ReadonlyMap<string, number>, byRound: 
 const tsOf = (r: LedgerRecord) => Date.parse(String(r.ts));
 const checkSet = (r: LedgerRecord): string => failuresOf(r)
   .map(f => `${String(f.check)}=${String(f.signature ?? "")}`).sort().join("|");
+/** #10362 (2026-10-09T17:28:01Z) made the parser read a glossed FIX_OUTCOME keyword. An "unstated" row stamped
+ *  before it is a defect already repaired in the parser, so re-pricing it re-files a fixed cause forever. */
+const GLOSS_PARSER_FIX_AT = Date.UTC(2026, 9, 9, 17, 28, 1);
 const quote = (tail: unknown) => (typeof tail === "string" && tail ? ` — worker saw: ${tail}` : "");
 const roundShape = (done: LedgerRecord | undefined) => done === undefined ? "" : ` [${["provider", "selected_model", "model", "effort"]
   .map(k => (typeof done[k] === "string" ? `${k} ${String(done[k])}` : "")).filter(Boolean).join(", ")}${typeof done.elapsed_ms === "number" ? `, ${Math.round(Number(done.elapsed_ms) / 1000)}s` : ""}]`;
@@ -371,7 +374,7 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
     } else if (r.step === "fix.done") {
       const outcome = String(r.fix_outcome ?? "");
       if (pr > 0) lastWasFixed.set(pr, outcome === "FIXED");
-      if (outcome === "unstated") add(r, "fix-outcome:unstated", `the worker's FIX_OUTCOME line was not recognised${roundShape(r)}${quote(r.worker_tail)}`);
+      if (outcome === "unstated" && tsOf(r) >= GLOSS_PARSER_FIX_AT) add(r, "fix-outcome:unstated", `the worker's FIX_OUTCOME line was not recognised${roundShape(r)}${quote(r.worker_tail)}`);
       if (outcome === "FIXED" && typeof r.pushed_head_sha === "string") pushed.set(r.pushed_head_sha, { pr, done: r });
       if (outcome === "FLAKE" && pr > 0) {
         const dispatch = rows.find(d => d.step === "fix.dispatch" && d.round_id === r.round_id);

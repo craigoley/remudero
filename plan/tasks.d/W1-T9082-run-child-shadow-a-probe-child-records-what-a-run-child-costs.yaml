@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T7729, W1-T8777, W1-T8778, W1-T9070, W1-T9077, W1-T9080]
   files: [scripts/build-child-entries.mjs, src/run-child-main.ts, src/lib/run-child.ts, src/lib/policy.ts, src/lib/host-memory-ledger.ts, plan/policy.yaml, src/run-task.ts, test/run-child-shadow-a-probe-child-records-what-a-run-child-costs.test.ts, test/a-daemon-child-entry-is-precompiled.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -68,6 +68,7 @@ import {
   type FeedbackEntry,
   type FeedbackExpanderDeps,
   type FeedbackExpansion,
+  type FeedbackOrigin,
   type FeedbackStatus,
 } from "./feedback.js";
 import {
@@ -409,11 +410,23 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
 /** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status reads from fetched origin/main, else the
  *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply. */
 function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
+  return replyRefusalFor(root, replyTo, queued, () =>
+    execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" }));
+}
+
+/** {@link replyRefusal}'s judgement, given how to read the record's origin/main blob (a throw: unreadable). The
+ *  daemon-loop GitHub-reply reader (W1-T8511) passes a blob it read asynchronously, so it checks the SAME `grilling`
+ *  status without a synchronous spawn on the loop. */
+export function replyRefusalFor(
+  root: string,
+  replyTo: string,
+  queued: ReadonlyMap<string, QueuedFeedbackRecord>,
+  readMainBlob: () => string,
+): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
   try {
-    const blob = execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" });
-    target = parseYaml(blob) as FeedbackEntry;
+    target = parseYaml(readMainBlob()) as FeedbackEntry;
   } catch {
     source = "the checkout (origin/main unreadable)";
     try {
@@ -448,6 +461,56 @@ function readQueueForCheck(deps: PanelGraphDeps, route: string, res: ServerRespo
   }
 }
 
+/** One feedback submission, already validated and refusal-checked by its caller. */
+export interface FeedbackReplyInput {
+  text: string;
+  attachments?: string[];
+  replyTo?: string;
+  expansion?: FeedbackExpansion | null;
+  submissionKey?: string;
+  origin: FeedbackOrigin;
+}
+
+/**
+ * W1-T8511: the reply half of POST /v1/feedback, factored out so an operator's GitHub reply on a
+ * feedback GRILL issue (lib/escalation-answers.ts) answers the record through the SAME writes the
+ * console does. Captures the entry (`reply_to` set when `replyTo` is), flips the `replyTo` record to
+ * `answered` with `answered_by`, and queues both under `inboxRoot` for the landing sweep. The caller
+ * owns validation, the `submissionKey` dedup and the `grilling` check ({@link replyRefusalFor}). `deps` is the checkout,
+ * the landing-queue root and the landing bridge.
+ */
+export function captureFeedbackReply(
+  deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
+  input: FeedbackReplyInput,
+): { entry: FeedbackEntry; landingError?: string } {
+  const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
+  const land = { stateRoot: deps.inboxRoot };
+  const entry = captureFeedback(deps.root, {
+    raw,
+    attachments: input.attachments ?? [],
+    origin: input.origin,
+    expansion: input.expansion,
+    replyTo: input.replyTo,
+    submissionKey: input.submissionKey,
+    land,
+  });
+  let landingError: string | undefined;
+  try {
+    const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
+    const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
+    if (input.replyTo !== undefined) {
+      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+    }
+    const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
+    const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
+    if (unqueued.length > 0) landingError = staged.error ?? `not queued: ${unqueued.join(", ")}`;
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    landingError = reason;
+  }
+  return landingError === undefined ? { entry } : { entry, landingError };
+}
+
 /**
  * POST /v1/feedback — write-scoped. Captures an entry with `origin: ui` always. Ledgers
  * `panel.feedback_submitted`. `replyTo` must name an entry parked `grilling` (404/400
@@ -480,32 +543,8 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
           return;
         }
       }
-      const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
       const origin = bearerTokenId(req);
-      const land = { stateRoot: deps.inboxRoot };
-      const entry = captureFeedback(deps.root, {
-        raw,
-        attachments: input.attachments,
-        origin: "ui",
-        expansion: input.expansion,
-        replyTo: input.replyTo,
-        submissionKey: input.submissionKey,
-        land,
-      });
-      let landingError: string | undefined;
-      try {
-        const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
-        const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
-        if (input.replyTo !== undefined) {
-          setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
-        }
-        const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
-        const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
-        if (unqueued.length > 0) landingError = staged.error ?? `not queued: ${unqueued.join(", ")}`;
-      } catch (error) {
-        const reason = String((error as Error)?.message ?? error);
-        landingError = reason;
-      }
+      const { entry, landingError } = captureFeedbackReply(deps, { ...input, origin: "ui" });
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,

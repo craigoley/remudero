@@ -20,3 +20,11 @@
     The ledger step read_model.now_view_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 10 in the older half, 15 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single new test file (test/scout-read-model-now-view-failed.test.ts), and the description shows no contact with secrets, auth, permissions, deletion, merge/deploy/infrastructure policy, or irreversible actions.; on the change's description/files alone, no diff was read — The task is a bug fix for a recurring ledger failure step (read_model.now_view_failed). It asks for no operator-only decision, and the acceptance is a grep-verifiable test name, so it can be checked from what is shown.; on the change's description/files alone, no diff was read — Some uncertainty remains. The rationale says the rows name no file, so the fix location is unknown, and the declared files list covers only the test while the actual cause fix would touch other files. The scout family's track record is weak (0 merged, 1 declined). Still, the PR must pass CI and review, and the machine-filing judge gates it."
+    judged_at: "2026-10-15T00:53:46.763Z"
+    pin: "b93ebc9f567c4f9fac7e5abf112c771419adc346bb0bde39b8247d175ec16391"
