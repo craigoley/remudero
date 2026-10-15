@@ -1,10 +1,10 @@
 // src/lib/advance-declarations.ts — W1-T6273's entry-point weight, read per declaration instead of per file.
 //
-// MEASURED 2026-10-13/14 (core ledger, ~/Remudero-notes/restart-cause-2026-10-14/): 37 of the 49 core boots were
-// freshness restarts, and 34 of those were released by a full-weight "daemon self" advance. W1-T6273 weighs
+// MEASURED 2026-10-13/14 (core ledger, ~/Remudero-notes/restart-cause-2026-10-14/): 34 of the 47 core boots were
+// freshness restarts, and 27 of those were released by a full-weight "daemon self" advance. W1-T6273 weighs
 // src/run-task.ts as a whole file, so all 53 of its commits in the window scored full weight, though only 12 touched
 // daemonCommand; the rest changed CLI commands (approve, skill-eval, verify-human), the inbox drafter or the fix rung.
-// For 10 of the 34 boots such a commit was the only full-weight change. This module reads which top-level
+// For 10 of the 27 boots such a commit was the only full-weight change. This module reads which top-level
 // declarations of the entry module each commit touched, so deploy-judge keeps full weight for the daemon's own.
 import type { AsyncGitRunner } from "./git-fetch-retry.js";
 import type { ServiceFreshness } from "./self-sync.js";

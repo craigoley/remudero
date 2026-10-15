@@ -12,8 +12,8 @@ import { asyncGit, type ServiceFreshness } from "../src/lib/self-sync.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 /**
- * MEASURED 2026-10-13/14 (core ledger, ~/Remudero-notes/restart-cause-2026-10-14/): 37 of 49 core boots were freshness
- * restarts and 34 of those were released by a full-weight "daemon self" advance. W1-T6273 gives src/run-task.ts full
+ * MEASURED 2026-10-13/14 (core ledger, ~/Remudero-notes/restart-cause-2026-10-14/): 34 of 47 core boots were freshness
+ * restarts and 27 of those were released by a full-weight "daemon self" advance. W1-T6273 gives src/run-task.ts full
  * weight as a whole file, so 53 of 53 run-task.ts commits scored 18, though only 12 touched daemonCommand. The rest
  * (approveCommand, the skill-eval and verify-human commands, the inbox drafter, the fix rung) restarted a busy daemon
  * within ~30 minutes each. Full weight now follows the declarations a commit touched.
