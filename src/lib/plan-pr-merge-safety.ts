@@ -102,6 +102,11 @@ function unsafeReason(r: PlanMergeSafetyReadings | undefined): string {
   return "the merged tree was not read";
 }
 
+/** A merged tree git failed to READ (25 of 25 plan_pr_behind refreshes, 10-12..15), not one found unsafe. */
+export function mergedTreeUnread(r: PlanMergeSafetyReadings | undefined): boolean {
+  return r?.error === undefined && r?.mergedTree?.state === "unreadable";
+}
+
 export function plansDisjoint(prPaths: readonly string[], mainPaths: readonly string[]): boolean {
   const main = new Set(mainPaths);
   return !prPaths.some((p) => main.has(p));
@@ -162,6 +167,8 @@ export interface OwnFilesReadings {
 /** W1-T9536 — W1-T5696's overlap and baseline arms, with no distance arm: main changed this PR's own
  *  files, a refresh-relevant path, or a list went unread. Any cause refreshes a behind PR. */
 export function mainChangedOwnFiles(own: OwnFilesReadings | undefined): { cause: "overlap" | "baseline" | "unread"; files: string[] } | undefined {
+  // A plan-only PR (#11901, 10-15) has no own file main can change: the merged-plan load judges it.
+  if (own?.error === undefined && own?.prFiles?.length === 0) return undefined;
   const cause = distanceRefreshCause(0, own?.prFiles, own?.error === undefined ? own?.mainFiles : undefined, Infinity);
   if (cause.reason === "distance-overlap") return { cause: "overlap", files: cause.files };
   if (cause.reason === "distance-baseline") return { cause: "baseline", files: cause.files };
@@ -319,6 +326,7 @@ function* mergedTreePlanSteps(
     if (listing.status !== 0) return { state: "unreadable", error: `git ls-tree exited ${listing.status}` };
     const paths = [plan.monolith, ...listing.stdout.split("\n").filter((p) => p.endsWith(".yaml")).sort()];
     const batch = yield* gitStep(git, ["cat-file", "--batch"], paths.map((p) => `${tree}:${p}`).join("\n") + "\n");
+    if (batch.status !== 0) return { state: "unreadable", error: `git cat-file --batch exited ${batch.status} (killed or failed mid-read)` };
     const texts = readBlobsAtRef(() => batch.stdout, tree, paths);
     return mergedPlanState(paths.map((p, i) => ({ label: `merged:${p}`, text: texts[i] })));
   } catch (e) {
