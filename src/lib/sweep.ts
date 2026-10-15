@@ -8903,7 +8903,7 @@ export function createRefreshAdmission(reading: RefreshAdmissionReading, surface
   const admitted: Array<Record<string, unknown>> = [];
   let closed: number[] | undefined;
   const entry = (c: AdmissionEntry, extra: Record<string, unknown>) => ({ pr_number: c.pr.prNumber, head_sha: c.pr.headSha, arm: c.arm,
-    ...(Number.isFinite(c.heldSinceMs) ? { held_since: new Date(c.heldSinceMs).toISOString() } : {}), ...extra });
+    ...(Number.isFinite(c.heldSinceMs) ? { held_since: clockFromMillisFn(() => c.heldSinceMs).iso() } : {}), ...extra });
   return {
     has: (prNumber: number) => candidates.has(prNumber),
     holding: () => closed !== undefined || reading.signal === "waiting",
