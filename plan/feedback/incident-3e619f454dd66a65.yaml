@@ -1,0 +1,30 @@
+id: incident-3e619f454dd66a65
+ts: 2026-10-15T04:15:44.173Z
+raw: >-
+  Incident 3e619f454dd6: anomaly cost.anomaly:docs
+
+  First seen: 2026-10-14T01:33:15.199Z
+
+  Last seen: 2026-10-14T11:56:12.127Z
+
+  Count: 22, burn: 2.12/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - task W1-T4347 (run W1-T4347-1791939118634) cost $1.44 against class "docs"'s median $0.12 (×8, n=5)
+    - task W1-T4464 (run W1-T4464-1791942784539) cost $1.71 against class "docs"'s median $0.19 (×8, n=5)
+    - task W1-T8445 (run W1-T8445-1791976999669) cost $2.49 against class "docs"'s median $0.12 (×8, n=13)
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#3e619f454dd66a6578fc45dd91098643e2993627ae160a589b745ae4bf9077ed
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

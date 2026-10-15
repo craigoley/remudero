@@ -11,7 +11,7 @@
   origin: "operator rulings 2026-10-09 (a hand-fixed PR is a bug in rmd) + 2026-09-23 (runbooks behind an independent governor): automate the hand `rmd release` of 2026-10-11"
   plan_refs: [W1-T4386, W1-T4390, W1-T4678, W1-T4025, W1-T7742]
   files: [src/lib/breaker-release.ts, src/run-task.ts, src/lib/sre-runbooks.ts, test/a-breaker-tripped-only-by-the-harness-is-released-by-a-runbook.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

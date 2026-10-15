@@ -10,7 +10,9 @@
  *   while `buildLedgerIndex` files the row under both);
  * - a cross-task row (`daemon.boot`, a `plan_only` `pr.opened`): every task, because
  *   `environmentChangedSince`, `lifetimeDispatchTally` and `isPlanOnlyFilingPr` read them whole-ledger;
- * - its plan entry, its durable credit record, the credit overrides, the GitHub generation, the code;
+ * - its plan entry, its durable credit record, the credit overrides, the code;
+ * - what it read from GitHub (W1-T6016): when the snapshot moves, each task's own GitHub reads are replayed against
+ *   the new gateway, and only a task whose answers moved re-derives (see {@link githubDigest});
  * - the clock: every {@link BOARD_CLOCK_REDERIVE_MS}, a projection that ages with the clock or holds
  *   an independent-failure block (the 6 h environmental cooldown);
  * - the ledger's own clock: `orphanedRunIds` measures a lone `run.start` against the NEWEST row
@@ -24,7 +26,7 @@
  * holds for the now view's readers outside the derive: per key, never per row ever ingested (board:core held 663,486
  * entries on 2026-10-14). `keepEveryRow` keeps the old behaviour as an equality test's reference arm.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { projectionAgesWithTheClock } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -40,18 +42,21 @@ import {
   defaultCreditStorePath,
   loadCreditStore,
   noteLedgerGeneration,
+  openSiblingBuild,
   projectPlan,
   type CreditStore,
   type DeriveDeps,
   type GitHub,
   type LedgerIndex,
+  type PrRef,
   type StatusProjection,
+  taskIdFromRunBranch,
   WORKER_ACTIVITY_STAND_IN_STEP,
 } from "./status.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 
 /** Bumped when this module's stamp or stored shape changes: every persisted projection then re-derives. */
-export const BOARD_PROJECTION_VERSION = 1;
+export const BOARD_PROJECTION_VERSION = 2;
 export const BOARD_CLOCK_REDERIVE_MS = 30_000;
 export const BOARD_ORACLE_INTERVAL_MS = 10 * 60_000;
 export const BOARD_DERIVE_DEBOUNCE_MS = 500;
@@ -82,7 +87,8 @@ export const BOARD_RUN_ACTIVITY_STEP = "read_model.run_activity";
 export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(task_id TEXT PRIMARY KEY,
   stamp TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS board_oracle_run(at_ms INTEGER NOT NULL, outcome TEXT NOT NULL, mismatches INTEGER NOT NULL,
-  healed INTEGER NOT NULL, issue_url TEXT);`;
+  healed INTEGER NOT NULL, issue_url TEXT);
+  CREATE TABLE IF NOT EXISTS task_github_read(task_id TEXT PRIMARY KEY, digest TEXT NOT NULL, keys TEXT NOT NULL) WITHOUT ROWID;`;
 
 export type Row = Record<string, unknown>;
 
@@ -92,8 +98,10 @@ export interface BoardDirtRules {
   crossTask: boolean;
   clock: boolean;
   ledgerClock: boolean;
+  /** W1-T6016: a task re-derives when what it read from GitHub moved. */
+  github: boolean;
 }
-const ALL_RULES: BoardDirtRules = { alias: true, crossTask: true, clock: true, ledgerClock: true };
+const ALL_RULES: BoardDirtRules = { alias: true, crossTask: true, clock: true, ledgerClock: true, github: true };
 
 export type BoardDirt = { all: true; reason: string } | { all: false; tasks: string[] };
 
@@ -137,6 +145,177 @@ export function githubGenerationOf(github: GitHub): string {
   const open = github.listOpenHeadBranches?.();
   const rows = open === undefined ? "none" : open === null ? "failed" : open.map((pr) => `${pr.number}:${pr.state}:${pr.headRefOid ?? ""}`).sort();
   return sha1(JSON.stringify([rows, github.readFailed?.() ?? false]));
+}
+
+/**
+ * W1-T6016: WHICH GITHUB FACTS A TASK'S PROJECTION READ. The generation above only says the snapshot moved; folded
+ * into every task's stamp it re-derived all of them (~4,085 on core, 17 s median a board stage on 2026-10-15) when
+ * one PR's head moved. A task's GitHub dependency is instead, per task:
+ * - every gateway call its derive made, with its arguments and its answer (a recording gateway, {@link
+ *   recordingGithub}), replayed against the new gateway: `prByRef` of a ledger-named PR, `headRefName`/`prBody`/
+ *   `changedFiles` of its trailer PR, `issueByUrl` of its escalation, and the batched trailer lookup;
+ * - its slices of the open and merged lists `projectPlan` groups once per pass and hands each task through a
+ *   closure no gateway call sees: open PRs its run branch owns or whose body names it (a superset of the trailer
+ *   grouping), merged PRs its run branch owns;
+ * - for a task the open-sibling observation runs on (declared files, neither merged nor open), that observation
+ *   recomputed over the new open list;
+ * - the facts no task owns, global: whether each list and the trailer lookup read at all, and the read failure.
+ */
+export interface GithubReadLog {
+  keys: string[];
+  answers: string[];
+}
+
+/** Gateway methods a replay never calls: they act (warm, seed, reset) or read the wall clock. A task that read one
+ *  is re-derived whenever the snapshot moves. */
+const GITHUB_UNREPLAYED: ReadonlySet<string> = new Set(["warm", "serveOffLoop", "seedBoardSnapshot", "resetFailureFlags", "factsAgeMs", "factsStale", "warmTelemetry"]);
+/** The key a call of the function `mergedTrailerLookup()` returned is recorded under. */
+const TRAILER_LOOKUP = "mergedTrailerLookup()";
+const UNDEFINED_ARG = "\u0000undefined";
+/** Every task-id-shaped token: the open slice's superset of `projectPlan`'s trailer grouping (TASK_ID_TRAILER_RE). */
+export const TASK_TOKEN_RE = /W[0-9]+-T[0-9]+[A-Za-z]?/;
+
+function readKey(method: string, args: readonly unknown[]): string {
+  return `${method}\u0000${JSON.stringify(args, (_key, value: unknown) => (value === undefined ? UNDEFINED_ARG : value))}`;
+}
+
+function parseReadKey(key: string): { method: string; args: unknown[] } {
+  const at = key.indexOf("\u0000");
+  const args = JSON.parse(key.slice(at + 1), (_key, value: unknown) => (value === UNDEFINED_ARG ? undefined : value)) as unknown[];
+  return { method: key.slice(0, at), args: Array.from(args) };
+}
+
+/** One answer as a comparable string; never throws. */
+export function githubAnswerOf(value: unknown): string {
+  if (value === undefined) return "u";
+  if (typeof value === "function") return "f";
+  try {
+    return `j${JSON.stringify(value)}`;
+  } catch (error) {
+    // A value JSON cannot hold (a cycle, a BigInt) is not comparable: a unique answer equals no other, even its own
+    // replay, so the task re-derives on every snapshot move rather than being reused on a guess.
+    void error;
+    return `x${randomUUID()}`;
+  }
+}
+
+const thrownAnswer = (error: unknown): string => `t${error instanceof Error ? error.message : String(error)}`;
+
+/** `github` with every method call recorded into the log `into` names (none: not recorded), answers unchanged. */
+export function recordingGithub(github: GitHub, into: () => GithubReadLog | undefined): GitHub {
+  const call = (method: string, fn: (...a: unknown[]) => unknown, self: unknown, args: unknown[]): unknown => {
+    const log = into();
+    if (!log) return Reflect.apply(fn, self, args);
+    let result: unknown;
+    try {
+      result = Reflect.apply(fn, self, args);
+    } catch (error) {
+      log.keys.push(readKey(method, args));
+      log.answers.push(thrownAnswer(error));
+      throw error;
+    }
+    log.keys.push(readKey(method, args));
+    log.answers.push(githubAnswerOf(result));
+    return result;
+  };
+  const wrapped = new WeakMap<object, unknown>();
+  return new Proxy(github, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (typeof value !== "function" || typeof prop !== "string") return value;
+      let wrapper = wrapped.get(value);
+      if (wrapper === undefined) {
+        wrapper = (...args: unknown[]): unknown => {
+          const result = call(prop, value as (...a: unknown[]) => unknown, target, args);
+          if (prop !== "mergedTrailerLookup" || typeof result !== "function") return result;
+          const lookup = result as (taskId: string) => PrRef | null;
+          return (taskId: string) => call(TRAILER_LOOKUP, lookup as (...a: unknown[]) => unknown, undefined, [taskId]);
+        };
+        wrapped.set(value, wrapper);
+      }
+      return wrapper;
+    },
+  });
+}
+
+/** One gateway's answers, computed once per snapshot and shared by every task's replay. */
+export interface GithubView {
+  readonly gateway: GitHub;
+  readonly generation: string;
+  readonly global: string;
+  /** The open list `projectPlan` hands the open-sibling observation; undefined when absent or unread. */
+  readonly openRows: PrRef[] | undefined;
+  slice(half: "open" | "merged", taskId: string): string;
+  answer(key: string): string;
+}
+
+export function githubViewOf(gateway: GitHub, generation: string): GithubView {
+  // In `projectPlan`'s order: the merged list, its trailer lookup (only over a list that read), the open list.
+  const merged = gateway.listMergedHeadBranches?.();
+  const trailer = merged === undefined || merged === null ? undefined : gateway.mergedTrailerLookup?.();
+  const open = gateway.listOpenHeadBranches?.();
+  const state = (v: unknown): string => (v === undefined ? "absent" : v === null ? "failed" : "read");
+  const global = JSON.stringify([state(merged), state(trailer), state(open), gateway.readFailed?.() ?? null, gateway.readFailureReason?.() ?? null]);
+  const groups = { open: new Map<string, PrRef[]>(), merged: new Map<string, PrRef[]>() };
+  const file = (half: "open" | "merged", owner: string, pr: PrRef): void => {
+    const list = groups[half].get(owner);
+    if (list) list.push(pr);
+    else groups[half].set(owner, [pr]);
+  };
+  for (const pr of open ?? []) {
+    const owners = new Set([taskIdFromRunBranch(pr.headRefName), ...((pr.body ?? "").match(new RegExp(TASK_TOKEN_RE.source, "g")) ?? [])]);
+    for (const owner of owners) if (owner !== undefined) file("open", owner, pr);
+  }
+  for (const pr of merged ?? []) {
+    const owner = taskIdFromRunBranch(pr.headRefName);
+    if (owner !== undefined) file("merged", owner, pr);
+  }
+  const slices = new Map<string, string>();
+  const answers = new Map<string, string>();
+  let unreplayed = 0;
+  const replay = (key: string): string => {
+    const { method, args } = parseReadKey(key);
+    if (GITHUB_UNREPLAYED.has(method)) return `n${++unreplayed}`;
+    const fn = method === TRAILER_LOOKUP ? (typeof trailer === "function" ? trailer : undefined) : (gateway as unknown as Record<string, unknown>)[method];
+    if (typeof fn !== "function") return "a";
+    try {
+      return githubAnswerOf(Reflect.apply(fn as (...a: unknown[]) => unknown, method === TRAILER_LOOKUP ? undefined : gateway, args));
+    } catch (error) {
+      // Not erased: a throw is an answer of its own, distinct from every return, as the recording keeps it.
+      return thrownAnswer(error);
+    }
+  };
+  return {
+    gateway, generation, global, openRows: open ?? undefined,
+    slice(half, taskId) {
+      const key = `${half}\u0000${taskId}`;
+      let hit = slices.get(key);
+      if (hit === undefined) slices.set(key, (hit = sha1((groups[half].get(taskId) ?? []).map(githubAnswerOf).join("\n"))));
+      return hit;
+    },
+    answer(key) {
+      let hit = answers.get(key);
+      if (hit === undefined) {
+        hit = replay(key);
+        if (!hit.startsWith("n")) answers.set(key, hit);
+      }
+      return hit;
+    },
+  };
+}
+
+/** The open-sibling observation `projectPlan` attaches to `projection`'s task, recomputed over `view`; "-" when it
+ *  does not run for this projection. */
+function siblingAnswer(view: GithubView, task: Task | undefined, projection: StatusProjection): string {
+  const files = task === undefined ? [] : task.files ?? [];
+  if (task === undefined || files.length === 0 || projection.merged || projection.prState === "OPEN") return "-";
+  const gateway = view.gateway;
+  return githubAnswerOf(openSiblingBuild(task.id, files, view.openRows, gateway.changedFiles?.bind(gateway)) ?? null);
+}
+
+/** What `task`'s projection read from GitHub under `view`, as one digest: equal digests, equal GitHub inputs. */
+export function githubDigest(view: GithubView, taskId: string, task: Task | undefined, projection: StatusProjection, answers: readonly string[]): string {
+  return sha1(JSON.stringify([view.global, view.slice("open", taskId), view.slice("merged", taskId), siblingAnswer(view, task, projection), answers]));
 }
 
 export interface BoardProjectionOptions {
@@ -408,6 +587,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     upsert: db.prepare(`INSERT INTO task_projection(task_id, stamp, json) VALUES(?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET stamp = excluded.stamp, json = excluded.json`),
     remove: db.prepare("DELETE FROM task_projection WHERE task_id = ?"),
+    upsertReads: db.prepare(`INSERT INTO task_github_read(task_id, digest, keys) VALUES(?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET digest = excluded.digest, keys = excluded.keys`),
+    removeReads: db.prepare("DELETE FROM task_github_read WHERE task_id = ?"),
     latest: db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
     taskFacts: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
       UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
@@ -485,6 +667,22 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   for (const r of db.prepare("SELECT task_id, stamp, json FROM task_projection").all()) {
     held.set(String(r.task_id), { stamp: String(r.stamp), projection: JSON.parse(String(r.json)) as StatusProjection });
   }
+  /** W1-T6016: per held task, the GitHub reads its derive made and their digest under the gateway it read. Persisted
+   *  beside the projection, so a restart replays them rather than re-deriving every task. */
+  const githubReads = new Map<string, { keys: readonly string[]; digest: string }>();
+  for (const r of db.prepare("SELECT task_id, digest, keys FROM task_github_read").all()) {
+    githubReads.set(String(r.task_id), { digest: String(r.digest), keys: JSON.parse(String(r.keys)) as string[] });
+  }
+  /** Tasks whose GitHub answers moved since their derive, kept until a derive takes them. */
+  const githubStale = new Set<string>();
+  let githubView: GithubView | undefined;
+  let githubChecked: GithubView | undefined;
+  const currentGithubView = (): GithubView => {
+    const gw = gateway();
+    const generation = githubGeneration();
+    if (githubView?.gateway !== gw || githubView.generation !== generation) githubView = githubViewOf(gw, generation);
+    return githubView;
+  };
   // The newest row the persisted projections saw: the ledger-clock rule's baseline after a restart.
   let derivedLatestTsMs = Number(db.meta(LATEST_TS_META) ?? 0);
   const planHash = new WeakMap<Task, string>();
@@ -890,11 +1088,25 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return h;
   }
 
-  function project(plan: Plan, credit: CreditStore, overrides: string, reuse?: (task: Task) => StatusProjection | undefined): Map<string, StatusProjection> {
+  /** One `projectPlan` pass and, per task it derived, the GitHub reads that derive made (W1-T6016): `projectPlan` asks
+   *  `reuseProjection` of each task just before deriving it, so the log a refusal opens takes that task's reads. */
+  function project(plan: Plan, credit: CreditStore, overrides: string, reuse?: (task: Task) => StatusProjection | undefined): {
+    projections: Map<string, StatusProjection>; reads: Map<string, GithubReadLog>;
+  } {
+    const reads = new Map<string, GithubReadLog>();
+    let deriving: GithubReadLog | undefined;
+    const deriveOrReuse = (task: Task): StatusProjection | undefined => {
+      deriving = undefined;
+      const kept = reuse?.(task);
+      if (kept !== undefined) return kept;
+      deriving = { keys: [], answers: [] };
+      reads.set(task.id, deriving);
+      return undefined;
+    };
     const deps: DeriveDeps = {
       ...opts.deriveDeps,
       ledgerPath: opts.ledgerPath,
-      github: gateway(),
+      github: recordingGithub(gateway(), () => deriving),
       readLedger: () => rows,
       now: () => clock.now(),
       readCreditStore: () => credit,
@@ -902,18 +1114,60 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       readCreditOverrideFile: () => overrides,
       skipUncreditedBuildWarning: true,
       ...(fromRows ? {} : { ledgerIndex: storeIndex(rows) }),
-      ...(reuse ? { reuseProjection: reuse } : {}),
+      reuseProjection: deriveOrReuse,
     };
-    return projectPlan(plan, deps);
+    return { projections: projectPlan(plan, deps), reads };
+  }
+
+  /** Takes the GitHub reads of each task in `ids` the pass derived as its own, digested under `view`, the gateway the
+   *  pass read. `reads` holds exactly the plan tasks the pass derived, each now held. */
+  function keepReads(plan: Plan, view: GithubView, reads: ReadonlyMap<string, GithubReadLog>, ids: ReadonlySet<string>): void {
+    for (const [id, log] of reads) {
+      if (!ids.has(id)) continue;
+      const h = held.get(id)!;
+      githubStale.delete(id);
+      // One entry per distinct read and answer: a derive asks `readFailed()` many times over.
+      const seen = new Set<string>();
+      const keys: string[] = [];
+      const answers: string[] = [];
+      log.keys.forEach((key, at) => {
+        const pair = `${key}\u0001${log.answers[at]!}`;
+        if (seen.has(pair)) return;
+        seen.add(pair);
+        keys.push(key);
+        answers.push(log.answers[at]!);
+      });
+      githubReads.set(id, { keys, digest: githubDigest(view, id, plan.byId.get(id), h.projection, answers) });
+    }
   }
 
   function persist(changed: ReadonlyArray<[string, Held]>, removed: readonly string[]): void {
     if (!lease) return;
     withWriteTransaction(db, lease, () => {
-      for (const [id, h] of changed) sql.upsert.run(id, h.stamp, JSON.stringify(h.projection));
-      for (const id of removed) sql.remove.run(id);
+      for (const [id, h] of changed) {
+        sql.upsert.run(id, h.stamp, JSON.stringify(h.projection));
+        const reads = githubReads.get(id);
+        if (reads) sql.upsertReads.run(id, reads.digest, JSON.stringify(reads.keys));
+        else sql.removeReads.run(id);
+      }
+      for (const id of removed) {
+        sql.remove.run(id);
+        sql.removeReads.run(id);
+      }
       sql.latest.run(LATEST_TS_META, String(latestTsMs));
     });
+  }
+
+  /** W1-T6016: the plan tasks whose GitHub answers moved since their derive, replayed against `view`. */
+  function githubDirt(plan: Plan, view: GithubView): void {
+    if (!rules.github || githubChecked === view) return;
+    for (const task of plan.tasks) {
+      const h = held.get(task.id);
+      if (!h || githubStale.has(task.id)) continue;
+      const reads = githubReads.get(task.id);
+      if (!reads || githubDigest(view, task.id, task, h.projection, reads.keys.map((key) => view.answer(key))) !== reads.digest) githubStale.add(task.id);
+    }
+    githubChecked = view;
   }
 
   function inputs(): { plan: Plan; credit: CreditStore; overrides: string; stampOf: (id: string, task?: Task) => string } {
@@ -921,7 +1175,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const credit = readCredit();
     const overrides = readOverrides();
     lastCredit = { credit, overrides };
-    const global = sha1(JSON.stringify([BOARD_PROJECTION_VERSION, opts.codeVersion ?? "", crossCount, crossSeq, githubGeneration(), sha1(overrides)]));
+    // W1-T6016: no GitHub generation here: what each task read from GitHub is its own dirt (`githubDirt`).
+    const global = sha1(JSON.stringify([BOARD_PROJECTION_VERSION, opts.codeVersion ?? "", crossCount, crossSeq, sha1(overrides)]));
     const stampOf = (id: string, task?: Task): string =>
       `${global}|${task ? hashTask(task) : "-"}|${taskCount.get(id) ?? 0}:${taskSeq.get(id) ?? 0}:${taskActivitySeq.get(id) ?? 0}:${taskWorkerSeq.get(id) ?? 0}|${credit[id] ? sha1(JSON.stringify(credit[id])) : "-"}`;
     return { plan, credit, overrides, stampOf };
@@ -960,13 +1215,16 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   /** Tiers, as the consistency oracle's: recheck, heal, then escalate if the drift survives the heal or recurs within 24 h. */
   function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string): BoardOracleResult {
     const now = clock.now();
-    let fresh = project(plan, credit, overrides);
+    const view = currentGithubView();
+    let pass = project(plan, credit, overrides);
+    let fresh = pass.projections;
     let mismatches = diffAgainstHeld(fresh);
     let outcome: BoardOracleOutcome = "agree";
     const reasons: string[] = [];
     let healedCount = 0;
     if (mismatches.length > 0) {
-      fresh = project(plan, credit, overrides);
+      pass = project(plan, credit, overrides);
+      fresh = pass.projections;
       mismatches = diffAgainstHeld(fresh);
       outcome = mismatches.length > 0 ? "healed" : "transient";
     }
@@ -979,9 +1237,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const removed = mismatches.filter((m) => !fresh.has(m.taskId)).map((m) => m.taskId);
       for (const [id, h] of healed) held.set(id, h);
       for (const id of removed) held.delete(id);
+      keepReads(plan, view, pass.reads, new Set(healed.map(([id]) => id)));
+      for (const id of removed) githubReads.delete(id);
       persist(healed, removed);
       healedCount = mismatches.length;
-      const survived = diffAgainstHeld(project(plan, credit, overrides));
+      const survived = diffAgainstHeld(project(plan, credit, overrides).projections);
       if (survived.length > 0) reasons.push(`${survived.length} task(s) still differ after the heal (${survived.slice(0, 5).map((m) => m.taskId).join(", ")})`);
       const prior = heals.filter((at) => at >= now - BOARD_ORACLE_RECURRENCE_MS);
       if (prior.length > 0) reasons.push(`the board drifted again within 24 h of an earlier self-heal (${prior.length} heal(s) in the window)`);
@@ -1021,7 +1281,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const { plan, credit, overrides, stampOf } = inputs();
       const stamps = new Map<string, string>();
       for (const task of plan.tasks) stamps.set(task.id, stampOf(task.id, task));
-      const moved = plan.tasks.some((t) => held.get(t.id)?.stamp !== stamps.get(t.id)) || held.size === 0;
+      const view = currentGithubView();
+      githubDirt(plan, view);
+      const moved = plan.tasks.some((t) => held.get(t.id)?.stamp !== stamps.get(t.id) || githubStale.has(t.id)) || held.size === 0;
       const idle: BoardUpdate = { derived: false, caughtUp, deferred: false, newRows, rederived: [], reused: plan.tasks.length, full: false, elapsedMs: 0 };
       if (!options.force && !moved && !pending && !clockDue && !oracleDue) return idle;
       if (!options.force && lastDeriveAt !== undefined && now - lastDeriveAt < BOARD_DERIVE_DEBOUNCE_MS) return { ...idle, deferred: true };
@@ -1033,13 +1295,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const rederived: string[] = [];
       const reuse = (task: Task): StatusProjection | undefined => {
         const h = held.get(task.id);
-        const stale = !h || h.stamp !== stamps.get(task.id) || ledgerClockDue.has(task.id)
+        const stale = !h || h.stamp !== stamps.get(task.id) || ledgerClockDue.has(task.id) || githubStale.has(task.id)
           || (clockDue && (projectionAgesWithTheClock(h.projection) || h.projection.independentFailureBlocked === true));
         if (!stale) return h.projection;
         rederived.push(task.id);
         return undefined;
       };
-      const next = project(plan, credit, overrides, reuse);
+      const { projections: next, reads } = project(plan, credit, overrides, reuse);
       const changed: Array<[string, Held]> = [];
       const planIds = new Set(plan.tasks.map((t) => t.id));
       for (const [id, projection] of next) {
@@ -1048,7 +1310,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         held.set(id, h);
       }
       const removed = [...held.keys()].filter((id) => !next.has(id));
-      for (const id of removed) held.delete(id);
+      for (const id of removed) {
+        held.delete(id);
+        githubReads.delete(id);
+        githubStale.delete(id);
+      }
+      keepReads(plan, view, reads, new Set(rederived));
       derivedLatestTsMs = latestTsMs;
       persist(changed, removed);
       pending = false;

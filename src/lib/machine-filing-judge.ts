@@ -35,7 +35,7 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { hostWorktreeGit } from "./worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import type { GardenWorkspacePort, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
 import { machineFilingAdmissionViolations, parseTasksFromYaml, type MachineFilingAdmissionContext, type Plan, type Task } from "./plan.js";
@@ -529,6 +529,18 @@ export function machineJudgeInputs(repoRoot: string, stateDir: string): string {
     plan = hostWorktreeGit(repoRoot, ["rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" }).trim();
   } catch {
     // deliberate: an unresolvable plan tree is its own stamp; it never matches a tree a pass recorded.
+    plan = "unreadable";
+  }
+  const releases = statSync(join(stateDir, OPERATOR_RELEASES_FILE), { throwIfNoEntry: false });
+  return `${plan}:${releases ? `${releases.size}:${releases.mtimeMs}` : "absent"}`;
+}
+
+export async function machineJudgeInputsAsync(repoRoot: string, stateDir: string): Promise<string> {
+  let plan: string;
+  try {
+    plan = (await hostWorktreeGitAsync(repoRoot, ["rev-parse", `HEAD:${relative(repoRoot, resolveRepoLayout(repoRoot).planDir)}`], { stdio: "pipe" })).trim();
+  } catch {
+    // An unreadable tree retains the existing input stamp instead of claiming no change.
     plan = "unreadable";
   }
   const releases = statSync(join(stateDir, OPERATOR_RELEASES_FILE), { throwIfNoEntry: false });

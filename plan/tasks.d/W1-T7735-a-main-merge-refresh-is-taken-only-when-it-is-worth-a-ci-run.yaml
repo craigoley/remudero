@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — whether the daemon writes main into a contributor branch; it decides CI spend and review churn board-wide
   band_meaning: blast-radius
   origin: "operator session 2026-10-10: throughput study (ledger union 05:53-15:39Z, gh PR timelines), operator asked for flow improvements"
-  plan_refs: [W1-T4351, W1-T7214, W1-T6022, W1-T528, W1-T5921, W1-T2789, W1-T6404, W1-T6405, W1-T5490, W1-T5903, W1-T5939, W1-T7736, W1-T100]
+  plan_refs: [W1-T4351, W1-T7214, W1-T6022, W1-T528, W1-T5921, W1-T2789, W1-T6404, W1-T6405, W1-T5490, W1-T5903, W1-T5939, W1-T7736, W1-T100, W1-T9595]
   files: [src/lib/refresh-value.ts, src/lib/sweep.ts, src/run-task.ts, src/lib/ledger.ts, test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts]
   status: queued
   priority: 1
@@ -76,7 +76,8 @@
        main-merge refresh path consults BEFORE `updateBranch`. Those paths are:
        - the W1-T528 general rung (distance, distance-unknown, armed-behind, stale-gate);
        - the W1-T7214 ready-overlap refresh on both passes;
-       - the W1-T4351 base-red and base-fixed slot;
+       - the W1-T4351 base-red and base-fixed refresh (operator ruling 2026-10-15: admitted by W1-T9595's paced,
+         oldest-held-first admission rather than one slot per pass; it still consults `decideRefresh` per head);
        - `tryPlanRepair`'s base-red refresh.
        It weighs BENEFIT against COST.
        - Benefit inputs: the overlap between the PR's files and main's delta since the PR's merge base;
@@ -105,8 +106,12 @@
          light pass. This keeps W1-T528's AT-MOST-ONCE contract.
        - Requests are ordered by closeness to merge: ready and reviewed first, then green awaiting review,
          then pending, then red.
-       - No path calls `updateBranch` for more than one PR in a pass. The light pass keeps
+       - No FRESHNESS path calls `updateBranch` for more than one PR in a pass. The light pass keeps
          `updateBranch: undefined` for its per-PR fan-out.
+       - EXCEPTION (operator ruling 2026-10-15): a refresh for a red that main has since fixed is a repair, not
+         freshness. W1-T9595 admits such heads oldest-held first, paced by how fast CI starts on earlier
+         admissions (no fixed count), because the single W1-T4351 slot held #11776/#11777 for 13 passes on
+         2026-10-14. Each admitted refresh still writes the decision row with `forced_by: base-fixed-admission`.
     5. SELF-TUNING ROW.
        - Each decision writes `sweep.refresh.decided` with: PR, head, path, decision, overlap files (capped
          list plus count), strict, ci_in_flight, judge verdict, predicted cost (CI-min) and predicted benefit.

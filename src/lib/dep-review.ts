@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -1018,4 +1019,210 @@ export function reconcileDependabotRefresh(args: {
     edited_head: record.command === DEPENDABOT_RECREATE_COMMAND, red_checks: args.result.redChecks,
   });
   return "requested";
+}
+
+// ── W1-T9586 — an own red on a minor/patch Dependabot head becomes a migration proposal (W1-T2705's capture path).
+
+/** `main-passes`: main's newest genuine run passes a check this head fails; `unclassified`: nothing says whose red it is. */
+export type DependabotOwnRedSignal = "main-passes" | "unclassified";
+export const DEPENDABOT_OWN_RED_SIGNALS: readonly DependabotOwnRedSignal[] = ["main-passes", "unclassified"];
+
+export function dependabotOwnRedSignal(
+  verdict: DependabotRefreshVerdict | undefined,
+  main: { state: string; failingChecks: readonly string[]; observedChecks?: readonly string[] } | undefined,
+  failing: readonly string[],
+): DependabotOwnRedSignal | undefined {
+  if (verdict?.kind !== "own" || failing.length === 0) return undefined;
+  const observed = main?.state === "green" || main?.state === "red" ? main.observedChecks : undefined;
+  return observed !== undefined && failing.some((name) => observed.includes(name) && !main!.failingChecks.includes(name))
+    ? "main-passes" : "unclassified";
+}
+
+export function dependabotReviewArgs(refresh: DependabotRefreshVerdict | undefined, ownRed: DependabotOwnRedSignal | undefined): string[] {
+  if (refresh?.kind === "request") return ["--dependabot-refresh", refresh.cause];
+  return ownRed === undefined ? [] : ["--dependabot-own-red", ownRed];
+}
+
+interface DependabotOwnRedBump { dependency: string; fromVersion: string; toVersion: string }
+
+interface DependabotOwnRedRecord {
+  headSha: string;
+  bumps: DependabotOwnRedBump[];
+  redChecks: string[];
+  firstSeenMs: number;
+  lastSeenMs: number;
+  feedbackId?: string;
+}
+
+interface DependabotOwnRedProposal { feedbackId: string; submissionKey: string; bumps: string[]; prNumbers: number[]; filedAtMs: number }
+
+const OWN_RED_PROPOSALS_FILE = "own-red-proposals.json";
+
+function ownRedBumpKey(b: DependabotOwnRedBump): string {
+  return `${b.dependency.trim().toLowerCase()}@${b.toVersion}`;
+}
+
+function ownRedBumpText(b: DependabotOwnRedBump): string {
+  return `${b.dependency} ${b.fromVersion} -> ${b.toVersion}`;
+}
+
+export function depReviewOwnRedSubmissionKey(owner: string, repo: string, bumps: readonly DependabotOwnRedBump[]): string {
+  const targets = [...new Set(bumps.map(ownRedBumpKey))].sort().join(",");
+  return `dep-review:own-red:${owner.trim().toLowerCase()}/${repo.trim().toLowerCase()}:${targets}`;
+}
+
+export function renderDepReviewOwnRedFeedback(args: {
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  basis: "main-passes" | "survived-refresh";
+  bumps: readonly DependabotOwnRedBump[];
+  redChecks: readonly string[];
+  siblings: ReadonlyArray<{ prNumber: number; bumps: readonly DependabotOwnRedBump[] }>;
+}): string {
+  return [
+    `Land the dependency bump(s) of Dependabot PR #${args.prNumber}, whose red is its own: ${args.title}`,
+    "",
+    args.basis === "main-passes"
+      ? "Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes."
+      : "Dependabot proposed a minor/patch update whose red survived a requested Dependabot refresh.",
+    "A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest",
+    "allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:",
+    "tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked",
+    "SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.",
+    "Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries",
+    "their hunks, or Dependabot does once main carries the versions.",
+    "",
+    `PR: ${args.prUrl}`,
+    `Head: ${args.headSha}`,
+    `Bumps: ${args.bumps.map(ownRedBumpText).join(", ")}`,
+    `Red checks: ${args.redChecks.join(", ")}`,
+    `Sibling Dependabot PRs folded in: ${args.siblings.length === 0 ? "none"
+      : args.siblings.map((s) => `#${s.prNumber} (${s.bumps.map(ownRedBumpText).join(", ")})`).join("; ")}`,
+    "",
+    "Dependabot proposal body:",
+    "",
+    args.body.trim().length > 0 ? args.body.trim() : "(empty body)",
+  ].join("\n");
+}
+
+function isOwnRedRecord(r: unknown): r is DependabotOwnRedRecord {
+  const o = r as DependabotOwnRedRecord | null;
+  return !!o && typeof o.headSha === "string" && Array.isArray(o.bumps) && Array.isArray(o.redChecks) &&
+    typeof o.firstSeenMs === "number" && typeof o.lastSeenMs === "number" &&
+    (o.feedbackId === undefined || typeof o.feedbackId === "string");
+}
+
+function readOwnRedProposals(path: string): DependabotOwnRedProposal[] {
+  if (!existsSync(path)) return [];
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as { proposals?: unknown } | null;
+  const proposals = parsed === null || typeof parsed !== "object" ? undefined : parsed.proposals;
+  if (!Array.isArray(proposals) || proposals.some((p: DependabotOwnRedProposal) =>
+    !p || typeof p.feedbackId !== "string" || !Array.isArray(p.bumps) || !Array.isArray(p.prNumbers))) {
+    throw new Error("invalid dependency own-red proposals; refusing to file a duplicate");
+  }
+  return proposals;
+}
+
+/** Siblings held own-red on their current head since this head was first seen; an unreadable one is not named. */
+function ownRedSiblings(dir: string, prNumber: number, sinceMs: number): Array<{ prNumber: number; bumps: DependabotOwnRedBump[] }> {
+  const siblings: Array<{ prNumber: number; bumps: DependabotOwnRedBump[] }> = [];
+  for (const name of readdirSync(dir).sort()) {
+    const m = /^PR(\d+)\.json$/.exec(name);
+    if (!m || Number(m[1]) === prNumber) continue;
+    let state: DepReviewHoldState & { ownRed?: unknown };
+    try {
+      state = JSON.parse(readFileSync(join(dir, name), "utf8"));
+    } catch (error) {
+      void error; // its own dep-review pass fails on the same file
+      continue;
+    }
+    const own = state?.ownRed;
+    if (isOwnRedRecord(own) && own.headSha === state.headSha && state.heldSinceMs !== null &&
+        own.feedbackId === undefined && own.lastSeenMs >= sinceMs) {
+      siblings.push({ prNumber: Number(m[1]), bumps: own.bumps });
+    }
+  }
+  return siblings;
+}
+
+export type DependabotOwnRedOutcome = "none" | "observed" | "captured" | "folded" | "proposed" | "unkeyed" | "failed";
+
+/** Pass one records the head so held siblings register; pass two files ONE proposal; named bumps fold into it. */
+export function reconcileDependabotOwnRed(args: {
+  statePath: string;
+  owner: string;
+  repo: string;
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  result: DepReviewResult;
+  signal: DependabotOwnRedSignal | undefined;
+  nowMs: number;
+  capture: (args: { raw: string; submissionKey: string }) => { id: string };
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotOwnRedOutcome {
+  if (args.result.decision !== "hold" || args.result.redChecks.length === 0 || args.signal === undefined) return "none";
+  const state = readRefreshState(args.statePath, args.headSha) as DepReviewHoldState & { ownRed?: unknown };
+  if (state.ownRed !== undefined && !isOwnRedRecord(state.ownRed)) throw new Error("invalid dependency own-red state; refusing to file a duplicate");
+  const survived = (state.refreshes ?? []).some((r) => r.delivered && r.headSha !== args.headSha);
+  const basis = args.signal === "main-passes" ? "main-passes" : survived ? "survived-refresh" : undefined;
+  if (basis === undefined) return "none";
+  const bumps = parseDependabotBumpFacts(args.title, args.body)
+    .map((b) => ({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
+  if (bumps.length === 0) {
+    args.log("dep-review.own_red.unkeyed", { pr_number: args.prNumber, head_sha: args.headSha, red_checks: args.result.redChecks });
+    return "unkeyed";
+  }
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const prior = isOwnRedRecord(state.ownRed) && state.ownRed.headSha === args.headSha ? state.ownRed : undefined;
+  const record: DependabotOwnRedRecord = prior ?? { headSha: args.headSha, bumps, redChecks: args.result.redChecks, firstSeenMs: args.nowMs, lastSeenMs: args.nowMs };
+  record.lastSeenMs = args.nowMs;
+  record.redChecks = args.result.redChecks;
+  state.ownRed = record;
+  save();
+  if (record.feedbackId !== undefined) return "proposed";
+  if (prior === undefined) {
+    args.log("dep-review.own_red.observed", { pr_number: args.prNumber, head_sha: args.headSha, basis, red_checks: args.result.redChecks });
+    return "observed";
+  }
+  const registryPath = join(dirname(args.statePath), OWN_RED_PROPOSALS_FILE);
+  const proposals = readOwnRedProposals(registryPath);
+  const mine = bumps.map(ownRedBumpKey);
+  const carrier = proposals.find((p) => mine.every((k) => p.bumps.includes(k)));
+  if (carrier !== undefined) {
+    record.feedbackId = carrier.feedbackId;
+    save();
+    args.log("dep-review.own_red.folded", { pr_number: args.prNumber, head_sha: args.headSha, feedback_id: carrier.feedbackId });
+    return "folded";
+  }
+  const siblings = ownRedSiblings(dirname(args.statePath), args.prNumber, record.firstSeenMs)
+    .filter((s) => !proposals.some((p) => s.bumps.every((b) => p.bumps.includes(ownRedBumpKey(b)))));
+  const all = [...bumps, ...siblings.flatMap((s) => s.bumps)];
+  const submissionKey = depReviewOwnRedSubmissionKey(args.owner, args.repo, all);
+  const raw = renderDepReviewOwnRedFeedback({ ...args, basis, bumps, redChecks: args.result.redChecks, siblings });
+  let entry: { id: string };
+  try {
+    entry = args.capture({ raw, submissionKey });
+  } catch (error) {
+    args.log("dep-review.own_red.capture_failed", {
+      pr_number: args.prNumber, head_sha: args.headSha, submission_key: submissionKey, error: String((error as Error)?.message ?? error),
+    });
+    return "failed";
+  }
+  writeAtomic(registryPath, `${JSON.stringify({ proposals: [...proposals, {
+    feedbackId: entry.id, submissionKey, bumps: [...new Set(all.map(ownRedBumpKey))].sort(),
+    prNumbers: [args.prNumber, ...siblings.map((s) => s.prNumber)], filedAtMs: args.nowMs,
+  }] })}\n`);
+  record.feedbackId = entry.id;
+  save();
+  args.log("dep-review.own_red.feedback_captured", {
+    pr_number: args.prNumber, head_sha: args.headSha, feedback_id: entry.id, submission_key: submissionKey, basis,
+    red_checks: args.result.redChecks, folded_prs: siblings.map((s) => s.prNumber),
+  });
+  return "captured";
 }

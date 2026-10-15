@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush, setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { daemonBoot, runDaemon, runLanePool, type LanePoolControl } from "../src/lib/daemon.js";
 import { adoptRunChildren } from "../src/lib/run-child.js";
 import { childIdentity, readSpec, RUN_CHILD_SCHEMA, writeSpec, writeStatus, type RunChildStatus } from "../src/lib/run-child-contract.js";
@@ -12,9 +14,19 @@ import type { RunResult } from "../src/lib/run-result.js";
 import { daemonCommand, ledgerPathFor, orphanSweepRunActive } from "../src/run-task.js";
 import { defaultInstance } from "../src/lib/host-memory-ledger.js";
 import { detachSweepAction } from "../src/lib/sweep.js";
-import { sweepOrphanWorkers } from "../src/lib/worker-containment.js";
+import {
+  defaultReadMarkers, killProcessGroup, RUN_ID_ENV, spawnDetachedGroup, sweepOrphanWorkers,
+  TASK_ID_ENV, workerInstallationScope, WORKER_SCOPE_ENV,
+} from "../src/lib/worker-containment.js";
 import { acquireInflightLock, readInflightLock } from "../src/lib/inflight-lock.js";
 import { sweepInflightLocksWithReceipts } from "../src/lib/benchmark-run.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
+import type { RunChildHandle } from "../src/lib/run-child.js";
+
+const { buildChildEntries } = createRequire(import.meta.url)("../scripts/build-child-entries.mjs") as {
+  buildChildEntries(options: { root: string; entries: { name: string; source: string }[]; workers: string[] }): Promise<{ sourceHash: string }>;
+};
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -84,6 +96,36 @@ test("W1-T9086: a terminal child settles once and a lost one takes the crash pat
     assert.equal(f.rows.filter((r) => r.step === "run_child.lost").length, 1);
     assert.equal(f.rows.filter((r) => r.step === "run_child.settled").length, 2);
     assert.deepEqual(f.adopt(), []);
+  } finally { f.cleanup(); }
+});
+
+test("an adopted live child keeps its occupied lane when its task left the current plan", async () => {
+  const f = fixture();
+  try {
+    const child = f.add("retired-run", {}, "retired-task");
+    const path = join(f.root, "tasks.yaml");
+    writeFileSync(path, "[]\n");
+    let stop = false;
+    let finished = false;
+    const run = runDaemon(loadPlan(path), {
+      adoptRunChildren: f.adopt, refreshMerged: () => () => false,
+      checkStop: () => stop ? "done" : undefined,
+      runOne: async () => assert.fail("an adopted child must never be dispatched again"),
+      log: (step, fields) => { f.log(step, fields); if (step === "dispatch.settled_set") stop = true; },
+      sleep: async () => { await delay(1); },
+    }, { laneCount: 1, pollIntervalMs: 5 });
+    void run.then(() => { finished = true; });
+    await flush();
+    assert.equal(f.rows.filter((row) => row.step === "run_child.adopted").length, 1);
+    assert.equal(finished, false, "the occupied child keeps the otherwise empty daemon pass open");
+    writeStatus(child.dir, { ...child.status, state: "done", result: result("retired-task") });
+    const outcome = await run;
+    assert.deepEqual(outcome.attempted, [], "adoption is not a fresh dispatch attempt");
+    const settled = f.rows.filter((row) => row.step === "run_child.settled");
+    assert.equal(settled.length, 1);
+    assert.equal(settled[0].task_id, "retired-task");
+    assert.deepEqual(f.rows.find((row) => row.step === "dispatch.settled_set")!.tasks,
+      [{ id: "retired-task", status: "fulfilled" }], "the occupied lane retains the removed task's identity");
   } finally { f.cleanup(); }
 });
 
@@ -341,6 +383,140 @@ test("daemonCommand adopts before the boot lock sweep and reads settlement recei
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
+    f.cleanup();
+  }
+});
+
+test("daemonCommand forwards a real spawned child's handle and settles from that child, not the in-process fallback", async () => {
+  const f = fixture();
+  const repo = gitRepo({ kind: "adoption-cli-repo" });
+  const origin = gitRepo({ bare: true, kind: "adoption-cli-origin" });
+  const shim = ghShim([{ when: "", exit: 1, stderr: "fixture: GitHub is unavailable" }]);
+  const oldHome = process.env.HOME;
+  const oldPath = process.env.PATH;
+  let child: RunChildHandle | undefined;
+  try {
+    mkdirSync(join(f.root, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(f.root, ".config", "remudero", "config.json"), JSON.stringify({ root: f.root, claudeBin: "/bin/true" }));
+    process.env.HOME = f.root;
+    process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+    mkdirSync(join(repo.dir, "plan"));
+    writeFileSync(join(repo.dir, "plan", "tasks.yaml"),
+      "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  status: queued\n");
+    repo.git("add", "plan/tasks.yaml");
+    repo.git("commit", "-qm", "fixture plan");
+    repo.addRemote("origin", origin.dir);
+    repo.git("push", "-qu", "origin", "main");
+    const engine = join(f.root, "engine-build");
+    mkdirSync(join(engine, "src"), { recursive: true });
+    symlinkSync(fileURLToPath(new URL("../node_modules", import.meta.url)), join(engine, "node_modules"), "dir");
+    // Build a bounded entry with the real contract writer, not a worker/provider. The production
+    // engine-currency check, spawn, status watcher and CLI runOne wiring remain unmocked.
+    const contract = fileURLToPath(new URL("../src/lib/run-child-contract.ts", import.meta.url));
+    writeFileSync(join(engine, "src", "run-child-main.ts"), `
+import { readSpec, writeStatus, childIdentity, RUN_CHILD_SCHEMA } from ${JSON.stringify(contract)};
+const dir = process.argv[process.argv.indexOf("--run-dir") + 1];
+const spec = readSpec(dir);
+if (!spec.ok) throw new Error(spec.detail);
+writeStatus(dir, { schema: RUN_CHILD_SCHEMA, runId: spec.value.runId, identity: childIdentity(process.pid),
+  engineSha: spec.value.engine.sha, entryKind: "bundle", phase: "implement", heartbeatAt: Date.now(), state: "done",
+  result: { taskId: spec.value.taskId, runId: spec.value.runId, merged: false, verdict: "no_pr", costUsd: 0 } });
+`);
+    const built = await buildChildEntries({ root: engine, entries: [{ name: "run-child", source: "src/run-child-main.ts" }], workers: [] });
+    writeFileSync(join(engine, "engine.json"), JSON.stringify({ sha: repo.git("rev-parse", "HEAD"), sourceHash: built.sourceHash, builtAt: Date.now() }));
+    mkdirSync(join(f.stateRoot, "engines"), { recursive: true });
+    renameSync(engine, join(f.stateRoot, "engines", built.sourceHash));
+    const code = await daemonCommand(["--allow-self-target", "--max", "0"], {
+      repoRoot: repo.dir, readRunChildMode: () => "on",
+      checkStop: () => undefined, checkPause: () => undefined,
+      startGithubAppRefresh: () => ({ armed: false }),
+      daemonBoot: (log, env) => daemonBoot(log, env),
+      runTask: async () => assert.fail("a spawned child must not fall through to runTask"),
+      runDaemon: async (_plan, deps) => {
+        let forwarded = 0;
+        const value = await deps.runOne("A", { restartAtWorkerBoundary: () => undefined,
+          onChild: (handle) => { forwarded++; child = handle; } });
+        assert.equal(forwarded, 1, "the actual daemonCommand closure must forward the full handle exactly once");
+        assert.ok(child?.started);
+        assert.equal(value, await child.settled, "runOne returns the child's settlement, not a fabricated result");
+        assert.equal(value.taskId, "A");
+        assert.equal(value.runId, child.runId);
+        assert.notEqual(child.pid, process.pid, "the default spawn really started a separate process");
+        assert.equal(typeof child.detach, "function");
+        child.acknowledge!({ status: "fulfilled", value });
+        return { attempted: ["A"], merged: [], costUsd: 0, ticks: 1, stopReason: "max_reached" };
+      },
+    });
+    assert.equal(code, 0);
+  } finally {
+    child?.detach?.();
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    repo.cleanup(); origin.cleanup();
+    rmSync(shim.dir, { recursive: true, force: true });
+    f.cleanup();
+  }
+});
+
+test("daemonCommand's real orphan sweep protects an adopted run without an inflight lock", async () => {
+  const f = fixture();
+  const shim = ghShim([{ when: "", exit: 1, stderr: "fixture: GitHub is unavailable" }]);
+  const oldHome = process.env.HOME;
+  const oldPath = process.env.PATH;
+  let worker: ReturnType<typeof spawnDetachedGroup> | undefined;
+  let adopted: ReturnType<typeof adoptRunChildren> = [];
+  try {
+    mkdirSync(join(f.root, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(f.root, ".config", "remudero", "config.json"), JSON.stringify({ root: f.root, claudeBin: "/bin/true" }));
+    process.env.HOME = f.root;
+    process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+    const child = f.add("A");
+    const spec = readSpec(child.dir);
+    if (!spec.ok) throw new Error(spec.detail);
+    writeSpec(child.dir, { ...spec.value, instance: defaultInstance(f.root).name });
+    const path = join(f.root, "tasks.yaml");
+    writeFileSync(path, "[]\n");
+    // Only this test-owned worker carries this unique temporary installation scope. The real
+    // candidate/marker readers and per-poll closure stay wired; no live installation can match it.
+    worker = spawnDetachedGroup({ command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], env: {
+      ...process.env, [RUN_ID_ENV]: "A", [TASK_ID_ENV]: "A", [WORKER_SCOPE_ENV]: workerInstallationScope(f.root),
+    } });
+    const pid = worker.pid;
+    const until = Date.now() + 5_000;
+    while (!defaultReadMarkers(pid) && Date.now() < until) await delay(20);
+    assert.equal(defaultReadMarkers(pid)?.runId, "A", "positive control: the real marker reader sees the owned worker");
+    assert.equal(readInflightLock(join(f.stateRoot, "inflight"), "A"), null,
+      "no lock may accidentally protect the adopted run");
+    const code = await daemonCommand(["--allow-self-target", "--plan", path, "--max", "0"], {
+      readRunChildMode: () => "on", checkStop: () => undefined, checkPause: () => undefined,
+      startGithubAppRefresh: () => ({ armed: false }),
+      daemonBoot: (log, env) => daemonBoot(log, env),
+      runDaemon: async (_plan, deps) => {
+        const children = deps.adoptRunChildren!();
+        adopted = children;
+        assert.deepEqual(children.map((entry) => entry.runId), ["A"]);
+        const report = await deps.sweepOrphans!();
+        assert.ok(report.leftAlone.some((entry) => entry.pid === pid && entry.reason === "run_active"),
+          "the actual per-poll closure must pass the adopted run set to its activity guard");
+        assert.deepEqual(report.killed, [], "the exact-scope adopted worker must not be killed");
+        assert.doesNotThrow(() => process.kill(pid, 0));
+        writeStatus(child.dir, { ...child.status, state: "done", result: result("A") });
+        const value = await children[0].settled;
+        children[0].acknowledge!({ status: "fulfilled", value });
+        return { attempted: [], merged: [], costUsd: 0, ticks: 0, stopReason: "max_reached" };
+      },
+    });
+    assert.equal(code, 0);
+  } finally {
+    for (const child of adopted) child.detach?.();
+    if (worker) killProcessGroup(worker.pid);
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    rmSync(shim.dir, { recursive: true, force: true });
     f.cleanup();
   }
 });

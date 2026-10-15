@@ -13,7 +13,7 @@
   files:
     - src/lib/flake-incident-gardener.ts
     - test/a-fix-round-flake-counts-toward-a-flake-incident.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # W1-T9561's own design says the gardener counts these rows; until this lands every rerouted flake is evidence nobody reads
   attempts: 0
   rationale: |

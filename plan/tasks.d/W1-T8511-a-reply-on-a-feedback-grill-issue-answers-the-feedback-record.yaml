@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-12: escalation triage of #9913 and #9894"
   plan_refs: [W1-T4471, W1-T4676, W1-T42]
   files: [src/lib/escalation-answers.ts, src/lib/panel-graph.ts, src/run-task.ts, test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-14: 10 operator answers sit stranded in the host question store (plan/questions.ndjson) while their feedback records still read `status: grilling` — #8934, #9894, #9913, #10150, #10199, #10241, #10911, #10961, #11067, #11149; this task is the only path that applies them (was 1.5)
   attempts: 0
   rationale: |

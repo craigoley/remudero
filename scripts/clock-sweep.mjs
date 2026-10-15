@@ -194,12 +194,18 @@ export function classifySweep(
 // `exec` is injected LAST with the real default so a test can drive the whole orchestration
 // without spawning node once. That is not just for speed: every suite this script runs is a REAL
 // test file, so an un-injectable runner would make covering main() cost a full sweep.
+// W1-T9587: every suite runs under the same preload as `npm test` and CI. Without it a suite's
+// loadConfig creates a real config and shells out to `which claude`, absent on a runner, so 30
+// suites failed at +0 days and every actions bump touching clock-sweep.yml went red.
+export const SUITE_PRELOAD = "test/setup/tmp-hygiene.ts";
+
 export function runSuite(suite, days, exec = execFileSync) {
   const isolatedTmp = mkdtempSync(join(tmpdir(), "rmd-clock-sweep-"));
   try {
     exec(
       process.execPath,
-      ["--test", "--test-reporter=tap", "--import", "tsx", "--import", join(REPO, "scripts", "clock-shift.mjs"), join("test", `${suite}.test.ts`)],
+      ["--test", "--test-reporter=tap", "--import", "tsx", "--import", join(REPO, SUITE_PRELOAD),
+        "--import", join(REPO, "scripts", "clock-shift.mjs"), join("test", `${suite}.test.ts`)],
       { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, TMPDIR: isolatedTmp, FK_SHIFT_DAYS: String(days) } },
     );
     return { failed: false, output: "" };
@@ -297,7 +303,7 @@ export function renderReport({ drift, newDrift, staleExclusions, unreached, brow
       out.push(`\n  test/${d.suite}.test.ts`);
       out.push(fuse === 0 ? "    fails by      : +0 days - NOT CLOCK DRIFT: fails with no shift (a runner or environment defect, for example a missing browser)" : `    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
       for (const t of d.titles) out.push(`    failing test  : ${t}`);
-      out.push(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
+      out.push(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import ./${SUITE_PRELOAD} --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
       out.push(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
       if (d.detail) {
         out.push(`    detail        :`);

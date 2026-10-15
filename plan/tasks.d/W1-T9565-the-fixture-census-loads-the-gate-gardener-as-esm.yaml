@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: \"fix all issues found\"; the coverage-ratchet red on #11757 traced to two CommonJS compiles of the src graph. Operator approved this filing 2026-10-14"
   plan_refs: [W1-T421, W1-T7812, W1-T3655, W1-T5826, W1-T9300]
   files: [scripts/expiring-fixture-census.mjs, test/expiring-fixture-census.test.ts, test/the-census-watches-its-own-base.test.ts, test/a-fixture-crossing-on-main-warns-ahead-instead-of-reddening-ci.test.ts, test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts, test/the-merge-queue-runs-the-recorded-literal-gates.test.ts, test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |
