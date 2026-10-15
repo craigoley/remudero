@@ -42,7 +42,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "n
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
-import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
+import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
 import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
@@ -13901,7 +13901,15 @@ export async function runFixRung(opts: {
     };
     const fixReport = workerTranscript(fixResult);
     let fixOutcome = anchoredFixOutcome(fixReport);
-    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
+    const attributeRed = async (outcome: TypedFixOutcome | undefined) => outcome?.kind !== "NEEDS_SCOPE" ? undefined : readRedAttribution({
+      failingTestFiles: baseReproductionFiles(priorCiFailures ?? []), headSha: priorHeadSha, prNumber, ledger: roundLedger, rerunReproduced: refutedFlake,
+      isHarnessPath: isCiHarnessPath, mainTip: () => deps.readMainTip ? deps.readMainTip() : mainTipViaGit(opts.worktreePath),
+      changedPaths: async (main, head) => (await hostWorktreeGitAsync(opts.worktreePath, ["diff", "--name-only", "-z", `${main}...${head}`])).split("\0").filter(Boolean),
+      closure: buildImportClosureRead(opts.worktreePath, deps.log),
+      namedInClosure: async (head, files, needles) => new Set((await hostWorktreeGitAsync(opts.worktreePath, ["grep", "-ohF", ...needles.flatMap((n) => ["-e", n]), head, "--", ...files])
+        .catch((error: { code?: unknown }) => { if (error.code === 1) return ""; throw error; })).split("\n").filter(Boolean)),
+    });
+    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
     const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
       derivedCommit: fixOutcome?.kind === "FIXED"
@@ -13956,7 +13964,7 @@ export async function runFixRung(opts: {
         // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
         fixOutcome = anchoredFixOutcome(answeredReport);
-        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
+        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) });
         if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
           harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
         }
@@ -14226,6 +14234,12 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes: strikes - 1, retriggers,
           reason: "flake claim repeated after refutation — no-op round" };
       }
+      const rerouted = fixAction.rerouted;
+      if (rerouted) {
+        const saved = await hostWorktreeGitAsync(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]).then(workerChangedPaths, () => undefined);
+        deps.log("fix.scope_rerouted", { ...scopeReroutedFields(rerouted, fixReport, saved?.filter((path) => !fixDeclaredPaths.includes(path))), head_sha: priorHeadSha });
+        fixClaimFields.flake_claim_source = "scope-rerouted";
+      }
       const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
       const failures = priorCiFailures ?? [];
       let requeued = failures.length > 0 && !!priorHeadSha;
@@ -14259,6 +14273,7 @@ export async function runFixRung(opts: {
           const handoff = ciHandoff(ci);
           if (handoff) { logFixDone(); return handoff; }
           green = ciGateState(ci) === "green" && (!ciGateSha(ci) || ciGateSha(ci) === priorHeadSha);
+          for (const row of rerouted && !deferred ? fixRoundFlakeRetryRows(rerouted, green, prNumber, priorHeadSha) : []) deps.log("test.flake_retry", row);
         } catch (error) {
           deps.log("fix.flake_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
         }
@@ -14275,7 +14290,8 @@ export async function runFixRung(opts: {
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }
     if (fixAction.kind === "scope-needed") {
-      deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
+      deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
+        ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
       let amendment: ScopeAmendmentOutcome;
       const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
       if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
