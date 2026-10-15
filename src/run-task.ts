@@ -54245,10 +54245,11 @@ export async function dispatchAlertFixRun(
   }
 }
 
-/** W1-T6403 — the synthetic task id a red-main repair PR carries: one per offending merge. */
+/** W1-T6403 — a red-main fix PR's synthetic task id, one per offending merge; W1-T9583 cuts each lane's head `run-<its id>-<epochMs>`. */
 export function mainRepairTaskId(offendingSha: string): string {
   return `main-repair-${offendingSha.slice(0, 12)}`;
 }
+export const mainRepairRevertTaskId = (offendingSha: string): string => `main-repair-revert-${offendingSha.slice(0, 12)}`;
 
 /**
  * W1-T8572 — THE DISPATCHER WRITES A MAIN-REPAIR PR'S ACCEPTANCE BLOCK. Each `request.testFiles` entry fails on main
@@ -54410,7 +54411,7 @@ export async function dispatchMainRepairFixRun(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "main-repair", ...extra });
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
-  const branch = `main-repair-fix-${request.offendingSha.slice(0, 12)}-${systemClock.now()}`;
+  const branch = `run-${taskId}-${systemClock.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   const bodyFile = mainRepairBodyFile(config, taskId);
   try {
@@ -54521,7 +54522,7 @@ export function mainRepairRevertCriteria(
 
 /** The revert PR body: the failing check, the fix PR, and why that fix was not enough. */
 export function mainRepairRevertBody(request: MainRepairRevertRequest, evidence: { testFiles?: readonly string[]; revertDiff?: string } = {}): string {
-  const taskId = mainRepairTaskId(request.offendingSha);
+  const taskId = mainRepairRevertTaskId(request.offendingSha);
   const pr = request.offendingPr !== undefined ? `#${request.offendingPr}` : "an unnamed PR";
   return [
     `Reverts \`${request.offendingSha}\` (${pr}), the first red merge on \`${request.branch}\`.`,
@@ -54558,12 +54559,13 @@ export async function openMainRepairRevertPr(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "main-repair", ...extra });
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
-  const branch = `main-repair-revert-${request.offendingSha.slice(0, 12)}-${systemClock.now()}`;
+  const branch = `run-${mainRepairRevertTaskId(request.offendingSha)}-${systemClock.now()}`;
   const worktreePath = join(worktreesDir(config), branch);
   try {
     await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { log });
     try {
       await hostWorktreeGitAsync(worktreePath, ["revert", "--no-edit", request.offendingSha]);
+      await hostWorktreeGitAsync(worktreePath, ["commit", "--amend", "--quiet", "--no-edit", "--trailer", `Remudero-Task: ${mainRepairRevertTaskId(request.offendingSha)}`]);
     } catch (error) {
       const conflictPaths = (await hostWorktreeGitAsync(worktreePath, ["diff", "--name-only", "--diff-filter=U"]))
         .split("\n")
@@ -54628,8 +54630,10 @@ export function runNpmScriptAsync(script: string, cwd: string, args: readonly st
   });
 }
 
-/** Every recorded-baseline PR the red-main repair lane opens is cut on this prefix. */
-export const MAIN_RATCHET_RECORD_BRANCH_PREFIX = "main-repair-ratchet-";
+/** A record PR's head is `run-<its trailer's id>-<epochMs>`: head-identity-gate and worker-branch-shape both admit that. */
+export const MAIN_RATCHET_RECORD_BRANCH_PREFIX = "run-main-repair-ratchet-";
+export const mainRatchetRecordTaskId = (sha: string): string => `main-repair-ratchet-${sha.slice(0, 12)}`;
+const isMainRatchetRecordBranch = (ref: string): boolean => /^(?:run-)?main-repair-ratchet-/.test(ref);
 
 /** How ci.yml's main-ceiling-drift runs each signal on main (`run_main_ceiling_gate`). On a branch cut
  *  from main the bare signal reads main's own crossing as inherited and passes, so only main's form can
@@ -54658,8 +54662,8 @@ function baselineRowsOf(text: string | undefined): Record<string, number> | unde
  * the SAME fenced writer the PR-side repair runs (W1-T4004's registry, so a coverage or mutation floor
  * can never be written) and verifies main's form green. It stands down on an open PR whose baseline
  * already carries every row this record raises -- a hand fix like #10712, or this lane's own earlier PR
- * -- and pushes nothing. Only then does it commit the baseline path alone, push, and open the PR; an
- * older PR of this lane's that no longer covers is closed as superseded, so one is open at a time.
+ * -- and pushes nothing. Only then does it commit the baseline path alone, with the trailer its branch names
+ * (#11831 had neither), push, and open the PR; an older lane PR that no longer covers is closed as superseded.
  */
 export async function openMainRatchetRecordPr(
   owner: string,
@@ -54679,7 +54683,8 @@ export async function openMainRatchetRecordPr(
     appendLedger(ledgerPath, { run_id: runId, task_id: mainRepairTaskId(request.headSha), step, lane: "main-repair", ...extra });
   const repairs = request.scripts.map((script) => ({ script, ...RATIFIED_BASELINE_RATCHET_REPAIRS[script] }));
   const repoDir = repo === resolveOwnerRepo().repo ? repoRoot : join(config.root, "repos", repo);
-  const branch = `${MAIN_RATCHET_RECORD_BRANCH_PREFIX}${request.headSha.slice(0, 12)}-${systemClock.now()}`;
+  const taskId = mainRatchetRecordTaskId(request.headSha);
+  const branch = `run-${taskId}-${systemClock.now()}`;
   const wt = join(worktreesDir(config), branch);
   const git = (args: readonly string[]): Promise<string> => hostWorktreeGitAsync(wt, args);
   const readAt = (rev: string, path: string): Promise<string | undefined> =>
@@ -54740,12 +54745,12 @@ export async function openMainRatchetRecordPr(
         log("main-repair.ratchet_standing", { pr_url: pr.url, head_sha: head });
         return { standing: pr.url };
       }
-      if (pr.ref.startsWith(MAIN_RATCHET_RECORD_BRANCH_PREFIX)) superseded.push(pr.url);
+      if (isMainRatchetRecordBranch(pr.ref)) superseded.push(pr.url);
     }
 
     const gates = request.gates.join(", ");
     await git(["add", "--", ...changed]);
-    await git(["commit", "--quiet", "-m", `chore(ci): record the ceiling main crossed at ${head.slice(0, 12)}`]);
+    await git(["commit", "--quiet", "-m", `chore(ci): record the ceiling main crossed at ${head.slice(0, 12)}`, "-m", `Remudero-Task: ${taskId}`]);
     await gitPushRunBranchAsync(wt, { stdio: "ignore" });
     const proofs = [...raised].flatMap(([path, rows]) =>
       Object.entries(rows).map(([row, value]) => `- main's ceiling for ${row} is recorded at ${value} | grep: "${row}": ${value} in ${path}`),
@@ -54763,7 +54768,7 @@ export async function openMainRatchetRecordPr(
           "## Acceptance",
           ...proofs,
           "",
-          `Remudero-Task: ${mainRepairTaskId(head)}`,
+          `Remudero-Task: ${taskId}`,
         ].join("\n"),
         head: branch,
         base: request.branch,
