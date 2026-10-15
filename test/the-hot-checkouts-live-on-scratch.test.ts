@@ -261,7 +261,7 @@ test("W1-T9617: a boot with the scratch checkout missing re-creates it and the r
   assert.match(run.out, /is a recorded scratch checkout with no \.git — the boot re-clones it/);
   assert.ok(run.dockerRun.includes(`${checkout}:${CHECKOUT_DEST}`), run.dockerRun);
   assert.ok(existsSync(checkout), "the launch re-created the dir");
-  const row = ledgerRows(h.state).find((r) => r.step === "recycle.checkout_placement");
+  const row = placementRows(h.state).find((r) => r.step === "recycle.checkout_placement");
   assert.ok(row, "the recycle recorded the placement");
   assert.equal(row.placement, "scratch");
   assert.equal(row.checkout, checkout);
@@ -385,7 +385,7 @@ test("W1-T9617: the ledger and state files stay on the state disk", (t) => {
   const run = recycle(h, h.state);
   assert.equal(run.status, 0, run.out);
   assert.ok(run.dockerRun.includes(`${h.state}:/home/node/Remudero`), run.dockerRun);
-  const row = ledgerRows(h.state).find((r) => r.step === "recycle.checkout_placement");
+  const row = placementRows(h.state).find((r) => r.step === "recycle.checkout_placement");
   assert.ok(row, "the row lands in <state-dir>/state/ledger.ndjson");
   assert.equal(row.cold, true, "the scratch checkout starts empty the first time");
   assert.ok(existsSync(join(h.state, "remudero", ".git")), "the old checkout stays where it was");
@@ -425,7 +425,7 @@ test("W1-T9617: a recycle records the disk each checkout reads from and the outg
   mkdirSync(join(h.state, "remudero"));
   lib(h, `scratch_placement_row "$1" remudero-daemon "$2" false "$3"`, [ledger, join(h.state, "remudero"), reads], env);
   lib(h, `scratch_placement_row "$1" remudero-daemon "$2" maybe ""`, [ledger, join(h.base, "remudero")], { ...env, RMD_SYS_DEV_BLOCK: join(h.root, "no-sys") });
-  const rows = ledgerRows(h.state);
+  const rows = placementRows(h.state);
   assert.equal(rows.length, 2);
   assert.equal(rows[0].placement, "state-disk");
   assert.equal(rows[0].checkout_disk, "fakedisk1", "a partition is named by its whole disk, the unit io.stat counts");
@@ -498,7 +498,7 @@ function recycle(h: Host, stateDir: string): RecycleRun {
   return { status: r.status, out: `${r.stdout}${r.stderr}`, dockerRun: calls.find((l) => l.startsWith("run ")) ?? "" };
 }
 
-function ledgerRows(stateDir: string): Array<Record<string, unknown>> {
+function placementRows(stateDir: string): Array<Record<string, unknown>> {
   const file = join(stateDir, "state", "ledger.ndjson");
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8").split("\n").filter((l) => l.includes('"step":"recycle.checkout_placement"')).map((l) => JSON.parse(l) as Record<string, unknown>);
