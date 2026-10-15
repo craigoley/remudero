@@ -148,7 +148,7 @@ function refusals(fns: Fn[], baseline: Readonly<Record<string, number>>): string
 }
 
 test("W1-T9651: the census names a daemon-reachable async child call that arms a wall-clock timeout", () => {
-  const fns = topLevelFunctions();
+  const fns = topLevelFunctions({ objectLiterals: true });
   const reach = loopReachable(fns, "daemonCommand");
   // The walk is real: the seed exists and the planted site below is reached.
   assert.ok(fns.some((f) => f.name === "daemonCommand"), "the walk must find daemonCommand to seed from");
@@ -210,7 +210,7 @@ test("W1-T9651: the census names a daemon-reachable async child call that arms a
 });
 
 test("a row above its real count is refused and names the row to delete", () => {
-  const fns = topLevelFunctions();
+  const fns = topLevelFunctions({ objectLiterals: true });
   assert.deepEqual(refusals(fns, { ...WALL_CLOCK_CHILD_LOOP_BASELINE, ghTextAsync: 1 }), [
     `ghTextAsync arms 0 wall-clock bound(s) < row 1 — delete the \`ghTextAsync\` row from WALL_CLOCK_CHILD_LOOP_BASELINE (${BASELINE_FILE}) in this PR`,
   ]);
