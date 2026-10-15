@@ -92,11 +92,11 @@ test("a re-saved github snapshot keeps the now board and re-derives only the dir
   assert.equal(view.materialize(w.ctx()).length, 1);
   assert.deepEqual(w.wrote(), ["W1-T3"], "only the dirtied task is re-derived");
 
-  // A snapshot whose content changed may move any task: every one is re-derived.
+  // A snapshot whose content changed re-derives only the task whose PR it moved (W1-T6016).
   w.advance(5_000);
   w.resave([openPr(9001, "W1-T1"), openPr(9002, "W1-T4")]);
   assert.equal(view.materialize(w.ctx()).length, 1);
-  assert.deepEqual(w.wrote(), IDS);
+  assert.deepEqual(w.wrote(), ["W1-T4"]);
 });
 
 test("a restarted now view reuses the board projection its predecessor persisted", (t) => {

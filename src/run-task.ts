@@ -3107,6 +3107,8 @@ import {
   WorkerAbandonedError,
   SubscriptionOnlyRefusedError,
   deliverOperatorAnswerToRunningWorker,
+  sharesHarnessCheckout,
+  unwireCredentialHelperSocket,
 } from "./lib/worker.js";
 import {
   QuietRoundEndedError, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, runQuietWorkerWatchdog, type QuietWorkerJudge,
@@ -17912,17 +17914,37 @@ export function dispatchFallbackObserver(
   };
 }
 
+export function unwireOwnCheckoutCredentialHelper(
+  checkout: string,
+  log: (step: string, extra?: Record<string, unknown>) => unknown,
+  unwire: (cwd: string) => string[] = unwireCredentialHelperSocket,
+): string[] {
+  try {
+    const removed = unwire(checkout);
+    if (removed.length > 0) log("daemon.own_checkout_credential_unwired", { checkout, removed });
+    return removed;
+  } catch (e) {
+    log("daemon.own_checkout_credential_unwired", { checkout, error: String((e as Error)?.message ?? e) });
+    return [];
+  }
+}
+
 /** W1-T5115: `args` carrying the daemon's git credential socket as a GIT-ONLY handle — a model half the caller already
  *  set is kept, and with none the worker's model env stays exactly as `buildWorkerEnv` built it. */
-function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string): SpawnWorkerArgs {
+function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string, harnessCheckout: string = repoRoot): SpawnWorkerArgs {
+  if (sharesHarnessCheckout(args.cwd, harnessCheckout)) return args;
   return { ...args, secretBoundary: { ...args.secretBoundary, credentialHelperSocketPath: socketPath } };
 }
 
 /** W1-T5115: the sweep fix rung's spawn — sweep.ts's own `benchmarkNonDispatchSpawn("sweep-fix")` default — with the
  *  daemon's git credential socket on every fix worker it starts. */
-export function gitCredentialFixSpawn(socketPath: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
+export function gitCredentialFixSpawn(
+  socketPath: string,
+  raw: typeof spawnWorker = spawnWorker,
+  harnessCheckout: string = repoRoot,
+): typeof spawnWorker {
   const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw);
-  return (args) => spawnFix(withGitCredentialSocket(args, socketPath));
+  return (args) => spawnFix(withGitCredentialSocket(args, socketPath, harnessCheckout));
 }
 
 async function runTask(
@@ -39672,6 +39694,7 @@ export async function daemonCommand(
   // production daemon is deliberately required to honour; injected `checkPause` still takes precedence.
   const checkPause = deps.checkPause ?? (deps.runDaemon ? () => pauseDetail(config.root) : () => checkSharedPause(config.root, realDeps().sharedPauseGit));
   if (!deps.checkPause && !deps.runDaemon && !checkStop()) await prepareSharedPause(config.root, realDeps().sharedPauseGit);
+  if (target.isSelf && !deps.runDaemon) unwireOwnCheckoutCredentialHelper(repoRoot, log);
   const invokeDaemonBoot: typeof daemonBoot = (...args) => daemonBoot(...args);
   const bootHold = resolveFleetControlHold({ checkStop, checkPause });
   if (bootHold) {

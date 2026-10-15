@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/prompt-render.ts
     - test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts
-  status: queued
+  status: merged
   priority: 1.3  # each misrouted round spends a fix strike, a worker run and an amendment attempt on a red the PR did not cause, and drops the flake on the floor
   attempts: 0
   rationale: |

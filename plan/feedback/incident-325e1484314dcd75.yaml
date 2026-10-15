@@ -1,0 +1,28 @@
+id: incident-325e1484314dcd75
+ts: 2026-10-15T07:10:53.739Z
+raw: >-
+  Incident 325e1484314d: flow idle-capacity:wip_limit
+
+  First seen: 2026-10-15T07:09:13.300Z
+
+  Last seen: 2026-10-15T07:09:13.300Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=wip_limit:unnamed setter=unrecorded since=2026-10-15T06:56:13.764Z since=2026-10-15T06:56:13.764Z slot_minutes=12.99 dispatchable=3 cause=wip_limit reason="wip_limit:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#325e1484314dcd757bec902eda299a7c2428fb8760e419683070218e00f2442b
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null
