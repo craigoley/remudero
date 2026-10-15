@@ -1,8 +1,9 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { loopAvailableDeadline, systemClock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /**
@@ -35,6 +36,18 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
  */
 
 const execFilePromise = promisify(execFile);
+
+/** A host git child bounded by LOOP-AVAILABLE time. execFile's own `timeout` is a plain timer: after a held loop it
+ *  fires ahead of an exit already waiting, destroys the unread stdout, and the call RESOLVES with what it had read. On
+ *  2026-10-15 that turned `git config --list` into an empty listing, and three pushes ran with no credential helper. */
+export function execFileLoopBounded(file: string, args: readonly string[], opts: ExecFileOptionsWithStringEncoding) {
+  const { timeout, killSignal, ...rest } = opts;
+  const command = execFilePromise(file, [...args], rest);
+  if (timeout === undefined || timeout <= 0) return command;
+  const cancel = loopAvailableDeadline(systemClock, timeout, () => command.child.kill(killSignal ?? "SIGTERM"));
+  command.then(cancel, cancel);
+  return command;
+}
 
 /** The harness's own code root (this module lives in `src/lib/`). */
 const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -268,6 +281,18 @@ export class WorktreeConfigRefusedError extends RmdError {
   }
 }
 
+/** A config listing without the repository's own (local) config is not a read: execFile handed back what it had
+ *  read before a late timer cut it off. Vetting it as empty dropped every credential helper. Nothing ran. */
+export class WorktreeConfigUnreadableError extends RmdError {
+  constructor(readonly worktree: string) {
+    super("git", GENERIC_EXIT_CODE,
+      `worktree-git: refusing a host git call into ${worktree}: its pinned config listing came back without the ` +
+        "repository's own config, so its credential helpers could not be vetted — nothing was run",
+      { worktree });
+    this.name = "WorktreeConfigUnreadableError";
+  }
+}
+
 /** W1-T6148 — what the pinned files may hold. config.worktree: the keys the harness writes there, and
  *  the keys a command-line value always overrides ({@link HOST_GIT_CONFIG}, the credential reset). */
 const WORKTREE_SCOPE_KEYS = new Set(["credential.helper", "credential.usehttppath", "core.hookspath", "remudero.assignment",
@@ -390,6 +415,10 @@ export function isHarnessCheckout(pin: PinnedWorktreeGit, harnessRoot: string = 
 
 function vetted(pin: PinnedWorktreeGit, listing: string, log: WorktreeGitLog, harnessRoot: string = HARNESS_ROOT): Array<[string, string]> {
   const entries = parseConfigListing(listing);
+  if (!entries.some((e) => e.scope === "local")) {
+    log("worktree_git.config_unreadable", { worktree: pin.worktree, git_dir: pin.gitDir, listing_bytes: listing.length });
+    throw new WorktreeConfigUnreadableError(pin.worktree);
+  }
   // The harness checkout skips only the refusal arm; the credential reset and every override still apply.
   const keys = isHarnessCheckout(pin, harnessRoot) ? [] : refusedConfigKeys(entries, recordedWorktreeRemote(pin.worktree));
   if (keys.length > 0) {
@@ -408,10 +437,16 @@ export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = st
 }
 
 async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog): Promise<Array<[string, string]>> {
-  const { stdout } = await execFilePromise("git", CONFIG_LIST_ARGS, {
+  const read = async () => (await execFileLoopBounded("git", CONFIG_LIST_ARGS, {
     cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout: CONFIG_READ_TIMEOUT_MS,
-  });
-  return vetted(pin, stdout, log);
+  })).stdout;
+  try {
+    return vetted(pin, await read(), log);
+  } catch (error) {
+    // A cut-off listing heals on a fresh read; a second unreadable one is refused by name, never vetted as empty.
+    if (!(error instanceof WorktreeConfigUnreadableError)) throw error;
+    return vetted(pin, await read(), log);
+  }
 }
 
 /** `args` with `--no-ext-diff --no-textconv` after a diff-producing subcommand. */
@@ -469,7 +504,7 @@ export function hostWorktreeGit(worktreePath: string, args: readonly string[], o
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, await vetPinnedConfigAsync(pin, opts.log ?? stderrLog));
-  const command = execFilePromise("git", argv(pin, args), spawn);
+  const command = execFileLoopBounded("git", argv(pin, args), spawn);
   const fed = input === undefined ? Promise.resolve() : new Promise<void>((resolve, reject) => {
     const stdin = command.child.stdin!;
     stdin.once("error", reject);
