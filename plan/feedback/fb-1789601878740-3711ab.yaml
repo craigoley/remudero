@@ -41,4 +41,6 @@ raw: "FOUR MEASURED SESSION TRAPS, landed here at discovery per the 2026-09-16 r
   line numbers make covered lines read as uncovered, which sent this session chasing lines
   that were already covered."
 origin: operator-session#shift-left-audit-2026-09-16
-status: open
+status: new
+# Normalize the legacy nonterminal spelling so automatic triage can see this entry.
+# All four original lessons remain unaccepted; existing guidance must be reconciled first.

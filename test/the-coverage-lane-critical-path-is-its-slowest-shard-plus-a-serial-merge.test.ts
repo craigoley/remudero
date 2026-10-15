@@ -61,11 +61,11 @@ function rawShards(root: string): string[] {
 
 /** Rewrite one premapped chunk family through `edit`, re-sealing sizes and checksums so the merge
  *  reads the edited content rather than refusing it — the edit, not the seal, is what is tested. */
-function editPremapped(directory: string, family: "lines" | "mapped", edit: (entries: unknown[]) => unknown[]): void {
+function editPremapped(directory: string, family: "lines" | "mapped" | "hits", edit: (entries: unknown[]) => unknown[]): void {
   const manifestName = readdirSync(directory).find((name) => /^coverage-premapped-/.test(name))!;
   const manifest = JSON.parse(readFileSync(join(directory, manifestName), "utf8"));
-  const key = family === "lines" ? "lines" : "reports";
-  for (const chunk of manifest[family === "lines" ? "lineChunks" : "reportChunks"]) {
+  const key = family === "mapped" ? "reports" : family;
+  for (const chunk of manifest[family === "lines" ? "lineChunks" : family === "hits" ? "hitChunks" : "reportChunks"]) {
     const parsed = JSON.parse(readFileSync(join(directory, chunk.file), "utf8"));
     parsed[key] = edit(parsed[key]);
     const source = JSON.stringify(parsed);
@@ -111,8 +111,11 @@ test("W1-T5923 falsifier: a premapped shard that drops a range, reorders functio
         report.map((script) => ({ ...script, functions: script.functions.map((fn) => ({ ...fn, ranges: fn.ranges.slice(0, 1) })) })))),
       "reordered functions": (directory) => editPremapped(directory, "mapped", (reports) => (reports as Script[][]).map((report) =>
         report.map((script) => ({ ...script, functions: [...script.functions].reverse() })))),
-      "lost line state": (directory) => editPremapped(directory, "lines", (lines) =>
-        (lines as Array<{ written: unknown[] }>).map((line) => ({ ...line, written: [] }))),
+      // W1-T9481: the shard's per-process line hits carry the same evidence, so they are lost with it.
+      "lost line state": (directory) => {
+        editPremapped(directory, "lines", (lines) => (lines as Array<{ written: unknown[] }>).map((line) => ({ ...line, written: [] })));
+        editPremapped(directory, "hits", (records) => (records as Array<{ hits: unknown[] }>).map((record) => ({ ...record, hits: [] })));
+      },
       // Node 24's translation ignores TypeScript type-only lines; replaying counts alone reports them.
       "lost ignored lines": (directory) => editPremapped(directory, "lines", (lines) =>
         (lines as Array<{ ignored: unknown[] }>).map((line) => ({ ...line, ignored: [] }))),

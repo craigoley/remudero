@@ -4,13 +4,14 @@
 // `until grep ...` shell, and the worker quiet past its bound.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dispatchStreamObserver, IMPLEMENT_WAIT_TARGET_CONTRACT, watchDispatchSpawn } from "../src/run-task.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import { exitCodeFor, RmdError } from "../src/lib/errors.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 import { DEFAULT_WORKER_QUIET_FLOOR_MS, withWorkerPidReport, type WorkerStreamEvent, type WorkerStreamObserver } from "../src/lib/worker.js";
 import {
   classifyProcessTree,
@@ -837,4 +838,33 @@ test("W1-T7807: the production quiet judge resolves the repo's mounts by default
   assert.equal(spawned.length, 3);
   assert.equal(typeof spawned[0].model, "string", "the default mount came from the repo's mounts.yaml");
   assert.ok(String(spawned[0].model).length > 0);
+});
+
+test("W1-T9527: a dispatch spawn's default bound history is the process's one slice reader, read off the loop", async (t) => {
+  const quiet = (run: string, value: string, ts: string) => ({ ts, run_id: run, task_id: "W1-T1", step: "worker.state", state: value });
+  const fixture = writeLedger([quiet("R2", "quiet", "2026-10-02T00:00:00.000Z")], {
+    rotations: [{ at: "2026-10-01T12:00:00.000Z", gz: true, rows: [quiet("R1", "quiet", "2026-10-01T00:00:00.000Z"),
+      quiet("R1", "working", "2026-10-01T00:01:00.000Z"), { ts: "2026-10-01T00:02:00.000Z", run_id: "R1", step: "heartbeat.tick" }] }],
+  });
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const captured: QuietWatchdogOptions[] = [];
+  const handle: QuietWatchdogHandle = { observer: () => {}, tick: async () => {}, start: () => () => {} };
+  const spawnFor = (runId: string) => watchDispatchSpawn((async () => "raw") as never, {
+    enabled: true, taskId: "W1-T9527", runId, ledgerPath: fixture.path, fallbackBoundMs: 60_000,
+    spawnArgs: { cwd: "/wt", settingsFile: "/wt/settings.json" } as never, task: { files: [], acceptance: [] } as never,
+    provider: () => "claude", log: () => {},
+  }, { runWatchdog: ((options: QuietWatchdogOptions) => { captured.push(options); return handle; }) as never });
+
+  spawnFor("W1-T9527-1");
+  const first = captured[0].history();
+  assert.ok(first instanceof Promise, "the default history is awaited, never a synchronous union read");
+  assert.deepEqual((await first).map((row) => [row.run_id, row.state]), [["R1", "quiet"], ["R1", "working"], ["R2", "quiet"]]);
+  const digests = join(fixture.dir, "cache", "rotation-digests", "run-task%2Equiet-worker-bound");
+  assert.ok(existsSync(digests), "control: the first spawn loaded the rotation into the slice's durable digest");
+  rmSync(digests, { recursive: true, force: true });
+
+  spawnFor("W1-T9527-2");
+  assert.equal((await captured[1].history()).length, 3);
+  assert.equal(existsSync(digests), false, "the second spawn answered from the process's one reader, loading nothing");
+  assert.equal(captured[1].historyCost?.().history_rotations_unseen, 0);
 });
