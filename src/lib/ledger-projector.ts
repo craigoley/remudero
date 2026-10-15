@@ -25,7 +25,10 @@ export const LEDGER_PROJECTOR_SCHEMA_VERSION = 1;
 export const FUTURE_ROW_TOLERANCE_MS = 5 * 60_000;
 /** The live file is read in pieces of this size, one transaction each (design §1.1). */
 export const DEFAULT_CHUNK_BYTES = 8 << 20;
-/** A directory mtime younger than this may still move within the same timestamp tick. */
+/**
+ * A directory mtime younger than this may still move within the same timestamp tick. The gate it settles only spares a
+ * quiet directory its listing; a busy one is listed every tick, and each applied archive is then skipped by its `stat`.
+ */
 export const DIR_GATE_SETTLE_MS = 2_000;
 /**
  * A closed gate re-lists after this long anyway: a directory whose mtime failed to move never hides a rotation for good.
