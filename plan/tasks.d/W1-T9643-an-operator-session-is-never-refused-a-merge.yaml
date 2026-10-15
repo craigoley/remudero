@@ -1,0 +1,54 @@
+- id: W1-T9643
+  title: "AN OPERATOR SESSION IS REFUSED A MERGE — deny-floor rule 5 refuses `gh pr merge`, the merge endpoint and the merge and auto-merge mutations in every lane, though its own comment scopes it to a worker and the operator ruled on 2026-10-15 never to block merges; apply rule 5 only in the worker lane, so an operator session's merge always passes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern — rule 5 binds the worker lane only
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-15: never block merges (made while filing the agent-catalogs scan, MASTER-PLAN §4G)"
+  plan_refs: [W1-T1066, W1-T5016]
+  files: [hooks/deny-floor.sh, test/deny-floor.test.ts, test/an-operator-session-is-never-refused-a-merge.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15); hooks/deny-floor.sh is unchanged at 863989788.
+    - Rule 5 (hooks/deny-floor.sh:219-236) refuses `gh pr merge`, a PUT to a pull request's merge endpoint, and the
+      `mergePullRequest` / `enablePullRequestAutoMerge` GraphQL mutations. Its comment says "merge or arm a pull
+      request from inside a worker … the orchestrator alone owns the merge decision".
+    - The rule never checks the lane. The floor's only lane signal is `--confine-file-tools` (:17), which
+      settings/worker.json passes (`deny-floor.sh --confine-file-tools`) and the interactive lane's
+      .claude/settings.json does not (W1-T5016). Rule 5 does not read it.
+    - So every operator session opened in this repo is refused `gh pr merge` today.
+    - test/deny-floor.test.ts:102 ("refuses every ordinary worker route that merges or arms a pull request") runs the
+      hook with no flag and expects refusal. The interactive lane's behaviour is asserted as a worker's.
+    THE RULING: on 2026-10-15 the operator ruled never to block merges. In the worker lane, rule 5 does not block a
+    merge: it routes the merge through the orchestrator, which merges every green PR and leaves its auto-merge
+    receipts. In the operator lane it does block one, against the ruling.
+    This replaces this id's first draft (route MCP merge tools to the floor and refuse them), which the ruling
+    withdrew before filing.
+  design: |
+    1. hooks/deny-floor.sh: rule 5 runs only when the worker lane flag is set (`confine_file_tools=1`). Name the lane
+       in a variable (`worker_lane`) so a later rule can read it without re-deriving it. Nothing else in rule 5
+       changes.
+    2. test/deny-floor.test.ts: the test at :102 passes `--confine-file-tools`, so it asserts the worker lane, as its
+       title says. Its title stays byte-identical.
+    3. The new test asserts that the same eight commands exit 0 with no flag (an operator session), and that
+       `gh pr view` and `gh pr diff` still exit 0 in both lanes.
+    New tests go in test/an-operator-session-is-never-refused-a-merge.test.ts, with `test(` titles exactly as in the
+    proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-operator-session-is-never-refused-a-merge.test.ts"
+    - claim: "an operator session is never refused a merge or an auto-merge"
+      proof: 'grep: test("W1-T9643: an operator session is never refused a merge or an auto-merge" in test/an-operator-session-is-never-refused-a-merge.test.ts'
+    - claim: "the worker lane still routes every merge through the orchestrator"
+      proof: 'grep: test("W1-T9643: the worker lane still routes every merge through the orchestrator" in test/an-operator-session-is-never-refused-a-merge.test.ts'
+  falsifier: |
+    Remove the lane check. The first test then sees `gh pr merge 42 --squash` exit 2 with no flag.
+  note: |
+    CONTENTION: W1-T5670 (queued; branches last pushed 2026-10-11) also edits hooks/deny-floor.sh, in `invokes_gh`.
+    Neither depends on the other.

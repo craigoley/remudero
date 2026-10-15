@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 2
+  # refusal-amendment (W1-T9350, run W1-T9350-1792066416657, 2026-10-15T12:53:25.129Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: Declared scope `src/**/*.js` contains zero files at this HEAD; a positive control found 580 TypeScript files.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   # backlog gardener: band=2 evidence=1bf2c84547b60764
   attempts: 0
