@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -35,10 +36,11 @@ export function defaultMergeProbeGit(cwd: string): MergeProbeGit {
   // its review clock can still admit and post reviews while this observation is in flight.
   return (args) => new Promise((resolve) => {
     try {
-      execFile("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
-        const code = (error as { code?: unknown } | null)?.code;
-        resolve({ status: error ? (typeof code === "number" ? code : null) : 0, stdout: stdout ?? "" });
-      });
+      execFileLoopBounded("git", [...args], { cwd, encoding: "utf8", timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }).then(
+        ({ stdout }) => resolve({ status: 0, stdout: stdout ?? "" }),
+        (error: { code?: unknown; stdout?: unknown }) =>
+          resolve({ status: typeof error.code === "number" ? error.code : null, stdout: typeof error.stdout === "string" ? error.stdout : "" }),
+      );
     } catch {
       resolve({ status: null, stdout: "" });
     }

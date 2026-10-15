@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import * as daemon from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 
 // W1-T5720 — A BOOT REVIEWS BEFORE IT RUNS ITS CADENCES. The loop ticks a median 2 times per lifetime, so
 // every iteration-top cadence ran on tick 1 ahead of the first full pass: first `sweep.pass` p50 8.1 / p90

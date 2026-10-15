@@ -136,10 +136,10 @@ test("assertCleanBoot: defaults the runtime reading to THIS process's own execPa
 
 // ── daemonBoot: WIRED INTO THE REAL BOOT LINE, not merely exported (acceptance claim 4) ──
 
-test("daemonBoot: the daemon.boot ledger line carries node_path/node_version, and a named node_drift when the runtime is foreign", () => {
+test("daemonBoot: the daemon.boot ledger line carries node_path/node_version, and a named node_drift when the runtime is foreign", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent" };
-  const result = daemonBoot(
+  const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     env,
     undefined, // sweepTmp
@@ -189,10 +189,10 @@ test("daemonBoot: drift is ADVISORY ONLY — a daemon on a drifting runtime stil
   assert.equal(lines.length, 1, "a drifted boot still logs exactly one daemon.boot line and proceeds");
 });
 
-test("daemonBoot: a runtime in the daemon's own roots, matching the pin, logs NO node_drift key at all", () => {
+test("daemonBoot: a runtime in the daemon's own roots, matching the pin, logs NO node_drift key at all", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const env = { PATH: "/usr/bin:/bin", HOME: "/Users/craigoleyagent" };
-  const result = daemonBoot(
+  const result = await daemonBoot(
     (step, extra = {}) => lines.push({ step, extra }),
     env,
     undefined,
@@ -215,9 +215,9 @@ test("daemonBoot: a runtime in the daemon's own roots, matching the pin, logs NO
   assert.equal(bootLine!.extra.node_version, "v22.22.3");
 });
 
-test("daemonBoot: with no nodeRuntime/declaredNodeVersion injected, defaults to THIS process's own runtime (real production wiring)", () => {
+test("daemonBoot: with no nodeRuntime/declaredNodeVersion injected, defaults to THIS process's own runtime (real production wiring)", async () => {
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const result = daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin:/bin", HOME: "/Users/op" });
+  const result = await daemonBoot((step, extra = {}) => lines.push({ step, extra }), { PATH: "/usr/bin:/bin", HOME: "/Users/op" });
   assert.equal(result.node_path, process.execPath);
   assert.equal(result.node_version, process.version);
   const bootLine = lines.find((l) => l.step === "daemon.boot");

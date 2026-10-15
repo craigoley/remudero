@@ -27,6 +27,8 @@ const BASE: Task = {
 const nothingExists = () => false;
 /** Everything exists — every named module is being EDITED. */
 const allExists = () => true;
+/** The production caller exists; the module under test is still new. */
+const callerExists = (path: string) => path === "src/lib/serve.ts";
 
 function withProofs(proofs: string[], files = BASE.files): Task {
   return { ...BASE, files, acceptance: proofs.map((p, i) => ({ claim: `c${i}`, proof: p })) } as never;
@@ -50,7 +52,7 @@ test("the same task WITH a call-site criterion passes", () => {
     "grep: brandNewThing( in src/lib/serve.ts",
   ]);
 
-  assert.deepEqual(callSiteViolations(task, { moduleExists: nothingExists }), []);
+  assert.deepEqual(callSiteViolations(task, { moduleExists: callerExists }), []);
 });
 
 test("TRAP LOCK: a MENTION proof does not satisfy the rule -- only a CALL does", () => {
@@ -61,12 +63,12 @@ test("TRAP LOCK: a MENTION proof does not satisfy the rule -- only a CALL does",
   const call = withProofs(["grep: brandNewThing( in src/lib/serve.ts"]);
 
   assert.equal(
-    callSiteViolations(mention, { moduleExists: nothingExists }).length,
+    callSiteViolations(mention, { moduleExists: callerExists }).length,
     1,
     "a bare-symbol proof is NOT a call-site proof -- it passes on a comment",
   );
   assert.deepEqual(
-    callSiteViolations(call, { moduleExists: nothingExists }),
+    callSiteViolations(call, { moduleExists: callerExists }),
     [],
     "the same proof with the open paren IS one",
   );

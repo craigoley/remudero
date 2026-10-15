@@ -1,0 +1,90 @@
+- id: W1-T9705
+  title: "A REPAIR WORKER'S PROMPT IS BUILT FOR THE PROVIDER THE AUCTION SELECTED — the main-repair and alert-fix prompts are rendered before spawnWorker's provider auction runs, from the requested fix mount, so a worker the auction routes to codex is told to `git push` and `gh pr create` while its sandbox cannot write git and the harness commits for it; W1-T9667's harness-owned prompt branch is unreachable, because the mount it reads never names codex and `resolveDispatchLaneToolBound(\"alert_fix\", \"codex\")` throws"
+  repo: remudero
+  depends_on: [W1-T9667]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — when a lane's worker prompt is rendered relative to provider selection; the prompts' text and the dispatch, push and open paths are W1-T9667's and unchanged
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: follow-up to W1-T9667 (#12104); 'fix root causes'"
+  plan_refs: [W1-T9667, W1-T3696, W1-T3656, W1-T6148, W1-T3616]
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/a-repair-worker-prompt-is-built-for-the-selected-provider.test.ts
+    - test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T9667 (#12104, head e1af50253, open and unmerged when this was filed) makes the dispatcher push and open a
+    codex-routed repair worker's harness commit, which fixes the 2026-10-15 main-repair outage (three rounds, each
+    routed to codex gpt-6.1-sol, each "the fix run opened no pull request"). It also adds a harness-owned prompt
+    branch: `mainRepairFixPrompt(request, bodyFile, harnessOwnsGit)` and `alertFixPrompt(alert, taskId, harnessOwned)`.
+    READ at #12104's head, src/run-task.ts:
+    - dispatchMainRepairFixRun and dispatchAlertFixRun compute
+      `tools = [...resolveDispatchLaneToolBound("alert_fix", fixMount.provider ?? "claude")]` and render the prompt
+      with `repairHarnessOwnsGit({ provider: fixMount.provider, tools })` BEFORE `deps.spawn(...)`.
+    - The fix mount does not name codex: the 2026-10-15 rows show "requested sonnet, fix mount, band high" and
+      worker.assignment selected provider codex. The provider is chosen INSIDE spawnWorker (src/lib/worker.ts,
+      `selection.provider === "codex"` after the capacity auction). So `fixMount.provider` is undefined, the
+      predicate is false, and the worker gets the claude prompt.
+    - The predicate could not be true pre-spawn anyway: src/lib/worker.ts DISPATCH_LANE_TOOL_BOUNDS has
+      `alert_fix: { claude: FIX_WORKER_TOOLS }` and resolveDispatchLaneToolBound fails closed (W1-T3656), so a mount
+      naming codex throws before the prompt is built. The harness-owned branch is dead in production.
+    - After the spawn #12104 reads ownership off the WorkerResult (`worker.provider`, `workerHarnessCommit(worker)`),
+      which is why the push works. Only the prompt is wrong.
+    - What the codex worker sees: spawnCodexWorker (src/lib/worker-provider.ts) prepends CODEX_HARNESS_COMMITS_PART
+      ("do not run git commit, git push or any git command that writes ... End with COMMIT_MESSAGE:") to a lane prompt
+      that says "git add ... && commit; `git push origin HEAD`; gh pr create ... End your REPORT with exactly:
+      PR_URL:". Two contradictory contracts in one prompt; the worker spends turns on git it cannot run, and its
+      report shape (PR_URL vs COMMIT_MESSAGE) is a coin toss.
+    - src/lib/worker.ts SpawnWorkerArgs `cashTools` already documents the root: "THE PROMPT IS BUILT BEFORE THE
+      AUCTION RUNS, so this is declared rather than inferred". The implement lane works around it by deciding
+      harnessOwnsGit before the spawn (config flag or a shell-less bound). The repair lanes cannot: they want a
+      claude worker to push and open its own PR.
+    OUT OF SCOPE, reported separately: the auction can route the alert_fix surface to codex although the lane table
+    declares no codex row for it; W1-T9667 accepts that routing, and this task does not change who may be selected.
+  design: |
+    1. THE SEAM (src/lib/worker.ts). Add an optional `promptFor?: (route: { provider: WorkerProviderId; harnessOwnsGit:
+       boolean }) => string` to SpawnWorkerArgs. spawnWorker calls it ONCE, after the provider is final (the auction's
+       selection, the mount-affinity path, or a cash/openweight divert retry), and hands its result to the adapter in
+       place of `args.prompt`. `harnessOwnsGit` is computed by ONE helper beside harnessOwnsGitFor: for codex,
+       codexHarnessCommits({ tools, cashTools, sandboxIntent }) (the same predicate the adapter uses to prepend
+       CODEX_HARNESS_COMMITS_PART, so prompt and adapter can never disagree); for cash/openweight, the divert surface
+       (cashTools) is shell-less; for claude, harnessOwnsGitFor(tools). `args.prompt` stays required and is the value
+       when `promptFor` is absent, so every other lane is byte-for-byte unchanged. The prompt-size admission checks
+       (openWeightEstimatedTokens on args.prompt) read the rebuilt prompt.
+    2. THE LANES (src/run-task.ts). dispatchMainRepairFixRun passes
+       `promptFor: ({ harnessOwnsGit }) => mainRepairFixPrompt(request, bodyFile, harnessOwnsGit)` and
+       dispatchAlertFixRun passes `promptFor: ({ harnessOwnsGit }) => alertFixPrompt(alert, taskId, harnessOwnsGit ? {
+       bodyFile } : undefined)`. Their pre-spawn `repairHarnessOwnsGit({ provider: fixMount.provider, tools })` prompt
+       argument goes; the post-spawn ownership read off the WorkerResult (W1-T9667) stays, as the authority for push
+       and open.
+    3. LEDGER. The worker.assignment row (emitWorkerSelectionAssignment) gains `harness_owns_git` when `promptFor` was
+       used, so a reader can see which contract a routed worker was given.
+    4. TESTS, in a NEW file test/a-repair-worker-prompt-is-built-for-the-selected-provider.test.ts, driving the real
+       spawnWorker with providerRouting fakes (spawnCodex / the claude query seam) that capture the prompt they
+       receive: an auction that selects codex hands the main-repair and the alert-fix worker a prompt that names no
+       `git push` and no `gh pr create` and ends with the COMMIT_MESSAGE contract; an auction that selects claude
+       hands it today's prompt byte-for-byte; a spawn with no `promptFor` passes `args.prompt` unchanged on every
+       provider. Extend #12104's test file only where its prompt assertion moves from the pre-spawn argument to the seam.
+    No fixed thresholds; no change to routing, tool bounds, the codex sandbox, the push/open path or the round budget.
+  acceptance:
+    - claim: "a repair worker the auction routes to codex receives the harness-owned prompt: no git push, no gh pr create"
+      proof: 'grep: test("W1-T9705: a codex-selected repair worker is prompted that the harness owns git" in test/a-repair-worker-prompt-is-built-for-the-selected-provider.test.ts'
+    - claim: "a repair worker the auction routes to claude receives today's push-and-open prompt unchanged"
+      proof: 'grep: test("W1-T9705: a claude-selected repair worker keeps the push-and-open prompt" in test/a-repair-worker-prompt-is-built-for-the-selected-provider.test.ts'
+    - claim: "a spawn without promptFor hands every provider its args.prompt unchanged"
+      proof: 'grep: test("W1-T9705: a spawn without promptFor passes its prompt through on every provider" in test/a-repair-worker-prompt-is-built-for-the-selected-provider.test.ts'
+  falsifier: |
+    After W1-T9667 merges, drive dispatchMainRepairFixRun with a fix mount naming no provider and a spawnWorker whose
+    auction selects codex (providerRouting.spawnCodex capturing its prompt): the captured prompt contains
+    "`git push origin HEAD`" and "gh pr create". Remove the `promptFor` call in spawnWorker and the codex test reds on
+    those lines.
+  note: |
+    EFFECT, measured after merge from the core ledger: a main-repair or alert-fix worker.assignment with provider codex
+    carries harness_owns_git true, and its round ends in main-repair.pushed / alert-fix.pushed with a COMMIT_MESSAGE
+    subject rather than the harness fallback subject "chore: commit the Codex worker's edits (harness commit, W1-T6148)".

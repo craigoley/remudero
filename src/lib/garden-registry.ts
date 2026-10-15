@@ -12,7 +12,8 @@
  * Pacing that used to live in each starter's closure (a minimum interval, the test garden's hourly evidence
  * refresh) stays in the parent, because a child starts fresh every pass.
  */
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { readFileSync } from "node:fs";
 import { homedir, setPriority as osSetPriority } from "node:os";
 import { join } from "node:path";
@@ -535,15 +536,15 @@ export function childGardenPassSpawn(
         } catch (e) {
           if (firstRefusal("nice")) log(GARDEN_PRIORITY_DEGRADED_STEP, refusal("nice", e));
         }
-        lowered = new Promise((done) => {
-          execFile(opts.ionice ?? "ionice", ["-c", "3", "-p", String(pid)], { timeout: 5_000 }, (e) => {
+        lowered = execFileLoopBounded(opts.ionice ?? "ionice", ["-c", "3", "-p", String(pid)], { encoding: "utf8", timeout: 5_000 }).then(
+          () => undefined,
+          (e: Error) => {
             // A child that already exited cannot be re-classed; that is not the host refusing.
-            if (e && child.exitCode === null && child.signalCode === null && firstRefusal("ionice")) {
+            if (child.exitCode === null && child.signalCode === null && firstRefusal("ionice")) {
               log(GARDEN_PRIORITY_DEGRADED_STEP, refusal("ionice", e));
             }
-            done();
-          });
-        });
+          },
+        );
       }
       child.once("error", (error) => {
         release();
