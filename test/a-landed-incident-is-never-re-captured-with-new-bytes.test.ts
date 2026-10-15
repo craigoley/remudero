@@ -41,7 +41,7 @@ function landedEntry(status: FeedbackEntry["status"]): FeedbackEntry {
 }
 
 /** A checkout at an OLD HEAD whose fetched origin/main has landed `entry` — the daemon's 10-15 tree. */
-function laggingCheckout(entry: FeedbackEntry): string {
+function landedEntryFixture(entry: FeedbackEntry): string {
   const origin = gitRepo({ bare: true, kind: "landed-incident-origin" });
   const writer = gitRepo({ cloneFrom: origin.dir, kind: "landed-incident-writer" });
   writer.git("commit", "--quiet", "--allow-empty", "-m", "chore: seed");
@@ -59,7 +59,7 @@ function laggingCheckout(entry: FeedbackEntry): string {
 }
 
 test("a landed incident is never re-captured with new bytes: the capture returns origin/main's entry and writes nothing", () => {
-  const root = laggingCheckout(landedEntry("new"));
+  const root = landedEntryFixture(landedEntry("new"));
 
   const entry = captureFeedback(root, {
     id: ID,
@@ -73,13 +73,13 @@ test("a landed incident is never re-captured with new bytes: the capture returns
 });
 
 test("a landed incident is never re-captured with new bytes: the SRE lane reads a landed open entry as already open", () => {
-  const root = laggingCheckout(landedEntry("new"));
+  const root = landedEntryFixture(landedEntry("new"));
   assert.equal(landedIncidentOpen(FINGERPRINT, (id) => readLandedFeedbackEntry(root, id)), true);
   assert.equal(landedIncidentOpen("0".repeat(64), (id) => readLandedFeedbackEntry(root, id)), false, "another fingerprint is not open");
 });
 
 test("a landed incident is never re-captured with new bytes: a rejected landed entry is closed, so a recurrence may file again", () => {
-  const root = laggingCheckout(landedEntry("rejected"));
+  const root = landedEntryFixture(landedEntry("rejected"));
   assert.equal(landedIncidentOpen(FINGERPRINT, (id) => readLandedFeedbackEntry(root, id)), false);
 });
 
