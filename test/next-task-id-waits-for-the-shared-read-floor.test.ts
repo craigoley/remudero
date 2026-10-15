@@ -243,6 +243,11 @@ function runNextTaskId(t: TestContext, floor: "advisory" | undefined) {
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: `url.${remote.dir}.insteadOf`,
     GIT_CONFIG_VALUE_0: origin,
+    // Blanked, never deleted (child_process re-injects a deleted key). Under tsx this child
+    // source-maps a temp bootstrap that t.after removes before the shard renders lcov; enrolled, its
+    // report left a shard with every test passing and no lcov at all. The dispatch line stays
+    // covered in-process by test/triage-id-mint.test.ts.
+    NODE_V8_COVERAGE: "",
   };
   delete env.RMD_GH_TRANSPORT_FLOOR;
   if (floor) env.RMD_GH_TRANSPORT_FLOOR = floor;
