@@ -55425,7 +55425,8 @@ async function projectCommand(rest: string[]): Promise<number> {
 interface OnboardCommandDeps {
   fs?: OnboardFsDeps;
   gh?: OnboardGhGateway;
-  resolveOwnerRepo?: typeof resolveTargetOwnerRepo;
+  /** W1-T9700: the real one is awaited; a fake may answer synchronously. */
+  resolveOwnerRepo?: (targetDir: string) => Awaited<ReturnType<typeof resolveTargetOwnerRepo>> | ReturnType<typeof resolveTargetOwnerRepo>;
 }
 
 export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = {}): Promise<number> {
@@ -55457,7 +55458,7 @@ export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = 
   }
   const { targetDir, owner: ownerFlag, repo: repoFlag } = parsed.args;
 
-  const resolved = ownerFlag && repoFlag ? undefined : resolveOwnerRepo(targetDir);
+  const resolved = ownerFlag && repoFlag ? undefined : await resolveOwnerRepo(targetDir);
   const owner = ownerFlag ?? resolved?.owner;
   const repo = repoFlag ?? resolved?.repo;
 
@@ -55512,7 +55513,8 @@ export async function onboardCommand(rest: string[], deps: OnboardCommandDeps = 
 interface ReconCommandDeps {
   fs?: ReconFsDeps;
   gh?: ReconGhGateway;
-  resolveOwnerRepo?: typeof resolveTargetOwnerRepo;
+  /** W1-T9700: the real one is awaited; a fake may answer synchronously. */
+  resolveOwnerRepo?: (targetDir: string) => Awaited<ReturnType<typeof resolveTargetOwnerRepo>> | ReturnType<typeof resolveTargetOwnerRepo>;
   /** Injectable per-lens raw-text runner — tests supply canned text; omitted, the real
    *  spawn-backed default below is used. */
   runLens?: (specialist: SpecialistName) => Promise<string>;
@@ -55587,7 +55589,7 @@ export async function reconCommand(rest: string[], deps: ReconCommandDeps = {}):
     ...deps,
   };
 
-  const resolved = ownerFlag && repoFlag ? undefined : resolveOwnerRepo(targetDir);
+  const resolved = ownerFlag && repoFlag ? undefined : await resolveOwnerRepo(targetDir);
   const owner = ownerFlag ?? resolved?.owner;
   const repo = repoFlag ?? resolved?.repo;
 
