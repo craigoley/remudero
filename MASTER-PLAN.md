@@ -4577,7 +4577,8 @@ re-raised · **W1-T9650** leak-grep reports where a secret is, never the secret,
   provides, and a session outlives its client, which is what ADR 0007 (Proposed) builds by hand. It waits for two
   things: W1-T9646's measure of how much of a worker tree the CLI holds (the most a hosted loop could free), and an
   operator decision on billing, because the quickstarts authenticate with an API key while workers bill to the Max
-  subscription by design.
+  subscription by design. **Operator ruling 2026-10-15: no per-token billing for workers.** This stays parked unless
+  that ruling changes; W1-T9646 still informs the host memory picture.
 - the diagnose report naming the causes it ruled out (wshobson team-debug): file it once `rmd ledger-grep
   diagnose.done` shows a material share of third attempts failing after a diagnose.
 - a report-anchored reviewer arm in paired-review-eval (agent-skills doubt-driven): the production reviewer reads the
