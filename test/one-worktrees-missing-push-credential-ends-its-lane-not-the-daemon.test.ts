@@ -18,12 +18,16 @@ import * as drainModule from "../src/lib/drain.js";
 import { PushFailedError } from "../src/lib/git-push.js";
 import { loadPlanFromYaml, type Plan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
+import * as runTaskModule from "../src/run-task.js";
 
 // Read off the namespaces so the file still loads at the merge base, where these do not exist.
 type Probe = { state: "alive" } | { state: "refused" | "unreadable"; detail: string };
 type TokenSource = () => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
 const { receivePackCredentialProbe } = daemonModule as unknown as {
   receivePackCredentialProbe: (opts: { originUrl: string; token: TokenSource; timeoutMs?: number }) => () => Promise<Probe>;
+};
+const { daemonPushTokenSource } = runTaskModule as unknown as {
+  daemonPushTokenSource: (repo: string, mint: ((repo: string) => ReturnType<TokenSource>) | undefined, env?: NodeJS.ProcessEnv) => TokenSource;
 };
 const { laneCredentialRefusal } = drainModule as unknown as {
   laneCredentialRefusal: (err: unknown) => { firstLine: string; stderr: string } | undefined;
@@ -248,4 +252,13 @@ test("W1-T9680: the receive-pack probe reads 403 as refused and any other answer
   }
   const gone = await receivePackCredentialProbe({ originUrl: forbidden.origin, token: tokenOf("t") })();
   assert.equal(gone.state, "unreadable", "a closed port is not a refused credential");
+});
+
+test("W1-T9680: the daemon's probe token is the credential socket's own mint while it listens, else GH_TOKEN", async () => {
+  const asked: string[] = [];
+  const mint = async (repo: string) => { asked.push(repo); return { ok: true as const, token: "scoped" }; };
+  assert.deepEqual(await daemonPushTokenSource("craigoley/remudero", mint, { GH_TOKEN: "ambient" })(), { ok: true, token: "scoped" });
+  assert.deepEqual(asked, ["craigoley/remudero"], "minted for the target repo, as the socket mints for a worker push");
+  assert.deepEqual(await daemonPushTokenSource("o/r", undefined, { GH_TOKEN: "ambient" })(), { ok: true, token: "ambient" });
+  assert.deepEqual(await daemonPushTokenSource("o/r", undefined, {})(), { ok: false, reason: "GH_TOKEN is not set" });
 });

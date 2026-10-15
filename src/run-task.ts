@@ -482,6 +482,7 @@ import {
   priorUnrecognisedResetStrings,
   pendingWorkerBoundaryHandoffs,
   receivePackCredentialProbe,
+  type PushTokenSource,
   v8HeapStatistics,
 } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree, sweepStrandedReviewWorktrees } from "./lib/review-worktree-reclaim.js";
@@ -35960,6 +35961,15 @@ function readAvailableMibBounded(
  * and bounded. See lib/drain.ts for the loop; this only wires the real defaults.
  */
 
+/** W1-T9680: the token a worker push sends — the credential socket's scoped mint while it listens, else GH_TOKEN. */
+export function daemonPushTokenSource(repo: string, mint: ScopedTokenMint | undefined, env: NodeJS.ProcessEnv = process.env): PushTokenSource {
+  return async () => {
+    if (mint) return mint(repo);
+    const token = env.GH_TOKEN;
+    return token ? { ok: true, token } : { ok: false, reason: "GH_TOKEN is not set" };
+  };
+}
+
 /**
  * W1-T916 — the ONE ref read behind {@link DrainDeps.readPushedRunBranches} and its daemon twin.
  * Raw `git ls-remote --heads origin 'run-*'` output, returned verbatim for `runBranchTaskIds`
@@ -40112,14 +40122,8 @@ export async function daemonCommand(
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
-        probeFleetPushCredential: receivePackCredentialProbe({
-          originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
-          token: async () => {
-            if (gitCredentialSocket) return (deps.gitCredentialMint ?? realScopedMint(log))(`${target.owner}/${target.repo}`);
-            const token = process.env.GH_TOKEN;
-            return token ? { ok: true, token } : { ok: false, reason: "GH_TOKEN is not set" };
-          },
-        }),
+        probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
+          token: daemonPushTokenSource(`${target.owner}/${target.repo}`, gitCredentialSocket ? (deps.gitCredentialMint ?? realScopedMint(log)) : undefined) }),
         // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
         // pair, same factory, same contract — and this is the lane that actually dispatches.
         openSiblingBuildFor,
