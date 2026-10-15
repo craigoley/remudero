@@ -21,7 +21,8 @@ import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./m
 import { createHash, randomUUID } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { basename, dirname, join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -407,14 +408,16 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   };
 }
 
+const replyStatusExec = promisify(execFile);
+
 /** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status reads from fetched origin/main, else the
  *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply.
  *  Exported (W1-T8511) so the GitHub-reply reader checks the SAME `grilling` status before it applies an answer. */
-export function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
+export async function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): Promise<{ refused: string } | undefined> {
   let target: FeedbackEntry;
   let source = "origin/main";
   try {
-    const blob = execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" });
+    const { stdout: blob } = await replyStatusExec("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8" });
     target = parseYaml(blob) as FeedbackEntry;
   } catch {
     source = "the checkout (origin/main unreadable)";
@@ -515,7 +518,7 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
     scope: "write",
     // W1-T404: LOW — bookkeeping, trivially reversible (capture-only).
     tier: "low",
-    handler: jsonAction(validateSubmitFeedback, (input, req, res) => {
+    handler: jsonAction(validateSubmitFeedback, async (input, req, res) => {
       const queued = readQueueForCheck(deps, "/v1/feedback", res);
       if (!queued) return;
       if (input.submissionKey) {
@@ -526,7 +529,7 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         }
       }
       if (input.replyTo !== undefined) {
-        const refusal = replyRefusal(deps.root, input.replyTo, queued);
+        const refusal = await replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
@@ -580,7 +583,7 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
       if (input.replyTo !== undefined) {
         const queued = readQueueForCheck(deps, "/v1/feedback/preview", res);
         if (!queued) return;
-        const refusal = replyRefusal(deps.root, input.replyTo, queued);
+        const refusal = await replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;

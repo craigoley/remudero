@@ -379,12 +379,12 @@ export function pickFeedbackAnswer<T extends { namesOption: boolean }>(answers: 
  * finds it and writes nothing (design step 3). Returns the ledger row to write: `feedback_applied` on a write,
  * `feedback_unreadable` when a store could not be read, and undefined when there is nothing to apply.
  */
-function applyGrilledFeedbackAnswer(
+async function applyGrilledFeedbackAnswer(
   feedback: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
   issue: OpenIssue,
   taskId: string,
   answers: readonly AcceptedAnswer[],
-): ({ step: string; task_id: string } & Record<string, unknown>) | undefined {
+): Promise<({ step: string; task_id: string } & Record<string, unknown>) | undefined> {
   const feedbackId = grilledFeedbackId(taskId);
   const picked = pickFeedbackAnswer(answers);
   if (feedbackId === undefined || picked === undefined) return undefined;
@@ -393,7 +393,7 @@ function applyGrilledFeedbackAnswer(
     const queued = readQueuedFeedbackRecords(feedback.inboxRoot);
     const queuedRecord = queued.get(feedbackEntryRepoPath(feedbackId));
     if (queuedRecord !== undefined && queuedRecord.status !== "grilling") return undefined;
-    if (replyRefusal(feedback.root, feedbackId, queued)) return undefined;
+    if (await replyRefusal(feedback.root, feedbackId, queued)) return undefined;
     if (findFeedbackBySubmissionKey(feedback.root, picked.origin, feedback.inboxRoot)) return undefined;
     const { entry, landingError } = captureFeedbackReply(feedback, {
       text: picked.text, replyTo: feedbackId, submissionKey: picked.origin, origin: "issue",
@@ -667,7 +667,7 @@ export async function readEscalationAnswers(
     }
     // W1-T8511: the question-store write above is unchanged; a feedback GRILL issue ALSO answers its record.
     if (deps.feedback) {
-      const row = applyGrilledFeedbackAnswer(deps.feedback, issue, taskId, acceptedAnswers);
+      const row = await applyGrilledFeedbackAnswer(deps.feedback, issue, taskId, acceptedAnswers);
       if (row) writeLedger(deps.ledgerPath, { ...row, run_id: runId });
     }
   }

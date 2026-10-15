@@ -8,7 +8,7 @@
 // (`captureFeedbackReply`), once, only while it is still grilling, picking the option-naming reply, for any id shape.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -338,4 +338,43 @@ test("W1-T8511: a stored question answer reaches the record's answered status en
   assert.equal(answered.status, "answered");
   assert.equal(repliesTo(f)[0].raw, `[answer to feedback#${FB_ID}] site-intake`, "the option answer, not the earlier prose");
   assert.ok(feedbackHasAnswer(answered, records(f)));
+});
+
+test("W1-T8511: the feedback status read leaves the event loop responsive and honours origin/main", async () => {
+  for (const status of ["grilling", "rejected"]) {
+    const f = fixture();
+    const before = snapshot(f);
+    const target = { ...record(f), status };
+    const shim = ghShim([
+      { when: `show origin/main:plan/feedback/${FB_ID}.yaml`, stdout: stringifyYaml(target), delaySeconds: 0.2 },
+    ], { kind: "w8511-git" });
+    renameSync(join(shim.dir, "gh"), join(shim.dir, "git"));
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
+    const pending = readEscalationAnswers(f.root, "RUN-1", gatewayFor(issueFor(9913), [ownerComment(1, "site-intake")]),
+      { ledgerPath: f.ledgerPath, feedback: f.feedback });
+    try {
+      for (let attempt = 0; attempt < 100 && !shim.events().some((event) => event.phase === "start"); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.ok(shim.events().some((event) => event.phase === "start"), "the status read really spawned its child");
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(shim.events().some((event) => event.phase === "end"), false,
+        "the event loop runs while the status child is still in flight");
+      await pending;
+      assert.equal(shim.calls().length, 1, "one authoritative status read");
+      if (status === "grilling") {
+        assert.equal(record(f).status, "answered");
+        assert.equal(repliesTo(f).length, 1);
+      } else {
+        assert.deepEqual(snapshot(f), before, "origin/main's rejected status refuses the stale grilling checkout");
+        assert.equal(appliedRows(f.ledgerPath).length, 0);
+      }
+    } finally {
+      await pending;
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      rmSync(shim.dir, { recursive: true, force: true });
+    }
+  }
 });
