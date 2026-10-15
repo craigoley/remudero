@@ -1,0 +1,29 @@
+id: incident-c9de468bdb4888a8
+ts: 2026-10-15T04:47:23.958Z
+raw: >-
+  Incident c9de468bdb48: flow idle-capacity:selection_empty
+
+  First seen: 2026-10-15T04:41:24.174Z
+
+  Last seen: 2026-10-15T04:47:15.057Z
+
+  Count: 2, burn: 2.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - instance=core hold=selection_empty:unnamed setter=unrecorded since=2026-10-15T04:12:12.953Z since=2026-10-15T04:12:12.953Z slot_minutes=29.19 dispatchable=3 cause=selection_empty reason="selection_empty:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+    - instance=core hold=selection_empty:unnamed setter=unrecorded since=2026-10-15T04:12:12.953Z since=2026-10-15T04:12:12.953Z slot_minutes=40.89 dispatchable=3 cause=selection_empty reason="selection_empty:unnamed" — idle lane slots held by a named hold beyond the cause's own history
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#c9de468bdb4888a896276501b97cdafb76dc21ed96dda78f1f9189a68cab8e7d
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

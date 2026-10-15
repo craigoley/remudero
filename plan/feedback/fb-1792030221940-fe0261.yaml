@@ -1,0 +1,16 @@
+id: fb-1792030221940-fe0261
+ts: 2026-10-15T02:10:21.940Z
+raw: "[answer to feedback#fb-1789846824506-93a418] confirm-closure. Covered by
+  W1-T4460 (plan/tasks.d/W1-T4460-a-synthetic-fix-task-has-a-surface.yaml),
+  merged 2026-09-24 in #7034 (1afa87908): a fix round for a PR with no plan
+  record now gets the PR's own files as its surface, not `files: []`. (Reopened
+  so this answer is applied to the feedback record.)"
+attachments: []
+origin: issue
+status: new
+reply_to: fb-1789846824506-93a418
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#10199:comment:6124538335
+thread_id: null
