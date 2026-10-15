@@ -176,7 +176,7 @@ test("W1-T5528: a PR with no test evidence or no readable main tip follows the e
   assert.equal(h.rows.filter((r) => r.step === "sweep.base_reproduction").length, 0);
 });
 
-test("W1-T5528: refreshes go through one per-pass admission and record a thrown request", async () => {
+test("W1-T5528: refreshes share the existing per-pass bound and record a thrown request", async () => {
   const prs = [redPr(), redPr({ prNumber: 5529, taskId: "W1-T5529", headSha: "other-head" }), peer()];
   const h = harness();
   h.deps.reproduceFailingTestsOnMain = async (_pr, files, sha) =>
@@ -185,13 +185,12 @@ test("W1-T5528: refreshes go through one per-pass admission and record a thrown 
   h.deps.readMainTip = () => NEXT;
   h.deps.updateBranch = (pr) => { h.refreshed.push(pr.prNumber); throw new Error("update denied"); };
   await h.sweep(prs);
-  // W1-T9595: no earlier admission waits for CI, so both held heads are admitted in this pass.
-  assert.equal(h.refreshed.length, 2);
+  assert.equal(h.refreshed.length, 1);
   assert.deepEqual(h.fixed, []);
   assert.match(String(h.rows.find((r) => r.step === BASE_RED_REFRESH_STEP)?.outcome), /update denied/);
   await h.sweep(prs);
   assert.equal(h.refreshed.length, 2);
-  assert.deepEqual(h.fixed, [5528, 5529]);
+  assert.deepEqual(h.fixed, [5528]);
 });
 
 test("W1-T5528: an unwired refresh holds a previously reproduced head without a worker", async () => {

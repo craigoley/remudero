@@ -43,7 +43,7 @@ const EARLIER = 11950;
 const held = () => [redPr(T3, "3", 300), redPr(T1, "1", 200), redPr(T2, "2", 100)];
 const refusedPr = () => redPr(REFUSED, "9", 50);
 
-/** An earlier admission's refresh of `EARLIER` from head `e…`; the snapshot decides whether its CI started. */
+/** An earlier admission's refresh of `EARLIER` from head `e…` that held this board; the snapshot decides whether its CI started. */
 function earlierAdmission(started: boolean): OpenPrView {
   return redPr(EARLIER, "f", 400, { checksState: "pending", ciFailures: [], ...(started ? { checksPendingSince: ago(2) } : {}) });
 }
@@ -56,8 +56,17 @@ function ledger(): Row[] {
     { step: BASE_RED_STOOD_DOWN_STEP, ts: ago(70), pr_number: T3, head_sha: "3".repeat(40), check_name: "ci" },
     { step: BASE_RED_STOOD_DOWN_STEP, ts: ago(120), pr_number: REFUSED, head_sha: "9".repeat(40), check_name: "ci" },
     { step: BASE_RED_REFRESH_STEP, ts: ago(20), pr_number: EARLIER, head_sha: "e".repeat(40), outcome: "updated", forced_by: FORCED_BY },
+    { step: ADMISSION_STEP, ts: ago(20), signal: "slow-start", width: 1,
+      admitted: [{ pr_number: EARLIER, head_sha: "e".repeat(40), arm: "base-red", outcome: "updated" }],
+      waiting: [[T1, "1"], [T2, "2"], [T3, "3"]].map(([n, c]) => ({ pr_number: n, head_sha: String(c).repeat(40), arm: "base-red" })) },
   ];
 }
+
+/** The same board with no earlier admission at all: there is no uptake signal to widen from. */
+const unseen = () => ledger().filter((row) => row.pr_number !== EARLIER && row.step !== ADMISSION_STEP);
+/** A head the admission refreshed: its new head `a…`/`b…` shows CI started, or not. */
+const moved = (n: number, c: string, started: boolean) =>
+  redPr(n, c, 200, { checksState: "pending", ciFailures: [], ...(started ? { checksPendingSince: ago(1) } : {}) });
 
 async function pass(prs: OpenPrView[], rows: Row[], over: Partial<SweepDeps> = {}) {
   const updated: number[] = [];
@@ -83,26 +92,46 @@ async function pass(prs: OpenPrView[], rows: Row[], over: Partial<SweepDeps> = {
 
 const numbers = (entries: unknown) => (entries as Row[] | undefined)?.map((e) => e.pr_number);
 
-test("W1-T9595: every held head whose red main has fixed is admitted oldest-held first while CI takes them", async () => {
-  const rows = ledger();
+test("W1-T9595: slow start admits the oldest-held head first, then twice as many while CI takes them", async () => {
+  const rows = unseen();
+  // EARLIER is only a pending bystander here: with no admission row it carries no uptake signal.
   const r = await pass([...held(), refusedPr(), earlierAdmission(true)], rows);
-  assert.deepEqual(r.updated, [T1, T2, T3], "oldest held first, not walk order, and not one per pass");
+  assert.deepEqual(r.updated, [T1], "no uptake signal yet: the oldest held head alone, not walk order and not the whole board");
   assert.deepEqual(r.dispatched, []);
   // assessRefresh is consulted for each held head, and its refusal is never admitted.
   assert.deepEqual([...r.merged].sort(), [T1, T2, T3, REFUSED].sort());
   assert.match(r.disposed(REFUSED), /base red refresh refused: merged-probe/);
-  const refreshes = rows.filter((row) => row.step === BASE_RED_REFRESH_STEP && row.forced_by === FORCED_BY && row.pr_number !== EARLIER);
-  assert.deepEqual(refreshes.map((row) => row.pr_number), [T1, T2, T3]);
-  for (const n of [T1, T2, T3]) assert.match(r.disposed(n), /main is green at c+, so the branch refresh was requested \(updated\)/);
-  assert.equal(r.admission?.signal, "clear");
-  assert.deepEqual(numbers(r.admission?.admitted), [T1, T2, T3]);
+  assert.match(r.disposed(T1), /main is green at c+, so the branch refresh was requested \(updated\)/);
+  for (const n of [T2, T3]) assert.match(r.disposed(n), new RegExp(`waiting for refresh admission behind #${T1} \\(slow start`));
+  assert.equal(r.admission?.signal, "slow-start");
+  assert.equal(r.admission?.width, 1);
+  assert.deepEqual(numbers(r.admission?.admitted), [T1]);
+  assert.deepEqual(numbers(r.admission?.waiting), [T2, T3]);
   assert.deepEqual(numbers(r.admission?.refused), [REFUSED]);
-  assert.deepEqual(r.admission?.ci_started, [{ pr_number: EARLIER, head_sha: "e".repeat(40) }]);
   assert.equal(r.admission?.oldest_held_since, ago(90));
 
+  // The second reading: T1's refreshed head has started CI, so the pass admits twice as many, oldest first.
+  const board = [moved(T1, "a", true), redPr(T2, "2", 100), redPr(T3, "3", 300), refusedPr(), earlierAdmission(true)];
+  const second = await pass(board, rows);
+  assert.deepEqual(second.updated, [T2, T3]);
+  for (const n of [T2, T3]) assert.match(second.disposed(n), /main is green at c+, so the branch refresh was requested \(updated\)/);
+  assert.equal(second.admission?.signal, "clear");
+  assert.equal(second.admission?.width, 2);
+  assert.deepEqual(second.admission?.ci_started, [{ pr_number: T1, head_sha: "1".repeat(40) }]);
+  const refreshes = rows.filter((row) => row.step === BASE_RED_REFRESH_STEP && row.forced_by === FORCED_BY);
+  assert.deepEqual(refreshes.map((row) => row.pr_number), [T1, T2, T3]);
+
   // A head refreshed once is never admitted again on that head.
-  const again = await pass([...held(), refusedPr(), earlierAdmission(true)], rows);
-  assert.deepEqual(again.updated, []);
+  assert.deepEqual((await pass([...held(), refusedPr(), earlierAdmission(true)], rows)).updated, []);
+
+  // A board a later main fix holds starts slow again: the width learned on a drained board does not carry over.
+  const T4 = 12030;
+  const T5 = 12031;
+  rows.push(...[[T4, "4"], [T5, "5"]].map(([n, c], i) => ({ step: BASE_RED_STOOD_DOWN_STEP, ts: ago(10 - i), pr_number: n,
+    head_sha: String(c).repeat(40), check_name: "ci" })));
+  const next = await pass([moved(T2, "b", true), moved(T3, "d", true), redPr(T4, "4", 40), redPr(T5, "5", 30), earlierAdmission(true)], rows);
+  assert.deepEqual(next.updated, [T4]);
+  assert.equal(next.admission?.signal, "slow-start");
 
   // A stalled own-red the admission refreshed is recorded as a fixed-on-main stage, never escalated.
   const STALLED = 12045;
@@ -137,9 +166,10 @@ test("W1-T9595: a refresh whose CI has not started holds the next admission and 
   assert.deepEqual(stillWaiting.merged, []);
   assert.deepEqual(stillWaiting.updated, []);
 
-  // The second reading: that refresh's CI has started, so the held heads are admitted, oldest first.
+  // The second reading: that refresh's CI has started, so twice its one head is admitted, oldest first.
   const started = await pass([...held(), earlierAdmission(true)], rows);
-  assert.deepEqual(started.updated, [T1, T2, T3]);
+  assert.deepEqual(started.updated, [T1, T2]);
+  assert.match(started.disposed(T3), new RegExp(`waiting for refresh admission behind #${T1}, #${T2} \\(this pass's width of 2 is full\\)`));
 
   // An unreadable reading (the snapshot never saw the earlier refresh move its head) admits the oldest only.
   const unread = await pass([...held(), redPr(EARLIER, "e", 400, { checksState: "pending", ciFailures: [] })], ledger());
@@ -159,7 +189,7 @@ test("W1-T9595: a light pass refreshes a held head only through one admission ov
     appendLine: (_path: string, row: Row) => { rows.push(row); },
     updateBranch: (pr: { prNumber: number }) => {
       updated.push(pr.prNumber);
-      if (pr.prNumber === T3) throw new Error("422 merge conflict");
+      if (pr.prNumber === T2) throw new Error("422 merge conflict");
       return "updated" as const;
     },
   };
@@ -169,16 +199,19 @@ test("W1-T9595: a light pass refreshes a held head only through one admission ov
   assert.deepEqual(updated, []);
   const admit = sweep.runLightPassRefreshAdmission;
   assert.equal(typeof admit, "function", "the light pass has one admission call over its whole snapshot");
-  assert.deepEqual(await admit(board, deps), [T1, T2, T3]);
-  assert.deepEqual(updated, [T1, T2, T3]);
+  assert.deepEqual(await admit(board, deps), [T1, T2]);
+  assert.deepEqual(updated, [T1, T2]);
   const light = rows.filter((row) => row.step === BASE_RED_REFRESH_STEP && row.surface === "light");
   assert.deepEqual(light.map((row) => [row.pr_number, row.forced_by, row.outcome]),
-    [[T1, FORCED_BY, "updated"], [T2, FORCED_BY, "updated"], [T3, FORCED_BY, "error: 422 merge conflict"]]);
+    [[T1, FORCED_BY, "updated"], [T2, FORCED_BY, "error: 422 merge conflict"]]);
   assert.equal(rows.findLast((row) => row.step === ADMISSION_STEP)?.surface, "light");
-  // Either pass reads the same fold: a head the light pass refreshed is never admitted twice.
-  assert.deepEqual(await admit(board, deps), []);
-  assert.deepEqual((await pass(board, rows)).updated, []);
-  assert.deepEqual(updated, [T1, T2, T3]);
+  // Either pass reads the same fold: a refreshed head is never admitted twice, and T1's unstarted CI holds T3.
+  const after = [moved(T1, "a", false), ...held().filter((pr) => pr.prNumber !== T1), earlierAdmission(true)];
+  assert.deepEqual(await admit(after, deps), []);
+  const full = await pass(after, rows);
+  assert.deepEqual(full.updated, []);
+  assert.match(full.disposed(T3), new RegExp(`waiting for refresh admission behind #${T1} \\(its CI has not started\\)`));
+  assert.deepEqual(updated, [T1, T2]);
 });
 
 test("W1-T9595: an unwired surface and a paced admission give different stand-down reasons", async () => {

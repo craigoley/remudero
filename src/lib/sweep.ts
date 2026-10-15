@@ -8848,29 +8848,27 @@ export const BASE_RED_REFRESH_ADMISSION_STEP = "sweep.base_red.refresh_admission
 export const REFRESH_ADMISSION_FORCED_BY = "base-fixed-admission";
 
 export interface RefreshAdmissionReading {
-  signal: "clear" | "waiting" | "unreadable";
+  signal: "clear" | "waiting" | "unreadable" | "slow-start";
   notStarted: number[];
   unreadable: number[];
   started: Array<{ pr_number: number; head_sha: string }>;
+  cohort: number;
+  carried: Set<string>;
 }
 
-/** W1-T9595 — CI uptake of earlier admissions: a refreshed head with no started required check holds the next. */
+/** W1-T9595 — CI uptake of the latest admission's refreshed heads (its cohort): one not started holds every candidate. */
 export function refreshAdmissionReading(
   openPrs: readonly OpenPrView[], lines: readonly Record<string, unknown>[],
 ): RefreshAdmissionReading {
-  const admitted = new Map<number, string>();
-  for (const line of lines) {
-    if (line.step === BASE_RED_REFRESH_ADMISSION_STEP && Array.isArray(line.ci_started)) {
-      for (const seen of line.ci_started as Array<Record<string, unknown>>) {
-        if (typeof seen?.pr_number === "number" && admitted.get(seen.pr_number) === seen.head_sha) admitted.delete(seen.pr_number);
-      }
-    }
-    if ((line.step === BASE_RED_REFRESH_STEP || line.step === BASE_FIXED_REFRESH_STEP) && line.forced_by === REFRESH_ADMISSION_FORCED_BY &&
-        line.outcome === "updated" && typeof line.pr_number === "number" && typeof line.head_sha === "string") admitted.set(line.pr_number, line.head_sha);
-  }
+  let last: Record<string, unknown> | undefined;
+  for (const line of lines) if (line.step === BASE_RED_REFRESH_ADMISSION_STEP && Array.isArray(line.admitted) && line.admitted.length > 0) last = line;
+  const rows = (field: string) => (Array.isArray(last?.[field]) ? last[field] as Array<Record<string, unknown>> : [])
+    .filter((e) => typeof e?.pr_number === "number" && typeof e.head_sha === "string");
+  const cohort = rows("admitted").filter((e) => e.outcome === "updated");
   const byNumber = new Map(openPrs.map((pr) => [pr.prNumber, pr]));
-  const reading: RefreshAdmissionReading = { signal: "clear", notStarted: [], unreadable: [], started: [] };
-  for (const [prNumber, refreshedHead] of admitted) {
+  const reading: RefreshAdmissionReading = { signal: "clear", notStarted: [], unreadable: [], started: [], cohort: cohort.length,
+    carried: new Set(rows("waiting").map((e) => `${e.pr_number}@${e.head_sha}`)) };
+  for (const { pr_number: prNumber, head_sha: refreshedHead } of cohort as Array<{ pr_number: number; head_sha: string }>) {
     const view = byNumber.get(prNumber);
     if (view === undefined) continue;
     if (view.headSha === refreshedHead || view.requiredContextsUnreadable === true) reading.unreadable.push(prNumber);
@@ -8878,7 +8876,7 @@ export function refreshAdmissionReading(
       reading.started.push({ pr_number: prNumber, head_sha: refreshedHead });
     } else reading.notStarted.push(prNumber);
   }
-  reading.signal = reading.notStarted.length > 0 ? "waiting" : reading.unreadable.length > 0 ? "unreadable" : "clear";
+  reading.signal = reading.notStarted.length > 0 ? "waiting" : reading.unreadable.length > 0 ? "unreadable" : cohort.length === 0 ? "slow-start" : "clear";
   return reading;
 }
 
@@ -8895,7 +8893,7 @@ type AdmissionEntry = Pick<RefreshAdmissionCandidate, "pr" | "arm" | "heldSinceM
 const behindText = (prs: readonly number[], why: string) =>
   `waiting for refresh admission behind ${prs.length > 0 ? prs.map((n) => `#${n}`).join(", ") : "this pass's closed admission"} (${why})`;
 
-/** W1-T9595 — oldest held first, paced by {@link refreshAdmissionReading}: neither one slot nor a fan-out. */
+/** W1-T9595 — oldest held first, slow start: one head with no uptake read, then twice the cohort while it carries this board. */
 export function createRefreshAdmission(reading: RefreshAdmissionReading, surface: SweepRepairSurface) {
   const candidates = new Map<number, RefreshAdmissionCandidate>();
   const held: Array<Record<string, unknown>> = [];
@@ -8918,7 +8916,12 @@ export function createRefreshAdmission(reading: RefreshAdmissionReading, surface
     refuse: (c: AdmissionEntry, evidence: string): void => { refused.push(entry(c, { evidence })); },
     async run(append: (row: LedgerLine) => void, runId: string): Promise<number[]> {
       const order = [...candidates.values()].sort((a, b) => a.heldSinceMs - b.heldSinceMs || a.pr.prNumber - b.pr.prNumber);
-      const take = reading.signal === "unreadable" ? order.slice(0, 1) : order;
+      const signal = reading.signal === "clear" && !order.some((c) => reading.carried.has(`${c.pr.prNumber}@${c.pr.headSha}`))
+        ? "slow-start" : reading.signal;
+      const width = signal === "waiting" ? 0 : signal === "clear" ? 2 * reading.cohort : 1;
+      const why = signal === "unreadable" ? `signal unreadable: CI uptake of #${reading.unreadable.join(", #")} is unread`
+        : signal === "slow-start" ? "slow start: no earlier admission's CI uptake is read" : `this pass's width of ${width} is full`;
+      const take = order.slice(0, width);
       for (const c of take) {
         const outcome = await c.refresh();
         admitted.push(entry(c, { outcome }));
@@ -8928,11 +8931,11 @@ export function createRefreshAdmission(reading: RefreshAdmissionReading, surface
       closed = ahead;
       for (const c of order.slice(take.length)) {
         held.push(entry(c, { behind: ahead, refresh_row: c.row }));
-        c.settle({ hold: behindText(ahead, `signal unreadable: CI uptake of #${reading.unreadable.join(", #")} is unread`) });
+        c.settle({ hold: behindText(ahead, why) });
       }
       const since = [...admitted, ...held].flatMap((e) => (typeof e.held_since === "string" ? [e.held_since] : [])).sort();
       if (admitted.length + held.length + refused.length > 0) {
-        append({ run_id: runId, task_id: "SWEEP", step: BASE_RED_REFRESH_ADMISSION_STEP, surface, signal: reading.signal,
+        append({ run_id: runId, task_id: "SWEEP", step: BASE_RED_REFRESH_ADMISSION_STEP, surface, signal, width,
           admitted, waiting: held, refused, ci_not_started: reading.notStarted, ci_unreadable: reading.unreadable,
           ci_started: reading.started, ...(since.length > 0 ? { oldest_held_since: since[0] } : {}) });
       }
