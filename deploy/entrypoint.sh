@@ -126,9 +126,8 @@ fi
 # ── Resolving REF: a branch means the tip at boot, a sha means exactly that ──────────────────
 # Invariant: `origin/$REF` is tried first, so a branch name means "the tip as of the fetch that
 # just ran"; anything without a matching remote ref — a sha, a tag — falls through to the exact
-# object, so a pin still means exactly what it says. Nothing here is silenced: a checkout that
-# cannot proceed never continues quietly on whatever HEAD happened to be — on a sync it is a named
-# STALE BOOT on the tree that last booted (W1-T9631), and on the clone path it dies.
+# object, so a pin still means exactly what it says. Nothing here is silenced: a refused checkout is
+# a named STALE BOOT on a sync (W1-T9631, below) and dies on the clone path, never a quiet HEAD.
 # Trap: the old code checked out the LOCAL branch (frozen at clone time — fetch never moves it)
 # and relied on a silenced `merge --ff-only` to climb back up, which regressed HEAD to the
 # clone-time sha whenever the merge failed and stayed there on every later boot.
@@ -195,8 +194,6 @@ clear_redundant_untracked() {
   done < <(git -C "$TREE" ls-files --others --exclude-standard -z)
 }
 
-# Returns 1, never dies, when the target cannot be reached: CHECKOUT_DIE names the refusal and
-# CHECKOUT_ERROR carries git's own words, so each caller decides what a refusal costs.
 try_checkout_target() {
   CHECKOUT_ERROR=""
   if ! TARGET="$(resolve_target)"; then
@@ -218,18 +215,13 @@ try_checkout_target() {
   fi
 }
 
-# The clone path: no tree has booted here yet, so there is nothing to fall back to and a refusal dies.
 checkout_target() {
   try_checkout_target || die "$CHECKOUT_DIE"
 }
 
-# ── W1-T9631: a boot whose checkout cannot advance runs the HEAD that last booted, and says so ──
-# Invariant: only sync_tree reaches this, so HEAD is the tree the previous boot ran — a refused
-# checkout leaves it untouched, which the tracked-clean check below confirms before trusting it.
-# Exiting instead was a crash loop no revive could fix (2026-10-15: 25 revives in 2 h 7 m). Loud,
-# never silent: a STALE BOOT log line, an entrypoint.stale_boot ledger row, an escalation spooled
-# for the daemon to post, and RMD_BOOT_CHECKOUT_BLOCKED=<target>, so the daemon does not
-# freshness-restart into the same refusal. Falsifier: test/a-boot-that-cannot-advance-runs-the-tree-that-last-booted.test.ts.
+# ── W1-T9631: a sync whose checkout refuses runs HEAD (the tree that last booted, if tracked-clean) as a STALE BOOT ──
+# Exiting was a crash loop no revive fixes (2026-10-15: 25 in 2 h 7 m). It logs, ledgers, spools an escalation, and exports RMD_BOOT_CHECKOUT_BLOCKED
+# so the daemon won't restart into it; recovery withdraws/closes it; the clone path still dies. Falsifier: test/a-boot-that-cannot-advance-runs-the-tree-that-last-booted.test.ts.
 STALE_BOOT_SPOOL_NAME="escalate-entrypoint-stale-boot.json"
 
 spool_host() { hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' || :; }
@@ -255,8 +247,6 @@ stale_boot_spool() {
   return 0
 }
 
-# A checkout that reached its target ends the stale boot: the daemon is told nothing is blocked, an
-# unposted escalation is withdrawn, and one the daemon already posted gets a spooled close.
 checkout_unblocked() {
   local dir="$STATE_DIR/escalation-spool" url now
   unset RMD_BOOT_CHECKOUT_BLOCKED
@@ -423,8 +413,7 @@ sync_tree() {
     log "  fast-forward would touch. Commit or stash, or run with RMD_SKIP_BOOTSTRAP=1."
   else
     # One step, not checkout-then-merge: the target IS the freshly-fetched tip (see the resolver
-    # above), so a single detach lands on it directly — no merge to silently fail. A refusal is a
-    # named STALE BOOT on the tree that last booted, never an exit (W1-T9631, above).
+    # above), so a single detach lands on it directly — no merge to silently fail.
     if try_checkout_target; then
       checkout_unblocked
     else
