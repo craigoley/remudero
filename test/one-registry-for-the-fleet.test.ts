@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
+import * as registryGrammar from "../src/lib/instance-registry.js";
 import {
   DEFAULT_PROJECT,
   InstanceRegistryError,
@@ -26,7 +27,7 @@ import {
   type InstanceRegistryErrorCode,
 } from "../src/lib/instance-registry.js";
 import { buildRegistryRoute, type RegistryRouteInput } from "../src/lib/serve.js";
-import { readSelectedInstanceRegistry, type RegistryFileIO } from "../src/lib/instance-registry-selection.js";
+import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO } from "../src/lib/instance-registry-selection.js";
 import type { Route } from "../src/lib/service.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -603,4 +604,56 @@ test("selected registry route snapshots explicit input and preserves true absenc
   if (initial.kind !== "ready") return;
   writeFileSync(path, FLEET + "future_safety_hold: true\n");
   assert.deepEqual(await initial.binding.recheck(), { kind: "refused", reason: "unsupported_field" });
+});
+
+function lifecycleRow(root: string): string {
+  return registry(row("widgets", {
+    repo: "widgets", github_repo: "acme/widgets", project: "fixture", retired: "false", mode: "shadow", primary: "false",
+    state_dir: join(root, "private-state"), container_name: "fixture-widgets", service_user: "fixture-user",
+    image: "registry.example.invalid/widgets:fixture", max_old_space_mb: "1024",
+    service_name: "widgets.service", watchdog_service_name: "widgets-watchdog.service", watchdog_timer_name: "widgets-watchdog.timer",
+    launcher_path: join(root, "private-launcher"), revival_log: join(root, "private-revivals"),
+    gh_app_id: "101", gh_app_installation_id: "202", gh_app_private_key_path: "/run/fixture/container-app.pem",
+    gh_app_private_key_host_path: join(root, "private-host-app.pem"), claude_dir: join(root, "private-claude"),
+    codex_dir: join(root, "private-codex"), container_config_dir: join(root, "private-config"),
+  }));
+}
+
+test("selected registry reads full lifecycle fields without reading credentials", async (t) => {
+  const dir = fixtureDir(t), path = join(dir, "registry.yaml"), text = lifecycleRow(dir);
+  writeFileSync(join(dir, "private-host-app.pem"), "fixture-key-bytes-must-not-be-read");
+  writeFileSync(path, text);
+  const actualDefault = await readSelectedInstanceRegistry({ cliPath: path });
+  assert.equal(actualDefault.kind, "ready", "the real default accepts existing lifecycle data");
+  const paths: string[] = [];
+  const observe = (p: string) => { paths.push(p); assert.equal(p, path, "only the registry may be opened or statted"); };
+  const realIO: RegistryFileIO = {
+    lstat: async (p) => { observe(p); return registryFileIO.lstat(p); },
+    open: async (p) => { observe(p); return registryFileIO.open(p); },
+  };
+  const result = await readSelectedInstanceRegistry({ cliPath: path }, realIO);
+  assert.equal(result.kind, "ready"); assert.ok(paths.length >= 3);
+  if (result.kind !== "ready") return;
+  assert.equal(result.binding.digest, createHash("sha256").update(text).digest("hex"));
+  assert.deepEqual(result.binding.instances, [{ name: "widgets", project: "fixture", repo: "acme/widgets", live: true, mode: "shadow", primary: false }]);
+});
+
+test("selected registry lifecycle field contract is immutable and shared by both consumers", () => {
+  const fields = (registryGrammar as unknown as Record<string, unknown>).SELECTED_INSTANCE_REGISTRY_FIELDS;
+  assert.ok(Array.isArray(fields), "the two consumers need one public field vocabulary");
+  assert.ok(fields.every(f => typeof f === "string")); assert.ok(Object.isFrozen(fields));
+  assert.equal(new Set(fields).size, fields.length);
+  const opened: string[] = [], observed = new Set<string>();
+  for (const file of ["deploy/install-host-units.sh", "deploy/recycle-container.sh"]) {
+    const text = readFileSync(join(REPO_ROOT, file), "utf8"); opened.push(file);
+    const start = text.indexOf("while IFS='=' read -r key value; do"); assert.ok(start >= 0, file);
+    const block = text.slice(start), end = block.indexOf("esac"); assert.ok(end > 0, file);
+    const keys = [...block.slice(0, end).matchAll(/^\s+([a-z_]+(?:\|[a-z_]+)*)\)/gm)].flatMap(m => m[1].split("|"));
+    assert.ok(keys.includes("gh_app_private_key_host_path") && keys.includes("repo"), "each real case block has positive controls");
+    for (const key of keys) observed.add(key);
+  }
+  assert.equal(opened.length, 2); observed.add("mode");
+  assert.deepEqual([...fields].sort(), [...observed].sort(), "full lifecycle grammar plus existing selected mode, no wildcard or invented field");
+  assert.throws(() => fields.push("future_authority"), TypeError);
+  assert.throws(() => Object.defineProperty(fields, "0", { value: "future_authority" }), TypeError);
 });
