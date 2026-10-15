@@ -170,11 +170,11 @@ test("W1-T9586: an own-red minor dependency hold files one migration proposal an
   assert.equal(await f.run(11788), 1);
   f.advance(15 * 60_000);
   assert.equal(await f.run(11788), 1);
-  assert.deepEqual(f.captures, []);
+  assert.equal(f.captures.length, 0);
 
   // First own-red pass records the head; the next pass files the proposal.
   assert.equal(await f.run(11788, "main-passes"), 1);
-  assert.deepEqual(f.captures, [], "the first own-red pass records the head so a held sibling can register");
+  assert.equal(f.captures.length, 0, "the first own-red pass records the head so a held sibling can register");
   assert.equal(f.ledger().filter((r) => r.step === "dep-review.own_red.observed").length, 1);
   f.advance(15 * 60_000);
   assert.equal(await f.run(11788, "main-passes"), 1, "the PR stays held: an own-red proposal arms nothing");
