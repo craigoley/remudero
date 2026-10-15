@@ -29327,7 +29327,7 @@ export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileC
 export type PlanReconcileProductionInput = PlanReconcileCadenceOpts & { settled: () => Promise<void> };
 
 export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionInputOptions): PlanReconcileProductionInput | undefined {
-  const landings: Promise<void>[] = [];
+  const landings: Promise<LandFeedbackResult>[] = [];
   const requireLanded = (landing: LandFeedbackResult): void => {
     if (!landing.landed || landing.error) throw new Error(landing.error ?? "plan reconciliation landing did not produce a PR");
   };
@@ -29339,13 +29339,11 @@ export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionI
       land: (inputs) => {
         const landOpts = { ...deps.landSeams, targetRepository: resolveOwnerRepo(), landingOwner: "measurement-cadence" };
         const landing = (deps.land ?? landPlanReconcileShardsAsync)(deps.checkoutRoot, inputs, landOpts);
-        if (!(landing instanceof Promise)) return requireLanded(landing);
-        const settled = landing.then(requireLanded);
-        settled.catch(() => {}); // observed here; the hook's `settled()` rethrows it
-        landings.push(settled);
+        if (landing instanceof Promise) landings.push(landing);
+        else requireLanded(landing);
       },
     });
-    return { ...cadence, settled: async () => void (await Promise.all(landings)) };
+    return { ...cadence, settled: async () => (await Promise.all(landings)).forEach(requireLanded) };
   } catch {
     // An unavailable config, plan, ledger or credit projection must not abort the other
     // measurement-cadence rungs. Omit this optional rung for the tick and retry next time.
