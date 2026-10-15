@@ -32,7 +32,8 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { writeAtomic } from "./fs-race-safe.js";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
 import { createHash } from "node:crypto";
@@ -113,6 +114,11 @@ export interface TriggerInputs {
   lastFailedAtMs?: number;
   /** The decision's clock, for the failure back-off above. */
   nowMs?: number;
+  /** W1-T8138: the blockers the last DRAIN-WAIT refusal named, from state/DEPLOY_FAILED. Absent for every
+   *  other failure kind, which keeps the back-off. */
+  lastFailedDrainBlockers?: readonly DrainBlocker[];
+  /** W1-T8138: of those, the ones this tick still sees running. `undefined` is UNKNOWN, which keeps the back-off. */
+  unsettledDrainBlockers?: readonly DrainBlocker[];
 }
 
 export interface ResourcePolicyDrift {
@@ -283,6 +289,198 @@ export function readMountPlanDrift(
 
 /** An automatic image recycle does not follow a recorded deploy failure sooner than this. */
 export const IMAGE_RECYCLE_FAILURE_BACKOFF_MS = 60 * 60_000;
+
+// ── W1-T8138: A REFUSED RECYCLE RETRIES WHEN ITS BLOCKERS SETTLE, AND WAITS AS LONG AS ITS LANES NEED ──
+// The script names what it refused on (one `drain-blockers|<json>` stderr line); the supervisor keeps
+// that list on the DEPLOY_FAILED marker and retries on the first tick at which every named blocker has
+// finished, instead of after IMAGE_RECYCLE_FAILURE_BACKOFF_MS. The wait it hands the script is read
+// from the observed `implement.done` run lengths and the lanes' ages. Pull, smoke and health failures
+// carry no blocker list and keep the back-off. FALSIFIER: test/a-refused-recycle-retries-when-its-blockers-settle.test.ts.
+
+/** The stderr line prefix on which recycle-container.sh writes its machine-readable blocker list. */
+export const DRAIN_BLOCKERS_PREFIX = "drain-blockers|";
+
+/** ONE thing a drain-wait refusal named: a lane lock, or a lane-less worker process. */
+export interface DrainBlocker {
+  kind: "lock" | "worker";
+  /** The lock's task id (its file name). */
+  task_id?: string;
+  /** The lock's run id. */
+  run_id?: string;
+  /** The worker's pid inside the container. */
+  pid?: number;
+  /** Attribution of a lane-less worker. */
+  worker_kind?: "review" | "retro" | "fix-rung" | "unknown";
+  /** The worker's command line as the script read it, to tell a reused pid from the same worker. */
+  args?: string;
+}
+
+/** Parse the blocker list out of a refusal's text; `undefined` when the refusal named none. */
+export function parseDrainBlockers(message: string): DrainBlocker[] | undefined {
+  const line = message.split(/\r?\n/).find((l) => l.startsWith(DRAIN_BLOCKERS_PREFIX));
+  if (line === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(line.slice(DRAIN_BLOCKERS_PREFIX.length)) as { blockers?: unknown };
+    if (!Array.isArray(parsed.blockers)) return undefined;
+    const kept = parsed.blockers.filter((b): b is DrainBlocker => {
+      const k = (b as { kind?: unknown } | null)?.kind;
+      return k === "lock" || k === "worker";
+    });
+    return kept.length > 0 ? kept : undefined;
+  } catch (err) {
+    void err; // a half-written line names no blocker — the refusal keeps today's back-off
+    return undefined;
+  }
+}
+
+/** Ledger steps that end a lane's run: a verdict, a freshness handoff, or a recycle yield that ended its round. */
+export const DRAIN_SETTLED_STEPS: readonly string[] = ["verdict", "run.freshness_handoff", "worker.recycle_yield"];
+
+/** What the supervisor observed about the named blockers on this tick. `undefined` is UNKNOWN. */
+export interface DrainBlockerEvidence {
+  /** Ledger rows naming a run: step, run_id, and the watchdog's `decision` where it has one. */
+  rows: ReadonlyArray<{ step?: unknown; run_id?: unknown; decision?: unknown }>;
+  /** The locks present now; `undefined` when the lock directory could not be read. */
+  liveLocks: ReadonlyArray<{ task_id: string; run_id?: string }> | undefined;
+  /** Command line by pid of the worker processes present now; `undefined` when they could not be read. */
+  livePidArgs: ReadonlyMap<number, string> | undefined;
+}
+
+/** A worker command line as the script records it: no quote, backslash or control character, 160 characters at most. */
+export function normalizeBlockerArgs(args: string): string {
+  return args.replace(/["\\\u0000-\u001f]/g, "").trim().slice(0, 160);
+}
+
+function describeDrainBlocker(b: DrainBlocker): string {
+  return b.kind === "lock"
+    ? `lock ${b.task_id ?? "?"} (run ${b.run_id ?? "?"})`
+    : `${b.worker_kind ?? "unknown"} worker pid ${b.pid ?? "?"}`;
+}
+
+/** The named blockers the evidence does NOT show settled. A blocker whose evidence could not be read
+ *  is unsettled: waiting on an unknown is the safe direction, retrying into it is the stall again. */
+export function unsettledDrainBlockers(blockers: readonly DrainBlocker[], ev: DrainBlockerEvidence): DrainBlocker[] {
+  return blockers.filter((b) => {
+    if (b.kind === "lock") {
+      const ended = b.run_id !== undefined && ev.rows.some(
+        (r) => r.run_id === b.run_id && typeof r.step === "string" && DRAIN_SETTLED_STEPS.includes(r.step) && r.decision !== "action_failed",
+      );
+      if (ended) return false;
+      // The lock is its lane: gone, or taken by another run of the task, means the named run has let go of it.
+      return ev.liveLocks === undefined ||
+        ev.liveLocks.some((l) => l.task_id === b.task_id && (b.run_id === undefined || l.run_id === b.run_id));
+    }
+    if (b.pid === undefined || ev.livePidArgs === undefined) return true;
+    const live = ev.livePidArgs.get(b.pid);
+    return live !== undefined && (b.args === undefined || normalizeBlockerArgs(live) === b.args);
+  });
+}
+
+/** The quiet-worker watchdog's ledger steps (src/lib/quiet-worker-watchdog.ts), named here so this module keeps its imports. */
+const RECYCLE_YIELD_STEP = "worker.recycle_yield";
+const QUIET_JUDGED_STEP = "worker.quiet_judged";
+
+/** The quantile of the observed run lengths a lane is waited for. A high one: the wait must cover the
+ *  lane, and a lane that overruns it is refused with its blockers named, then retried when they settle. */
+export const RECYCLE_WAIT_QUANTILE = 0.9;
+/** The wait the script itself keeps when nobody derived one, and the remainder given a lane older than every observed run. */
+export const RECYCLE_WAIT_FALLBACK_S = 3000;
+
+/** One in-flight lane as the supervisor reads it from its lock. */
+export interface RecycleWaitLane {
+  task_id: string;
+  run_id?: string;
+  age_s: number;
+}
+
+export interface RecycleWaitInput {
+  /** `worker_duration_ms` of the observed `implement.done` rows. */
+  durationsMs: readonly number[];
+  lanes: readonly RecycleWaitLane[];
+  /** Lane-less workers (review, retro, fix-rung) in flight, whose ages the supervisor does not read. */
+  laneLessWorkers: number;
+  /** Runs the watchdog ended the round of (`worker.recycle_yield` / `worker.quiet_judged`, decision acted). */
+  endedRunIds: ReadonlySet<string>;
+  /** Runs whose round end FAILED — still waited for, for their own expected remainder. */
+  failedEndRunIds: ReadonlySet<string>;
+}
+
+export interface RecycleWaitDerived {
+  waitS: number;
+  source: "observed_distribution" | "no_history_fallback";
+  samples: number;
+  quantile: number;
+  lanes: Array<{ task_id: string; run_id?: string; age_s: number; remaining_s: number; basis: string }>;
+}
+
+function quantileOf(sorted: readonly number[], q: number): number {
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))];
+}
+
+/** The drain wait the in-flight lanes need: for each lane, the high quantile of the run lengths that
+ *  were AT LEAST as old as the lane is now, less its age; the largest remainder over all lanes. */
+export function deriveRecycleWait(input: RecycleWaitInput): RecycleWaitDerived {
+  const sorted = input.durationsMs.filter((d) => Number.isFinite(d) && d > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) {
+    return { waitS: RECYCLE_WAIT_FALLBACK_S, source: "no_history_fallback", samples: 0, quantile: RECYCLE_WAIT_QUANTILE, lanes: [] };
+  }
+  const lanes = input.lanes.map((lane) => {
+    if (lane.run_id !== undefined && input.endedRunIds.has(lane.run_id) && !input.failedEndRunIds.has(lane.run_id)) {
+      return { ...lane, remaining_s: 0, basis: "round_ended" };
+    }
+    const older = sorted.filter((d) => d >= lane.age_s * 1000);
+    if (older.length === 0) return { ...lane, remaining_s: RECYCLE_WAIT_FALLBACK_S, basis: "older_than_every_observed_run" };
+    const remaining = Math.max(0, Math.ceil(quantileOf(older, RECYCLE_WAIT_QUANTILE) / 1000 - lane.age_s));
+    return { ...lane, remaining_s: remaining, basis: input.failedEndRunIds.has(lane.run_id ?? "") ? "round_end_failed" : "conditional_quantile" };
+  });
+  // Lane-less workers and an idle fleet are read as a run that has just begun: nothing says more.
+  const fresh = Math.ceil(quantileOf(sorted, RECYCLE_WAIT_QUANTILE) / 1000);
+  const waitS = Math.max(
+    input.laneLessWorkers > 0 || lanes.length === 0 ? fresh : 0,
+    ...lanes.map((l) => l.remaining_s),
+  );
+  return { waitS, source: "observed_distribution", samples: sorted.length, quantile: RECYCLE_WAIT_QUANTILE, lanes };
+}
+
+/** How many archived ledgers the duration read opens, newest first, and how many run lengths it keeps. */
+const RECYCLE_WAIT_ARCHIVE_SCAN = 40;
+const RECYCLE_WAIT_SAMPLE_CAP = 300;
+
+/** `worker_duration_ms` of the newest `implement.done` rows: the live ledger, then its rotated and gzipped siblings. */
+export function readImplementDurationsMs(ledgerPath: string): number[] {
+  const out: number[] = [];
+  const take = (text: string): void => {
+    for (const line of text.split("\n").reverse()) {
+      if (out.length >= RECYCLE_WAIT_SAMPLE_CAP) return;
+      if (!line.includes("implement.done") || !line.includes("worker_duration_ms")) continue;
+      try {
+        const row = JSON.parse(line) as { step?: unknown; worker_duration_ms?: unknown };
+        if (row.step === "implement.done" && typeof row.worker_duration_ms === "number") out.push(row.worker_duration_ms);
+      } catch (err) {
+        void err; // a torn line is one sample fewer, not a failed derivation
+      }
+    }
+  };
+  const dir = dirname(ledgerPath);
+  const archives = (() => {
+    try {
+      return readdirSync(dir).filter((n) => /^ledger\..+\.ndjson(\.gz)?$/.test(n)).sort().reverse().slice(0, RECYCLE_WAIT_ARCHIVE_SCAN);
+    } catch (err) {
+      void err; // no directory listing — the live ledger alone
+      return [];
+    }
+  })();
+  for (const read of [ledgerPath, ...archives.map((n) => join(dir, n))]) {
+    if (out.length >= RECYCLE_WAIT_SAMPLE_CAP) break;
+    try {
+      const buf = readFileSync(read);
+      take((read.endsWith(".gz") ? gunzipSync(buf) : buf).toString("utf8"));
+    } catch (err) {
+      void err; // absent or unreadable — fewer samples; none at all is the labelled fallback
+    }
+  }
+  return out;
+}
 
 export interface Decision {
   deploy: boolean;
@@ -767,6 +965,18 @@ function newestLockfileChangeSha(
  * self-corrects once that restart records a sha.
  */
 // Why: docs/forensics/deployer.md#decidedeploytrigger
+/** Does a recorded failure still hold an automatic recycle off? A drain-wait refusal is held off by the
+ *  blockers it named, for as long as they run (W1-T8138); every other failure by the hour's back-off. */
+function failureHoldsRecycle(i: TriggerInputs): { held: false } | { held: true; why: string } {
+  if (i.lastFailedDrainBlockers !== undefined && i.lastFailedDrainBlockers.length > 0 && i.unsettledDrainBlockers !== undefined) {
+    return i.unsettledDrainBlockers.length === 0
+      ? { held: false }
+      : { held: true, why: `the last recycle was refused on ${i.unsettledDrainBlockers.map(describeDrainBlocker).join(", ")}, still running — it retries when they settle` };
+  }
+  const recent = i.lastFailedAtMs !== undefined && i.nowMs !== undefined && i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
+  return recent ? { held: true, why: "a deploy failed under an hour ago — the automatic recycle backs off" } : { held: false };
+}
+
 export function decideDeployTrigger(i: TriggerInputs): Decision {
   const behind = !sameCommit(i.installHead, i.originMain);
   const runningStale = !sameCommit(i.runningHead, i.installHead);
@@ -846,10 +1056,9 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
     if (stopUnknownOrSet) {
       return { deploy: false, reason: `${what}, but STOP is set or unknown — no automatic recycle` };
     }
-    const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
-      i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
-    if (recentFailure) {
-      return { deploy: false, reason: `${what}; a deploy failed under an hour ago — the automatic recycle backs off` };
+    const failure = failureHoldsRecycle(i);
+    if (failure.held) {
+      return { deploy: false, reason: `${what}; ${failure.why}` };
     }
     return { deploy: true, reason: createDrift.map((d) => `${d.recycle}: ${d.details.join(", ")}`).join("; "), recycle: "create-drift" };
   }
@@ -903,10 +1112,9 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.imageDriftOnly === true && imageStale && !i.autoMode && i.imageRecycleManual !== true) {
     if (stopUnknownOrSet) return { deploy: false, reason: `${why}, but STOP is set or unknown — no automatic recycle` };
     const image = i.newestBakedSha ? `the image for ${i.newestBakedSha.slice(0, 9)}` : "the new image";
-    const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
-      i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
-    if (recentFailure) {
-      return { deploy: false, reason: `${why}; a deploy failed under an hour ago — the automatic image recycle backs off` };
+    const failure = failureHoldsRecycle(i);
+    if (failure.held) {
+      return { deploy: false, reason: `${why}; ${failure.why.replace("automatic recycle", "automatic image recycle")}` };
     }
     if (i.imagePublished === true) {
       return { deploy: true, reason: `automatic image recycle: ${why}, and ${image} is published`, recycle: "image" };
@@ -1409,6 +1617,10 @@ export interface DeployDeps {
   imageRecycleManual?: () => boolean;
   /** When the recorded deploy failure happened, from state/DEPLOY_FAILED. */
   lastFailedAtMs?: () => number | undefined;
+  /** W1-T8138: the blockers the recorded drain-wait refusal named (state/DEPLOY_FAILED). Absent: none. */
+  lastFailedDrainBlockers?: () => DrainBlocker[] | undefined;
+  /** W1-T8138: of the named blockers, those still running now. `undefined` = could not tell. */
+  unsettledDrainBlockers?: (blockers: readonly DrainBlocker[]) => DrainBlocker[] | undefined;
   dirtyFiles: () => string[];
   incomingFiles: (from: string, to: string) => string[];
   /** Each merged change whose daemon impact can contribute restart pressure. Optional only for
@@ -1445,7 +1657,7 @@ export interface DeployDeps {
   /** Poll for boot health for the configured window; returns what was observed. */
   waitBootHealth: (sinceMs: number) => HealthInputs;
   /** Record a failure for the operator (state/DEPLOY_FAILED) + the failed HEAD. */
-  alert: (message: string, failedHead: string, kind: DeployFailureKind) => void;
+  alert: (message: string, failedHead: string, kind: DeployFailureKind, drainBlockers?: readonly DrainBlocker[]) => void;
   /** Consume the operator marker after a terminal outcome (success or rollback). */
   clearMarker: () => void;
   /** Retract the recorded failure (state/DEPLOY_FAILED + DEPLOY_LAST_FAILED) once a deploy is VERIFIED
@@ -1530,14 +1742,15 @@ export interface DeployResult {
 
 // ── A RECYCLE THAT KEEPS REFUSING IS ESCALATED (W1-T6062) ──────────────────────────────────────
 // Tiered, never one threshold: the first refusal keeps today's marker and `deploy.restart_refused`
-// row; a refusal recurring across consecutive backoff windows (same instance, same reason) logs
+// row; a refusal recurring across consecutive refused ATTEMPTS (same instance, same reason; W1-T8138: not
+// timer windows, since a drain refusal now retries when its blockers settle) logs
 // `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT windows it opens ONE
 // needs-human issue per instance and reason and updates it while it persists. A VERIFIED recycle
 // closes it. FALSIFIER: test/a-recycle-that-keeps-refusing-is-escalated.test.ts.
 
-/** Consecutive refused windows at which the refusal is logged as persisting. */
+/** Consecutive refused attempts at which the refusal is logged as persisting. */
 export const REFUSAL_PERSISTING_AT = 2;
-/** Consecutive refused windows at which the one needs-human issue is opened. */
+/** Consecutive refused attempts at which the one needs-human issue is opened. */
 export const REFUSAL_ESCALATE_AT = 3;
 
 /** The run of consecutive same-reason refusals for one instance. */
@@ -1572,7 +1785,12 @@ export interface PersistingRefusal {
 /** Stable key for "the same refusal": digits and whitespace are normalised so a changing worker
  *  count or timestamp inside the message does not read as a different reason. */
 export function refusalReasonKey(message: string): string {
-  const reason = message.split(/\r?\n/).filter((line) => !/^\s*smoke-output\|/.test(line)).join("\n");
+  // W1-T8138: a drain-wait refusal is the SAME reason whichever lanes it named, so its key is its headline
+  // alone; the blocker detail below it changes from one attempt to the next and must not restart the count.
+  const headline = message.split(/\r?\n/).find((line) => line.includes("REFUSING —") && line.includes("still in flight"));
+  const reason = headline !== undefined && parseDrainBlockers(message) !== undefined
+    ? headline
+    : message.split(/\r?\n/).filter((line) => !/^\s*smoke-output\|/.test(line)).join("\n");
   const norm = reason.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
   return createHash("sha256").update(norm).digest("hex").slice(0, 10);
 }
@@ -1805,6 +2023,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     }
   }
   const stopPresent = deps.stopPresent?.();
+  const drainBlockers = deps.lastFailedDrainBlockers?.();
   const decision = decideDeployTrigger({
     markerPresent: markerWasPresent,
     autoMode,
@@ -1827,6 +2046,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     imageRecycleManual: deps.imageRecycleManual?.(),
     lastFailedAtMs: deps.lastFailedAtMs?.(),
     nowMs: deps.now(),
+    ...(drainBlockers ? { lastFailedDrainBlockers: drainBlockers, unsettledDrainBlockers: deps.unsettledDrainBlockers?.(drainBlockers) } : {}),
   });
   if (!decision.deploy) {
     deps.clearDeferredSince?.(); // nothing being deferred — no active deploy attempt
@@ -2010,7 +2230,8 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // replaced by a different backend or a bare `docker restart`.
     const message = err instanceof Error ? err.message : String(err);
     deps.log("deploy.restart_refused", { to: short(toHead), backend: selection.backend.name, message });
-    deps.alert(`deploy of ${toHead} was pulled but ${selection.backend.name} refused the restart: ${message}`, toHead, "restart-refused");
+    const named = parseDrainBlockers(message);
+    deps.alert(`deploy of ${toHead} was pulled but ${selection.backend.name} refused the restart: ${message}`, toHead, "restart-refused", named);
     recordRefusal(deps, { toHead, backend: selection.backend.name, message });
     return { deployed: false, reason: `restart-refused: ${message}`, fromHead, toHead, pulledPendingRestart: true };
   }
@@ -2335,6 +2556,94 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         return undefined;
       }
     })();
+  // ── W1-T8138: what the supervisor reads off the lanes, for the drain wait it hands the script and for the
+  // settle check on a refused recycle's named blockers. Every read degrades to UNKNOWN, never to a guess.
+  const inflightDir = join(o.stateRoot, "state", "inflight");
+  const daemonContainer = process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer;
+  const ledgerRowsFor = (steps: readonly string[]): Array<Record<string, unknown>> => {
+    let text: string;
+    try {
+      text = readFileSync(ledgerPath, "utf8");
+    } catch (err) {
+      void err; // no live ledger — no rows, so nothing reads as settled or ended
+      return [];
+    }
+    return text.split("\n").filter((l) => steps.some((st) => l.includes(`"${st}"`))).flatMap((l) => {
+      try {
+        return [JSON.parse(l) as Record<string, unknown>];
+      } catch (err) {
+        void err; // a torn line names nothing
+        return [];
+      }
+    });
+  };
+  const readLocks = (): Array<{ task_id: string; run_id?: string; startedAtMs?: number }> | undefined => {
+    try {
+      return readdirSync(inflightDir).filter((n) => n.endsWith(".lock")).map((n) => {
+        let info: { run_id?: unknown; startedAt?: unknown } = {};
+        try {
+          info = JSON.parse(readFileSync(join(inflightDir, n), "utf8")) as typeof info;
+        } catch (err) {
+          void err; // an unparseable lock still occupies its lane: kept, with no run id or age
+        }
+        const startedAtMs = typeof info.startedAt === "string" ? Date.parse(info.startedAt) : Number.NaN;
+        return {
+          task_id: n.slice(0, -".lock".length),
+          ...(typeof info.run_id === "string" ? { run_id: info.run_id } : {}),
+          ...(Number.isFinite(startedAtMs) ? { startedAtMs } : {}),
+        };
+      });
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === "ENOENT" ? [] : undefined; // no directory is no lanes; an unreadable one is unknown
+    }
+  };
+  const readPidArgs = (): Map<number, string> | undefined => {
+    try {
+      const pids = new Map<number, string>();
+      for (const line of exec("docker", ["exec", daemonContainer, "ps", "-eo", "pid,args", "--no-headers"]).split("\n")) {
+        const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+        if (m) pids.set(Number(m[1]), m[2]);
+      }
+      return pids;
+    } catch (err) {
+      void err; // container down or docker unreachable — UNKNOWN, so a worker blocker stays unsettled
+      return undefined;
+    }
+  };
+  const deriveDrainWait = (): RecycleWaitDerived | undefined => {
+    const durationsMs = readImplementDurationsMs(ledgerPath);
+    if (durationsMs.length === 0) return undefined; // the script's own labelled fallback applies
+    const locks = readLocks() ?? [];
+    const now = clock();
+    const yields = ledgerRowsFor([RECYCLE_YIELD_STEP, QUIET_JUDGED_STEP]);
+    const endedRunIds = new Set<string>();
+    const failedEndRunIds = new Set<string>();
+    for (const r of yields) {
+      if (typeof r.run_id !== "string") continue;
+      if (r.step === QUIET_JUDGED_STEP && r.action !== "end_round") continue;
+      (r.decision === "acted" ? endedRunIds : r.decision === "action_failed" ? failedEndRunIds : new Set<string>()).add(r.run_id);
+    }
+    let workers: number | undefined;
+    try {
+      workers = process.env.RMD_RESOURCE_POLICY_CONTAINER
+        ? countContainerWorkers(exec("docker", ["top", daemonContainer, "-eo", "pid,ppid,args"]))
+        : exec("pgrep", ["-f", WORKER_PROCESS_PATTERN]).split("\n").filter(Boolean).length;
+    } catch (err) {
+      void err; // pgrep exit 1 is no match; any other failure is unknown, read below as one unseen worker
+      workers = undefined;
+    }
+    return deriveRecycleWait({
+      durationsMs,
+      lanes: locks.map((l) => ({
+        task_id: l.task_id,
+        ...(l.run_id === undefined ? {} : { run_id: l.run_id }),
+        age_s: l.startedAtMs === undefined ? 0 : Math.max(0, Math.floor((now - l.startedAtMs) / 1000)),
+      })),
+      laneLessWorkers: workers === undefined ? 1 : Math.max(0, workers - locks.length),
+      endedRunIds,
+      failedEndRunIds,
+    });
+  };
   const recycleContainerBackend: RestartBackend = {
     name: "recycle-container",
     // Section 5 of the script: PAUSE, then a bounded wait for in-flight workers, refusing past it.
@@ -2362,7 +2671,22 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // `deploy.restart_refused`, "Declared: core site console", after the image had already been
       // pulled. An unresolved instance still invokes the script bare, so the refusal stands wherever
       // there is no answer rather than being replaced by a guess.
-      exec("bash", recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript]);
+      const script = recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript];
+      // W1-T8138: the drain wait comes from the observed run lengths and the lanes' ages, unless an operator
+      // already set one. With no history nothing is passed and the script keeps its labelled fallback.
+      const derived = process.env.RMD_RECYCLE_WAIT_S === undefined ? deriveDrainWait() : undefined;
+      if (derived === undefined) {
+        exec("bash", script);
+        return;
+      }
+      log("deploy.recycle_wait_derived", {
+        wait_s: derived.waitS,
+        source: derived.source,
+        samples: derived.samples,
+        quantile: derived.quantile,
+        lanes: derived.lanes,
+      });
+      exec("env", [`RMD_RECYCLE_WAIT_S=${derived.waitS}`, `RMD_RECYCLE_WAIT_SOURCE=${derived.source}`, "bash", ...script]);
     },
   };
 
@@ -2582,6 +2906,21 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       exec("gh", ["workflow", "run", IMAGE_BUILD_WORKFLOW, "-R", slug, "--ref", "main"]);
     },
     imageRecycleManual: () => existsSync(deployImageManualPath(o.stateRoot)),
+    lastFailedDrainBlockers: () => {
+      try {
+        const b = (JSON.parse(readFileSync(deployFailedAlertPath(o.stateRoot), "utf8")) as { drainBlockers?: unknown }).drainBlockers;
+        return Array.isArray(b) && b.length > 0 ? (b as DrainBlocker[]) : undefined;
+      } catch (err) {
+        void err; // no marker, or an unreadable one — no blockers named, so the back-off applies
+        return undefined;
+      }
+    },
+    unsettledDrainBlockers: (blockers) =>
+      unsettledDrainBlockers(blockers, {
+        rows: ledgerRowsFor(DRAIN_SETTLED_STEPS),
+        liveLocks: readLocks(),
+        livePidArgs: blockers.some((b) => b.kind === "worker") ? readPidArgs() : new Map(),
+      }),
     lastFailedAtMs: () => {
       try {
         const at = Date.parse((JSON.parse(readFileSync(deployFailedAlertPath(o.stateRoot), "utf8")) as { at?: string }).at ?? "");
@@ -2749,13 +3088,13 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       }
       return { bootObserved: boots >= 1, crashCount: Math.max(0, boots - 1), rowsSeen: seen };
     },
-    alert: (message, failedHead, kind) => {
+    alert: (message, failedHead, kind, drainBlockers) => {
       // `kind` is persisted so the NEXT poll's skip line can state the real cause. Without it the
       // record and the message that cites it can disagree, which is how a dirty-tree stall spent
       // an investigation being read as a health-check failure.
       writeAtomic(
         deployFailedAlertPath(o.stateRoot),
-        JSON.stringify({ message, failedHead, kind, at: new Date().toISOString() }, null, 2),
+        JSON.stringify({ message, failedHead, kind, at: new Date().toISOString(), ...(drainBlockers ? { drainBlockers } : {}) }, null, 2),
       );
       writeAtomic(deployLastFailedPath(o.stateRoot), failedHead);
     },

@@ -420,7 +420,21 @@ RECYCLE_PAUSE_BODY=""
 # (5910s), and remains a full 2.4x under HUNG_WORKER_AGE_S (7200s) — so this widens ONLY how long a
 # HEALTHY run is waited for before refusing; it does not move what this script treats as hung, and
 # `RMD_RECYCLE_WAIT_S` still overrides it exactly as before.
+#
+# W1-T8138: THE 3000 BELOW IS NOW ONLY THE NO-HISTORY FALLBACK, NOT THE SIZING. The deploy supervisor
+# (src/lib/deployer.ts, deriveRecycleWait) reads the observed `implement.done` run lengths and the in-flight
+# lanes' ages, passes the wait it needs as RMD_RECYCLE_WAIT_S with RMD_RECYCLE_WAIT_SOURCE, and ledgers it as
+# `deploy.recycle_wait_derived`. A hand run, or a supervisor with no history to read, reaches the constant, and
+# every message below says so (WAIT_SOURCE). The distribution above is why 3000 was a sound fallback, not
+# why a fleet of two-minute runs and a fleet of ninety-minute runs should wait the same time.
 WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-3000}"
+if [ -n "${RMD_RECYCLE_WAIT_SOURCE:-}" ]; then
+  WAIT_SOURCE="${RMD_RECYCLE_WAIT_SOURCE}"
+elif [ -n "${RMD_RECYCLE_WAIT_S:-}" ]; then
+  WAIT_SOURCE="operator"
+else
+  WAIT_SOURCE="no_history_fallback"
+fi
 POLL_INTERVAL_S="${RMD_RECYCLE_POLL_S:-5}"
 
 # The distribution above, in the exact words a refusal below reuses — an operator reading a timeout
@@ -1526,6 +1540,29 @@ lock_started_at_field() {
     | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
 }
 
+lock_run_id_field() {
+  # Same discipline as lock_started_at_field: the lock's quoted `run_id` string, or nothing.
+  grep -ao '"run_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
+}
+
+# W1-T8138: text safe inside a JSON string without an encoder — quotes, backslashes and control characters
+# removed, at most 160 characters (src/lib/deployer.ts normalizeBlockerArgs applies the same rule).
+json_text() {
+  printf '%s' "$1" | tr -d '"\\\000-\037' | cut -c1-160
+}
+
+# W1-T8138: what kind of lane-less worker a command line is, for the refusal's blocker list.
+worker_kind_of() {
+  case "$1" in
+    *run-task.ts*retro*) printf 'retro' ;;
+    *sweep-fix-settings*) printf 'fix-rung' ;;
+    *review*) printf 'review' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 lock_pid_field() {
   # Same discipline as lock_host_field and lock_started_at_field above: grep/cut, not jq. Unlike
   # those two, `pid` is a bare JSON NUMBER (`{"pid":57,"host":"..."}`), never a quoted string, so
@@ -1871,6 +1908,7 @@ while :; do
   lane_less_hung=""
   worker_snapshot="$(worker_lines)"
   busy_worker_lines=""
+  busy_worker_json=""
   while read -r wpid wage wlane wargs; do
     [ -n "${wpid:-}" ] || continue
     if [ "${wlane}" != "lane-less" ]; then
@@ -1883,6 +1921,7 @@ while :; do
       *)
         lane_less_busy=$((lane_less_busy + 1))
         busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
+        busy_worker_json="${busy_worker_json:+${busy_worker_json},}{\"kind\":\"worker\",\"pid\":${wpid},\"worker_kind\":\"$(worker_kind_of "${wargs}")\",\"args\":\"$(json_text "${wargs}")\"}"
         continue ;;
     esac
     if [ "${wage}" -ge "${HUNG_WORKER_AGE_S}" ] 2>/dev/null; then
@@ -1890,6 +1929,7 @@ while :; do
     else
       lane_less_busy=$((lane_less_busy + 1))
       busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
+      busy_worker_json="${busy_worker_json:+${busy_worker_json},}{\"kind\":\"worker\",\"pid\":${wpid},\"worker_kind\":\"$(worker_kind_of "${wargs}")\",\"args\":\"$(json_text "${wargs}")\"}"
     fi
   done <<WORKERS
 ${worker_snapshot}
@@ -1924,7 +1964,11 @@ WORKERS
   if [ "${waited}" -ge "${WAIT_SECONDS}" ]; then
     OLDEST_AGE_S="$(oldest_inflight_age_s)"
     echo "recycle-container: REFUSING — ${n} lane-holding and ${lane_less_busy} lane-less worker(s) still in flight after ${WAIT_SECONDS}s." >&2
-    echo "  WAIT_SECONDS=${WAIT_SECONDS} was sized against ${RECYCLE_WAIT_DISTRIBUTION_NOTE}." >&2
+    if [ "${WAIT_SOURCE}" = "observed_distribution" ]; then
+      echo "  WAIT_SECONDS=${WAIT_SECONDS} was derived by the deploy supervisor from the observed run lengths and the lanes' ages (W1-T8138)." >&2
+    else
+      echo "  WAIT_SECONDS=${WAIT_SECONDS} was sized against ${RECYCLE_WAIT_DISTRIBUTION_NOTE}; source: ${WAIT_SOURCE}." >&2
+    fi
     [ -z "${STALL_PROOF_FAILED}" ] || echo "  STALLED verdict, but frozen-daemon ownership was not proven — ${STALL_PROOF_FAILED} (W1-T6597)." >&2
     if [ -n "${OLDEST_AGE_S}" ] && [ "${OLDEST_AGE_S}" -gt 0 ] 2>/dev/null; then
       echo "  the oldest in-flight work this run observed was ${OLDEST_AGE_S}s old — a wait of at" >&2
@@ -1941,6 +1985,17 @@ WORKERS
       echo "  in-flight worker trees — busy, not hung (lane workers are included in their lock count):" >&2
       printf '%s' "${busy_worker_lines}" >&2
     fi
+    # W1-T8138: the blockers, machine-readable, so the supervisor retries when THEY settle instead of on a timer.
+    blockers_json="${busy_worker_json}"
+    if [ -d "${INFLIGHT_DIR}" ]; then
+      for f in "${INFLIGHT_DIR}"/*.lock; do
+        [ -e "${f}" ] || continue
+        lock_task="$(basename "${f}" .lock)"
+        lock_run="$(lock_run_id_field "${f}")"
+        blockers_json="${blockers_json:+${blockers_json},}{\"kind\":\"lock\",\"task_id\":\"$(json_text "${lock_task}")\"${lock_run:+,\"run_id\":\"$(json_text "${lock_run}")\"}}"
+      done
+    fi
+    echo "drain-blockers|{\"wait_s\":${WAIT_SECONDS},\"wait_source\":\"${WAIT_SOURCE}\",\"blockers\":[${blockers_json}]}" >&2
     echo "  ${CONTAINER_NAME} is untouched — killing it now would lose this work and strand these" >&2
     echo "  locks. Widen the wait with RMD_RECYCLE_WAIT_S, or re-run once these finish." >&2
     clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
