@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { acquireTestSlotAsync, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlotAsync, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotOptions } from "./test-slot.js";
 
 /** PRIMARY CONTROL: maximum combined stdout/stderr bytes retained for one preflight attempt. */
 export const RETRO_PREFLIGHT_CAPTURE_BYTES = 16 * 1024;
@@ -413,7 +413,7 @@ async function runAttempt(
   // W1-T6111: the suite run is the heavy part, so it takes a host-wide slot, niced and at the
   // concurrency the slot grants. The ASYNC acquirer is deliberate: `acquireTestSlot` waits on a
   // synchronous Atomics.wait, which would freeze the event loop this awaited preflight shares with
-  // the caller. It never throws and never refuses; every outcome runs the suite.
+  // the caller. Legacy-only fallback runs; private-required NOT_RUN must not launch a suite.
   const slot = await acquireTestSlotAsync("retro-preflight:plan-reading-suites", {
     perFileBytes: TEST_FILE_PEAK_BYTES,
     ...testSlot,
@@ -421,6 +421,7 @@ async function runAttempt(
   let result: RetroPrepublishCommandResult;
   let slotRow: AttemptSlot;
   try {
+    if (!testSlotExecutionAllowed(slot)) throw new Error(`retro preflight NOT_RUN (${slot.note})`);
     const argv = testRunArgv(
       [
         "scripts/test-with-retry.mjs",

@@ -1,0 +1,77 @@
+- id: W1-T9689
+  title: "DEP REVIEW READS THE SELECTED CHECK ATTEMPTS — its command passes the raw rollup to redChecks, so a superseded commitlint and ci-gate failure keep PR11968 held after successful reruns while the sweep already reads that exact head green"
+  repo: remudero
+  depends_on: [W1-T5694, W1-T3244, W1-T9664]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # Rule 19: one concern, the dependency review command reads the selected attempts without weakening real gates
+  band_meaning: span
+  origin: "operator PR queue restoration request 2026-10-15, exact-head API and core ledger comparison"
+  plan_refs: [W1-T5694, W1-T3244, W1-T2274, W1-T2275, W1-T5802, W1-T9664]
+  files: [src/run-task.ts, src/lib/dep-review.ts, test/dep-review.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED PR11968 at f102d2d7503c18b8e77cd5f28be32e78a32a156c, actual 79-context
+    rollup read 2026-10-15T16:51:20Z: the old commitlint check116378672852 failed before
+    the title correction; the newer check116501523069 succeeded at15:11, as did the newer
+    ci-gate116501518866. No rerun was sent by this operator: a fresh-read guard caught the success.
+    Core's 17:19:44.519Z dep-review.decided still names commitlint and ci-gate not green,
+    while the sweep reads this same head checks green. A pure recorded-input diagnostic returns
+    hold from decideDepReview(raw), but arm after the existing sweep latest-attempt selector
+    reduces those79 entries to60. This is diagnostic evidence, not a test, review or arm.
+    READ main03269ad67c43398e5e13082cc8106b1a5d691c6e and all36OPEN head trees:
+    depReviewCommand still supplies checks:view.statusCheckRollup directly; redChecks matches
+    every past failure. All37trees include the W3244 identity positive control and actual four
+    source/test blobs. Own redChecks changes zero. Own command/source overlaps in11996,12058
+    and12078 concern retro reads, child bounds and host identity;12085/W9664 changes proposal
+    staging, not check selection. W9664 is a dependency so its owned consumer repair merges first.
+    W2274/W2275 concern conclusion vocabulary, W3244 excludes this lane's own status, and W5694
+    supplies the workflow/run-aware selector. None wires that selector into this real producer.
+  design: |
+    1. At the dependency review composition root, select the current exact-head rollup using the
+       existing workflow/run/attempt-aware selector, not a new name-only maximum timestamp rule.
+       Preserve started/completed times, numeric check-run IDs, posted external IDs and real
+       workflow/run identity. Reuse existing REST rollup/observation facilities when the GraphQL
+       projection cannot carry that identity. Never fabricate identity from a check-run URL.
+       Do not import sweep.ts into dep-review.ts: sweep already imports the dependency judge.
+    2. A newer successful attempt of the same producer supersedes its older red; a late rerun
+       of an older workflow run cannot override the newer run. Independent workflow producers
+       retain the established selector contract. Genuine current red, unread/malformed selected
+       evidence and a newer pending attempt remain unresolved, never permission to post success
+       or arm. Preserve the lane-owned remudero-review exclusion and existing author/diff/version
+       checks, major-migration staging and action-pin rules. Do not ignore another red check.
+    3. Bind any extra production read to the selected repository/head, await an existing bounded
+       asynchronous transport, and keep outages/head changes explicit and retryable by the existing
+       lane. No new daemon poll loop, blocking default, arbitrary timeout-to-green fallback or
+       parallel rerun. Preserve legacy injected fixtures deliberately without a real default leak.
+       Keep contributor admission opt-in SHADOW, independent owner override and normal required
+       CI/security/merge preflights unchanged. No real close, feedback publish or arm in tests.
+    4. Drive the actual depReviewCommand boundary in existing test/dep-review.test.ts, with
+       forbidden-effect recorders and a real PATH-shim default child. Cover old-red/new-success,
+       old-run late rerun, equal-time ID ties, commit statuses, real current red, pending, malformed
+       and failed reads, exact-head changes, configured owner and no-policy compatibility.
+       Prove every added catch/default, real nonblocking in-flight transport, and W9664 staging
+       compatibility. Delete the producer fix to fail these tests, restore to pass. Commit before
+       scoped source-mapped coverage; prove all changed source SFs and relevant census membership.
+       Run one native author on the final committed tree; reproduce new native failures on its
+       actual unchanged pinned base. Normal hosted checks and required review still gate merge.
+    OUT OF SCOPE: changing W5694's selector policy, dependency trust/allowlists, gates/baselines,
+    ownership recovery, new scheduler activation, credential/settings changes and worker stops.
+  acceptance:
+    - claim: "the real dependency review consumer selects the latest attempts and does not revive an older run's late red rerun"
+      proof: "unit test: W1-T9689 dep review selects current attempts without reviving superseded runs"
+    - claim: "current red, pending and unread evidence cannot become a success or arm while real successful and lane-owned-status controls retain compatibility"
+      proof: "unit test: W1-T9689 dep review holds current red pending and unread evidence"
+    - claim: "the real default reader is bounded and asynchronous, binds the selected repository and head, and fails closed on read or identity changes"
+      proof: "unit test: W1-T9689 the default dep review reader binds checks to the selected head"
+  falsifier: |
+    Restore the raw view.statusCheckRollup producer with the captured PR11968 old-red/new-success
+    entries: the real command holds for commitlint and ci-gate and the first criterion fails.
+    Selecting a newer pending entry while ignoring its unresolved state must fail the second
+    criterion, not manufacture a green decision. Returning checks from another head or turning an
+    unread default child into empty success must fail the third. Successful exact-head current
+    attempts and the existing lane-owned status exclusion are positive controls. No live effect runs.
