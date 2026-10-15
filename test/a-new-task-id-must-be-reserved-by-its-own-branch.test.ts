@@ -120,7 +120,7 @@ test("W1-T4414: an unreachable origin is UNKNOWN and withholds the verdict rathe
   assert.equal(v.taskIdOwnership?.[0]?.kind, "unknown");
   assert.equal(v.state, "failure", "never a pass");
   assert.equal(v.taskIdOwnershipWithheld, v.summary);
-  assert.equal(v.summary, "remudero-review: FAIL — id CONSOLE-T60 reservation unreadable (UNKNOWN) — verdict withheld");
+  assert.equal(v.summary, "remudero-review: FAIL — id CONSOLE-T60 reservation unreadable (UNKNOWN): ls-remote failed — verdict withheld");
   const noHead = judgeReview(CRITERIA, { planLint: CLEAN_PLAN_LINT, diff: T60, report: REPORT, headCheckoutDir: head.dir });
   assert.deepEqual(noHead.taskIdOwnership, [], "no head ref means no holder to compare, so the check does not run");
 });
@@ -151,7 +151,7 @@ test("W1-T4414: readReservationAnchors reads a present ref and reports a failed 
     return { status: 0, stdout: r, stderr: "" };
   };
   assert.deepEqual(readReservationAnchors([], run), new Map());
-  assert.deepEqual(readReservationAnchors(["CONSOLE-T60"], run).get("CONSOLE-T60"), { status: "unknown", reason: "fatal: fetch refused" });
+  assert.deepEqual(readReservationAnchors(["CONSOLE-T60"], run).get("CONSOLE-T60"), { status: "unknown", reason: "fetch failed: fatal: fetch refused" });
 });
 
 test("a reservation minted with --branch names that branch as its holder", async () => {
@@ -230,6 +230,7 @@ test("W1-T4414: a withheld ownership verdict posts no terminal review status", a
   try {
     process.env.PATH = `${gh.dir}:${priorPath}`;
     const steps: string[] = [];
+    const rows: Array<Record<string, unknown>> = [];
     const verdict = await runReview({
       lintPlanForReviewFn: async () => CLEAN_PLAN_LINT,
       owner: "acme",
@@ -240,7 +241,7 @@ test("W1-T4414: a withheld ownership verdict posts no terminal review status", a
       report: REPORT,
       settingsFile: "",
       config: { root, claudeBin: "/bin/true" } as Config,
-      log: (step) => steps.push(step),
+      log: (step, fields) => { steps.push(step); if (step === "review.post_refused") rows.push((fields ?? {}) as Record<string, unknown>); },
       say: () => {},
       account: (result) => result,
       spawnReviewer: false,
@@ -252,6 +253,11 @@ test("W1-T4414: a withheld ownership verdict posts no terminal review status", a
     });
     assert.match(verdict.verdictWithheld ?? "", /CONSOLE-T60 reservation unreadable \(UNKNOWN\)/);
     assert.ok(steps.includes("review.post_refused"));
+    // W1-T9674: the refusal row names the failed git read and carries git's own words.
+    assert.match(String(rows[0]?.reason), /CONSOLE-T60 reservation unreadable \(UNKNOWN\): ls-remote failed — verdict withheld/);
+    const unknown = rows[0]?.unknown_reservations as Array<{ id: string; reason: string }>;
+    assert.deepEqual(unknown.map((u) => u.id), ["CONSOLE-T60"]);
+    assert.match(unknown[0].reason, /^ls-remote failed: .*no-such-origin/s);
     assert.ok(!steps.includes("review.posted"), "an unread reservation must not publish a terminal status");
     assert.ok(!gh.calls().some((c) => c.includes("statuses/")), "no commit status was written");
     assert.equal(readLedgerLines(join(root, "ledger.ndjson")).some((l) => l.step === "review.posted"), false);

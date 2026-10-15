@@ -11,7 +11,8 @@
  * Anything else, or an unreadable input: refresh, up to
  * {@link PLAN_PR_REFRESH_BOUND} times, then escalate to the operator.
  */
-import { execFile, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { join, relative } from "node:path";
 import { step, type Steps } from "./git-push.js";
 import { singlePrRestArgs } from "./open-prs-rest.js";
@@ -225,12 +226,18 @@ export function planSafetyGitSync(cwd: string): PlanSafetyGit {
 export function planSafetyGitAsync(cwd: string): PlanSafetyGit {
   return (args, stdin) =>
     new Promise((resolve) => {
-      const child = execFile("git", [...args], { cwd, encoding: "utf8", timeout: GIT_CALL_MS, maxBuffer: 1 << 26 }, (error, stdout, stderr) => {
-        const { code, signal } = (error ?? {}) as { code?: unknown; signal?: string | null };
-        // a non-numeric code (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) is Node's reason, kept beside git's own words.
-        const said = typeof code === "string" ? `${stderr ?? ""}\n${code}` : stderr;
-        resolve({ status: error ? (typeof code === "number" ? code : null) : 0, stdout: stdout ?? "", signal: signal ?? null, stderr: stderrTail(said) });
-      });
+      const command = execFileLoopBounded("git", [...args], { cwd, encoding: "utf8", timeout: GIT_CALL_MS, maxBuffer: 1 << 26 });
+      command.then(
+        ({ stdout, stderr }) => resolve({ status: 0, stdout: stdout ?? "", signal: null, stderr: stderrTail(stderr) }),
+        (error: { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: string | null }) => {
+          const { code } = error;
+          const stderr = typeof error.stderr === "string" ? error.stderr : "";
+          // a non-numeric code (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) is Node's reason, kept beside git's own words.
+          const said = typeof code === "string" ? `${stderr}\n${code}` : stderr;
+          resolve({ status: typeof code === "number" ? code : null, stdout: typeof error.stdout === "string" ? error.stdout : "", signal: error.signal ?? null, stderr: stderrTail(said) });
+        },
+      );
+      const child = command.child;
       // a verb that exits before reading stdin must not surface as an EPIPE on the daemon.
       child.stdin?.on("error", () => {});
       child.stdin?.end(stdin);
