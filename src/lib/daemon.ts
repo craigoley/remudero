@@ -131,7 +131,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
-import { clockFromDateFn, clockFromIsoFn, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, fixedClock, type Clock } from "../lib/clock.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 import {
@@ -6893,7 +6893,7 @@ export async function runDaemon(
       for (const since of laneIdleSince.values()) idleLaneMs += Math.max(0, firedAtMs - since);
       laneIdleSince.clear();
       log("daemon.restart_latch_cost", {
-        latched_at: new Date(restartWait.decidedAtMs).toISOString(), fired_at: new Date(firedAtMs).toISOString(),
+        latched_at: fixedClock(restartWait.decidedAtMs).iso(), fired_at: fixedClock(firedAtMs).iso(),
         waited_ms: Math.max(0, firedAtMs - restartWait.decidedAtMs), idle_lane_ms: idleLaneMs,
         refills_under_latch: admittedUnderLatch.size,
         holdouts: [...holdoutOutcomes].map(([task_id, outcome]) => ({ task_id, outcome })),
