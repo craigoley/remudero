@@ -679,7 +679,7 @@
   files: ["plan/tasks.d/**", "plan/tasks.yaml", "scripts/task-id-existence-check.mjs", "src/lib/task-id-reservation.ts"]
   error_signatures: ["task-id-existence"]
   fact: >-
-    The task-id-existence gate refuses any W1-T<n> id cited under src/, deploy/ or plan/ that resolves to neither a refs/rmd-id/W1-T<n> reservation on origin nor a `- id:` record in plan/tasks.yaml or plan/tasks.d/*.yaml; before pushing, write a placeholder W1-T<n> in prose, or mint and declare the id in the same PR, and run `npm run --silent task-id-existence:check`.
+    The task-id-existence gate refuses any W1-T<n> id cited under src/, deploy/ or plan/ that resolves to neither a refs/rmd-id/W1-T<n> reservation on origin nor a `- id:` record in plan/tasks.yaml or a .yaml file under plan/tasks.d; before pushing, write a placeholder W1-T<n> in prose, or mint and declare the id in the same PR, and run `npm run --silent task-id-existence:check`.
   evidence: "scripts/task-id-existence-check.mjs (header: resolves to a reservation ref or a declared plan record, existence not ownership) and src/lib/task-id-reservation.ts. The ci-learning note for PR #10904 records that the gate went red and was repaired by editing plan/tasks.d/W1-T5399-discover-interrupted-assistant-actions-without-resubmission.yaml; the exact id that failed to resolve in that run was NOT read from the CI log in this entry, so the trigger is not verified here."
   src: "ci-learning:10904:task-id-existence"
   cited: "2026-10-14"
