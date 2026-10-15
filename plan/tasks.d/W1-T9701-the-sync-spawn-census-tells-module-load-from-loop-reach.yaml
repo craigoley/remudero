@@ -1,0 +1,62 @@
+- id: W1-T9701
+  title: "THE SYNC-SPAWN CENSUS COUNTS A MODULE-LOAD CAPTURE AS LOOP REACH — captureImportedModule and executingHarnessRevision run once, when run-task.ts and benchmark-run.ts are evaluated at import, before daemonCommand starts; the census reaches them only because runTask names the workerBoundaryStack const whose initializer calls them, so W1-T9660 recorded two rows no conversion can retire without buying the loop nothing"
+  repo: remudero
+  depends_on: [W1-T9651]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — what the sync-spawn census's object-literal walk treats as reach; no src/ behaviour changes
+  band_meaning: span
+  origin: "operator session 2026-10-15: W1-T9660 (#12081, fcfaeb5d4) census rows captureImportedModule and executingHarnessRevision"
+  plan_refs: [W1-T9660, W1-T9615, W1-T9651, W1-T5689]
+  files:
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/helpers/daemon-loop-walk.ts
+  status: queued
+  priority: 3  # census precision: the two captures cost the loop nothing; the rows are false reach
+  attempts: 0
+  rationale: |
+    READ at origin/main 03269ad67 (2026-10-15):
+    - src/run-task.ts, at column 0 at module scope: `const workerBoundaryStack = { harnessRevision:
+      executingHarnessRevision(fileURLToPath(import.meta.url)) };` then `workerBoundaryStack.loadedModule =
+      captureImportedModule(...)` and `const ciRemedyComponent = captureCiRemedyComponent(...)`. That last one's
+      default `recorder` parameter also calls captureImportedModule. src/lib/benchmark-run.ts has the same shape
+      in `nonDispatchWorkerStack`.
+    - Both functions' doc comments say they are to be called once at module load ("a later fast-forward cannot
+      change the identity of code in memory"). A fixed-string grep of src/ finds no other caller of
+      captureImportedModule, executingHarnessRevision or captureCiRemedyComponent. package.json is
+      `"type": "module"`, and run-task.ts is the process entry, so these calls finish before `daemonCommand` runs.
+    - The census's object-literal walk (W1-T9660) takes a column-0 `const X = {` body up to the next column-0
+      declaration as one node. Any identifier in it is reached when X is. `runTask` names `workerBoundaryStack`,
+      so the walk reaches both captures. The rows read "daemonCommand > runTask > workerBoundaryStack; no
+      conversion filed".
+    - Converting them to awaited children would need top-level await at import, and nothing else runs on the
+      loop at that point. The defect is in the census's reach, not the source.
+    - W1-T9651 (open, run-W1-T9651-1792076407089) moves the walk into test/helpers/daemon-loop-walk.ts. This
+      task edits the walk wherever it lives once that lands, never a second copy.
+  design: |
+    1. Within a column-0 object-literal const, the walk tells reach from module-load evaluation:
+       - a member that is a function (an arrow or method body), or a bare identifier handed over as a value
+         (`checkAcceptance: checkAlertFixAcceptance`), is reached when the const is, as today;
+       - a call evaluated by the initializer itself (`key: name(...)` at the literal's own depth), and a column-0
+         statement that follows the literal in the same node, runs at module load. Its callees are attributed to
+         a `<module-load>` node that no daemonCommand path reaches.
+       The rule is structural. It names no function and adds no exemption list.
+    2. Delete the captureImportedModule and executingHarnessRevision rows. Drop both from OBJECT_LITERAL_SPAWNERS.
+    3. Tests (in the census file, `test(` titles verbatim as in the proofs below):
+       - the census walk does not reach captureImportedModule or executingHarnessRevision from daemonCommand,
+         and the module-load node holds both;
+       - positive controls: defaultPreflightChecks' arrow members still reach their callees, and a
+         handed-over member (REAL_ALERT_FIX_DISPATCH_DEPS's checkAcceptance, or a synthetic Fn fixture if that
+         row is gone by then) is still reached;
+       - a synthetic fixture whose literal holds both a call-valued member and an arrow member shows only the
+         arrow's callee reached.
+  acceptance:
+    - claim: "a call evaluated in a column-0 const's initializer is module-load, not daemon-loop reach"
+      proof: 'grep: test("W1-T9701: the census attributes a const initializer call to module load, not the loop" in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts'
+    - claim: "an object literal's function members and handed-over values are still reached"
+      proof: 'grep: test("W1-T9701: an object literal member function is still loop reach" in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts'
+  falsifier: |
+    At origin/main, loopReachable(censusFunctions(), "daemonCommand") contains executingHarnessRevision, through
+    runTask > workerBoundaryStack, so the first test fails.
