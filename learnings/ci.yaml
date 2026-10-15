@@ -637,6 +637,30 @@
   src: "ci-learning:10339:Scan"
   cited: "2026-10-11"
 
+- id: leak-grep-refuses-plan-shard-token-text
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "plan/tasks.d/**"
+    - ".github/scripts/leak-grep.sh"
+    - ".github/workflows/ci.yml"
+  error_signatures:
+    - "leak-grep: possible secret matching"
+  fact: >-
+    The leak-grep gate scans every tracked file, plan task shards included, for fixed secret-token
+    formats. Before pushing a plan/tasks.d shard, run `bash .github/scripts/leak-grep.sh` on the
+    committed tree, and if it reports a match, reword the matched text so the pattern no longer
+    matches. Never add an allowlist entry to defeat the tripwire.
+  evidence: >-
+    The leak-grep gate went red on PR #11383 and the repair touched
+    plan/tasks.d/W1-T9181-the-revalidation-garden-never-closes-on-an-absence.yaml. Checked at
+    origin/main on 2026-10-14: that record matches none of the seven patterns in
+    .github/scripts/leak-grep.sh. So the token that tripped #11383 is NOT established, and the
+    #11383 CI log was not read. The gate's own refusal names the rule above, so this entry
+    names that remedy, not a verified per-PR cause.
+  src: "ci-learning:11383:leak-grep"
+  cited: "2026-10-14"
+
 # ── docs-index-check refusal (ci-learning:11388:docs-index-check, PRs #11388 and #11524) ──
 - id: docs-index-stale-after-doc-edit
   subsystem: ci
