@@ -73,7 +73,7 @@ test("W1-T2781: the existing unconditional unwired-gate workflow contract is oth
     (job.steps ?? []).filter((step) => typeof step.uses === "string").map((step) => step.uses),
     [
       "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-      "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+      "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1",
     ],
   );
   assert.ok((job.steps ?? []).some((step) => step.run === "npm ci"));

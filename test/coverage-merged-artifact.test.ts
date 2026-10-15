@@ -32,7 +32,7 @@ test("coverage-merged-artifact CI wiring: the aggregator uploads a pinned artifa
   const jobBody = await aggregatorJobBody();
   assert.match(
     jobBody,
-    /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1\r?\n\s*with:\r?\n\s*name: coverage-merged\b/,
+    /uses: actions\/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7\.0\.2\r?\n\s*with:\r?\n\s*name: coverage-merged\b/,
     "the aggregator must upload an artifact named coverage-merged, pinned by sha like the shard upload step already is",
   );
 });
