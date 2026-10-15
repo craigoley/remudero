@@ -236,3 +236,67 @@ test("default reader refuses after real guard creation succeeds but its descript
     console.log(JSON.stringify({executionAllowed:false,guardOccupied:true,descriptorClosed:true}));
   `), { executionAllowed: false, guardOccupied: true, descriptorClosed: true });
 });
+
+test("private refresh defers behind a real mutation guard without rewriting or dropping ownership", () => {
+  assert.deepEqual(recoveryProbe(`
+    const lease=api.acquireTestSlot('deferred refresh',options);assert.equal(lease.outcome,'acquired');
+    const before=fs.readFileSync(slot,'utf8'),inode=fs.lstatSync(slot).ino;
+    const guard=mutation.acquireSlotMutation(slot);assert.equal(guard.state,'acquired');
+    lease.refresh();assert.equal(fs.readFileSync(slot,'utf8'),before);assert.equal(fs.lstatSync(slot).ino,inode);
+    assert(rows.some(row=>row.step==='test_slot.refresh_deferred'));
+    assert.equal(mutation.slotMutationPending(slot),true);guard.release();
+    lease.refresh();lease.release();assert.equal(fs.existsSync(slot),false);
+    assert.equal(mutation.slotMutationPending(slot),false);
+    console.log(JSON.stringify({deferred:true,ownerPreserved:true,released:true}));
+  `), { deferred: true, ownerPreserved: true, released: true });
+});
+
+test("a failed private terminal write closes its real descriptor and leaves unresolved ownership occupied", () => {
+  assert.deepEqual(recoveryProbe(`
+    const nativeOpen=fs.openSync,nativeStat=fs.fstatSync,nativeWrite=fs.writeSync,nativeUnlink=fs.unlinkSync;
+    let ownerFd,unlinks=0,terminalWrites=0;
+    fs.openSync=(name,flags,...args)=>{const fd=nativeOpen(name,flags,...args);if(name===slot&&flags==='wx+')ownerFd=fd;return fd;};
+    syncBuiltinESMExports();const lease=api.acquireTestSlot('terminal write fault',options);assert.equal(lease.outcome,'acquired');
+    const original=readOwner(),inode=fs.lstatSync(slot).ino;
+    fs.unlinkSync=name=>{if(name===slot){unlinks++;throw Object.assign(Error('canonical unlink denial'),{code:'EACCES'});}return nativeUnlink(name);};
+    fs.writeSync=(fd,buffer,...args)=>{if(fd===ownerFd&&buffer.toString().includes('releaseRequestedAt')){
+      terminalWrites++;throw Object.assign(Error('terminal write denial'),{code:'EIO'});
+    }return nativeWrite(fd,buffer,...args);};
+    syncBuiltinESMExports();assert.doesNotThrow(()=>lease.release());assert.equal(unlinks,3);assert.equal(terminalWrites,1);
+    assert.throws(()=>nativeStat(ownerFd),{code:'EBADF'});assert.equal(fs.lstatSync(slot).ino,inode);
+    assert.equal(readOwner().ownerNonce,original.ownerNonce);assert.equal(readOwner().releaseRequestedAt,undefined);
+    assert.equal(mutation.slotMutationPending(slot),false);
+    assert(rows.some(row=>row.step==='test_slot.cleanup_incomplete'&&/terminal write denial/.test(row.error)));
+    fs.openSync=nativeOpen;fs.writeSync=nativeWrite;fs.unlinkSync=nativeUnlink;syncBuiltinESMExports();
+    const waiter=api.acquireTestSlot('unresolved live owner',options);assertRefused(waiter);
+    assert.equal(readOwner().ownerNonce,original.ownerNonce);waiter.release();
+    console.log(JSON.stringify({bounded:true,descriptorClosed:true,unknownRemainsOccupied:true}));
+  `), { bounded: true, descriptorClosed: true, unknownRemainsOccupied: true });
+});
+
+test("post-publication rollback failure retains private recovery authority and closes the original descriptor", () => {
+  assert.deepEqual(recoveryProbe(`
+    const {systemClock}=await import(new URL('./clock.ts',${JSON.stringify(SLOT_URL)}).href);
+    const nativeOpen=fs.openSync,nativeStat=fs.fstatSync,nativeUnlink=fs.unlinkSync;
+    let ownerFd,postPublicationFaults=0,projectionUnlinks=0;
+    fs.openSync=(name,flags,...args)=>{const fd=nativeOpen(name,flags,...args);if(name===slot&&flags==='wx+')ownerFd=fd;return fd;};
+    fs.unlinkSync=name=>{if(name.startsWith(directory+'/')){projectionUnlinks++;
+      throw Object.assign(Error('projection rollback denial'),{code:'EACCES'});}return nativeUnlink(name);};
+    const clock={...systemClock,now:()=>{
+      if(postPublicationFaults===0&&fs.existsSync(directory)&&fs.readdirSync(directory).length){
+        postPublicationFaults++;throw Error('caller failed after publication');
+      }return systemClock.now();
+    }};
+    syncBuiltinESMExports();const lease=api.acquireTestSlot('post-publication caller fault',{...options,clock});assertRefused(lease);
+    assert.equal(postPublicationFaults,1);assert.equal(projectionUnlinks,1);
+    assert.throws(()=>nativeStat(ownerFd),{code:'EBADF'});const terminal=readOwner();
+    assert.equal(typeof terminal.releaseRequestedAt,'string');assert.equal(fs.lstatSync(slot).mode&0o777,0o600);
+    assert.equal(fs.readdirSync(directory).length,1,'failed metadata rollback retains its canonical private anchor');
+    assert(rows.some(row=>row.step==='test_slot.capacity_rollback_incomplete'));
+    assert.equal(mutation.slotMutationPending(slot),false);
+    fs.openSync=nativeOpen;fs.unlinkSync=nativeUnlink;syncBuiltinESMExports();
+    const next=api.acquireTestSlot('owner recovery after rollback',options);assert.equal(next.outcome,'acquired');
+    assert.notEqual(readOwner().ownerNonce,terminal.ownerNonce);next.release();assert.equal(fs.existsSync(slot),false);
+    console.log(JSON.stringify({faultAfterPublication:true,anchorRetained:true,descriptorClosed:true,recovered:true}));
+  `), { faultAfterPublication: true, anchorRetained: true, descriptorClosed: true, recovered: true });
+});

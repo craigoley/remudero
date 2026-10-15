@@ -161,6 +161,29 @@ test("guard inspection failure closes the real descriptor and retains an occupie
   } finally { fx.cleanup(); }
 });
 
+test("guard release tolerates its already-unlinked pathname and closes the retained descriptor", () => {
+  const fx = fixture();
+  try {
+    assert.deepEqual(probe(fx.root, `
+      const nativeOpen=fs.openSync,nativeStat=fs.fstatSync,nativeUnlink=fs.unlinkSync;
+      let guardFd,guardOpens=0;
+      fs.openSync=(name,flags,...args)=>{const fd=nativeOpen(name,flags,...args);
+        if(name===guardPath&&flags==='wx'){guardFd=fd;guardOpens++;}return fd;};
+      syncBuiltinESMExports();const api=await import(mutationUrl),held=api.acquireSlotMutation(slot);
+      assert.equal(held.state,'acquired');assert.equal(guardOpens,1);
+      assert.equal(nativeStat(guardFd).size,0);assert.equal(api.slotMutationPending(slot),true);
+      nativeUnlink(guardPath);
+      assert.throws(()=>fs.lstatSync(guardPath),{code:'ENOENT'});
+      assert.equal(nativeStat(guardFd).size,0,'raw unlink leaves the real ownership descriptor open until release');
+      assert.doesNotThrow(()=>held.release());
+      assert.throws(()=>nativeStat(guardFd),{code:'EBADF'});
+      assert.doesNotThrow(()=>held.release());
+      assert.equal(api.slotMutationPending(slot),false);
+      console.log(JSON.stringify({missingPathReleased:true,descriptorClosed:true,pending:false}));
+    `), { missingPathReleased: true, descriptorClosed: true, pending: false });
+  } finally { fx.cleanup(); }
+});
+
 test("guard release aggregates unlink and close failures without retrying or claiming free capacity", () => {
   const fx = fixture();
   try {
