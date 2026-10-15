@@ -258,11 +258,14 @@ test("the host credential is a minted App installation token, else GH_TOKEN, els
 });
 
 test("the post goes to the checkout's own github repo, and is refused under the test runner", (t) => {
-  assert.deepEqual(
-    hostAlertRepo(() => spawned({ stdout: "https://github.com/craigoley/remudero.git\n" })),
-    { owner: "craigoley", repo: "remudero" },
+  assert.deepEqual(hostAlertRepo(() => "https://github.com/craigoley/remudero.git\n"), { owner: "craigoley", repo: "remudero" });
+  assert.throws(() => hostAlertRepo(() => "/srv/mirror/remudero.git\n"), /no github\.com origin/);
+  assert.throws(
+    () => hostAlertRepo(() => {
+      throw new Error("fatal: not a git repository");
+    }),
+    /no readable origin: fatal: not a git repository/,
   );
-  assert.throws(() => hostAlertRepo(() => spawned({ status: 128, stderr: "not a git repository" })), /no github\.com origin/);
   // The default really runs git in the working directory, as the launcher's `cd` into the daemon tree.
   const own = hostAlertRepo();
   assert.match(`${own.owner}/${own.repo}`, /^[^/\s]+\/[^/\s]+$/, "this checkout's own github.com origin");

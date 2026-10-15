@@ -15,6 +15,7 @@ import {
   type SpoolMeta,
 } from "./host-escalation-spool.js";
 import { isTestRunner } from "./live-write-guard.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 
@@ -393,10 +394,18 @@ export function hostGithubToken(seams: Partial<typeof realTokenSeams> = {}): str
   throw new Error(`no host credential: set ${GH_APP_ID_ENV}, ${GH_APP_INSTALLATION_ID_ENV} and ${GH_APP_PRIVATE_KEY_PATH_ENV}, or GH_TOKEN, in host-alert's environment`);
 }
 
-/** `owner/repo` of the checkout `rmd host-alert` runs from (the launcher cds into the daemon tree). */
-export function hostAlertRepo(run: SpawnSyncFn = realSpawnSync): { owner: string; repo: string } {
-  const r = run("git", ["remote", "get-url", "origin"], { encoding: "utf8", timeout: DOCKER_INSPECT_TIMEOUT_MS });
-  const slug = r.status === 0 ? githubSlugOf(r.stdout ?? "") : undefined;
+/** `owner/repo` of the checkout `rmd host-alert` runs from (the launcher cds into the daemon tree),
+ *  read through the hardened host git leaf. */
+export function hostAlertRepo(
+  originUrl: () => string = () => hostWorktreeGit(process.cwd(), ["remote", "get-url", "origin"], { timeout: DOCKER_INSPECT_TIMEOUT_MS }),
+): { owner: string; repo: string } {
+  let url: string;
+  try {
+    url = originUrl();
+  } catch (err) {
+    throw new Error(`the checkout host-alert runs from has no readable origin: ${(err as Error).message}`);
+  }
+  const slug = githubSlugOf(url);
   if (!slug) throw new Error("the checkout host-alert runs from has no github.com origin");
   const [owner, repo] = slug.split("/");
   return { owner, repo };
