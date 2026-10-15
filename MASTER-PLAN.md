@@ -4512,6 +4512,89 @@ vocabulary · `subagent-driven-development`, `executing-plans` and `using-git-wo
 and worktree isolation are this repo's core product, not a skill to borrow · frontend, art and brand skills
 — no surface here uses them.
 
+## 4G. External scan (2026-10-15): five agent and skill catalogs — taken, refused, parked, already held
+
+[research: agent-catalogs-scan-2026-10-15] Read at source from shallow clones: `msitarzewski/agency-agents` (652b269,
+MIT, 283 agent files in 18 divisions), `anthropics/knowledge-work-plugins` (e6b5053, Apache-2.0, 22 plugins in-repo
+with 252 skills; its marketplace lists 123, and all 101 external entries are pinned to a commit),
+`anthropics/claude-quickstarts` (9ec32b9, MIT, though autonomous-coding's README says "Internal Anthropic use"),
+`wshobson/agents` (46891e7, MIT, 94 marketplace entries, 202 agents, 184 skills, 105 commands) and
+`addyosmani/agent-skills` (aeac41d, MIT, 25 skills, 4 agents, 9 commands). As in §4F, every row taken is rewritten
+as this repo's own code; no text is copied and nothing is installed.
+**THE MEASURED FINDING:** the catalogs are prompt text, and none measures its agents' behaviour. agency-agents lints
+structure only. wshobson's eval says its quality score "measures reply length, not whether the reply is correct", and
+that its judge is "not validated against human labels". agent-skills checks skill routing lexically. This repo
+already holds most of their mechanisms in enforced form. The value is in four gaps of OUR OWN the reading exposed:
+- the prompt-evolution bridge (W1-T4665) promotes `candidates[0]`, which is always the unchanged base prompt;
+  held-out scoring and the Pareto front have no caller, and nothing produces a fix transcript. The one loop meant to
+  learn prompts from their own graders has never learned, and its test passes;
+- the worker init inventory keeps MCP servers and tools but drops the plugins and skills the SDK reports;
+- every DECISION_REQUEST is auto-chosen as recommended with no second reader. Of 50 records in plan/decisions.d,
+  three chose to relax a criterion, override a procedure, or have the operator widen scope;
+- deny-floor rule 5 refuses `gh pr merge` in operator sessions too: it never reads the worker-lane flag, though its
+  comment scopes it to a worker. **Operator ruling 2026-10-15: never block merges.** The scan's first draft proposed
+  routing MCP merge tools to the floor and refusing them; the ruling withdrew that before filing.
+**SUPPLY CHAIN, AMENDED:** §4F's "nothing is installed" holds for this repo. The operator's claude.ai account,
+however, syncs two Anthropic plugins, `engineering` and `cowork-plugin-management` (knowledge-work-plugins, version
+0040), into the Claude Code sessions it opens, cloud sessions included (OBSERVED 2026-10-15,
+`~/.claude/plugins/synced/*/manifest.json`). W1-T9489 closed the account-connector path for workers; W1-T9642
+measures the plugin and skill path before anything is refused. If a plugin is ever adopted, a marketplace that pins
+each source to a commit is a pin, not a subscription; none is proposed.
+**TAKEN — TEN SHARDS, FILED 2026-10-15:** **W1-T9639** the prompt-evolution bridge promotes only a held-out winner
+that beats the base, and nothing when unscored · **W1-T9640** a prompt lesson stays with the worker model whose rounds
+taught it (the fix lane's arms are refused at 62% and 22%) · **W1-T9641** the fix-lane gardener turns refused rounds
+into transcripts and records, in shadow, the lessons they would teach · **W1-T9642** every worker row names the
+plugins and skills its init reported, as a census · **W1-T9643** rule 5 binds the worker lane only, so an operator
+session is never refused a merge · **W1-T9644** a recorded DECISION_REQUEST gets one blind typed
+judgment that never sees the recommendation · **W1-T9646** a worker tree's peak names its agent CLI's own share ·
+**W1-T9648** a skill-eval result names its exact one-sided p-value (6 of 6 against 3 of 6 passes today at p ≈ 0.091)
+· **W1-T9649** a review finding keeps one lineage key across rounds, so `superseded` splits into persisted and not
+re-raised · **W1-T9650** leak-grep reports where a secret is, never the secret, and says a real one must be rotated.
+**REFUSED, WITH THE REASON:**
+- change-size caps (agent-skills: about 100 lines, at most 5 files a task). Measured over implement shards filed
+  2026-08-15..09-30, counting a task merged by its trailer or a non-plan commit subject naming it, the merge rate by
+  declared files is 82% (1–2), 89% (3–4), 87% (5–7) and 86% (8+). A cap would fire on the healthy population.
+- a parallel reviewer panel per dimension (wshobson team-review, agent-skills /ship): N paid reviews on every PR with
+  no measured miss by category. It must first win in paired-review-eval.
+- a "find at least three issues" reviewer quota (agency-agents README): its own Evidence Collector now says "Never
+  invent issues or downgrade a result to meet a quota".
+- an LLM judge of skill triggering, and Monte Carlo "quality" (wshobson plugin-eval): unvalidated by its own account.
+  Worker skill selection here is deterministic.
+- a "Success Metrics" section per role with invented targets (agency-agents): nothing computes them. Roles here are
+  measured per gate, filer, finding and procedure.
+- packaging the operator macros as a plugin for other repositories: an installed copy is a snapshot
+  `macro-skills:check` cannot byte-compare, and the macros cite this repo's CLAUDE.md headlines. Revisit once a macro is
+  measured in use elsewhere.
+- `~~category` connector placeholders (knowledge-work-plugins): a placeholder would defeat W1-T4331's missing-verb
+  refusal.
+- autonomous-coding's bash allowlist: weaker than deny-floor (`node` is allowed, so `node -e` runs anything).
+- the knowledge-wiki "dream" that rewrites a memory store: a single run behind a gated preview. §4E's refusal of
+  whole-corpus rewrites stands.
+- worker-injected personas from any catalog: §4F's reason stands, and no catalog evaluates its personas.
+**PARKED, WITH WHAT EACH WAITS FOR:**
+- Managed Agents for workers (claude-quickstarts managed-agents, beta header `managed-agents-2026-04-01`). A
+  self-hosted environment runs the agent loop on Anthropic's servers while tool calls run in a sandbox the host
+  provides, and a session outlives its client, which is what ADR 0007 (Proposed) builds by hand. It waits for two
+  things: W1-T9646's measure of how much of a worker tree the CLI holds (the most a hosted loop could free), and an
+  operator decision on billing, because the quickstarts authenticate with an API key while workers bill to the Max
+  subscription by design. **Operator ruling 2026-10-15: no per-token billing for workers.** This stays parked unless
+  that ruling changes; W1-T9646 still informs the host memory picture.
+- the diagnose report naming the causes it ruled out (wshobson team-debug): file it once `rmd ledger-grep
+  diagnose.done` shows a material share of third attempts failing after a diagnose.
+- a report-anchored reviewer arm in paired-review-eval (agent-skills doubt-driven): the production reviewer reads the
+  author's REPORT before its verdicts, while the benchmark reviewer gets none. Worth a paid pilot after W1-T9644's rows
+  show whether blind readers disagree.
+- a burn-in of every new test (agency-agents test automation): file it only if a join of flake rows to the PR that last
+  touched each test shows young tests dominate flake incidents. That join has not been run.
+**ALREADY HELD:** one fresh reviewer per criterion; the proof floor, where an unrun proof is not a failure; the
+compaction anchor and checkpoint commits (autonomous-coding's progress file); file ownership for parallel builders
+(`partitionByFileOverlap`); tests red for the right reason (`classifyBaseProofOutcome`); measured model routing
+(mounts.yaml and the Tier Invariant) where the catalogs hand-set a model per agent; three-tier escalation with earned
+autonomy; doubt loops bounded by repeated-findings escalation; citing the docs (`DISTRUST_RULE` in every worker
+prompt); task content last in the prompt; the "missed todos" sweep (`promisedFollowUps`); validate before sharing
+(the zero-needs-a-positive-control doctrine); vault-style secret injection (`secret-boundary.ts`); scheduled agents
+that back off and escalate (gardener backoff and the overseer).
+
 ## 5. Principles engine
 
 Remudero's CI today is typecheck + tests. That is the FLOOR, not the bar. The operator's fleet

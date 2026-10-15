@@ -20,7 +20,7 @@ const CORPUS_LOCK = '.coverage-corpus-write.lock';
 // W1-T5923: a shard's reports already translated through pinned Node's source mapper, plus the line
 // state that translation leaves behind, so the aggregator replays only the range merge.
 const PREMAPPED_FILE = /^coverage-premapped-(\d+)-(\d{13})\.json$/;
-const PREMAPPED_PIECE = /^coverage-(?:premapped|lines|mapped)-/;
+const PREMAPPED_PIECE = /^coverage-(?:premapped|lines|mapped|hits)-/;
 const PREMAPPED_FORMAT = 'rmd-v8-coverage-premapped-v1';
 // W1-T6108: test/setup/tmp-hygiene.ts's record of which suite spawned the child reports beside it.
 const CHILD_RECORD_FILE = /^rmd-v8-children-\d+-\d{13}\.json$/;
@@ -414,6 +414,190 @@ function addRecordedDrops(record, counts, file) {
   counts.droppedRepeatInstances += dropped;
 }
 
+/**
+ * W1-T9481 — A LINE ANY SINGLE PROCESS RAN IS NEVER MERGED DOWN TO ZERO. A file a tsx test loads
+ * (CJS-transformed, source-mapped) and a plain-node child loads natively reaches the merge in two
+ * shapes. mergeCoverage joins only functions whose name and first range match, so both lists are
+ * kept, and summary() writes each line's count last-writer-wins: a child that never called a
+ * function writes its zero range over the hits a tsx test recorded (#11660,
+ * scripts/build-child-entries.mjs:237). So each process report is also read ALONE, on a fresh copy of
+ * the same pinned-Node lines with its own translation writes, and the merge raises a line to the
+ * highest count any one process gave it. It never lowers one.
+ */
+function recordLineState(coverage) {
+  const lineState = new Map();
+  let reportWrites;
+  const getLines = coverage.getLines.bind(coverage);
+  coverage.getLines = (url, source) => {
+    const lines = getLines(url, source);
+    if (lines && !lineState.has(url)) {
+      const written = new Map();
+      const ignored = new Set();
+      lineState.set(url, { source: lines.map(line => line.src).join(''), written, ignored, lines });
+      lines.forEach((line, index) => {
+        let count = line.count;
+        let ignore = line.ignore;
+        Object.defineProperty(line, 'count', {
+          configurable: true, enumerable: true,
+          get: () => count,
+          set: (value) => {
+            count = value;
+            written.set(index, value);
+            if (reportWrites) {
+              let writes = reportWrites.get(url);
+              if (!writes) { writes = new Map(); reportWrites.set(url, writes); }
+              writes.set(index, value);
+            }
+          },
+        });
+        Object.defineProperty(line, 'ignore', {
+          configurable: true, enumerable: true,
+          get: () => ignore,
+          set: (value) => { ignore = value; if (value === true) ignored.add(index); },
+        });
+      });
+    }
+    return lines;
+  };
+  /** Translate one report, keeping the line writes that translation made for it alone. */
+  const mapReport = (report) => {
+    reportWrites = new Map();
+    try {
+      return { result: coverage.mapCoverageWithSourceMap(report), writes: reportWrites };
+    } finally {
+      reportWrites = undefined;
+    }
+  };
+  return { lineState, mapReport };
+}
+
+/** The largest V8 offset a raw script's whole-script ranges reach: its generated extent. */
+function generatedExtent(script) {
+  let extent = -1;
+  for (const fn of script?.functions ?? []) for (const range of fn?.ranges ?? []) {
+    if (range.startOffset === 0 && range.endOffset > extent) extent = range.endOffset;
+  }
+  return extent;
+}
+
+/** Node 24.21.0's private mapRangeToLines line write, over typed copies of the line offsets. */
+function writeRangeOnLines({ startOffset, endOffset, count }, starts, ends, counts) {
+  let start = 0;
+  let end = starts.length;
+  while (start <= end) {
+    let mid = Math.floor((start + end) / 2);
+    if (startOffset >= starts[mid] && startOffset <= ends[mid]) {
+      while (mid < starts.length && endOffset > starts[mid]) {
+        if (startOffset <= starts[mid] && endOffset >= ends[mid]) counts[mid] = count;
+        mid++;
+      }
+      return;
+    } else if (mid < starts.length && startOffset >= ends[mid]) {
+      start = mid + 1;
+    } else {
+      end = mid - 1;
+    }
+  }
+}
+
+/**
+ * Per-process line hits and instance shapes for one or more process reports. `linesFor(url)` returns
+ * the pinned-Node lines the merge itself reads for a URL; `skip(url)` is the merge's own filter.
+ */
+function processLineHitCollector(linesFor, skip) {
+  const hits = new Map();
+  const extents = new Map();
+  const offsets = new WeakMap();
+  const addShapes = (rawResult) => {
+    for (const script of rawResult) {
+      if (typeof script?.url !== 'string' || skip(script.url)) continue;
+      let seen = extents.get(script.url);
+      if (!seen) { seen = new Set(); extents.set(script.url, seen); }
+      seen.add(generatedExtent(script));
+    }
+  };
+  const addReport = (mappedResult, writes) => {
+    for (const script of mappedResult) {
+      if (typeof script?.url !== 'string' || skip(script.url)) continue;
+      const lines = linesFor(script.url);
+      if (!lines || lines.length === 0) continue;
+      let lineOffsets = offsets.get(lines);
+      if (!lineOffsets) {
+        lineOffsets = { starts: Float64Array.from(lines, line => line.startOffset), ends: Float64Array.from(lines, line => line.endOffset) };
+        offsets.set(lines, lineOffsets);
+      }
+      const { starts, ends } = lineOffsets;
+      const counts = new Float64Array(lines.length);
+      for (let index = 0; index < lines.length; index++) counts[index] = starts[index] === ends[index] ? 1 : 0;
+      for (const [index, count] of writes?.get(script.url) ?? []) if (index < counts.length) counts[index] = count;
+      for (const fn of script.functions ?? []) for (const range of fn?.ranges ?? []) writeRangeOnLines(range, starts, ends, counts);
+      let best = hits.get(script.url);
+      if (!best) { best = []; hits.set(script.url, best); }
+      for (let index = 0; index < counts.length; index++) if (counts[index] > (best[index] ?? 0)) best[index] = counts[index];
+    }
+  };
+  /** One record per URL: 1-based [line, count] for each non-ignored line some process hit, and its extents. */
+  const records = () => {
+    const out = [];
+    for (const url of new Set([...hits.keys(), ...extents.keys()])) {
+      const best = hits.get(url);
+      const lines = best && linesFor(url);
+      const lineHits = [];
+      if (best) for (let index = 0; index < best.length; index++) {
+        if (best[index] > 0 && !lines?.[index]?.ignore) lineHits.push([index + 1, best[index]]);
+      }
+      out.push({ url, hits: lineHits, extents: [...(extents.get(url) ?? [])].sort((a, b) => a - b) });
+    }
+    return out;
+  };
+  return { addShapes, addReport, records };
+}
+
+/** Fold one process line-hit record into the merge's per-path maxima and extent sets. */
+function foldProcessLineHits(record, processHits, shapes, file) {
+  if (typeof record?.url !== 'string' || !Array.isArray(record.hits) || !Array.isArray(record.extents) ||
+      record.hits.some(hit => !Array.isArray(hit) || !Number.isSafeInteger(hit[0]) || hit[0] < 1 || !Number.isFinite(hit[1]) || hit[1] <= 0) ||
+      record.extents.some(extent => !Number.isSafeInteger(extent))) {
+    throw new Error(`${file} contains an invalid process line-hit record`);
+  }
+  // Only a script the merge's own filter kept is recorded, and that filter already read its file URL.
+  const path = fileURLToPath(record.url);
+  let lines = processHits.get(path);
+  if (!lines) { lines = new Map(); processHits.set(path, lines); }
+  for (const [line, count] of record.hits) if (count > (lines.get(line) ?? 0)) lines.set(line, count);
+  let seen = shapes.get(path);
+  if (!seen) { seen = new Set(); shapes.set(path, seen); }
+  for (const extent of record.extents) seen.add(extent);
+}
+
+/** Raise each summary line to the highest count one process gave it; returns lines raised and files touched. */
+function raiseProcessLineHits(summary, processHits) {
+  let lines = 0;
+  let files = 0;
+  for (const file of summary.files) {
+    const hits = processHits.get(file.path);
+    if (!hits) continue;
+    const coveredBefore = file.lines.filter((line) => line.count > 0).length;
+    const ignoredLines = file.coveredLineCount - coveredBefore;
+    let raised = 0;
+    for (const line of file.lines) {
+      const count = hits.get(line.line) ?? 0;
+      if (count > line.count) { line.count = count; raised++; }
+    }
+    if (raised === 0) continue;
+    lines += raised;
+    files++;
+    file.coveredLineCount = ignoredLines + file.lines.filter((line) => line.count > 0).length;
+    file.coveredLinePercent = file.totalLineCount === 0 ? 100 : (file.coveredLineCount / file.totalLineCount) * 100;
+  }
+  if (files > 0) {
+    summary.totals.coveredLineCount = summary.files.reduce((sum, file) => sum + file.coveredLineCount, 0);
+    summary.totals.coveredLinePercent = summary.totals.totalLineCount === 0 ? 100 :
+      (summary.totals.coveredLineCount / summary.totals.totalLineCount) * 100;
+  }
+  return { lines, files };
+}
+
 function* coverageReports(directories, bytes) {
   const childSuites = childSuiteCache();
   for (const directory of directories) {
@@ -576,41 +760,24 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
   try {
     if (readdirSync(outputDirectory).some(name => name !== CORPUS_LOCK)) throw new Error(`${outputDirectory} already contains premapped coverage files`);
     const stem = `${process.pid}-${Date.now()}`;
-    const mapper = newTestCoverage(loadTestCoverage(), { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: true });
-    const lineState = new Map();
-    const getLines = mapper.getLines.bind(mapper);
-    mapper.getLines = (url, source) => {
-      const lines = getLines(url, source);
-      if (lines && !lineState.has(url)) {
-        const written = new Map();
-        const ignored = new Set();
-        lineState.set(url, { source: lines.map(line => line.src).join(''), written, ignored });
-        lines.forEach((line, index) => {
-          let count = line.count;
-          let ignore = line.ignore;
-          Object.defineProperty(line, 'count', {
-            configurable: true, enumerable: true,
-            get: () => count,
-            set: (value) => { count = value; written.set(index, value); },
-          });
-          Object.defineProperty(line, 'ignore', {
-            configurable: true, enumerable: true,
-            get: () => ignore,
-            set: (value) => { ignore = value; if (value === true) ignored.add(index); },
-          });
-        });
-      }
-      return lines;
-    };
+    const newCoverage = () => newTestCoverage(loadTestCoverage(), { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: true });
+    const mapper = newCoverage();
+    const { lineState, mapReport } = recordLineState(mapper);
+    // A native script's lines come from disk at the merge, so a separate reader keeps them out of the line records.
+    const reader = newCoverage();
+    const processHits = processLineHitCollector((url) => lineState.get(url)?.lines ?? reader.getLines(url), (url) => mapper.shouldSkipFileCoverage(url));
     const mapped = chunkWriter(outputDirectory, stem, PREMAPPED_FORMAT, 'mapped', 'reports', maxChunkBytes);
     const bytes = { rawFileCount: 0, inputBytes: 0, droppedRepeatInstances: 0 };
     let reportCount = 0;
     for (const report of coverageReports(directories, bytes)) {
+      processHits.addShapes(report.result ?? []);
+      const { result: translated, writes } = mapReport(report);
       // A script the merge would skip (node:, test/**, node_modules) can never reach a summary, so
       // it is dropped here rather than shipped; translation itself never touches such a script.
-      const result = mapper.mapCoverageWithSourceMap(report).filter((script) => !mapper.shouldSkipFileCoverage(script.url));
+      const result = translated.filter((script) => !mapper.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       mapped.add(JSON.stringify(result));
+      processHits.addReport(result, writes);
       reportCount++;
     }
     if (reportCount === 0) throw new Error('raw coverage premapping produced no source records');
@@ -619,13 +786,20 @@ export function writePremappedCoverageDirectories(directories, outputDirectory, 
     const lines = chunkWriter(outputDirectory, stem, PREMAPPED_FORMAT, 'lines', 'lines', maxChunkBytes);
     for (const [url, { source, written, ignored }] of lineState) lines.add(JSON.stringify({ url, source, written: [...written], ignored: [...ignored] }));
     lines.flush();
-    const manifest = { format: PREMAPPED_FORMAT, maxChunkBytes, ...counts, lineFileCount: lineState.size, lineChunks: lines.chunks, reportChunks: mapped.chunks };
+    const hits = chunkWriter(outputDirectory, stem, PREMAPPED_FORMAT, 'hits', 'hits', maxChunkBytes);
+    const hitRecords = processHits.records();
+    for (const record of hitRecords) hits.add(JSON.stringify(record));
+    hits.flush();
+    const manifest = {
+      format: PREMAPPED_FORMAT, maxChunkBytes, ...counts, lineFileCount: lineState.size, hitFileCount: hitRecords.length,
+      lineChunks: lines.chunks, reportChunks: mapped.chunks, hitChunks: hits.chunks,
+    };
     const source = JSON.stringify(manifest);
     if (Buffer.byteLength(source) > maxChunkBytes) throw new Error('coverage manifest exceeds its byte bound');
     const output = join(outputDirectory, `coverage-premapped-${stem}.json`);
     atomicCoverageFile(output, source);
-    const premappedBytes = Buffer.byteLength(source) + [...lines.chunks, ...mapped.chunks].reduce((sum, chunk) => sum + chunk.bytes, 0);
-    return { ...counts, lineFileCount: lineState.size, premappedBytes, output };
+    const premappedBytes = Buffer.byteLength(source) + [...lines.chunks, ...mapped.chunks, ...hits.chunks].reduce((sum, chunk) => sum + chunk.bytes, 0);
+    return { ...counts, lineFileCount: lineState.size, hitFileCount: hitRecords.length, premappedBytes, output };
   } finally { closeSync(fd); unlinkSync(lock); }
 }
 
@@ -648,7 +822,7 @@ function premappedManifestIn(directory) {
 
 /** Replay one shard's recorded translation effects onto `collector`, then yield its translated
  *  reports in their recorded order for the caller to range-merge. */
-function* premappedReports(file, collector, bytes) {
+function* premappedReports(file, collector, bytes, onHitRecord) {
   const source = readCoverageSource(file, CHUNK_BYTES);
   bytes.inputBytes += Buffer.byteLength(source);
   const manifest = JSON.parse(source);
@@ -657,12 +831,19 @@ function* premappedReports(file, collector, bytes) {
       !Number.isSafeInteger(manifest.reportCount) || manifest.reportCount < 1 ||
       !Number.isSafeInteger(manifest.rawFileCount) || manifest.rawFileCount < manifest.reportCount ||
       !Number.isSafeInteger(manifest.lineFileCount) || manifest.lineFileCount < 0 ||
-      !Array.isArray(manifest.lineChunks) || !Array.isArray(manifest.reportChunks)) {
+      !Number.isSafeInteger(manifest.hitFileCount) || manifest.hitFileCount < 0 ||
+      !Array.isArray(manifest.lineChunks) || !Array.isArray(manifest.reportChunks) || !Array.isArray(manifest.hitChunks)) {
     throw new Error(`${file} has an invalid premapped coverage manifest`);
   }
   addRecordedDrops(manifest, bytes, file);
   const readChunk = verifiedChunkReader(file, manifest, PREMAPPED_FORMAT, PREMAPPED_PIECE, PREMAPPED_FILE.exec(basename(file)),
-    [['lines', manifest.lineChunks], ['mapped', manifest.reportChunks]], bytes);
+    [['lines', manifest.lineChunks], ['mapped', manifest.reportChunks], ['hits', manifest.hitChunks]], bytes);
+  let hitFiles = 0;
+  for (const chunk of manifest.hitChunks) for (const record of readChunk(chunk, 'hits')) {
+    onHitRecord(record, file);
+    hitFiles++;
+  }
+  if (hitFiles !== manifest.hitFileCount) throw new Error(`${file} has a process line-hit record count mismatch`);
   let lineFiles = 0;
   for (const chunk of manifest.lineChunks) for (const entry of readChunk(chunk, 'lines')) {
     if (typeof entry?.url !== 'string' || typeof entry.source !== 'string' || !Array.isArray(entry.written) || !Array.isArray(entry.ignored)) {
@@ -701,25 +882,41 @@ export function mergeRawCoverageDirectories(directories) {
   if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
   assertPinnedNodeVersion();
   const TestCoverage = loadTestCoverage();
-  const collector = newTestCoverage(TestCoverage, { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: true });
+  const newCoverage = () => newTestCoverage(TestCoverage, { cwd: process.cwd(), excludeGlobs: ['test/**'], includeGlobs: undefined, sourceMaps: true });
+  const collector = newCoverage();
   const bytes = { rawFileCount: 0, inputBytes: 0, droppedRepeatInstances: 0 };
+  // W1-T9481: a premapped shard ships its per-process line hits; a raw directory's are read here, the same way.
+  const processHits = new Map();
+  const shapes = new Map();
+  const onHitRecord = (record, file) => foldProcessLineHits(record, processHits, shapes, file);
   collector.getCoverageFromDirectory = () => {
+    const premappedManifests = directories.map(premappedManifestIn);
+    // Only a raw directory is translated here, so an all-premapped merge leaves pinned Node's lines unwrapped.
+    const { lineState, mapReport } = premappedManifests.every(Boolean) ? {} : recordLineState(collector);
+    const reader = newCoverage();
     const merged = new Map();
-    for (const directory of directories) {
-      const premapped = premappedManifestIn(directory);
+    for (const [index, directory] of directories.entries()) {
+      const premapped = premappedManifests[index];
       if (premapped) {
-        for (const report of premappedReports(premapped, collector, bytes)) collector.mergeCoverage(merged, report);
+        for (const report of premappedReports(premapped, collector, bytes, onHitRecord)) collector.mergeCoverage(merged, report);
         continue;
       }
+      const rawHits = processLineHitCollector((url) => lineState.get(url)?.lines ?? reader.getLines(url), (url) => collector.shouldSkipFileCoverage(url));
       for (const report of coverageReports([directory], bytes)) {
-        collector.mergeCoverage(merged, collector.mapCoverageWithSourceMap(report));
+        rawHits.addShapes(report.result ?? []);
+        const { result, writes } = mapReport(report);
+        rawHits.addReport(result, writes);
+        collector.mergeCoverage(merged, result);
       }
+      for (const record of rawHits.records()) onHitRecord(record, directory);
     }
     return [...merged.values()];
   };
   const summary = collector.summary();
   if (summary.files.length === 0) throw new Error('raw coverage merge produced no source records');
-  return { ...bytes, summary, stagingBytes: 0, peakBytes: bytes.inputBytes, stagingDir: 'none' };
+  const processLineHitsRescued = raiseProcessLineHits(summary, processHits);
+  const mixedShapeFiles = [...shapes.values()].filter((extents) => extents.size > 1).length;
+  return { ...bytes, summary, stagingBytes: 0, peakBytes: bytes.inputBytes, stagingDir: 'none', processLineHitsRescued, mixedShapeFiles };
 }
 
 // W1-T4436: refuse a merge whose shard-directory count differs from ci.yml's `--shard-count`.
@@ -793,12 +990,13 @@ export async function main(argv) {
         `${r.placed} function span(s) placed on ${r.maps} source map(s))`,
     );
   } else if (values['premap-output']) {
-    const { rawFileCount, reportCount, lineFileCount, output, premappedBytes, droppedRepeatInstances } =
+    const { rawFileCount, reportCount, lineFileCount, hitFileCount, output, premappedBytes, droppedRepeatInstances } =
       writePremappedCoverageDirectories(positionals, values['premap-output']);
     console.log(
       `coverage-merge-ratchet: premapped ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
         `${reportCount} retained process report(s), ` +
-        `${lineFileCount} source file line record(s), premappedBytes=${premappedBytes} droppedRepeatInstances=${droppedRepeatInstances} -> ${output}`,
+        `${lineFileCount} source file line record(s), ${hitFileCount} process line-hit record(s), ` +
+        `premappedBytes=${premappedBytes} droppedRepeatInstances=${droppedRepeatInstances} -> ${output}`,
     );
   } else if (values['compact-output']) {
     const outputDirectory = values['compact-output'];
@@ -810,7 +1008,8 @@ export async function main(argv) {
         `rawBytes=${rawBytes} compactBytes=${compactBytes} peakBytes=${rawBytes + compactBytes} droppedRepeatInstances=${droppedRepeatInstances} -> ${output}`,
     );
   } else {
-    const { rawFileCount, summary, inputBytes, stagingBytes, peakBytes, stagingDir, droppedRepeatInstances } = mergeRawCoverageDirectories(positionals);
+    const { rawFileCount, summary, inputBytes, stagingBytes, peakBytes, stagingDir, droppedRepeatInstances, processLineHitsRescued, mixedShapeFiles } =
+      mergeRawCoverageDirectories(positionals);
     const lineUnion = lineLcovFiles.length === 0 ? undefined :
       mergeShardLineHits(summary, lineLcovFiles.map((file) => readFileSync(file, 'utf8')));
     writeFileSync(values.output, renderCoverageSummary(summary));
@@ -818,6 +1017,7 @@ export async function main(argv) {
       `coverage-merge-ratchet: ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
         `${summary.files.length} source record(s), inputBytes=${inputBytes} stagingBytes=${stagingBytes} ` +
         `peakBytes=${peakBytes} stagingDir=${stagingDir} droppedRepeatInstances=${droppedRepeatInstances}` +
+        ` processLineHitsRescued=${processLineHitsRescued.lines}/${processLineHitsRescued.files} mixedShapeFiles=${mixedShapeFiles}` +
         (lineUnion ? ` lineHitsRescued=${lineUnion.rescuedLines}/${lineUnion.rescuedHits} across ${lineUnion.shardCount} shard LCOV(s)` : '') +
         ` -> ${values.output}`,
     );
