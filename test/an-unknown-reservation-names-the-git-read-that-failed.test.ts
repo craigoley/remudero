@@ -6,18 +6,14 @@
  * what git said; the status and the review.post_refused row dropped it.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import type { Config } from "../src/lib/config.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { failSummary, judgeReview, taskIdOwnershipFindings, type TaskIdOwnershipFinding } from "../src/lib/review.js";
+import { failSummary, judgeReview, taskIdOwnershipFindings, unknownReservationReads, type TaskIdOwnershipFinding } from "../src/lib/review.js";
 import { readReservationAnchors, readReservationAnchorsAsync } from "../src/lib/task-id-reservation.js";
-import { runReview } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
 
 const CLEAN_PLAN_LINT = { ran: true as const, label: "fixture", checked: 1, violations: [] };
 const CRITERIA: AcceptanceCriterion[] = [{ claim: "the widget renders", proof: "the widget renders" }];
@@ -104,64 +100,13 @@ test("W1-T9674: the awaited reader names the failed verb too, and an empty stder
   assert.deepEqual(silent.get(ID), { status: "unknown", reason: "ls-remote failed: exited 2" });
 });
 
-test("W1-T9674: a withheld review's post_refused row carries each unknown read's id and what git said", async () => {
-  const bare = gitRepo({ bare: true, kind: "t9674-origin" });
-  const work = gitRepo({ kind: "t9674-work" });
-  mkdirSync(dirname(join(work.dir, "plan/tasks.yaml")), { recursive: true });
-  writeFileSync(join(work.dir, "plan/tasks.yaml"), "- id: W1-T57\n  title: seed\n");
-  work.git("add", "plan");
-  work.git("commit", "--quiet", "-m", "plan");
-  work.addRemote("origin", bare.dir);
-  work.git("push", "--quiet", "origin", "main");
-  const head = gitRepo({ cloneFrom: bare.dir, kind: "t9674-head" });
-  head.git("remote", "set-url", "origin", join(head.dir, "no-such-origin"));
-  const root = mkdtempSync(join(tmpdir(), "rmd-t9674-run-"));
-  const sha = head.git("rev-parse", "HEAD");
-  const prUrl = "https://github.com/craigoley/remudero/pull/12011";
-  const gh = ghShim(
-    [
-      { when: "api repos/", stdout: JSON.stringify({ number: 12011, html_url: prUrl, updated_at: "t", body: "", head: { ref: HEAD, sha }, state: "open" }) },
-      { when: "pr diff", stdout: DIFF },
-      { when: "pr view", stdout: JSON.stringify({ state: "OPEN" }) },
-    ],
-    { kind: "t9674-run" },
-  );
-  const priorPath = process.env.PATH;
-  try {
-    process.env.PATH = `${gh.dir}:${priorPath}`;
-    const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
-    const verdict = await runReview({
-      lintPlanForReviewFn: async () => CLEAN_PLAN_LINT,
-      owner: "craigoley",
-      repo: "remudero",
-      prUrl,
-      headRefName: HEAD,
-      task: { id: "PR-12011", acceptance: CRITERIA },
-      report: REPORT,
-      settingsFile: "",
-      config: { root, claudeBin: "/bin/true" } as Config,
-      log: (step, fields) => rows.push({ step, fields: (fields ?? {}) as Record<string, unknown> }),
-      say: () => {},
-      account: (result) => result,
-      spawnReviewer: false,
-      headCheckoutDir: head.dir,
-      ledgerPath: join(root, "ledger.ndjson"),
-      runId: "W1-T9674-withheld",
-      arm: () => "no-task-id",
-      disarm: () => "not-armed",
-    });
-    const refused = rows.filter((r) => r.step === "review.post_refused");
-    assert.equal(refused.length, 1, "exactly one refusal row");
-    assert.equal(refused[0].fields.reason, verdict.verdictWithheld);
-    assert.match(String(refused[0].fields.reason), new RegExp(`id ${ID} reservation unreadable \\(UNKNOWN\\): ls-remote failed — verdict withheld`));
-    const unknown = refused[0].fields.unknown_reservations as Array<{ id: string; reason: string }>;
-    assert.deepEqual(unknown.map((u) => u.id), [ID]);
-    assert.match(unknown[0].reason, /^ls-remote failed: .*no-such-origin/s, "git's own words ride the row in full");
-    assert.ok(!rows.some((r) => r.step === "review.posted"), "still withheld: no terminal status");
-  } finally {
-    if (priorPath === undefined) delete process.env.PATH;
-    else process.env.PATH = priorPath;
-    rmSync(root, { recursive: true, force: true });
-    rmSync(gh.dir, { recursive: true, force: true });
-  }
+test("W1-T9674: a withheld review's post_refused row carries each unknown read's id and what git said", () => {
+  const v = verdictFor("fetch");
+  assert.deepEqual(unknownReservationReads(v.taskIdOwnership), [{ id: ID, reason: `fetch failed: ${GIT_SAID}` }]);
+  const mixed: TaskIdOwnershipFinding[] = [
+    { id: "W1-T9647", file: "b.yaml", kind: "unreserved" },
+    { id: ID, file: SHARD, kind: "unknown", reason: "head-ref-unavailable" },
+  ];
+  assert.deepEqual(unknownReservationReads(mixed), [{ id: ID, reason: "head-ref-unavailable" }], "only unknown reads ride the row");
+  assert.deepEqual(unknownReservationReads(undefined), []);
 });
