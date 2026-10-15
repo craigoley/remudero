@@ -11221,7 +11221,7 @@ export function recordForcedRefresh(
   pr: Pick<OpenPrView, "prNumber" | "headSha"> & { taskId?: string },
   forcedBy: string,
 ): void {
-  const nowMs = deps.now ? deps.now() : Date.now();
+  const nowMs = deps.now ? deps.now() : systemClock.now();
   (deps.appendLine ?? appendLedger)(deps.ledgerPath, forcedRefreshRow({ runId: deps.runId, taskId: pr.taskId,
     prNumber: pr.prNumber, headSha: pr.headSha, forcedBy, nowMs }));
 }

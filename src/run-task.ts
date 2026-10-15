@@ -11094,7 +11094,7 @@ export async function runFixRebase(
   }
 
   // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
-  io.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: target.number, forcedBy: "fix-rebase", nowMs: Date.now() }));
+  io.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: target.number, forcedBy: "fix-rebase", nowMs: systemClock.now() }));
   const result = await io.updateBranch(target.number);
   if (!result.ok) {
     const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
@@ -12665,7 +12665,7 @@ export async function runFixRung(opts: {
         if (decision.refresh && clearance?.refresh !== false) {
           // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
           deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber, headSha: review.headSha, forcedBy: "fix-base-refresh",
-            nowMs: Date.now() }));
+            nowMs: systemClock.now() }));
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             const reason =
