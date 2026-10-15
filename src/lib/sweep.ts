@@ -14857,6 +14857,11 @@ export function noteReviewDuration(ms: number): void {
 /** W1-T8167: the steps that end a `sweep.review_admitted` review's life. */
 const LIVE_REVIEW_CLOSING_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.post_failed", "review.post_refused"]);
 
+/** W1-T8167: the (ledger, PR, stage) keys this process has already ledgered a `pr.stuck.deferred` for, so a
+ *  live review is announced once, not on every pass. Bounded; a restart re-announces once, which is harmless. */
+const deferredStageKeys = new Set<string>();
+const DEFERRED_STAGE_KEYS_CAP = 1000;
+
 /** PURE. How long a review may run before it counts as overdue: the longest of the observed durations
  *  (the window's upper bound), or undefined when none are observed so the caller keeps its stand-in. */
 export function observedReviewOverrunBoundMs(durationsMs: readonly number[]): number | undefined {
@@ -15130,7 +15135,10 @@ export async function runSweep(
         const observedBoundMs = observedReviewOverrunBoundMs(idleMemo.reviewMs);
         const overdueAfterMs = observedBoundMs ?? bound.minutes * 60_000;
         if (now - admittedAtMs <= overdueAfterMs) {
-          if (!currentRows.some(row => row.step === "pr.stuck.deferred" && stageKey(row) === key)) {
+          const deferredKey = `${deps.ledgerPath}\u0000${key}`;
+          if (!deferredStageKeys.has(deferredKey)) {
+            if (deferredStageKeys.size >= DEFERRED_STAGE_KEYS_CAP) deferredStageKeys.clear();
+            deferredStageKeys.add(deferredKey);
             record("pr.stuck.deferred", { ...fields, admitted_at: admitted.ts, review_age_ms: now - admittedAtMs,
               overdue_after_ms: overdueAfterMs, overdue_basis: observedBoundMs === undefined ? "backstop" : "observed" });
           }

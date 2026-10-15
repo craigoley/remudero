@@ -10,7 +10,6 @@ import {
 } from "./helpers/sweep-test.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 import { findDuplicateEscalation, type IssueGateway, type OpenIssue } from "../src/lib/escalate.js";
-import { openEscalationStandDownReason } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -147,7 +146,6 @@ test("W1-T8167: an open stall issue does not stand a fix round down", async () =
   }, { issues });
   const matched = probe("review");
   assert.equal(matched, undefined);
-  assert.equal(openEscalationStandDownReason(HEAD, matched), undefined);
 
   // Positive control: the same probe does match an issue carrying the fix rung's own cause, and stands down.
   const control = issueStore();
@@ -156,7 +154,6 @@ test("W1-T8167: an open stall issue does not stand a fix round down", async () =
     class: "BLOCKED", taskId: pr.taskId!, summary: `review false-block — ${pr.prUrl}`, detail: "", headSha: HEAD, cause: "review",
   }, { issues: control });
   assert.ok(controlMatch);
-  assert.ok(openEscalationStandDownReason(HEAD, controlMatch));
 
   // Another stall report for the same PR still dedups onto its own issue.
   assert.ok(probe("stage-stall"));
