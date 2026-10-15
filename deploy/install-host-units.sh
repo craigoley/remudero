@@ -515,7 +515,7 @@ deploy_code_busy_handoff() {
     return 1
   fi
   if GIT_OPTIONAL_LOCKS=0 git -C "$code" merge-base --is-ancestor "$install_head" "$daemon_head" 2>/dev/null; then
-    rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
+    deploy_logic_lag_cleared "$daemon_head"
     echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} contains install head ${install_head}, asking deploy-run anyway."
     return 0
   fi
@@ -523,6 +523,11 @@ deploy_code_busy_handoff() {
   GIT_OPTIONAL_LOCKS=0 git -C "$code" fetch --quiet origin main 2>/dev/null || true
   GIT_OPTIONAL_LOCKS=0 git -C "$code" diff --quiet "$daemon_head" "$install_head" -- "${DEPLOY_LOGIC_PATHS[@]}" 2>/dev/null || rc=$?
   if [ "$rc" -eq 1 ]; then
+    if why="$(deploy_logic_ships_only_by_recycle "$code" "$daemon_head" "$install_head")"; then
+      deploy_logic_lag_mark_recycled "$daemon_head"
+      echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} lacks install head ${install_head}'s deploy logic, but ${why}: a freshness restart keeps the old image, so asking deploy-run to recycle at the next drain."
+      return 0
+    fi
     echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} lacks install head ${install_head}'s deploy logic (${DEPLOY_LOGIC_PATHS[*]}); deferring." >&2
     deploy_logic_lag_pressure "$container" "$daemon_head"
     return 1
@@ -531,8 +536,80 @@ deploy_code_busy_handoff() {
     echo "rmd-relaunch: deploy code -- busy, and daemon tree ${daemon_head} vs install head ${install_head}: deploy logic unreadable (git diff exit ${rc}); deferring." >&2
     return 1
   fi
-  rm -f "$STATE_DIR/state/deploy-logic-lag" 2>/dev/null || true
+  deploy_logic_lag_cleared "$daemon_head"
   echo "rmd-relaunch: deploy code -- busy; daemon tree ${daemon_head} carries install head ${install_head}'s deploy logic, asking deploy-run anyway."
+}
+
+# W1-T9645 -- A CHANGE ONLY A RECYCLE CAN CARRY IS NEVER WAITED OUT. On 2026-10-15 W1-T9623's
+# deploy/entrypoint.sh fix sat behind the deferral above for the whole lag: the daemon's freshness
+# restart re-execs node in the SAME container, so the image's baked entrypoint stays the old one, and
+# the wait could end only in the backstop or a hand recycle. The build-role image inputs
+# (BUILD_ROLE_IMAGE_BAKED_PATHS in src/lib/deploy-judge.ts; a test holds the two lists equal), or a
+# commit whose Remudero-Task shard has priority below 1, go to deploy-run now: it recycles onto the
+# image that carries them, through recycle-container.sh's pause-and-drain (W1-T6249), at the next drain.
+DEPLOY_BAKED_PATHS=(deploy/Dockerfile deploy/entrypoint.sh .dockerignore deploy/package.json deploy/package-lock.json
+  deploy/codex-requirements.toml)
+
+# Prints why the daemon tree's lag must ship by recycle and returns 0, else returns 1.
+deploy_logic_ships_only_by_recycle() {
+  local code="$1" from="$2" to="$3" baked id shard
+  baked="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" diff --name-only "$from" "$to" -- "${DEPLOY_BAKED_PATHS[@]}" 2>/dev/null | head -n 3 | tr '\n' ' ')"
+  if [ -n "$baked" ]; then
+    printf 'it changes baked path(s) %s' "${baked% }"
+    return 0
+  fi
+  for id in $(GIT_OPTIONAL_LOCKS=0 git -C "$code" log --format=%B "${from}..${to}" 2>/dev/null |
+    sed -n 's/^Remudero-Task: \(W1-T[0-9][0-9]*\)$/\1/p' | sort -u); do
+    for shard in "$CHECKOUT/plan/tasks.d/${id}"-*.yaml; do
+      [ -f "$shard" ] || continue
+      if grep -Eq '^  priority: 0([.][0-9]+)?([[:space:]]|$)' "$shard"; then
+        printf 'it carries %s, a priority-0 task' "$id"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# W1-T9645 -- THE BACKSTOP'S BOUND IS LEARNED, NOT 36. Each time the daemon tree's HEAD moves off a
+# lagging head WITHOUT a watchdog recycle in between, the lag it took is a measured freshness-restart
+# clear: "<cleared-at> <lag-s> <head>" in DEPLOY_LAG_HISTORY, newest DEPLOY_LAG_HISTORY_KEEP kept
+# (bound kind: physical). The backstop waits for the longest of them; with none yet, the two daemon
+# horizons the fixed 36 stood for (7200s). A lag the watchdog's own recycle ended is not recorded,
+# so the bound cannot feed on itself.
+DEPLOY_LAG_HISTORY="$STATE_DIR/state/deploy-logic-lag-history"
+DEPLOY_LAG_HISTORY_KEEP=20
+DEPLOY_LAG_DEFAULT_BOUND_S=7200
+
+deploy_logic_lag_bound_s() {
+  local bound
+  bound="$(tail -n "$DEPLOY_LAG_HISTORY_KEEP" "$DEPLOY_LAG_HISTORY" 2>/dev/null |
+    awk '$2 ~ /^[0-9]+$/ && $2 + 0 > m { m = $2 + 0 } END { if (m > 0) print m }')"
+  printf '%s\n' "${bound:-$DEPLOY_LAG_DEFAULT_BOUND_S}"
+}
+
+# The lag mark is "<since> <head> [recycled]". A recycle this script asked for flags it.
+deploy_logic_lag_mark_recycled() {
+  local mark="$STATE_DIR/state/deploy-logic-lag" since="" head="" flag=""
+  { read -r since head flag < "$mark"; } 2>/dev/null || true
+  [ -n "$since" ] && [ "$head" = "$1" ] || { since="$(date -u +%s)"; head="$1"; }
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+  printf '%s %s recycled\n' "$since" "$head" > "$mark" 2>/dev/null || true
+}
+
+# The daemon tree left the lagging head ($1 is the head it is at now): record the clear, end the mark.
+deploy_logic_lag_cleared() {
+  local mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" flag="" tmp
+  now="$(date -u +%s)"
+  { read -r since head flag < "$mark"; } 2>/dev/null || return 0
+  rm -f "$mark" 2>/dev/null || true
+  case "$since" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$head" ] && [ "$head" != "${1:-}" ] && [ -z "$flag" ] && [ "$since" -le "$now" ] || return 0
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+  printf '%s %s %s\n' "$now" "$((now - since))" "$head" >> "$DEPLOY_LAG_HISTORY" 2>/dev/null || return 0
+  tmp="$DEPLOY_LAG_HISTORY.tmp.$$"
+  tail -n "$DEPLOY_LAG_HISTORY_KEEP" "$DEPLOY_LAG_HISTORY" > "$tmp" 2>/dev/null && mv -f "$tmp" "$DEPLOY_LAG_HISTORY" 2>/dev/null ||
+    rm -f "$tmp" 2>/dev/null || true
 }
 
 # 2026-10-10 -- THE DEFERRAL ABOVE HAD NO AGE. While workers ran and the daemon tree lacked the
@@ -542,7 +619,8 @@ deploy_code_busy_handoff() {
 # "drain and restart" at 05:00Z, then waited out its in-flight lanes (45 min), a bounded sweep and a
 # bounded drain. That path is the right one and normally wins -- but nothing here noticed if it
 # never did. So the lag now accrues PRESSURE on the same scale, keyed to the daemon tree's HEAD:
-#   below two horizons (36) -- defer; one horizon is the daemon's own restart decision, one its drain.
+#   below the learned bound -- defer (W1-T9645: the longest lag a freshness restart has cleared in;
+#                              two horizons, 36, until one has been measured).
 #   at or above           -- hand the daemon to recycle-container.sh's pause-and-drain swap from the
 #                            INSTALL checkout (the current deploy logic, never the lagging tree's), as
 #                            W1-T6249/W1-T6282 do for a busy image recycle. It waits out the workers;
@@ -550,26 +628,34 @@ deploy_code_busy_handoff() {
 #                            WATCHDOG_RECYCLE_GAP_S, and pressure keeps growing until the tree moves.
 # Any move of the daemon tree's HEAD -- its own restart, an idle fast-forward -- resets the clock.
 deploy_logic_lag_pressure() {
-  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" pressure
+  local container="$1" daemon_head="$2" mark="$STATE_DIR/state/deploy-logic-lag" now since="" head="" flag="" pressure bound_s bound
   now="$(date -u +%s)"
-  { read -r since head < "$mark"; } 2>/dev/null || true
+  { read -r since head flag < "$mark"; } 2>/dev/null || true
   case "$since" in ''|*[!0-9]*) since="" ;; esac
+  if [ -n "$since" ] && [ -n "$head" ] && [ "$head" != "$daemon_head" ]; then
+    deploy_logic_lag_cleared "$daemon_head"
+    since=""
+  fi
   if [ -z "$since" ] || [ "$head" != "$daemon_head" ] || [ "$since" -gt "$now" ]; then
-    since="$now"
+    since="$now"; flag=""
     mkdir -p "$STATE_DIR/state" 2>/dev/null || true
     printf '%s %s\n' "$since" "$daemon_head" > "$mark" 2>/dev/null || true
   fi
+  # Shown on the daemon's own restart-pressure scale (18 per hour); the bound is the learned lag.
+  bound_s="$(deploy_logic_lag_bound_s)"
   pressure=$(( (now - since) * 18 / 3600 ))
-  if [ "$pressure" -lt 36 ]; then
-    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} < 36; the daemon's own freshness restart has it." >&2
+  bound=$(( bound_s * 18 / 3600 ))
+  if [ "$((now - since))" -lt "$bound_s" ]; then
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} < ${bound}; the daemon's own freshness restart has it (bound: the longest lag one has cleared in, ${bound_s}s)." >&2
     return 0
   fi
   if [ -z "$container" ] || ! declare -F watchdog_recycle >/dev/null; then
-    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s, pressure ${pressure} >= 36, but no recycle path is wired; deferring." >&2
+    echo "rmd-relaunch: deploy code -- deploy-logic lag $((now - since))s, pressure ${pressure} >= ${bound}, but no recycle path is wired; deferring." >&2
     return 0
   fi
+  deploy_logic_lag_mark_recycled "$daemon_head"
   watchdog_recycle "$container" "deploy code" \
-    "deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} >= 36: the daemon never restarted onto it" || true
+    "deploy-logic lag $((now - since))s at ${daemon_head}, pressure ${pressure} >= ${bound}: the daemon never restarted onto it" || true
 }
 DEPLOY_CODE_REFRESH
 }
