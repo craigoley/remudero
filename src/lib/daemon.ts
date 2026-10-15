@@ -215,19 +215,20 @@ export interface IntakeRungRunResult {
  *  fallback reasoning as {@link DEFAULT_POLL_INTERVAL_MS} above (W1-T1044, W1-T9563). */
 export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 
-/** W1-T9563: the full pass's bound is learned from passes that SETTLED, abandoned-then-settled ones included, since
- *  they are the healthy-slow population a fixed bound misread as hangs (10-14 12-24Z: 20 of 41 passes abandoned at
- *  559 s, p50 16.6 min, none hung). Bound = nearest-rank p90 of the last {@link SWEEP_BOUND_WINDOW} settled
- *  durations x {@link SWEEP_BOUND_HEADROOM}. On 10-14 12-24Z's sample that is 3 x 33.7 = 101.1 min: 2.9x the slowest
+/** PRIMARY CONTROL (W1-T9563): the full pass's bound is learned from passes that SETTLED, abandoned-then-settled
+ *  ones included: they are the healthy-slow population a fixed bound misread as hangs (10-14 12-24Z: 21 of 41
+ *  passes abandoned at 559 s, p50 16.6 min, none hung). Bound = nearest-rank p90 of the last
+ *  {@link SWEEP_BOUND_WINDOW} settled durations x {@link SWEEP_BOUND_HEADROOM}. On 10-14 12-24Z's sample that is 3 x 33.7 = 101.1 min: 2.9x the slowest
  *  settled pass (35.3 min), 0.61x the shortest confirmed hang (165.5 min); on 10-13 00-12Z, 3 x 9.8 = 29.4 min still
  *  clears that window's slowest (15.0 min). Never clamped to the policy row's max: no fixed ceiling. A hang never
  *  settles, so it never widens the sample. Below {@link SWEEP_BOUND_MIN_SAMPLES} the policy value is the bound. */
 export const SWEEP_BOUND_QUANTILE = 0.9;
-/** Headroom over the quantile; the 10-14 12-24Z sample admits 1.05x (slowest settled) to 4.9x (shortest hang). */
+/** PRIMARY CONTROL: headroom over the quantile; the 10-14 12-24Z sample admits 1.05x (slowest settled) to 4.9x (shortest hang). */
 export const SWEEP_BOUND_HEADROOM = 3;
-/** About one 12 h window of settled passes at 10-14's rate (20-40), so the bound follows a slowdown within half a day. */
+/** PRIMARY CONTROL: about one 12 h window of settled passes at 10-14's rate (20-40), so the bound follows a
+ *  slowdown within half a day. */
 export const SWEEP_BOUND_WINDOW = 40;
-/** Fewest settled passes the quantile is read from; below it nearest-rank p90 is only the newest few maxima. */
+/** BACKSTOP: fewest settled passes the quantile is read from; below it nearest-rank p90 is only the newest few maxima. */
 export const SWEEP_BOUND_MIN_SAMPLES = 5;
 
 /** The learner's state: the policy cold-start value and the most recent settled full-pass durations, oldest first. */
