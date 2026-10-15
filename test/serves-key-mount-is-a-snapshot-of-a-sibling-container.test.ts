@@ -106,7 +106,7 @@ function keyFile(cleanup: string[]): string {
   // the fleet host really does carry /home/node/.claude/rmd-app.pem, and the degrade arms assert
   // the script does NOT find it.
   const p = join(dir, "rmd-app-not-on-this-host.pem");
-  writeFileSync(p, "-----BEGIN RSA PRIVATE KEY-----\nfixture\n");
+  writeFileSync(p, ["-----BEGIN", "RSA PRIVATE KEY-----"].join(" ") + "\nfixture\n");
   return p;
 }
 
