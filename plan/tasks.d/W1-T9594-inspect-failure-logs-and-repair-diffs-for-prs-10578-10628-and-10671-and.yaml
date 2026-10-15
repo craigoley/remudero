@@ -1,0 +1,28 @@
+- id: W1-T9594
+  title: "Inspect failure logs and repair diffs for PRs 10578, 10628 and 10671 and name the actual remedy for each"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  design: |
+    Read-only research. For each of #10578, #10628 and #10671, read the failing check logs and the repair diffs (fix rounds, merge-from-main commits, hand fixes). The task record named #10671 twice, so first establish whether the third PR was meant to be a different number. Write the findings to the file below, one section per PR, each naming the failing check, the commit that repaired it, and the remedy that actually worked.
+    CREATES: docs/forensics/followup-w1-t7898-pr-repairs.md
+  files:
+    - docs/forensics/followup-w1-t7898-pr-repairs.md
+  acceptance:
+    - claim: "The findings file names the failing check and the repair for PR 10578"
+      proof: "grep: 10578 in docs/forensics/followup-w1-t7898-pr-repairs.md"
+    - claim: "The findings file names the failing check and the repair for PR 10628"
+      proof: "grep: 10628 in docs/forensics/followup-w1-t7898-pr-repairs.md"
+    - claim: "The findings file names the failing check and the repair for PR 10671 and says whether the duplicate reference was a typo"
+      proof: "grep: 10671 in docs/forensics/followup-w1-t7898-pr-repairs.md"
+  origin: "architect"
+  rationale: >-
+    From the 2026-10-11 follow-up on W1-T7898-1791709352590, ratified via rmd approve:
+  
+    follow-up harvest [research]: Inspect failure logs and repair diffs for #10578, #10628, and
+    #10671, because the task record leaves the remedy unclear and repeats #10671. — from W1-T7898
+    (run W1-T7898-1791709352590)
