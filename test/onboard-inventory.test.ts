@@ -246,12 +246,12 @@ test("parseOwnerRepoFromRemoteUrl parses both ssh and https remote url shapes", 
   assert.equal(parseOwnerRepoFromRemoteUrl("not-a-url-at-all"), undefined);
 });
 
-test("resolveTargetOwnerRepo is injectable — a fake getRemoteUrl proves it never needs a real git repo, and a throw resolves to undefined (never guessed)", () => {
-  const ok = resolveTargetOwnerRepo("/some/target", { getRemoteUrl: () => "git@github.com:acme-corp/widget-fixture.git" });
+test("resolveTargetOwnerRepo is injectable — a fake getRemoteUrl proves it never needs a real git repo, and a throw resolves to undefined (never guessed)", async () => {
+  const ok = await resolveTargetOwnerRepo("/some/target", { getRemoteUrl: async () => "git@github.com:acme-corp/widget-fixture.git" });
   assert.deepEqual(ok, { owner: "acme-corp", repo: "widget-fixture" });
 
-  const fails = resolveTargetOwnerRepo("/some/target", {
-    getRemoteUrl: () => {
+  const fails = await resolveTargetOwnerRepo("/some/target", {
+    getRemoteUrl: async () => {
       throw new Error("no such remote");
     },
   });

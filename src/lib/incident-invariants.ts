@@ -1,5 +1,6 @@
 import type { EventLoopLag } from "./daemon-health.js";
 import type { LedgerLine } from "./ledger.js";
+import type { PrBlocker } from "./pr-blocker.js";
 
 /**
  * lib/incident-invariants.ts — W1-T4384, the SRE gardener's phase 2.
@@ -132,7 +133,15 @@ export const LOOP_LAG_P99_BOUND_MS = 500;
  *  (`queue.merge_ready` was never written). Merges are ledgered as `verdict.merged`; `pr.merged` is kept
  *  as a second witness. */
 const SWEEP_DISPOSED_STEP = "sweep.disposed";
-const AWAITING_ARM_BLOCKER = "awaiting-arm";
+/** W1-T9673: every blocker pr-blocker.ts returns, placed on purpose: true for a green PR waiting only on its arm,
+ *  including a W1-T9633 security hold of a mergeable, unarmed PR. */
+export const GREEN_WORK_WAITING_BLOCKER = {
+  "awaiting-arm": true, "security-alert-hold": true, "security-unknown-hold": true,
+  "awaiting-ci": false, "own-red": false, "base-red": false, "awaiting-review": false, "review-failed": false,
+  "armed-idle": false, "conflict": false, "strikes-exhausted": false, "escalated": false,
+  "stale-reviewer-withheld": false, "plan-proof-unrunnable": false, "held-draft": false, "operator-hold": false,
+  "other": false,
+} as const satisfies Record<PrBlocker, boolean>;
 const VERDICT_MERGED_STEP = "verdict.merged";
 const MERGE_STEP = "pr.merged";
 
@@ -219,17 +228,23 @@ const RULES: readonly InvariantRule[] = [
     longMs: 4 * 60 * 60_000,
     inputs: [SWEEP_DISPOSED_STEP, VERDICT_MERGED_STEP, MERGE_STEP],
     bad: (window) => {
-      const awaitingArm = new Set<string>();
+      const green = new Set<string>();
+      const byBlocker = new Map<string, Set<string>>();
       for (const row of window) {
-        if (row.step !== SWEEP_DISPOSED_STEP || row.blocker !== AWAITING_ARM_BLOCKER) continue;
+        const blocker = row.blocker;
+        if (row.step !== SWEEP_DISPOSED_STEP || typeof blocker !== "string" ||
+          !Object.hasOwn(GREEN_WORK_WAITING_BLOCKER, blocker) || !GREEN_WORK_WAITING_BLOCKER[blocker as PrBlocker]) continue;
         const pr = row.pr_number;
-        awaitingArm.add(typeof pr === "number" || typeof pr === "string" ? String(pr) : "unknown");
+        const key = typeof pr === "number" || typeof pr === "string" ? String(pr) : "unknown";
+        green.add(key);
+        byBlocker.set(blocker, (byBlocker.get(blocker) ?? new Set()).add(key));
       }
-      const greenQueued = awaitingArm.size;
+      const greenQueued = green.size;
+      const named = [...byBlocker].map(([blocker, prs]) => `${blocker}=${prs.size}`).join(", ");
       const merges = window.filter((row) => row.step === VERDICT_MERGED_STEP || row.step === MERGE_STEP).length;
       return {
         bad: greenQueued > 0 && merges === 0,
-        message: `green-queued=${greenQueued}, merges=${merges}`,
+        message: `green-queued=${greenQueued}${named ? ` (${named})` : ""}, merges=${merges}`,
       };
     },
   },

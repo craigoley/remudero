@@ -1,3 +1,4 @@
+// @census-reads: src/lib/serve.ts
 // @source-text-subject: this suite's first two assertions intentionally inspect route handler
 // source text because W1-T3192's deliverable is a request-path census/ratchet.
 import assert from "node:assert/strict";
