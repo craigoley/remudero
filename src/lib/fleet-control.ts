@@ -1,4 +1,5 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -458,16 +459,15 @@ export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
     run,
     runAsync: (args) => new Promise((resolve) => {
       if (args[0] === "push") assertLiveWriteAllowed("git-push", `${args.at(-1)} on ${repoRoot}'s origin`);
-      execFile("git", argv(args), {
+      execFileLoopBounded("git", argv(args), {
         encoding: "utf8",
         timeout: SHARED_PAUSE_GIT_TIMEOUT_MS,
         killSignal: "SIGTERM",
-      }, (error, stdout) => {
+      }).then(
+        ({ stdout }) => resolve({ status: 0, stdout }),
         // Exit failures, timeouts and spawn failures all mean the read was unreachable.
-        resolve(error
-          ? { status: typeof error.code === "number" ? error.code : 1, stdout: "" }
-          : { status: 0, stdout });
-      });
+        (error: { code?: unknown }) => resolve({ status: typeof error.code === "number" ? error.code : 1, stdout: "" }),
+      );
     }),
     mintAnchor(info?: SharedPauseMintInfo) {
       const tree = run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();

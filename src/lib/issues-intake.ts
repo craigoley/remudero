@@ -1,9 +1,8 @@
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
-import { captureFeedback, feedbackEntryPath, type FeedbackAdmissionContext, type FeedbackEntry } from "./feedback.js";
+import { captureFeedback, feedbackCaptured, stageFeedbackCapture, type CaptureFeedbackOptions, type FeedbackAdmissionContext, type FeedbackEntry } from "./feedback.js";
 import { contributionOriginFromRest, feedbackContentDigest, readAdmissionRestAsync, type ContributionOrigin,
   type FeedbackAdmissionSubject, type RestContributionOrigin } from "./contributor-admission.js";
-import { existsSync } from "node:fs";
 import type { ManagedRepo } from "./managed-repos.js";
 
 /**
@@ -181,6 +180,8 @@ export interface IssuesIntakeDeps {
   dryRun?: boolean;
   /** W1-T7754: explicit shadow only; absent preserves legacy capture and selection. */
   admission?: FeedbackAdmissionContext;
+  /** W1-T9615: the daemon's state root: a new entry is staged in its landing queue, never landed on the loop (the CLI omits it). */
+  landingStateRoot?: string;
 }
 
 export interface IssuesIntakeResult {
@@ -211,7 +212,7 @@ export async function pollIssues(managedRepos: ManagedRepo[], deps: IssuesIntake
   let skippedExisting = 0;
   for (const issue of open) {
     const id = issueFeedbackId(issue.owner, issue.repo, issue.number);
-    if (existsSync(feedbackEntryPath(deps.root, id))) {
+    if (feedbackCaptured(deps.root, id, deps.landingStateRoot)) {
       skippedExisting++;
     } else {
       newIssues.push(issue);
@@ -235,17 +236,18 @@ export async function pollIssues(managedRepos: ManagedRepo[], deps: IssuesIntake
         itemId: issue.itemId, revision: issue.revision, origin: issue.origin,
         repository: repositories.get(`${issue.owner}/${issue.repo}`),
       };
-      created.push(
-        captureFeedback(deps.root, {
-          id,
-          raw: renderIssueRaw(issue),
-          origin: `issue#${issue.number}`,
-          ...(deps.admission?.mode === "shadow" ? {
-            contribution: { ...subject, ...(issue.url ? { url: issue.url } : {}) },
-            admission: { ...deps.admission, nowMs: now, currentSubject: subject },
-          } : {}),
-        }),
-      );
+      const capture: CaptureFeedbackOptions = {
+        id,
+        raw: renderIssueRaw(issue),
+        origin: `issue#${issue.number}`,
+        ...(deps.admission?.mode === "shadow" ? {
+          contribution: { ...subject, ...(issue.url ? { url: issue.url } : {}) },
+          admission: { ...deps.admission, nowMs: now, currentSubject: subject },
+        } : {}),
+      };
+      created.push(deps.landingStateRoot === undefined
+        ? captureFeedback(deps.root, capture)
+        : stageFeedbackCapture(deps.root, deps.landingStateRoot, capture).entry);
     }
   }
 

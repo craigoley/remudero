@@ -272,27 +272,48 @@ test("loop, THROUGH THE ADAPTER: a NOT-behind assessment never stops as stale, a
 
 // ── THE IDLE GATE (Q2): the check can never interrupt a live dispatch ─────────────────────────
 
-test("IDLE GATE: origin advancing DURING a dispatch never interrupts it — the worker reaches its verdict first", async () => {
+function idleGateEscape(root: string) {
+  let polls = 0;
+  return {
+    observe: (step: string) => { if (step === "daemon.tick") polls++; },
+    polls: () => polls,
+    // STOP is read by admission, the in-flight ticker and the restart latch within one poll.
+    // Spend the same four-poll escape budget on actual polls, never on those safety reads.
+    checkStop: () => polls >= 4 ? (requestStop(root, "escape hatch"), stopDetail(root)) : undefined,
+  };
+}
+
+test("IDLE GATE: origin advancing DURING a dispatch never interrupts it — the worker reaches its verdict first", async (t) => {
   const plan = fixturePlan();
   const order: string[] = [];
   let advanced = false;
   // Same escape hatch, same reason as the stale-direction test above: a regression must FAIL here,
   // never hang. checkStop runs before freshness, so a broken adapter stops as `stopped`.
   const root = mkdtempSync(join(tmpdir(), "daemon-freshness-wiring-idle-"));
-  let ticks = 0;
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const escape = idleGateEscape(root);
+  let releaseWorker!: () => void;
+  const heartbeatSeen = new Promise<void>((resolve) => { releaseWorker = resolve; });
   const s = await runDaemon(plan, {
     refreshMerged: () => () => false,
-    checkStop: () => (++ticks >= 4 ? (requestStop(root, "escape hatch"), stopDetail(root)) : undefined),
+    checkStop: escape.checkStop,
     runOne: async (id) => {
       order.push("runOne:start");
       // origin/main moves WHILE the worker is in flight — the exact race the brief asks about.
       advanced = true;
-      await new Promise((r) => setTimeout(r, 5));
+      // Exercise a freshness read while admitted work is still running, independent of host speed.
+      // The ticker yields through setImmediate. Allow two check phases, then finish even if its
+      // heartbeat regresses: the assertion below must fail finitely, not strand this worker.
+      await Promise.race([heartbeatSeen, new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve)))]);
       order.push("runOne:end");
       return okResult(id);
     },
     sleep: async () => {},
-    log: (step) => order.push(`log:${step}`),
+    log: (step, data) => {
+      escape.observe(step);
+      order.push(`log:${step}`);
+      if (step === "daemon.alive" && data?.phase === "dispatch") releaseWorker();
+    },
     checkFreshness: (): DaemonFreshness =>
       daemonFreshnessFromService(advanced ? CLEAN_BEHIND : { status: "assessed", dirty: false, behind: null }),
   });
@@ -303,5 +324,28 @@ test("IDLE GATE: origin advancing DURING a dispatch never interrupts it — the 
     order.indexOf("runOne:end") >= 0 && order.indexOf("runOne:end") < restart,
     `the in-flight dispatch completed BEFORE the restart decision — got ${JSON.stringify(order)}`,
   );
-  rmSync(root, { recursive: true, force: true });
+  assert.ok(order.indexOf("log:daemon.alive") >= 0 && order.indexOf("log:daemon.alive") < order.indexOf("runOne:end"),
+    "the dispatch heartbeat really observed the advance before the worker was allowed to finish");
+});
+
+test("IDLE GATE: a never-stale regression still terminates through its four-poll escape hatch", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-idle-escape-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const escape = idleGateEscape(root);
+  let extraStopReads = 0;
+  const s = await runDaemon(fixturePlan(), {
+    refreshMerged: () => () => true,
+    runOne: async (id) => okResult(id),
+    sleep: async () => {},
+    log: escape.observe,
+    checkStop: escape.checkStop,
+    checkFreshness: () => {
+      // Extra control reads must not spend polls, even if a future safety check adds more.
+      for (let i = 0; i < 5; i++) { escape.checkStop(); extraStopReads++; }
+      return daemonFreshnessFromService({ status: "assessed", dirty: false, behind: null });
+    },
+  });
+  assert.equal(s.stopReason, "stopped", "a missing stale verdict must fail finitely, never hang");
+  assert.equal(escape.polls(), 4, "the original escape budget remains four logical daemon polls");
+  assert.ok(extraStopReads >= 5, "the negative control really made repeated STOP reads");
 });

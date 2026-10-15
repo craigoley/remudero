@@ -48,6 +48,8 @@ export interface FixArmEvidence {
   unattributedExcluded: number;
   /** W1-T6028: rounds whose worker a signal ended with nothing pushed: counted, never pooled into an arm. */
   signalExcluded: number;
+  /** W1-T9618: rounds whose commit never reached the remote: a push or credential fault, not the arm's work. */
+  pushFailedExcluded: number;
   /** Pooled fix-lane acceptance mean, the prior's centre. */
   priorMean: number;
   priorWeight: number;
@@ -84,6 +86,7 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
   const byArm = new Map<string, FixArmStats>();
   let unattributedExcluded = 0;
   let signalExcluded = 0;
+  let pushFailedExcluded = 0;
   for (const row of rows) {
     if (row.step !== "fix.done") continue;
     const provider = text(row.provider);
@@ -94,6 +97,10 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
     }
     if (endedBySignalWithNothingPushed(row)) {
       signalExcluded += 1;
+      continue;
+    }
+    if (row.subtype === "push_failed") {
+      pushFailedExcluded += 1;
       continue;
     }
     const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
@@ -122,6 +129,7 @@ export function fixArmEvidence(rows: readonly Row[], nowMs: number): FixArmEvide
     arms,
     unattributedExcluded,
     signalExcluded,
+    pushFailedExcluded,
     priorMean: Math.min(Math.max(mean, PRIOR_MEAN_EPSILON), 1 - PRIOR_MEAN_EPSILON),
     priorWeight: FIX_ROUTING_PRIOR_WEIGHT,
     halfLifeMs: FIX_ROUTING_HALF_LIFE_MS,

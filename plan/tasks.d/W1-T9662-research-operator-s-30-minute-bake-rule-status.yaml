@@ -1,0 +1,24 @@
+- id: W1-T9662
+  title: Research operator's 30‑minute bake rule status
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  priority: 2
+  status: queued
+  # backlog gardener: band=2 evidence=17f6fb7117c1f44f
+  attempts: 0
+  files:
+    - MASTER-PLAN.md
+  acceptance:
+    - claim: Operator's 30‑minute bake rule status determined
+      proof: "grep: \"30‑minute bake\" in MASTER-PLAN.md"
+  origin: architect
+
+  rationale: >-
+    From the 2026-10-02 follow-up on W1-T4529-1790927258425, ratified via rmd approve:
+  
+    follow-up harvest [research]: decide whether the operator's 30-minute bake ruling still stands
+    as a requirement. If it does, file it as a fresh plan-only task with its own tag/identity
+    prerequisites rather than reviving this one. — from W1-T4529 (run W1-T4529-1790927258425)

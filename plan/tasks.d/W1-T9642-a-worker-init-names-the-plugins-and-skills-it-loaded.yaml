@@ -1,0 +1,58 @@
+- id: W1-T9642
+  title: "NOTHING RECORDS WHICH PLUGINS AND SKILLS A WORKER LOADED — the SDK's init message lists `plugins`, `skills` and `agents`, but the worker inventory reads only MCP servers and tools, while the operator account syncs two Anthropic plugins into every session it opens; record the plugin and skill inventory on every worker row, as a census, never a gate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19 span: the init parser, the inventory helper and the worker row writer. One concern — the worker inventory names plugins and skills; nothing is refused
+  band_meaning: span
+  origin: "operator ask 2026-10-15: review five agent and skill catalogs for innovation, leaning into automation and self-improvement (MASTER-PLAN §4G)"
+  plan_refs: [W1-T9489, W1-T4348, W1-T505, W1-T971]
+  files: [src/lib/worker-init-summary.ts, src/lib/worker-mcp-isolation.ts, src/lib/worker.ts, test/a-worker-init-names-the-plugins-and-skills-it-loaded.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ at origin/main 3f9003ebf (2026-10-15).
+    WHAT THE SDK REPORTS: the `system`/`init` message type in @anthropic-ai/claude-agent-sdk (sdk.d.ts, read at
+    0.3.293; package-lock pins 0.3.296) carries `skills: string[]`, `plugins: { name, path }[]`, `agents?: string[]`
+    and `plugin_errors?`, beside `tools` and `mcp_servers`.
+    WHAT REMUDERO KEEPS: `workerInitSummaryFromMessage` (src/lib/worker-init-summary.ts:71) reads only `mcp_servers`
+    and `tools`. W1-T9489's tripwire (src/lib/worker.ts:3265) therefore sees MCP names only.
+    WHY IT MATTERS:
+      - W1-T9489 (merged #11841, 2026-10-14) closed the account-connector path after a fix worker called an account
+        Claude Docs tool. Account-level configuration had reached a worker unseen.
+      - The operator's claude.ai account syncs two Anthropic plugins, `engineering` and `cowork-plugin-management`
+        (marketplace knowledge-work-plugins, version 0040), into the Claude Code sessions it opens. OBSERVED in a cloud
+        session on 2026-10-15 at ~/.claude/plugins/synced/*/manifest.json.
+      - W1-T4348 (merged #8549) narrowed a worker's ~/.claude grant to the credentials file, but nothing observes which
+        plugins and skills a worker actually loads. A synced plugin brings skills the model may invoke itself, whose text
+        changes upstream with no review here (the §4F supply-chain finding).
+    WHY A CENSUS, NOT A GATE: bundled CLI skills appear in `skills` too (W1-T971 measured workers invoking bundled
+    skills). An allowlist written before a census would fire on a healthy population.
+  design: |
+    1. `WorkerInitSummary` gains `pluginNames`, `skillNames` and `agentNames` (each an `InitNameEvidence`, bounded like
+       `mcpToolNames`) and `pluginErrorCount`. A missing field is unknown, never `[]`, by the file's existing rule.
+    2. src/lib/worker-mcp-isolation.ts gains `workerPluginInventory(summary)`, returning the names, or `unknown` when
+       the inventory is partial.
+    3. src/lib/worker.ts writes `plugin_inventory` on the worker ledger row, beside `mcp_exposure` (:591-592, :648-649).
+       It never sets `isError` and never changes a verdict.
+    4. Whether a loaded plugin or skill should fail a run is decided later, from these rows.
+    New tests go in test/a-worker-init-names-the-plugins-and-skills-it-loaded.test.ts, with `test(` titles exactly as
+    in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-worker-init-names-the-plugins-and-skills-it-loaded.test.ts"
+    - claim: "an init message naming a plugin and skills is recorded on the worker row"
+      proof: 'grep: test("W1-T9642: an init message naming a plugin and skills is recorded on the worker row" in test/a-worker-init-names-the-plugins-and-skills-it-loaded.test.ts'
+    - claim: "an init message with no plugins field records the inventory as unknown, never empty"
+      proof: 'grep: test("W1-T9642: an init message with no plugins field records the inventory as unknown, never empty" in test/a-worker-init-names-the-plugins-and-skills-it-loaded.test.ts'
+    - claim: "a loaded plugin never fails the run"
+      proof: 'grep: test("W1-T9642: a loaded plugin never fails the run" in test/a-worker-init-names-the-plugins-and-skills-it-loaded.test.ts'
+  falsifier: |
+    Stop reading `plugins` in `workerInitSummaryFromMessage`. The first test then finds no plugin on the row.
+  note: |
+    READ-OUT: once rows exist, `rmd ledger-grep plugin_inventory` shows whether any worker loaded `engineering` or
+    `cowork-plugin-management`. A non-zero count is the evidence for a refusal task in W1-T9489's shape.
