@@ -14331,7 +14331,6 @@ export function detachSweepAction(
 ): (phase: DetachedFixPhase) => void {
   const registration: DetachedSweepActionRegistration = {
     ...action, startedAtMs: Date.now(),
-    // W1-T9780: a light-pass action waiting for memory still owes its worker, so a freshness drain waits for it.
     phase: action.actionKind === "fix-dispatch" || action.actionKind === "light-pass-action" ? action.phase ?? "worker" : "best-effort",
   };
   const onPhase = (phase: DetachedFixPhase) => {
@@ -20017,13 +20016,10 @@ const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight 
 // Closed by `drainInFlightReviews` (an exit), reopened by the next light pass.
 let lightPassRefillsClosed = false;
 
-/** W1-T9780: the light pass runs each PR's action in this scope; its memory-admission wait signals it. */
 const lightPassActionScope = new AsyncLocalStorage<{ onMemoryWait: () => void }>();
-/** W1-T9780: heads whose light-pass action left the pass to wait for memory, until that action settles. */
 const lightPassMemoryWaits = new Map<string, { sinceMs: number }>();
 
-/** W1-T9780: memory-admission ports for a worker a light pass may await. Every enforced wait backs off
- *  through `sleep`, so its first call tells the pass this PR's action is waiting; outside a pass it only sleeps. */
+/** W1-T9780: an enforced admission backs off through `sleep`, so its first call detaches the waiting light-pass action. */
 export function lightPassMemoryWaitPorts(): Pick<AdmissionPorts, "sleep"> {
   return {
     sleep: async (ms) => {
@@ -20033,8 +20029,6 @@ export function lightPassMemoryWaitPorts(): Pick<AdmissionPorts, "sleep"> {
   };
 }
 
-/** W1-T9780: the pass's summary for a head whose action waits for memory outside it, and, when a later
- *  pass meets that head, its `wait` row naming the in-flight action. */
 function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: number): SweepSummary {
   const reason = sinceMs === undefined
     ? "light-pass action detached while waiting for memory admission"
@@ -20062,7 +20056,6 @@ export async function runSweepLightPass(
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
-  // W1-T9780: a head whose action still waits for memory outside an earlier pass is never re-admitted.
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   if (memoryHeld.length > 0) {
     const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
@@ -20181,7 +20174,6 @@ export async function runSweepLightPass(
   const reevaluationRows = deps.appendLine ?? appendLedger;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
-  // W1-T9780: PRs whose action left this pass to wait for memory; their reservations release on settlement.
   const memoryDetachedNumbers = new Set<number>();
   // W1-T9498: this pass's spawning reviews not yet settled; the repair admission reads it live.
   let unsettledSpawning = spawning.length;
@@ -20238,9 +20230,8 @@ export async function runSweepLightPass(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
       const baseStandDownReasonFor = deps.standDownReasonFor;
-      // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick this
-      // pass runs inside is awaited whichever PR won the post-review admission, so the fix rung's
-      // CI wait must leave the await on both branches.
+      // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick awaits this
+      // pass whichever PR won the post-review admission, so the fix rung's CI wait leaves it on both branches.
       const scopedDeps: SweepDeps =
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
           ? {
@@ -20314,8 +20305,6 @@ export async function runSweepLightPass(
         if (previousPlanMerge !== undefined) await previousPlanMerge;
         return runSweep([pr], scopedDeps, policy);
       };
-      // W1-T9780: the pass awaits this PR's action only until it waits for memory admission; from then
-      // it is a detached sweep action, and its head stays held until it settles.
       let onMemoryWait!: () => void;
       const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
       const settled = lightPassActionScope.run({ onMemoryWait: () => onMemoryWait() }, sweepOne).then(async (summary) => {
