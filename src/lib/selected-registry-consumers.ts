@@ -6,6 +6,7 @@ export type RegistryConsumerAction = "serve-registry" | "serve-readiness" | "ser
   | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery";
 export interface RegistryConsumerTarget { repository?: string; instanceName?: string }
 export type RegistryObservationSink = (step: string, fields: Readonly<Record<string, unknown>>) => unknown;
+export type RegistryConsumerRead = typeof readSelectedInstanceRegistry;
 /** Trusted composition only. Neither this context nor its selected input belongs in a public body. */
 export interface SelectedRegistryConsumerOptions {
   settings?: SelectedModeSettings;
@@ -19,7 +20,8 @@ export interface SelectedRegistryObserver {
   settled(): Promise<void>;
   close(): void;
 }
-type Evidence = { selected_state: "ready" | "absent" | "retired" | "unknown"; reason?: string; binding_digest?: string };
+type Evidence = { selected_state: "ready" | "absent" | "retired" | "unknown"; reason?: string; binding_digest?: string;
+  selection_source?: SelectedRegistryBinding["source"]; contract_version?: number; capabilities?: readonly string[] };
 type Bound = { kind: "ready"; binding: SelectedRegistryBinding } | { kind: "unknown"; reason: string };
 type Captured = { kind: "off" } | { kind: "unknown"; record?: RegistryObservationSink }
   | { kind: "selected"; input: RegistrySelectionInput; io: RegistryFileIO; name?: string; record?: RegistryObservationSink };
@@ -30,21 +32,23 @@ const LIMIT = 32;
 function capture(options: SelectedRegistryConsumerOptions | undefined): Captured {
   let record: RegistryObservationSink | undefined;
   try {
-    if (options?.settings?.mode !== "shadow") return { kind: "off" };
-    const settings = options.settings, input = options.input;
+    const settings = options?.settings;
+    if (settings?.mode !== "shadow") return { kind: "off" };
     record = options.record;
+    const { cliPath, envPath, configuredPath, contractVersion, requiredCapabilities, expectedDigest,
+      maxBytes, timeoutMs, signal } = options.input ?? {};
     const io = options.io ?? registryFileIO, lstat = io.lstat.bind(io), open = io.open.bind(io);
     const ports: RegistryFileIO = Object.freeze({ lstat, open: async (path: string) => {
       const handle = await open(path);
       return Object.freeze({ stat: handle.stat.bind(handle), read: handle.read.bind(handle), close: handle.close.bind(handle) });
     } });
     return { kind: "selected", record, name: settings.instanceName,
-      input: Object.freeze({ cliPath: input?.cliPath, envPath: input?.envPath,
-        configuredPath: input?.configuredPath === undefined ? settings.registryPath : input.configuredPath,
-        contractVersion: input?.contractVersion ?? settings.contractVersion,
-        requiredCapabilities: Object.freeze([...(input?.requiredCapabilities ?? []), "identity"]),
-        expectedDigest: input?.expectedDigest, maxBytes: input?.maxBytes ?? settings.maxBytes,
-        timeoutMs: input?.timeoutMs ?? settings.timeoutMs, signal: input?.signal }), io: ports };
+      input: Object.freeze({ cliPath, envPath,
+        configuredPath: configuredPath === undefined ? settings.registryPath : configuredPath,
+        contractVersion: contractVersion ?? settings.contractVersion,
+        requiredCapabilities: Object.freeze([...(requiredCapabilities ?? []), "identity"]),
+        expectedDigest, maxBytes: maxBytes ?? settings.maxBytes,
+        timeoutMs: timeoutMs ?? settings.timeoutMs, signal }), io: ports };
   } catch {
     // Unreadable selection/ports cannot establish authority. Retain unknown without exposing their exception.
     return { kind: "unknown", record };
@@ -68,7 +72,8 @@ function targetSnapshot(target: RegistryConsumerTarget, name: string | undefined
 }
 
 /** Bounded SHADOW observations, independent of the result, exception and timing of the legacy effect. */
-export function createSelectedRegistryObserver(options: SelectedRegistryConsumerOptions | undefined): SelectedRegistryObserver | undefined {
+export function createSelectedRegistryObserver(options: SelectedRegistryConsumerOptions | undefined,
+  reader: RegistryConsumerRead = readSelectedInstanceRegistry): SelectedRegistryObserver | undefined {
   const captured = capture(options);
   if (captured.kind === "off") return undefined;
   const controller = new AbortController();
@@ -93,7 +98,7 @@ export function createSelectedRegistryObserver(options: SelectedRegistryConsumer
     if (invalidCancellation) return { kind: "unknown", reason: "invalid_cancellation" };
     if (captured.kind !== "selected") return { kind: "unknown", reason: "input_unreadable" };
     try {
-      const result = await readSelectedInstanceRegistry({ ...captured.input, signal }, captured.io);
+      const result = await reader({ ...captured.input, signal }, captured.io);
       return result.kind === "ready" ? result : { kind: "unknown", reason: result.kind === "legacy" ? "selection_missing" : result.reason };
     } catch {
       // A rejected custom port remains unknown, never cached/legacy selected authority.
@@ -110,18 +115,20 @@ export function createSelectedRegistryObserver(options: SelectedRegistryConsumer
       return unknown(bound.reason);
     }
     const digest = bound.binding.digest;
+    const identity = Object.freeze({ binding_digest: digest, selection_source: bound.binding.source,
+      contract_version: bound.binding.contractVersion, capabilities: Object.freeze([...bound.binding.capabilities]) });
     try {
       const checked = await bound.binding.recheck(signal);
-      if (checked.kind !== "unchanged") return unknown("reason" in checked ? checked.reason : "revision_changed", digest);
+      if (checked.kind !== "unchanged") return { ...unknown("reason" in checked ? checked.reason : "revision_changed", digest), ...identity };
     } catch {
       // A failed final recheck is unknown; the original ready digest is not permission to borrow a healthy cache.
-      return unknown("recheck_failed", digest);
+      return { ...unknown("recheck_failed", digest), ...identity };
     }
     const rows = bound.binding.instances.filter(row => (target.instanceName === undefined || row.name === target.instanceName)
       && (target.repository === undefined || row.repo.toLowerCase() === target.repository));
-    if (rows.length === 0) return { selected_state: "absent", reason: "target_absent", binding_digest: digest };
-    if (rows.every(row => !row.live)) return { selected_state: "retired", reason: "target_retired", binding_digest: digest };
-    return { selected_state: "ready", binding_digest: digest };
+    if (rows.length === 0) return { selected_state: "absent", reason: "target_absent", ...identity };
+    if (rows.every(row => !row.live)) return { selected_state: "retired", reason: "target_retired", ...identity };
+    return { selected_state: "ready", ...identity };
   };
   const report = (action: RegistryConsumerAction, target: ReturnType<typeof targetSnapshot>, evidence: Evidence, threw: boolean): void => {
     if (closed) return;
