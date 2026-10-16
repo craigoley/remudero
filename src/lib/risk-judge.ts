@@ -381,6 +381,11 @@ export function riskJudgePlanContextDigest(shard: RiskJudgeShard | undefined): s
   return createHash("sha256").update(stableStringify(fields)).digest("hex");
 }
 
+/** W1-T9799 — the sweep's `planContextDigestFor`: the digest of the shard the judge would be shown for a PR now. */
+export function riskJudgePlanContextDigestFor(plan: { byId: ReadonlyMap<string, RiskJudgeShard> }): (pr: { taskId?: string }) => string | undefined {
+  return (pr) => riskJudgePlanContextDigest(pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId));
+}
+
 /**
  * W1-T9799 — bound the plan text to the room `budget` leaves beside the rest of the rendered prompt (the mount's own input
  * budget, {@link riskJudgeDiffInputBudget}; no fixed size). The origin is kept first, then the design, then the rationale,

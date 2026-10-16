@@ -1433,6 +1433,7 @@ import {
   riskJudgeDiffInputBudget,
   riskJudgePlanContext,
   riskJudgePlanContextDigest,
+  riskJudgePlanContextDigestFor,
   riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
@@ -2990,11 +2991,6 @@ export function codeScanningJudgeDeps(
       ghExec(["pr", "comment", pr.prUrl, "--repo", `${owner}/${repo}`, "--body", body], { stdio: "pipe" });
     },
   };
-}
-
-/** W1-T9799 — the sweep's {@link SweepDeps.planContextDigestFor}: the digest of the shard the judge would be shown now. */
-export function handedOffHeadPlanContextDigest(plan: Plan): NonNullable<SweepDeps["planContextDigestFor"]> {
-  return (pr) => riskJudgePlanContextDigest(pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId));
 }
 
 /**
@@ -47311,7 +47307,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       behindMainByPr,
       baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
-      planContextDigestFor: handedOffHeadPlanContextDigest(plan),
+      planContextDigestFor: riskJudgePlanContextDigestFor(plan),
       handedOffHeadJudgments,
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
@@ -48707,7 +48703,7 @@ export function buildSweepHook(
           baseChangedFilesByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
-          planContextDigestFor: handedOffHeadPlanContextDigest(plan),
+          planContextDigestFor: riskJudgePlanContextDigestFor(plan),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
@@ -49099,7 +49095,7 @@ export function buildSweepLightHook(
                 readMainPlan: resolvedReadMainPlan },
             }),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
-            planContextDigestFor: handedOffHeadPlanContextDigest(activePlan),
+            planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest

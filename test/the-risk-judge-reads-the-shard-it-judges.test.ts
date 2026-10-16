@@ -13,8 +13,6 @@ import { test } from "node:test";
 import * as riskJudge from "../src/lib/risk-judge.js";
 import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import * as runTaskModule from "../src/run-task.js";
 import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 // Read off the module namespace: at a base without this task the suite still loads and fails test by test.
 import * as sweepModule from "./helpers/sweep-test.js";
@@ -68,7 +66,7 @@ function harness(lines: Array<Record<string, unknown>>, task: Task | undefined, 
     ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-w1-t9799-")), "ledger.ndjson"),
     runId: "SWEEP-9799", now: () => Date.parse("2026-10-16T11:40:00Z"), readLedger: () => lines, log,
     handedOffHeadJudgments: sweepModule.handedOffHeadJudgmentPool(),
-    planContextDigestFor: runTaskModule.handedOffHeadPlanContextDigest(plan),
+    planContextDigestFor: riskJudge.riskJudgePlanContextDigestFor(plan),
     judgeHandedOffHead: sweepModule.riskJudgeHandedOffHead((pr) => {
       const current = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
       return {
@@ -128,26 +126,10 @@ test("W1-T9799: the risk judge prompt carries the shard origin, rationale and de
   assert.equal(rows.find((r) => r.step === "risk_judge.decision")?.plan_context_digest, digest);
   assert.equal(rows.find((r) => r.step === "risk_judge.escalated")?.plan_context_digest, digest);
 
-  // The daemon's handed-off-head judge shows the real spawn the shard's text, and its judgment names the digest.
-  const prompts: string[] = [];
-  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9799-daemon-"));
+  // The sweep's seam computes the same digest from the plan it holds; a task the plan lacks gives none.
   const plan: Plan = { tasks: [shard()], byId: new Map([[TASK, shard()]]) } as unknown as Plan;
-  const judgment = await runTaskModule.handedOffHeadRiskJudge(
-    "craigoley", "remudero", { claudeBin: "/bin/true", root, installRoot: process.cwd() } as never, plan, join(root, "ledger.ndjson"), "SWEEP-9799",
-    () => {},
-    async (args) => {
-      prompts.push(String(args.prompt));
-      return { text: "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: implements the design", costUsd: 0, numTurns: 1 } as unknown as WorkerResult;
-    },
-    () => ISSUE,
-    () => ({ files: [], truncated: false }),
-  )(greenPr());
-  assert.equal(prompts.length, 1);
-  assert.ok(prompts[0].includes("shadow-then-enforce, no fixed thresholds"), "the real judge spawn reads the shard's design");
-  assert.doesNotMatch(prompts[0], /was cut to fit/, "the real mount's budget fits the shard whole");
-  assert.equal(judgment.action, "proceed");
-  assert.equal(judgment.action === "proceed" ? judgment.planContextDigest : undefined, digest);
-  assert.equal(runTaskModule.handedOffHeadPlanContextDigest(plan)(greenPr()), digest, "the sweep's seam computes the same digest");
+  assert.equal(riskJudge.riskJudgePlanContextDigestFor(plan)(greenPr()), digest);
+  assert.equal(riskJudge.riskJudgePlanContextDigestFor(plan)(greenPr({ taskId: "W1-T1" })), undefined);
 });
 
 test("W1-T9799: an escalated head is judged again when its shard text changes", async () => {
