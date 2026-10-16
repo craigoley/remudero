@@ -1082,7 +1082,7 @@ export function* hydrateScannerBlockerObservationsSteps(
 }
 
 export const CODEQL_CHECK_NAME = "CodeQL";
-export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one REST read per failing-CodeQL head per pass
+export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one merge-ref read per failing-CodeQL or refused head per pass
 export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error"];
 
 export interface CodeqlHeadAlert {
@@ -1108,7 +1108,6 @@ export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined
   return latest !== undefined && (latest.conclusion ?? "").toUpperCase() === "FAILURE";
 }
 
-/** W1-T9731: a pull_request CodeQL analysis is filed under `refs/pull/<n>/merge`; `/head` lists nothing (#12088). */
 export function codeqlHeadAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {
   return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/merge&state=open&per_page=${SCANNER_PAGE_SIZE}`];
 }
@@ -1117,7 +1116,6 @@ interface RestHeadAlert extends RestScannerAlert {
   rule?: { id?: unknown; severity?: unknown; security_severity_level?: unknown } | null;
 }
 
-/** `mergeRef`: an instance on the PR's own merge ref counts; the caller pins it to this head's CodeQL verdict. */
 export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown, mergeRef?: string): CodeqlHeadObservation | undefined {
   if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) return undefined;
   const found: CodeqlHeadAlert[] = [];

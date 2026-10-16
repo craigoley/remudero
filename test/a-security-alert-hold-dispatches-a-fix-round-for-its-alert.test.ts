@@ -5,22 +5,20 @@
 // The real alert: CodeQL #400, high, js/file-system-race at src/lib/main-health-rung.ts:1213.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { rmSync } from "node:fs";
 
-import { buildOpenPrViews } from "../src/run-task.js";
-import { reviewInputDigest } from "../src/lib/review.js";
+// Namespace reads, so the file loads at a base without these exports and each test fails on its own.
+import * as blockers from "../src/lib/pr-blocker.js";
+import { hydrateCodeqlHeadAlerts } from "../src/lib/open-prs-rest.js";
 import { runSweep, CODE_SCANNING_FIX_DISPATCH_STEP, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
 const PR = 12088;
 const TASK = "W1-T9551";
-const HEAD = "4d0406d30aa1b2c3d4e5f60718293a4b5c6d7e8f";
-const MERGE = "77e1d2c3b4a5968778695a4b3c2d1e0f98765432";
-const BRANCH = `run-${TASK}-1792082362617`;
+const HEAD = "4d0406d308fcbef87904ba3f4e15160ea52e9a4e";
+// The merge commit alert #400 was really analysed at (GET .../alerts/400/instances?ref=refs/pull/12088/merge).
+const MERGE = "bc021cbbbac4103697cf5e842e6384ba4ffd838c";
 const PR_URL = `https://github.com/${OWNER}/${REPO}/pull/${PR}`;
-const BODY = `Remudero-Task: ${TASK}`;
 const NOW = Date.parse("2026-10-15T19:40:00Z");
 const MESSAGE = "The file may have changed since it was checked.";
 const BLOCKED = "security merge blocked: new-high-or-critical-security-alert";
@@ -43,43 +41,22 @@ function alertRow(): Record<string, unknown> {
   };
 }
 
-function sceneFetch(seen: string[]): (args: string[]) => unknown {
-  return (args) => {
+/** The open-PR producer's two steps for one head: is a read due, and what the merge-ref listing holds. */
+function readAlerts(rows: Record<string, unknown>[], seen: string[], head = HEAD) {
+  if (!blockers.codeqlAlertsReadDue(rows, PR, head, false)) return undefined;
+  return hydrateCodeqlHeadAlerts(OWNER, REPO, [{ number: PR, headSha: head }], (args) => {
     const path = args[args.length - 1] ?? "";
     seen.push(path);
-    if (/pulls\?state=open/.test(path)) {
-      return [{ number: PR, html_url: PR_URL, head: { ref: BRANCH, sha: HEAD }, updated_at: "2026-10-15T17:50:00.000Z", // expiring-fixture: exempt -- aged only against this suite's injected NOW
-        body: BODY, auto_merge: null, draft: false, state: "open" }];
-    }
-    if (path.includes("/check-runs")) {
-      return { check_runs: [
-        { name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-10-15T17:30:00Z", completed_at: "2026-10-15T17:40:00Z" },
-        { name: "CodeQL", status: "completed", conclusion: "success", started_at: "2026-10-15T17:31:00Z", completed_at: "2026-10-15T17:45:00Z" },
-      ] };
-    }
-    if (path.endsWith(`/commits/${HEAD}/status`)) {
-      return { statuses: [{ context: "remudero-review", state: "success", created_at: "2026-10-15T17:55:00Z", updated_at: "2026-10-15T17:55:00Z" }] }; // expiring-fixture: exempt -- aged only against this suite's injected NOW
-    }
-    if (path.endsWith(`/pulls/${PR}`)) return { mergeable: true, mergeable_state: "clean", merge_commit_sha: MERGE, head: { sha: HEAD } };
-    if (path.includes("/code-scanning/alerts")) return path.includes(`ref=refs/pull/${PR}/merge`) ? [alertRow()] : [];
-    return [];
-  };
+    return path.includes(`ref=refs/pull/${PR}/merge`) ? [alertRow()] : [];
+  }).get(PR);
 }
 
-const reviewed = { ts: "2026-10-15T17:56:00.000Z", step: "review.posted", task_id: TASK, head_sha: HEAD, pr_url: PR_URL,
-  state: "success", review_input_digest: reviewInputDigest(HEAD, BODY) };
-
-function produced(rows: Record<string, unknown>[]): { views: OpenPrView[]; seen: string[] } {
-  const ledger = writeLedger(rows);
-  const seen: string[] = [];
-  try {
-    const views = buildOpenPrViews(OWNER, REPO, ledger.path, {
-      fetch: sceneFetch(seen), requiredContexts: () => ["ci-gate"], readMainPlan: () => ({ tasks: [], byId: new Map() }),
-    });
-    return { views, seen };
-  } finally {
-    rmSync(ledger.dir, { recursive: true, force: true });
-  }
+function view(over: Partial<OpenPrView> = {}): OpenPrView {
+  return {
+    prNumber: PR, prUrl: PR_URL, taskId: TASK, headRefName: `run-${TASK}-1792082362617`, headSha: HEAD,
+    checksState: "green", reviewState: "success", autoMergeArmed: false, isDraft: false,
+    priorStrikes: 0, unmetCriteria: [], lastActivityAt: "2026-10-15T17:50:00Z", ...over,
+  };
 }
 
 function sweep(prior: Record<string, unknown>[]) {
@@ -99,16 +76,16 @@ function sweep(prior: Record<string, unknown>[]) {
 }
 
 test("W1-T9731: a security-alert-hold dispatches a fix round for its alert", async () => {
-  const prior = [reviewed, armRefused()];
-  const { views, seen } = produced(prior);
-  assert.equal(views.length, 1);
-  assert.ok(seen.some((p) => p.includes(`code-scanning/alerts?ref=refs/pull/${PR}/merge&state=open`)),
+  const prior = [armRefused()];
+  const seen: string[] = [];
+  const observed = readAlerts(prior, seen);
+  assert.deepEqual(seen, [`repos/${OWNER}/${REPO}/code-scanning/alerts?ref=refs/pull/${PR}/merge&state=open&per_page=100`],
     "a green CodeQL check with a refused arm still reads the head's alerts, on the merge ref");
-  assert.deepEqual(views[0]!.codeqlHeadAlerts?.alerts.map((a) => [a.alertNumber, a.ruleId, a.path, a.line]),
+  assert.deepEqual(observed?.alerts.map((a) => [a.alertNumber, a.ruleId, a.path, a.line]),
     [[400, "js/file-system-race", "src/lib/main-health-rung.ts", 1213]]);
 
   const s = sweep(prior);
-  await runSweep(views, s.deps);
+  await runSweep([view({ codeqlHeadAlerts: observed })], s.deps);
   assert.deepEqual(s.armed, [], "a head with a fix ruling is not re-armed into the same refusal");
   assert.equal(s.fixes.length, 1, "the existing code-scanning fix path dispatched one fix round");
   assert.match(s.fixes[0]![0]!, /location: src\/lib\/main-health-rung\.ts:1213/);
@@ -119,10 +96,9 @@ test("W1-T9731: a security-alert-hold dispatches a fix round for its alert", asy
 });
 
 test("W1-T9731: the security hold names its alert", async () => {
-  const prior = [reviewed, armRefused()];
-  const { views } = produced(prior);
+  const prior = [armRefused()];
   const s = sweep(prior);
-  await runSweep(views, s.deps);
+  await runSweep([view({ codeqlHeadAlerts: readAlerts(prior, []) })], s.deps);
   const disposed = s.rows.filter((r) => r.step === "sweep.disposed").at(-1);
   assert.equal(disposed?.blocker, "security-alert-hold");
   for (const field of [disposed?.blocker_cause, disposed?.reason]) {
@@ -131,19 +107,22 @@ test("W1-T9731: the security hold names its alert", async () => {
 
   // Once the fix is dispatched the head is settled and unread: the next pass says why it waits.
   const next = sweep([...prior, ...s.rows]);
-  const settled = produced([...prior, ...s.rows]);
-  assert.equal(settled.views[0]!.codeqlHeadAlerts, undefined);
-  await runSweep(settled.views, next.deps);
+  await runSweep([view()], next.deps);
   const held = next.rows.filter((r) => r.step === "sweep.disposed").at(-1);
   assert.equal(held?.blocker, "security-alert-hold");
   assert.match(String(held?.blocker_cause), /no high or critical CodeQL alert was read at this head this pass/);
   assert.match(String(held?.blocker_cause), /this pass: a code-scanning fix was already dispatched for this head/);
   assert.equal(next.fixes.length, 0);
+  assert.deepEqual(next.armed, []);
 });
 
 test("W1-T9731: a refusal at another head reads no alerts", () => {
-  const { views, seen } = produced([reviewed, armRefused("b".repeat(40))]);
-  assert.equal(views.length, 1);
-  assert.equal(seen.some((p) => p.includes("/code-scanning/alerts")), false, "no refusal at this head costs no alert read");
-  assert.equal(views[0]!.codeqlHeadAlerts, undefined);
+  const seen: string[] = [];
+  assert.equal(readAlerts([armRefused("b".repeat(40))], seen), undefined);
+  assert.deepEqual(seen, [], "no refusal at this head costs no alert read");
+  // Positive controls: a failed CodeQL check still reads (W1-T5633), and so does this head's own refusal.
+  assert.equal(blockers.codeqlAlertsReadDue([], PR, HEAD, true), true);
+  assert.equal(blockers.codeqlAlertsReadDue([armRefused()], PR, HEAD, false), true);
+  assert.equal(blockers.codeqlAlertsReadDue([armRefused(), { step: "automerge.armed", pr_number: PR, head_sha: HEAD }], PR, HEAD, false), false,
+    "a later arm at this head ends the refusal");
 });

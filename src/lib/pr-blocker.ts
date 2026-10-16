@@ -58,6 +58,13 @@ export function securityArmRefusalAtHead(
   return match ? { state: match[1] as SecurityArmRefusal["state"], reason: match[2]! } : undefined;
 }
 
+/** W1-T9731 — a head whose CodeQL check failed (W1-T5633), or whose newest arm the security policy refused on a
+ *  new high alert, has its open alerts read. #12088's CodeQL check was green, so its refused head was never read. */
+export function codeqlAlertsReadDue(lines: readonly Record<string, unknown>[], prNumber: number, headSha: string,
+  codeqlCheckFailed: boolean): boolean {
+  return codeqlCheckFailed || securityArmRefusalAtHead(lines, prNumber, headSha)?.state === "blocked";
+}
+
 /** W1-T9633 — the disposed row's sentence for a security hold: the verdict, its owner, and each alert read at this head.
  *  W1-T9731: each alert carries its message (bounded at hydration); with none read, or a pass that stood down, it says so. */
 export function securityHoldReason(refusal: SecurityArmRefusal,
