@@ -109,16 +109,16 @@ test("selected serve composition forwards one shadow context to the real registr
     selectedRegistryObservation: { ...f.options, input: { signal: controller.signal } },
   } as unknown as ServeDeps;
   const routes = buildServeRoutes(deps);
-  for (const path of ["/v1/registry", "/v1/onboarding/readiness", "/v1/repos/summary"]) {
+  for (const [path, expectedStatus] of [["/v1/registry", 200], ["/v1/onboarding/readiness", 200], ["/v1/repos/summary", 200], ["/v1/views/repositories", 503]] as const) {
     const route = routes.find(route => route.path === path); assert.ok(route, path);
     let raw = "", code = 0;
     await route.handler({ url: path + "?repo=owner/repo" } as never,
       { writeHead: (n: number) => { code = n; }, end: (text: string) => { raw += text; } } as never, { params: {} });
-    assert.equal(code, 200, raw);
+    assert.equal(code, expectedStatus, raw);
     assert.ok(!raw.includes("selected-material-sentinel"));
   }
-  for (let n = 0; n < 100 && f.rows.filter(row => row.step === STEP).length < 3; n++) await new Promise(resolve => setTimeout(resolve, 10));
-  assert.deepEqual(f.rows.filter(row => row.step === STEP).map(row => row.fields.action).sort(), ["repo-dashboard", "serve-readiness", "serve-registry"]);
+  for (let n = 0; n < 100 && f.rows.filter(row => row.step === STEP).length < 4; n++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(f.rows.filter(row => row.step === STEP).map(row => row.fields.action).sort(), ["repo-dashboard", "repositories-view", "serve-readiness", "serve-registry"]);
   assert.ok(f.rows.every(row => row.fields.publication_permission === "not-granted"));
 });
 
@@ -275,12 +275,20 @@ test("selected trusted-worker intent snapshots data without carrying ports or gr
   assert.equal(capture(undefined), undefined);
   assert.equal(capture({ ...f.options, io: registryFileIO }).kind, "unknown", "custom ports must never silently become defaults in another thread");
   assert.equal(capture({ ...f.options, input: { signal: new AbortController().signal } }).kind, "unknown");
+  assert.equal(capture({ ...f.options, input: { configuredPath: (() => "invalid") as unknown as string } }).kind, "unknown");
+  assert.equal(capture({ ...f.options, settings: { get mode() { throw new Error("private-config-sentinel"); } } }).kind, "unknown");
   const restore = Reflect.get(registryConsumers, "selectedRegistryObserverFromIntent"); assert.equal(typeof restore, "function");
   const observer = restore(structuredClone(intent), f.options.record) as NonNullable<ReturnType<typeof createSelectedRegistryObserver>>;
   t.after(() => observer.close());
   await observer.observe("repositories-view", { instanceName: "fixture", repository: "owner/repo" }, () => "legacy");
   await observer.settled(); assert.equal(f.rows.at(-1)?.fields.selected_state, "ready", "restored data uses the real bounded async reader");
   assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
+  for (const invalid of [{ ...intent, version: 999 }, { ...intent, input: null }, { kind: "unknown", version: 1 }, { get kind() { throw new Error("private-intent-sentinel"); } }]) {
+    const unknown = restore(invalid, f.options.record) as typeof observer; t.after(() => unknown.close());
+    await unknown.observe("repositories-view", { instanceName: "fixture" }, () => "legacy"); await unknown.settled();
+    assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown"); assert.equal(f.rows.at(-1)?.fields.reason, "transport_unavailable");
+    assert.ok(!JSON.stringify(f.rows.at(-1)).includes("private-intent-sentinel"));
+  }
 });
 
 test("selected repositories factory observes real synchronous materialization without changing its body", (t) => {
