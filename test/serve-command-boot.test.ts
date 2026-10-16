@@ -69,7 +69,7 @@ test("selected real daemon draft batch retains its captured intent through the a
   const selectedPath = join(home, "selected.yaml");
   writeFileSync(selectedPath, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
   const facts = checkoutRepoFacts(seed.dir), id = "P-selected-draft";
-  assert.deepEqual(lintDraftedFragment(fragment, id, composeStampLine(id, "qualification only", ["NEW-1"]), planText,
+  assert.deepEqual(lintDraftedFragment(fragment, id, composeStampLine(id, "qualification only", ["NEW-1"]), new Set(["remudero"]),
     facts.moduleExists, facts.readGrepProofFile, facts.pathIsDirectory, facts.pathExistsAtBase), [],
     "prove this exact fixture is lint-clean BEFORE any real batch can reach an uninjected escalation default");
   for (const enabled of [false, true]) {
