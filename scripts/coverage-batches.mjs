@@ -45,10 +45,11 @@ export function coverageArtifactDigest(path, { read = readSync } = {}) {
 
 /** Await actual child close, including its stdio. Forward only this runner's signals and retain
  * the original outcome; an interrupted child which reports zero cannot qualify a batch. */
-export function runCoverageCommand(args, { cwd, env, signal: abort, terminateAfterMs = 5000, log = console.error } = {}) {
+export function runCoverageCommand(args, { cwd, env, signal: abort, terminateAfterMs = 5000, log = console.error,
+  spawnProcess = spawn } = {}) {
   return new Promise((done) => {
     const command = lowPriorityCommand(process.execPath, args);
-    const child = spawn(command.file, command.args, { cwd, env, stdio: ['ignore', 'inherit', 'inherit'] });
+    const child = spawnProcess(command.file, command.args, { cwd, env, stdio: ['ignore', 'inherit', 'inherit'] });
     let error, interrupted, escalation;
     const stop = (reason = 'lease-lost', signal = 'SIGTERM') => {
       interrupted = reason; child.kill(signal);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, fstatSync, mkdirSync, readFileSync, readSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,34 +50,50 @@ function lease(dir: string) {
     refresh() {}, release() { rmSync(path, { force: true }); } } };
 }
 
+function observedSpawn() {
+  // A readiness file may still be empty, and a closed child's PID can be reused. Observe the
+  // real handle's close event; the deliberately empty marker only orders handler installation.
+  const state = { child: undefined as ChildProcess | undefined, closed: false,
+    spawnProcess(file: string, args: readonly string[], opts: SpawnOptions) {
+      state.child = spawn(file, [...args], opts);
+      state.child.once("close", () => { state.closed = true; });
+      return state.child;
+    } };
+  return state;
+}
+
 test("coverage command waits for an aborted child's close even when its signal handler exits zero", async (t) => {
-  const fixture = ownedFixtureDir(t, "batch-child-close"), pidPath = join(fixture.dir, "pid");
+  const fixture = ownedFixtureDir(t, "batch-child-close"), readyPath = join(fixture.dir, "ready");
   const abort = new AbortController();
-  const running = runCoverageCommand(["-e", `const fs=require('node:fs');process.on('SIGTERM',()=>process.exit(0));fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));setInterval(()=>{},1000)`],
-    { cwd: fixture.dir, env: process.env, signal: abort.signal });
+  const observed = observedSpawn();
+  const running = runCoverageCommand(["-e", `const fs=require('node:fs');process.on('SIGTERM',()=>process.exit(0));fs.writeFileSync(${JSON.stringify(readyPath)},'');setInterval(()=>{},1000)`],
+    { cwd: fixture.dir, env: process.env, signal: abort.signal, spawnProcess: observed.spawnProcess });
   fixture.until(running);
   try {
-  for (let i = 0; i < 100 && !existsSync(pidPath); i++) await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(existsSync(pidPath), "real child reached its signal handler");
-  const pid = Number(readFileSync(pidPath, "utf8")); abort.abort();
+  for (let i = 0; i < 100 && !existsSync(readyPath); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(existsSync(readyPath), "real child reached its signal handler");
+  assert.ok(observed.child?.pid && observed.child.pid > 1); abort.abort();
   const result = await running;
   assert.equal(result.status, 0); assert.equal(result.interrupted, "lease-lost");
-  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  assert.ok(observed.closed, "the actual child closed before the caller received its result");
+  assert.equal(observed.child.exitCode, 0);
   } finally { abort.abort(); await running; }
 });
 
 test("coverage command reaps its own stubborn child and reports a real spawn failure", async (t) => {
-  const fixture = ownedFixtureDir(t, "batch-stubborn"), pidPath = join(fixture.dir, "pid");
+  const fixture = ownedFixtureDir(t, "batch-stubborn"), readyPath = join(fixture.dir, "ready");
   const abort = new AbortController();
-  const running = runCoverageCommand(["-e", `const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));setInterval(()=>{},1000)`],
-    { cwd: fixture.dir, env: process.env, signal: abort.signal, terminateAfterMs: 20 });
+  const observed = observedSpawn();
+  const running = runCoverageCommand(["-e", `const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(readyPath)},'');setInterval(()=>{},1000)`],
+    { cwd: fixture.dir, env: process.env, signal: abort.signal, terminateAfterMs: 20, spawnProcess: observed.spawnProcess });
   fixture.until(running);
   try {
-    for (let i = 0; i < 100 && !existsSync(pidPath); i++) await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.ok(existsSync(pidPath)); const pid = Number(readFileSync(pidPath, "utf8"));
+    for (let i = 0; i < 100 && !existsSync(readyPath); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(existsSync(readyPath)); assert.ok(observed.child?.pid && observed.child.pid > 1);
     abort.abort(); const result = await running;
     assert.equal(result.signal, "SIGKILL"); assert.notEqual(result.status, 0);
-    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    assert.ok(observed.closed, "the reaped child is identified by its native handle, not a reused PID");
+    assert.equal(observed.child.signalCode, "SIGKILL");
   } finally { abort.abort(); await running; }
   const logs: string[] = [];
   const failed = await runCoverageCommand(["-e", "0"], { cwd: join(fixture.dir, "missing"), env: process.env, log: (text: string) => logs.push(text) });
