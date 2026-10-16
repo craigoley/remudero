@@ -88,7 +88,7 @@ async function bindMode(ownerRepo: string, name: string | undefined, input: Regi
 /** Optional observation only: preserve the independent legacy effect, not selected permission. */
 export function createSelectedModeQualification(
   settings: SelectedModeSettings | undefined, ownerRepo: string, input: SelectedModeInput,
-  record: (step: string, fields: Record<string, unknown>) => void, io: RegistryFileIO = registryFileIO,
+  record: (step: string, fields: Record<string, unknown>) => void | Promise<void>, io: RegistryFileIO = registryFileIO,
   reading: "async" | "sync" = "async",
 ): SelectedModeQualification | undefined {
   let initial: Promise<BoundMode>;
@@ -126,6 +126,15 @@ export function createSelectedModeQualification(
     }
   };
   let lastKey: string | undefined, recordFailureReported = false;
+  const recordFailed = (): void => {
+    if (!recordFailureReported) {
+      try { console.error("instance_mode.shadow_observation_unrecorded"); }
+      catch {
+        // Even an unavailable diagnostic channel cannot replace the independent effect/result.
+      }
+    }
+    recordFailureReported = true;
+  };
   const report = (action: SelectedModeAction, evidence: ModeEvidence, result: unknown,
     target: ReturnType<typeof modeTarget>, threw = false): void => {
     let outcome: unknown = result;
@@ -144,11 +153,17 @@ export function createSelectedModeQualification(
       legacy_outcome: legacy, publication_permission: "not-granted" });
     const key = JSON.stringify(fields);
     if (key === lastKey) return;
-    try { record("instance_mode.shadow_observed", fields); lastKey = key; recordFailureReported = false; }
+    try {
+      const pending = record("instance_mode.shadow_observed", fields);
+      lastKey = key; recordFailureReported = false;
+      if (pending !== undefined) void Promise.resolve(pending).catch(() => {
+        if (lastKey === key) lastKey = undefined;
+        recordFailed();
+      });
+    }
     catch {
       // An unavailable observation sink is unknown. SHADOW must not become an effect gate.
-      if (!recordFailureReported) console.error("instance_mode.shadow_observation_unrecorded");
-      recordFailureReported = true;
+      recordFailed();
     }
   };
   return Object.freeze({
