@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { classifyProposal, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
 import { stampVerificationAsk } from "../src/lib/inbox-retirement.js";
+import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
 import { machineJudgeProposal } from "../src/lib/machine-filing-judge.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 
@@ -80,4 +81,25 @@ test("a generic summary reframe cannot reuse unchanged machine-judge release met
   assert.equal(result.state, "not_ready");
   assert.equal(result.proposalId, original.id);
   assert.equal(JSON.stringify(reframed), before);
+});
+
+
+test("an exact producer-owned release stays retired when the same task later merges", () => {
+  for (const family of ["machine", "verification"] as const) {
+    const ctx = context(), proposal = family === "machine" ? judgedAsk(ctx)
+      : proposalFromJudgedShard({ id: ID, title: "Operator release is required", rationale: "A scoped release decision",
+        acceptance: ["operator releases this task"], ageDays: 1, depsAllMerged: true, citedInSrc: false },
+      { decision: "needs_operator", reason: "The operator must choose whether to release this exact task" });
+    const before = JSON.stringify(proposal);
+    assert.equal(classifyProposal(proposal, undefined, ctx).state, "retired", family + ": before merge");
+    ctx.isMerged = task => task.id === ID;
+    assert.equal(classifyProposal(proposal, undefined, ctx).state, "retired", family + ": after merge");
+    const changed = { ...proposal, summary: "A newly unanswered budget decision" };
+    assert.equal(classifyProposal(changed, undefined, ctx).state, "not_ready", family + ": changed ask");
+    const copied = { ...proposal, id: family === "machine" ? `verify-human:${ID}` : `machine-judge:${ID}` };
+    assert.equal(classifyProposal(copied, undefined, ctx).state, "not_ready", family + ": copied purpose");
+    ctx.plan.byId.get(ID)!.dispatch_hold = true;
+    assert.equal(classifyProposal(proposal, undefined, ctx).state, "not_ready", family + ": current hold");
+    assert.equal(JSON.stringify(proposal), before, family + ": immutable history");
+  }
 });

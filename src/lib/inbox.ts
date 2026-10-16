@@ -1371,6 +1371,21 @@ export function classifyProposal(
     if (lifecycle.state === "retired") return { proposalId: proposal.id, state: "retired", reasons: [], retiredReason: lifecycle.reason, retirement: lifecycle };
     return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: restored ask requires operator review" }], needsTriageReason: lifecycle.reason, retirement: lifecycle };
   }
+  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
+  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
+  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
+  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const verifiedFamily = proposal.verificationAsk?.producer === "verify-human-judge-v1" ? `verify-human:${releasedTaskId}`
+    : proposal.verificationAsk?.producer === "machine-filing-judge-v1" ? `machine-judge:${releasedTaskId}` : undefined;
+  if (!held && releasedTaskId && proposal.verificationAsk?.taskId === releasedTaskId &&
+    proposal.verificationAsk.proposalDigest === inboxMechanicalProposalDigest(proposal) && proposal.id === verifiedFamily && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
+    };
+  }
   const currentTaskReferent = taskIdForProtection ? ctx.plan.byId.get(taskIdForProtection) : undefined;
   if (currentTaskReferent && ((currentTaskReferent.status === "blocked" && currentTaskReferent.retirement) ||
     ctx.depsUnobservable?.(currentTaskReferent.id) === undefined && ctx.isMerged(currentTaskReferent)))
@@ -1452,21 +1467,6 @@ export function classifyProposal(
         `${proposal.id}'s task ${mergedTaskReferent} has merged, so this proposal is about finished ` +
         `work and can never render READY again; it stays in the registry as a record of the finding, ` +
         `never deleted`,
-    };
-  }
-  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
-  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
-  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
-  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
-  const verifiedFamily = proposal.verificationAsk?.producer === "verify-human-judge-v1" ? `verify-human:${releasedTaskId}`
-    : proposal.verificationAsk?.producer === "machine-filing-judge-v1" ? `machine-judge:${releasedTaskId}` : undefined;
-  if (!held && releasedTaskId && proposal.verificationAsk?.taskId === releasedTaskId &&
-    proposal.verificationAsk.proposalDigest === inboxMechanicalProposalDigest(proposal) && proposal.id === verifiedFamily && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
-    return {
-      proposalId: proposal.id,
-      state: "retired",
-      reasons: [],
-      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
     };
   }
   const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};
