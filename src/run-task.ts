@@ -1176,7 +1176,7 @@ const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./l
 };
 workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 const ciRemedyComponent = captureCiRemedyComponent(workerBoundaryStack.loadedModule, ciLogNamedSourcePaths, existsSync, join);
-import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
+import { BENCHMARK_COHORT_VERSION, runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
@@ -32115,22 +32115,45 @@ interface BenchmarkCohortHookDeps {
   run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
 }
 
+export const BENCHMARK_COHORT_MIN_INTERVAL_MS = 900_000; // W1-T8876: one pass re-parses a 37 MB checkpoint
+const BENCHMARK_COHORT_MAX_SOURCES = 4;
+
+function benchmarkCohortInputs(stateDir: string): string | undefined {
+  try {
+    const live = statSync(join(stateDir, LEDGER_FILENAME), { throwIfNoEntry: false });
+    const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).length;
+    return JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir, BENCHMARK_COHORT_MAX_SOURCES,
+      live ? [live.ino, live.size] : null, rotations]);
+  } catch {
+    return undefined;
+  }
+}
+
 export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = {}): {
   checkBenchmarkCohort: () => boolean;
   runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
 } {
   const clock = deps.clock ?? systemClock;
-  const intervalMs = deps.intervalMs ?? 30_000;
+  const intervalMs = deps.intervalMs ?? BENCHMARK_COHORT_MIN_INTERVAL_MS;
+  const stateDir = (): string => dirname(ledgerPathFor(deps.config ?? loadConfig()));
   let lastStartedAt = Number.NEGATIVE_INFINITY;
+  let finishedInputs: string | undefined;
   return {
     checkBenchmarkCohort: () => {
       const current = clock.now();
       if (current - lastStartedAt < intervalMs) return false;
+      if (finishedInputs !== undefined && benchmarkCohortInputs(stateDir()) === finishedInputs) return false;
       lastStartedAt = current;
       return true;
     },
-    runBenchmarkCohortPass: () => (deps.run ?? ((stateDir) => runBenchmarkCohortPass(stateDir, { maxSources: 4 })))
-      (dirname(ledgerPathFor(deps.config ?? loadConfig()))),
+    runBenchmarkCohortPass: async () => {
+      const dir = stateDir();
+      const inputs = benchmarkCohortInputs(dir);
+      finishedInputs = undefined;
+      const result = await (deps.run ?? ((path) => runBenchmarkCohortPass(path, { maxSources: BENCHMARK_COHORT_MAX_SOURCES })))(dir);
+      if (result.pendingSources === 0) finishedInputs = inputs;
+      return result;
+    },
   };
 }
 
