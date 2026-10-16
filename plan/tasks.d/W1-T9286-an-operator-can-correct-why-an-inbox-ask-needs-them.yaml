@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "2026-10-13 operator-approved follow-up; issue #7708"
   plan_refs: ["W1-T4742","W1-T4853","W1-T5339"]
-  files: ["src/lib/inbox-freshness.ts","src/lib/nav-badge-view.ts","src/run-task.ts","src/lib/verify-human-judge.ts","src/lib/inbox-why-me.ts","src/lib/inbox-view.ts","src/lib/inbox-responder.ts","src/lib/panel-graph.ts","src/lib/instance-inbox-contract.ts","src/lib/fleet-lane.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/an-operator-can-correct-why-an-inbox-ask-needs-them.test.ts","test/a-verify-human-shard-is-judged.test.ts","test/helpers/why-me-world.ts","scripts/generate-api-client.mjs","test/api-client-drift-check.test.ts"]
+  files: ["src/lib/inbox-freshness.ts","src/lib/nav-badge-view.ts","src/run-task.ts","src/lib/verify-human-judge.ts","src/lib/inbox-why-me.ts","src/lib/inbox-view.ts","src/lib/inbox-responder.ts","src/lib/panel-graph.ts","src/lib/instance-inbox-contract.ts","src/lib/fleet-lane.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/an-operator-can-correct-why-an-inbox-ask-needs-them.test.ts","test/a-verify-human-shard-is-judged.test.ts","test/helpers/why-me-world.ts","scripts/generate-api-client.mjs","test/api-client-drift-check.test.ts","test/every-served-route-is-in-the-contract.test.ts"]
   status: queued
   attempts: 0
   rationale: |
@@ -53,3 +53,6 @@
     of unknown, including the new advisory feedback item; its regression covers nested union and
     array precedence. Permission-failure fixtures use uid-independent filesystem shape denials,
     and the production intake fixture uses the maintained gitRepo helper without a census waiver.
+    The assembled-route census includes the newly mounted scoped advisory write in its explicit
+    instance Inbox family. A real default-registry POST control and parameter-alias regression
+    preserve both contract directions without changing the public API or shrink-only baseline.
