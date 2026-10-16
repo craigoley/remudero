@@ -28,6 +28,8 @@
 
 import { join } from "node:path";
 
+import { fixedClock } from "./clock.js";
+
 import { daemonOwnedProcess, openLearnedReservation, type LearnedReservation } from "./host-memory-learning.js";
 import { MEMORY_ADMISSION_LOCK_BUSY, withMemoryAdmissionLock, type WorkerClass } from "./host-memory-ledger.js";
 import { rankDemand, type HostMemoryPriorityPolicy } from "./host-memory-priority.js";
@@ -271,7 +273,7 @@ export async function awaitMemoryAdmission(
             streaks.set(key, streak);
             write({ step: ENFORCE_DEFER_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
               uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario, attempts: attempt,
-              waited_ms: now - startedAt, deferred_since: new Date(since).toISOString(), deferrals: streak.deferrals,
+              waited_ms: now - startedAt, deferred_since: fixedClock(since).iso(), deferrals: streak.deferrals,
               cadence_ms: request.deferral?.cadenceMs ?? null, cadence_basis: request.deferral?.cadenceBasis ?? null, aged_blocked: agedBlock });
             return { kind: "deferred", reasons: verdict.reasons };
           }
