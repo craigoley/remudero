@@ -122,3 +122,26 @@ test("the CLI prints scoped and previous counts without contaminating its suite 
     assert.match(result.stderr, new RegExp(`selected_count=${selected.length} previous_count=${planReadingSuiteFiles(root).length}`));
   });
 });
+
+// #12389 (2026-10-16): a filing cited a doctrine page its build will create, and main went red on the
+// census that resolves every doctrine path cited in plan/. That census walks its roots as BARE segments,
+// `["plan", "docs", "learnings"].map((d) => join(REPO_ROOT, d))`, which only the imported-walker arm read.
+test("a suite walking a bare plan or docs segment runs for a plan or docs edit", async () => {
+  await withTempDir("plan-segment-walker", (root) => {
+    mkdirSync(join(root, "test"));
+    const suites: Record<string, string> = {
+      "segment-walker": 'const roots = ["plan", "docs"].map((d) => join(REPO_ROOT, d));\nfor (const r of roots) readdirSync(r);',
+      "segment-mention": 'const kind = "plan";\nreadFileSync(join(REPO_ROOT, "package.json"));',
+      "fixture-walker": 'const dir = mkdtempSync(join(tmpdir(), "plan"));\nconst kind = "plan";\nreaddirSync(dir);',
+    };
+    for (const [name, content] of Object.entries(suites)) writeFileSync(join(root, "test", `${name}.test.ts`), content);
+    for (const changed of [SHARD, "docs/guide.md"]) {
+      const selected = planReadingSuiteFiles(root, [changed]);
+      assert.ok(selected.includes("test/segment-walker.test.ts"), `a walker of the bare segment runs for ${changed}`);
+      assert.ok(!selected.includes("test/segment-mention.test.ts"), "naming the segment without walking is no census");
+      assert.ok(!selected.includes("test/fixture-walker.test.ts"), "walking a fixture directory is no census");
+    }
+  });
+  const real = planReadingSuiteFiles(REPO_ROOT, ["plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml"]);
+  assert.ok(real.includes("test/a-retired-index-line-keeps-its-frozen-bullet.test.ts"), "the doctrine-citation census runs for a filed shard");
+});
