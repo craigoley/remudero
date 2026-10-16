@@ -25,10 +25,24 @@ interface CompactCosts {
   version: 1; correlated: boolean; unlinked: number; passes: PassCost[];
   repository: string; daemonRunId: string; from: string; through: string;
 }
+type CallCounts = Record<"assignments" | "matched" | "missing" | "orphan" | "conflicting" | "invalid", number | null>;
+type CallBilling = Record<"api" | "subscription" | "unknown", number | null>;
+type CallPrices = Record<"reported" | "unreported", number | null>;
+interface GardenCalls { name: string; counts: CallCounts; billingModes: CallBilling; priceCoverage: CallPrices }
+export interface GardenerWorkerCalls {
+  version: "gardener-worker-calls-v1";
+  state: "not_collected" | "partial" | "complete";
+  reason: "missing_capture" | "invalid_capture" | "scope_mismatch" | "over_budget" | "incomplete_evidence" | "observed";
+  observedAt: string | null;
+  window: { from: string; through: string } | null;
+  counts: CallCounts; billingModes: CallBilling; priceCoverage: CallPrices; gardens: GardenCalls[];
+}
+interface CallSource { repository: string; daemonRunId: string; value: GardenerWorkerCalls }
 export interface GardenerSpendSource {
   runtime?: unknown; reason?: RegistryReason | "ledger_unavailable";
   receipts?: Receipt[]; observedAt?: string; corpusComplete?: boolean;
   compact?: CompactCosts;
+  workerCalls?: CallSource | "over_budget";
 }
 export interface GardenerSpend {
   version: typeof GARDENER_SPEND_VERSION;
@@ -44,6 +58,142 @@ export interface GardenerSpend {
   coverage: { retainedCorpus: "not_collected" | "partial" | "complete"; truncated: boolean | null };
   gardens: Array<{ name: string; enabled: boolean; scope: "repository" | "host" | "fleet";
     totalUsd: number | null; pricedSubtotalUsd: number | null }>;
+  /** Observed call coverage, never an additional monetary producer or invoice. */
+  workerCalls?: GardenerWorkerCalls;
+}
+
+export function unavailableGardenerWorkerCalls(reason: GardenerWorkerCalls["reason"]): GardenerWorkerCalls {
+  return { version: "gardener-worker-calls-v1", state: "not_collected", reason, observedAt: null, window: null,
+    counts: { assignments: null, matched: null, missing: null, orphan: null, conflicting: null, invalid: null },
+    billingModes: { api: null, subscription: null, unknown: null }, priceCoverage: { reported: null, unreported: null }, gardens: [] };
+}
+
+function callAccumulator(runtime: ReturnType<typeof parseGardenerRuntime>, observedAt: string) {
+  type Evidence = { name?: string; passId?: string; valid: boolean; originInvalid: boolean; signature: string; billing: keyof CallBilling; priced: boolean };
+  const entries = new Map<string, { assignment?: Evidence; attempt?: Evidence; conflict: boolean }>();
+  const seen = new Set<string>();
+  let overflow = false, invalid = 0;
+  const small = (x: unknown): string | undefined => typeof x === "string" && x.length > 0 && x.length <= 128 ? x : undefined;
+  const record = (x: unknown): Record<string, unknown> | undefined => x && typeof x === "object" && !Array.isArray(x) ? x as Record<string, unknown> : undefined;
+  const known = (name: unknown) => runtime.gardens.some(g => g.scope === "repository" && g.name === name);
+  return {
+    add(row: Record<string, unknown>, raw: string) {
+      if (overflow) return;
+      const identity = fingerprintLedgerLine(raw);
+      if (seen.has(identity)) return;
+      if (seen.size >= GARDENER_SPEND_MAX_IDENTITIES) { overflow = true; return; }
+      seen.add(identity);
+      const origin = carrier(row.gardener_origin);
+      const attributed = origin?.state === "linked" && known(origin.name);
+      const assignment = row.step === "worker.assignment";
+      const envelope = record(row.worker_assignment), selected = record(envelope?.selected);
+      const candidateId = small(assignment ? envelope?.id : row.selection_assignment_id);
+      // Same bounded opaque-token dialect as worker.ts's immutable assignment trailer.
+      const id = candidateId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(candidateId) ? candidateId : undefined;
+      const stamp = Date.parse(String(row.ts));
+      // Ordinary unrelated workers are not gardener orphans. Keep bounded id-only candidates
+      // so a later attributed mate can still expose their missing identity, in either order.
+      if (!id) { if (attributed || origin?.state === "invalid") invalid++; return; }
+      const valid = attributed && Number.isFinite(stamp) && stamp >= Date.parse(runtime.configuredAt) && stamp <= Date.parse(observedAt) &&
+        (row.repository === undefined || row.repository === runtime.repository) &&
+        (row.daemon_run_id === undefined || row.daemon_run_id === runtime.daemonRunId) &&
+        small(row.run_id) !== undefined && small(row.task_id) !== undefined && (assignment ? small(selected?.provider) !== undefined && small(selected?.model) !== undefined : row.assignment_observed !== false);
+      const billing = row.billing_mode === "api" || row.billing_mode === "subscription" ? row.billing_mode : "unknown";
+      const priced = Object.hasOwn(row, "total_cost_usd") && typeof row.total_cost_usd === "number" && Number.isFinite(row.total_cost_usd) && row.total_cost_usd >= 0;
+      const name = attributed ? origin.name : undefined, passId = attributed ? origin.passId : undefined;
+      const signature = JSON.stringify([name, passId, valid ? runtime.repository : small(row.repository), valid ? runtime.daemonRunId : small(row.daemon_run_id), small(row.run_id), small(row.task_id), valid,
+        assignment ? [small(selected?.provider), small(selected?.model), small(selected?.effort)] : [billing, priced, priced ? row.total_cost_usd : null]]);
+      const evidence: Evidence = { name, passId, valid, originInvalid: origin?.state === "invalid", signature, billing, priced };
+      let entry = entries.get(id);
+      if (!entry) { entry = { conflict: false }; entries.set(id, entry); }
+      const key = assignment ? "assignment" : "attempt";
+      if (entry[key] && entry[key].signature !== signature) {
+        entry.conflict = true;
+        // A conflicted id stays quarantined; deterministic retention avoids archive-order
+        // dependent attribution without retaining an unbounded set of restatements.
+        if (signature < entry[key].signature) entry[key] = evidence;
+      } else entry[key] = evidence;
+    },
+    finish(hasParent: (name: string, passId: string) => boolean, corpusComplete: boolean): CallSource | "over_budget" {
+      if (overflow) return "over_budget";
+      const gardens: GardenCalls[] = runtime.gardens.filter(g => g.scope === "repository").map(g => ({ name: g.name,
+        counts: { assignments: 0, matched: 0, missing: 0, orphan: 0, conflicting: 0, invalid: 0 },
+        billingModes: { api: 0, subscription: 0, unknown: 0 }, priceCoverage: { reported: 0, unreported: 0 } }));
+      const value: GardenerWorkerCalls = { version: "gardener-worker-calls-v1", state: "complete", reason: "observed", observedAt,
+        window: { from: runtime.configuredAt, through: observedAt }, counts: { assignments: 0, matched: 0, missing: 0, orphan: 0, conflicting: 0, invalid },
+        billingModes: { api: 0, subscription: 0, unknown: 0 }, priceCoverage: { reported: 0, unreported: 0 }, gardens };
+      const bump = (garden: GardenCalls, key: keyof CallCounts) => { garden.counts[key]!++; value.counts[key]!++; };
+      for (const { assignment: a, attempt: t, conflict } of entries.values()) {
+        const assignmentGarden = gardens.find(g => g.name === a?.name), attemptGarden = gardens.find(g => g.name === t?.name);
+        const garden = assignmentGarden ?? attemptGarden;
+        if (!garden) { if (a?.originInvalid || t?.originInvalid) value.counts.invalid!++; continue; }
+        const assigned = !!(assignmentGarden && a?.valid && a.passId && hasParent(assignmentGarden.name, a.passId));
+        const attempted = !!(attemptGarden && t?.valid && t.passId && hasParent(attemptGarden.name, t.passId));
+        if (assigned) bump(assignmentGarden!, "assignments");
+        if (conflict) { bump(garden, "conflicting"); continue; }
+        if (a && !a.valid || t && !t.valid) bump(garden, "invalid");
+        // The origin and immutable id are necessary, not sufficient: a reused id under
+        // another run/task, garden or parent pass must never manufacture a joined call.
+        const aScope = a?.signature && JSON.parse(a.signature).slice(0, 6);
+        const tScope = t?.signature && JSON.parse(t.signature).slice(0, 6);
+        const same = assigned && attempted && JSON.stringify(aScope) === JSON.stringify(tScope);
+        if (same) {
+          bump(garden, "matched"); garden.billingModes[t!.billing]!++; value.billingModes[t!.billing]!++;
+          const price = t!.priced ? "reported" : "unreported";
+          garden.priceCoverage[price]!++; value.priceCoverage[price]!++;
+        } else {
+          if (assigned) bump(assignmentGarden!, "missing");
+          if (attemptGarden) bump(attemptGarden, "orphan");
+          if (a && t && assigned && attempted) bump(garden, "conflicting");
+          if (a && !assigned && !t) bump(garden, "invalid");
+        }
+      }
+      if (!corpusComplete || value.counts.missing || value.counts.orphan || value.counts.conflicting || value.counts.invalid) {
+        value.state = "partial"; value.reason = "incomplete_evidence";
+      }
+      return { repository: runtime.repository, daemonRunId: runtime.daemonRunId, value };
+    },
+  };
+}
+
+function foldCalls(source: GardenerSpendSource["workerCalls"], runtime: ReturnType<typeof parseGardenerRuntime>, observedAt: string, corpusComplete: boolean): GardenerWorkerCalls {
+  if (!source) return unavailableGardenerWorkerCalls("missing_capture");
+  if (source === "over_budget") return unavailableGardenerWorkerCalls("over_budget");
+  try {
+    if (Buffer.byteLength(JSON.stringify(source)) > GARDENER_SPEND_MAX_BYTES) return unavailableGardenerWorkerCalls("over_budget");
+    if (source.repository !== runtime.repository || source.daemonRunId !== runtime.daemonRunId ||
+      source.value.window?.from !== runtime.configuredAt || source.value.window.through !== observedAt || source.value.observedAt !== observedAt) return unavailableGardenerWorkerCalls("scope_mismatch");
+    const exact = (x: object, keys: string[]) => Object.keys(x).sort().join("|") === [...keys].sort().join("|");
+    const value = source.value;
+    const countKeys = ["assignments", "matched", "missing", "orphan", "conflicting", "invalid"];
+    const validCounts = (x: object, keys: string[]) => exact(x, keys) && Object.values(x).every(n => Number.isSafeInteger(n) && n >= 0);
+    const validGroup = (g: Pick<GardenCalls, "counts" | "billingModes" | "priceCoverage">) => validCounts(g.counts, countKeys) &&
+      validCounts(g.billingModes, ["api", "subscription", "unknown"]) && validCounts(g.priceCoverage, ["reported", "unreported"]) &&
+      g.counts.matched! <= g.counts.assignments! && g.counts.missing! <= g.counts.assignments! - g.counts.matched! &&
+      g.counts.assignments! - g.counts.matched! - g.counts.missing! <= g.counts.conflicting! &&
+      Object.values(g.billingModes).reduce<number>((sum, n) => sum + n!, 0) === g.counts.matched &&
+      Object.values(g.priceCoverage).reduce<number>((sum, n) => sum + n!, 0) === g.counts.matched;
+    if (value.version !== "gardener-worker-calls-v1" || !["complete", "partial"].includes(value.state) ||
+      !exact(value, ["version", "state", "reason", "observedAt", "window", "counts", "billingModes", "priceCoverage", "gardens"]) ||
+      !exact(value.window!, ["from", "through"]) || !validGroup(value) ||
+      !Array.isArray(value.gardens) || value.gardens.length !== runtime.gardens.filter(g => g.scope === "repository").length ||
+      value.gardens.length > GARDENER_SPEND_MAX_GARDENS || new Set(value.gardens.map(g => g.name)).size !== value.gardens.length ||
+      value.gardens.some(g => !exact(g, ["name", "counts", "billingModes", "priceCoverage"]) || !runtime.gardens.some(r => r.name === g.name && r.scope === "repository") || !validGroup(g)) ||
+      value.state === "complete" && (value.reason !== "observed" || ["missing", "orphan", "conflicting", "invalid"].some(k => value.counts[k as keyof CallCounts]! > 0)) ||
+      value.state === "partial" && value.reason !== "incomplete_evidence") return unavailableGardenerWorkerCalls("invalid_capture");
+    for (const key of countKeys) {
+      const sum = value.gardens.reduce((n, g) => n + g.counts[key as keyof CallCounts]!, 0);
+      if (key === "invalid" ? sum > value.counts.invalid! : sum !== value.counts[key as keyof CallCounts]) return unavailableGardenerWorkerCalls("invalid_capture");
+    }
+    for (const key of ["billingModes", "priceCoverage"] as const) for (const field of Object.keys(value[key])) {
+      if (value.gardens.reduce((n, g) => n + (g[key] as Record<string, number>)[field]!, 0) !== (value[key] as Record<string, number>)[field]) return unavailableGardenerWorkerCalls("invalid_capture");
+    }
+    return corpusComplete ? value : { ...value, state: "partial", reason: "incomplete_evidence" };
+  } catch {
+    // Absence is missing_capture above; malformed optional evidence is invalid_capture,
+    // never observed zero. Its failure must not erase independently valid money.
+    return unavailableGardenerWorkerCalls("invalid_capture");
+  }
 }
 
 function carrier(raw: unknown): GardenerOrigin | undefined {
@@ -60,7 +210,9 @@ function costAccumulator(runtime: ReturnType<typeof parseGardenerRuntime>, obser
   const passes = new Map<string, PassCost>();
   let bytes = 0;
   const from = Date.parse(runtime.configuredAt), through = Date.parse(observedAt);
-  return { compact, get bytes() { return bytes; }, add(row: Receipt) {
+  return { compact, get bytes() { return bytes; }, hasParent(name: string, passId: string) {
+    return passes.get(JSON.stringify([name, passId]))?.parent === true;
+  }, add(row: Receipt) {
     if (row.origin !== undefined) compact.correlated = true;
     const stamp = Date.parse(row.ts);
     if (!Number.isFinite(stamp) || stamp < from || stamp > through) return;
@@ -126,6 +278,7 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
   }
   const observedAt = clock.iso();
   const costs = costAccumulator(runtime, observedAt);
+  const calls = callAccumulator(runtime, observedAt);
   const seen = new Set<string>();
   let complete = true, liveObserved = false, overflow = false;
   const small = (value: unknown): string | undefined => typeof value === "string" && value.length <= 128 ? value : undefined;
@@ -135,6 +288,7 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
     onUnreadDirectory: () => { complete = false; },
     onMalformedRow: () => { complete = false; }, onLiveRead: () => { liveObserved = true; },
     onAcceptedRecord: (row, raw) => {
+      if (row.step === "worker.assignment" || row.step === "worker.attempt") calls.add(row, raw);
       const parent = row.step === "garden.lifecycle" || row.step === "garden.pass";
       if (!parent && spendRoleOf(row) !== "produced") return;
       const identity = fingerprintLedgerLine(raw);
@@ -157,7 +311,13 @@ export async function captureGardenerSpendSource(stateDir: string, clock: Clock 
     void row;
     if (overflow) return { reason: "over_budget" };
   }
-  const source = { runtime, compact: costs.compact, observedAt, corpusComplete: complete && liveObserved };
+  const source: GardenerSpendSource = { runtime, compact: costs.compact, observedAt, corpusComplete: complete && liveObserved,
+    workerCalls: calls.finish(costs.hasParent, complete && liveObserved) };
+  // Usage has its own bounded index and may never crowd independently valid money out.
+  if (Buffer.byteLength(JSON.stringify(source)) > GARDENER_SPEND_MAX_BYTES) source.workerCalls = "over_budget";
+  // At the exact old source ceiling even a failure tag may not fit. Omission means
+  // unavailable capture (never zero) and preserves the original monetary source.
+  if (Buffer.byteLength(JSON.stringify(source)) > GARDENER_SPEND_MAX_BYTES) delete source.workerCalls;
   return Buffer.byteLength(JSON.stringify(source)) > GARDENER_SPEND_MAX_BYTES ? { reason: "over_budget" } : source;
 }
 
@@ -170,13 +330,19 @@ export function foldGardenerSpend(source: GardenerSpendSource | undefined, repos
   if (!source) return unknown("missing_materialization");
   if (source.reason !== undefined) return unknown(source.reason);
   try {
+    const { workerCalls, ...moneySource } = source;
     const raw = source.runtime as { gardens?: unknown[] } | null | undefined;
-    if (Buffer.byteLength(JSON.stringify(source)) > GARDENER_SPEND_MAX_BYTES ||
+    if (Buffer.byteLength(JSON.stringify(moneySource)) > GARDENER_SPEND_MAX_BYTES ||
       (Array.isArray(raw?.gardens) && raw.gardens.length > GARDENER_SPEND_MAX_GARDENS)) return unknown("over_budget");
     const runtime = parseGardenerRuntime(source.runtime);
     if (!repository || runtime.repository !== repository) return unknown("scope_mismatch");
     const result = unknown("correlation_not_available");
     result.observedAt = source.observedAt ?? runtime.observedAt;
+    // A registry-only legacy source already says correlation_not_available. Preserve its
+    // exact old payload; optional omission is unknown, never an observed zero-call capture.
+    if (workerCalls !== undefined || source.compact || source.receipts) {
+      result.workerCalls = foldCalls(workerCalls, runtime, result.observedAt, source.corpusComplete === true);
+    }
     result.gardens = runtime.gardens.map(({ name, enabled, scope }) => ({ name, enabled, scope,
       totalUsd: null, pricedSubtotalUsd: null }));
     let compact = source.compact;
@@ -195,7 +361,7 @@ export function foldGardenerSpend(source: GardenerSpendSource | undefined, repos
     if (compact.repository !== repository || compact.daemonRunId !== runtime.daemonRunId ||
       compact.from !== runtime.configuredAt || compact.through !== result.observedAt) return unknown("scope_mismatch");
     if (!compact.correlated) {
-      if (source.corpusComplete === false) return unknown("ledger_unavailable");
+      if (source.corpusComplete === false) return { ...unknown("ledger_unavailable"), workerCalls: result.workerCalls };
       return result;
     }
     const stats = new Map(runtime.gardens.map(g => [g.name,

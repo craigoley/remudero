@@ -973,15 +973,17 @@ sweep:
       min: 1000
       max: 86400000
   # W1-T9082 — ADR 0007 decision A.9: whether a build run also starts a child process. mode accepts off, shadow,
-  # on or auto, and an absent block reads as off. "shadow" (shipped) starts one PROBE child per dispatched run
-  # beside the in-process run: it loads what a run child would load, round-trips the run-child contract and records
-  # `run_child.shadow` (load time, tree peak, entry kind), and never touches the task. "on" and "auto" are accepted
-  # and implemented by later tasks; until then they behave as shadow and say so. Switching beyond shadow is an
-  # operator ruling made by editing this row; nothing switches it on a timer. Read by src/lib/policy.ts
-  # (loadRunChildMode), never by validatePolicy.
+  # on or auto, and an absent block reads as off. "shadow" starts one PROBE child per dispatched run beside the
+  # in-process run: it loads what a run child would load, round-trips the run-child contract and records
+  # `run_child.shadow` (load time, tree peak, admitted class estimate). "on" (W1-T9085) runs the build in a detached
+  # child. "auto" (W1-T9087, shipped) decides between them on its own ledger evidence since the previous daemon boot
+  # (src/lib/run-child-mode.ts): it promotes to on only after a clean whole boot cycle with an adoption pass and every
+  # probe peak within its class estimate, and demotes to shadow on a contract mismatch, a misidentified child or a lost
+  # one. Every change, and one decision per boot, is ledgered as `run_child.mode_decision`. Read by
+  # src/lib/policy.ts (loadRunChildMode), never by validatePolicy.
   runChild:
     mode:
-      value: "shadow"
+      value: "auto"
       origin: "proposal"
   # W1-T9097 — ADR 0007 decision C ("Parallelism adapts"): the build lane count follows the memory governor
   # (src/lib/lane-governor.ts `laneTarget`), not the fixed dispatchLanes above. mode accepts shadow or enforce, and an

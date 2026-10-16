@@ -3,6 +3,7 @@
  *  into a plan-only PR: generation deterministic here, publication with the gate and the human. */
 
 import { fixDispatchCountsAttributed } from "./workflow-mining.js";
+import { acquireDrainLock, DrainLockError, type DrainLockInfo } from "./drain-lock.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { ghExec, ghTextAsync, type GhAsyncExecutor } from "./github-transport.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -35,6 +36,29 @@ import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-wo
 import { notionalSpendUsd } from "./spend-rows.js";
 import { openLedgerUnion, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
+
+/** Hold the shared retro lane through asynchronous synthesis AND publication. A contender defers
+ *  to the next cadence tick; after acquisition the caller must re-query pending sync PRs before
+ *  gathering. Reuse the atomic lock's dead-owner recovery rather than adding an expiring lease. */
+export function serializeRetroDispatch<T>(
+  lockPath: string,
+  run: () => Promise<T>,
+): Promise<{ kind: "completed"; value: T } | { kind: "inflight"; holder: DrainLockInfo }> {
+  return (async () => {
+    let lock;
+    try {
+      lock = acquireDrainLock(lockPath);
+    } catch (error) {
+      if (error instanceof DrainLockError) return { kind: "inflight", holder: error.holder };
+      throw error;
+    }
+    try {
+      return { kind: "completed", value: await run() };
+    } finally {
+      lock.release();
+    }
+  })();
+}
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
 export interface LedgerRecord {

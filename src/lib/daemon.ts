@@ -115,7 +115,7 @@ import {
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { resolveReleasedIds } from "./drain.js";
+import { resolveReleasedIds, closedUnmergedRunBranchTaskIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, type IndependentBlockRelease } from "./status.js";
 import type { DispatchValueContext } from "./dispatch-value.js";
@@ -1361,6 +1361,10 @@ export interface DaemonDeps {
   probeFleetPushCredential?: () => Promise<FleetCredentialProbe>;
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
+  /** Same contract as `DrainDeps.readClosedRunBranchPrs` (W1-T1207): raw `<head-ref>\t<unmerged>` rows, parsed by
+   *  `closedUnmergedRunBranchTaskIds`. W1-T9482: the daemon arm reads it too, lazily, only for a task holding a pushed
+   *  ref. Absent or throwing keeps every ref blocking. */
+  readClosedRunBranchPrs?: () => string;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
    *  pack step and the partition call below so the two never disagree about a candidate's effective
    *  scope. Optional — omitted, both fall back to the empty union (W1-T2286). */
@@ -1815,10 +1819,72 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
  */
 /** W1-T5805: the run-branch facts one selection pass decides on. The tick's start reads them and so does
  *  each lane refill: a branch pushed mid-phase (#9210, 02:16Z) was invisible to a refill at 02:43Z. */
-interface RunBranchState {
+export interface RunBranchState {
   ids: ReadonlySet<string> | undefined;
   refs: readonly PushedRunRef[];
   orphanEvidence: OrphanRunBranchEvidence | undefined;
+  /** W1-T9482: reads the closed-unmerged exclusion set; absent when no reader is wired. */
+  readClosedUnmerged?: () => ReadonlySet<string> | undefined;
+}
+
+/** W1-T9482: the latest `sweep.strike_ladder.requeued` instant per task in `lines`; unparseable rows are skipped. */
+export function requeueTimesFromLedger(lines: readonly string[]): ReadonlyMap<string, number> {
+  const out = new Map<string, number>();
+  for (const line of lines) {
+    if (!line.includes("sweep.strike_ladder.requeued")) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch (error) {
+      void error; // a torn ledger line is not a requeue receipt; the ref keeps blocking
+      continue;
+    }
+    if (row.step !== "sweep.strike_ladder.requeued" || typeof row.task_id !== "string" || typeof row.ts !== "string") continue;
+    const at = Date.parse(row.ts);
+    if (Number.isFinite(at) && at > (out.get(row.task_id) ?? -Infinity)) out.set(row.task_id, at);
+  }
+  return out;
+}
+
+/** W1-T9482: threads the ledger's requeue receipts into the orphan evidence. The ledger is read on the first
+ *  lookup only, and only for a task whose ref already passed the reaper's no-PR sha proof. */
+export function withRequeueReceipts(
+  evidence: OrphanRunBranchEvidence | undefined,
+  readLedgerLines: (() => readonly string[]) | undefined,
+): OrphanRunBranchEvidence | undefined {
+  if (evidence === undefined || readLedgerLines === undefined || evidence.requeuedAtMs !== undefined) return evidence;
+  let times: ReadonlyMap<string, number> | undefined;
+  return {
+    ...evidence,
+    requeuedAtMs: (taskId) => {
+      if (times === undefined) {
+        try {
+          times = requeueTimesFromLedger(readLedgerLines());
+        } catch (error) {
+          void error; // unreadable ledger: no receipt, every ref keeps blocking
+          times = new Map();
+        }
+      }
+      return times.get(taskId);
+    },
+  };
+}
+
+/** W1-T9482: a memoised, fail-closed reader of the closed-unmerged set (empty on a throw, so refs keep blocking). */
+export function lazyClosedUnmerged(read: (() => string) | undefined): (() => ReadonlySet<string> | undefined) | undefined {
+  if (read === undefined) return undefined;
+  let set: ReadonlySet<string> | undefined;
+  return () => {
+    if (set === undefined) {
+      try {
+        set = closedUnmergedRunBranchTaskIds(read());
+      } catch (error) {
+        void error; // unreadable closed-PR sweep: exclude nothing
+        set = new Set();
+      }
+    }
+    return set;
+  };
 }
 
 /** The epoch-ms suffix of a `run-<id>-<epochMs>` branch; NaN (never older) when it has none. */
@@ -1827,8 +1893,9 @@ function runBranchEpoch(branch: string): number {
   return match ? Number(match[1]) : Number.NaN;
 }
 
-function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBranchEvidence | undefined,
-  resumable: ReadonlyMap<string, { branch: string; headSha: string }> = new Map()): RunBranchState {
+export function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBranchEvidence | undefined,
+  resumable: ReadonlyMap<string, { branch: string; headSha: string }> = new Map(),
+  readClosedUnmerged?: () => ReadonlySet<string> | undefined): RunBranchState {
   if (raw === undefined) return { ids: undefined, refs: [], orphanEvidence };
   const refs = parsePushedRunRefs(raw).filter((ref) => {
     const checkpoint = resumable.get(ref.taskId);
@@ -1838,7 +1905,7 @@ function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBr
     // newer checkpoint carries the work. Left blocking, it held a resumable task as run-branch-already-pushed.
     return !(runBranchEpoch(ref.ref) < runBranchEpoch(checkpoint.branch));
   });
-  return { ids: new Set(refs.map((ref) => ref.taskId)), refs, orphanEvidence };
+  return { ids: new Set(refs.map((ref) => ref.taskId)), refs, orphanEvidence, readClosedUnmerged };
 }
 
 /** Calls the reader, awaiting only a promised read, so a sync reader keeps a refill synchronous. */
@@ -1856,8 +1923,8 @@ function readRunBranchListing(
 }
 
 /** The two options a pass's run-branch read decides; none when no reader was wired. */
-function runBranchDispatchOpts(
-  { ids, refs, orphanEvidence }: RunBranchState,
+export function runBranchDispatchOpts(
+  { ids, refs, orphanEvidence, readClosedUnmerged }: RunBranchState,
   receipts: readonly PlanOnlyRunBranchReceipt[],
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): Pick<NextRunnableOpts, "hasPushedRunBranch" | "onSkipRunBranch"> {
@@ -1869,7 +1936,9 @@ function runBranchDispatchOpts(
     // sees is explicit rather than a silent non-block.
     hasPushedRunBranch: (id: string) => {
       const refsForTask = refs.filter((r) => r.taskId === id);
-      const stillBlocked = stillBlockedByPushedRunBranch(id, ids, undefined, refs, receipts, orphanEvidence);
+      // W1-T9482: the closed-unmerged exclusion drain.ts's arms apply, read only for a task that holds a ref.
+      const closedUnmerged = refsForTask.length > 0 ? readClosedUnmerged?.() : undefined;
+      const stillBlocked = stillBlockedByPushedRunBranch(id, ids, closedUnmerged, refs, receipts, orphanEvidence);
       if (!stillBlocked && refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, receipts, orphanEvidence);
       return stillBlocked;
     },
@@ -6124,7 +6193,10 @@ export async function runDaemon(
       // W1-T4002 — the most recent completed full sweep already proved these (W1-T4998); see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
-      const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
+      const runBranchStateThisTick = runBranchStateFrom(
+        tickRunBranchListing, withRequeueReceipts(deps.readOrphanRunBranchEvidence?.(), deps.readLedgerLines), resumableHandoffs,
+        lazyClosedUnmerged(deps.readClosedRunBranchPrs),
+      );
       const dispatchOpts: NextRunnableOpts = {
       priorityBackfill,
       onDeferredForPriority: logPriorityDeferral,
@@ -6769,7 +6841,10 @@ export async function runDaemon(
           const budget = laneDispatchBudget({
             laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
           });
-          const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.(), resumableHandoffs);
+          const runBranchState = runBranchStateFrom(
+            runBranchListing, withRequeueReceipts(deps.readOrphanRunBranchEvidence?.(), deps.readLedgerLines), resumableHandoffs,
+            lazyClosedUnmerged(deps.readClosedRunBranchPrs),
+          );
           const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),

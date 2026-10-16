@@ -846,7 +846,8 @@ test("W1-T9689 selected evidence retains snapshots and explicit unknown shape ou
     { label: "invalid workflow identity", expected: "unknown", workflows: { total_count: 1, workflow_runs: [{ ...workflow, workflow_id: 0 }] } },
     { label: "ambiguous check suite", expected: "unknown", checks: { total_count: 1, check_runs: [{ ...check, check_suite: { id: 30 } }] },
       workflows: { total_count: 2, workflow_runs: [workflow, { ...workflow, id: 11 }] } },
-    { label: "run identity contradicts check suite", expected: "unknown", checks: { total_count: 1, check_runs: [{ ...check, check_suite: { id: 31 }, external_id: "run:10:1:job:1" }] },
+    { label: "native run identity contradicts check suite", expected: "unknown", checks: { total_count: 1, check_runs: [{ ...check, check_suite: { id: 31 },
+      app: { slug: "github-actions" }, details_url: "https://github.com/craigoley/remudero/actions/runs/10/job/1" }] },
       workflows: { total_count: 2, workflow_runs: [workflow, { ...workflow, id: 11, check_suite_id: 31 }] } },
     { label: "native Actions check suite supplies real identity", expected: "observed", checks: { total_count: 1, check_runs: [{ ...check, check_suite: { id: 30 }, app: { slug: "github-actions" } }] },
       workflows: { total_count: 1, workflow_runs: [workflow] } },
@@ -871,6 +872,36 @@ test("W1-T9689 selected evidence retains snapshots and explicit unknown shape ou
       assert.equal(result.checks[0].workflowRunId, 10); assert.equal(result.checks[0].workflowId, 5);
     }
   });
+});
+
+test("W1-T9798 a posted check is read by its posting run, not the suite GitHub files it under", async () => {
+  // PR11968 at f102d2d75: light-gates posted 16 checks as run:38722031956:1:job:116378673939, and GitHub
+  // filed every one under check suite 104930348981, which belongs to run 38722026716 (security-policy-producer).
+  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
+  const sha = "f102d2d7503c18b8e77cd5f28be32e78a32a156c", target = { number: 11968, url: "https://github.com/craigoley/remudero/pull/11968", headSha: sha, body: "b" };
+  const pull = { id: 8, number: 11968, html_url: target.url, state: "open", merged: false, head: { sha },
+    base: { repo: { id: 55, full_name: "craigoley/remudero" } }, body: "b" };
+  const native = { id: 116378655571, name: "security-policy-producer", head_sha: sha, status: "completed", conclusion: "success",
+    started_at: "2026-10-15T10:41:18Z", app: { slug: "github-actions" }, check_suite: { id: 104930348981 },
+    details_url: "https://github.com/craigoley/remudero/actions/runs/38722026716/job/116378655571" };
+  const posted = { id: 116381193628, name: "rule-checks", head_sha: sha, status: "completed", conclusion: "success",
+    started_at: "2026-10-15T10:47:45Z", app: { slug: "github-actions" }, check_suite: { id: 104930348981 },
+    external_id: "run:38722031956:1:job:116378673939", details_url: "https://github.com/craigoley/remudero/runs/116381193628" };
+  const producer = { id: 38722026716, workflow_id: 7, check_suite_id: 104930348981, head_sha: sha, run_attempt: 1 };
+  const ci = { id: 38722031956, workflow_id: 8, check_suite_id: 104930364246, head_sha: sha, run_attempt: 1 };
+  const read = (workflowRuns: unknown[]) => readSelectedDepReviewChecks("craigoley", "remudero", { ...target }, async (args) =>
+    args[1].includes("/pulls/") ? pull
+      : args[1].includes("/check-runs") ? { total_count: 2, check_runs: [native, posted] }
+        : args[1].includes("/status") ? { sha, total_count: 0, statuses: [] }
+          : { total_count: workflowRuns.length, workflow_runs: workflowRuns });
+  const observed = await read([producer, ci]);
+  assert.equal(observed.kind, "observed", "the real PR11968 shape is readable evidence");
+  if (observed.kind === "observed") {
+    assert.deepEqual(observed.checks.map((c) => [c.name, c.workflowRunId, c.workflowId]),
+      [["security-policy-producer", 38722026716, 7], ["rule-checks", 38722031956, 8]], "each check keeps its own producer run");
+  }
+  assert.deepEqual(await read([producer]), { kind: "unknown", reason: "workflow_identity_unresolved" },
+    "a posting run absent from this head's workflow runs is still unresolved");
 });
 
 test("depReviewCommand posts verified pin-only status with a lane-specific decision revision", async () => {
