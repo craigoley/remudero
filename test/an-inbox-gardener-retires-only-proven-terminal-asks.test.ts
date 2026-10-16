@@ -425,3 +425,28 @@ test("generic proposal text changes cannot inherit the mechanical producer purpo
   assert.equal("retired" in result && result.retired, 0); assert.equal(f.store().events.length, 0);
   const c = f.source().classifications.find(c => c.proposalId === ID)!; assert.equal(c.state, "not_ready"); assert.match(c.needsTriageReason ?? "", /purpose|ownership|criteria/);
 });
+
+
+test("default proof sources bind exact mechanical handoff and open successor ownership", async t => {
+  const f = await fixture(t), permit = proofDebtPopulationPermit(loadPlan(f.planPath).tasks.filter(task => task.id === TASK));
+  const original = parseProposalRegistry(readFileSync(f.registry, "utf8")).find(p => p.id === ID)!;
+  const predecessor = stampMechanicalAsk({ ...original, id: `${ID}:0` }, TASK, permit);
+  updateProposalRegistry(f.registry, all => [...all, predecessor]); await f.refresh();
+  let ports = f.ports(), pack = await ports.capture();
+  let candidate = pack.candidates.find(c => c.proposal.id === predecessor.id)!;
+  const successor = await ports.proof(candidate); assert.equal(successor?.kind, "successor");
+  assert.equal(validInboxTerminalProof(successor, f.scope, predecessor), true);
+  assert.equal(validInboxTerminalProof({ ...successor!, predecessorCriteria: "f".repeat(64) } as InboxTerminalProof, f.scope, predecessor), false);
+  appendFileSync(f.ledgerPath, JSON.stringify({ ts: new Date(f.now()).toISOString(), run_id: "operator-handoff", step: "ratify.approved",
+    task_id: TASK, proposal_id: ID, repository: f.repository, instance: "foreign", author_class: "operator", released: "verify-human",
+    handoff_kind: "proof-repair", receipt_id: "d".repeat(64) }) + "\n");
+  ports = f.ports(); pack = await ports.capture(); candidate = pack.candidates.find(c => c.proposal.id === ID)!;
+  assert.equal((await ports.proof(candidate))?.kind, "merged-task", "foreign handoff cannot replace the independently qualified merge proof");
+  appendFileSync(f.ledgerPath, JSON.stringify({ ts: new Date(f.now() + 1).toISOString(), run_id: "owned-operator-handoff", step: "ratify.approved",
+    task_id: TASK, proposal_id: ID, repository: f.repository, instance: f.instance, author_class: "operator", released: "verify-human",
+    handoff_kind: "proof-repair", receipt_id: "d".repeat(64) }) + "\n");
+  ports = f.ports(); pack = await ports.capture(); candidate = pack.candidates.find(c => c.proposal.id === ID)!;
+  const handoff = await ports.proof(candidate); assert.equal(handoff?.kind, "handoff");
+  assert.equal(validInboxTerminalProof(handoff, f.scope, original), true);
+  assert.equal(validInboxTerminalProof({ ...handoff!, proposalId: predecessor.id } as InboxTerminalProof, f.scope, original), false);
+});
