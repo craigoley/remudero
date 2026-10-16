@@ -1998,7 +1998,7 @@ export function logArmAttribution(
     });
     // The merge landed, so the terminal fact exists now; the sweep's closed-PR rung only dedups it later.
     log(PR_TERMINAL_STEP, { task_id: "SWEEP", pr_url: prUrl, pr_number: prNumber, state: "merged",
-      merged_at: new Date().toISOString(), source: "automerge.direct_merge" });
+      merged_at: systemClock.iso(), source: "automerge.direct_merge" });
   }
   const preflightStep =
     directMergePreflight?.reason === "plan_pr_mergeability_unknown_bound"
