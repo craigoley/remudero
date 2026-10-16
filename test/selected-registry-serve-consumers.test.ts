@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, mock } from "node:test";
 import { buildOnboardingGoLiveRoutes, buildOnboardingReadinessRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { buildInstanceGatewayRoutes, watchInstanceLiveness, type InstanceGatewayOptions } from "../src/lib/instance-gateway.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { registryInstanceRoots } from "../src/lib/benchmark-aa-readiness.js";
+import { knownPlanRepos } from "../src/lib/inbox.js";
 import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -170,6 +172,33 @@ test("selected go-live observation cannot replace the verified-owner refusal or 
   assert.equal(code, 403); assert.deepEqual(JSON.parse(body), { error: "verified_operator_required" });
   const row = await observed(f.rows); assert.ok(row); assert.equal(row.action, "serve-go-live");
   assert.equal(row.target_instance, "core"); assert.equal(row.target_repo, "owner/repo"); assert.equal(row.publication_permission, "not-granted");
+});
+
+test("selected benchmark discovery preserves actual legacy roots and names synchronous freshness unknown", (t) => {
+  const f = fixture(t), observer = createSelectedRegistryObserver({ ...f.options,
+    io: { lstat: () => assert.fail("sync discovery must not read selected IO"), open: () => assert.fail("sync discovery must not open selected IO") } })!;
+  t.after(() => observer.close());
+  writeFileSync(f.legacy, selectedText("core") + "  site:\n    github_repo: owner/site\n    mode: shadow\n");
+  const read = () => readFileSync(f.legacy, "utf8"), local = join(f.root, "local"), base = join(f.root, "instances");
+  const expected = registryInstanceRoots(local, read, base);
+  const actual = Reflect.apply(registryInstanceRoots, undefined, [local, read, base, observer]);
+  assert.deepEqual(actual, expected);
+  assert.deepEqual(actual, { roots: [{ instance: "core", stateDir: local }, { instance: "site", stateDir: join(base, "site", "state") }] });
+  assert.equal(f.rows.at(-1)?.fields.action, "benchmark-discovery");
+  assert.equal(f.rows.at(-1)?.fields.reason, "synchronous_seam");
+  assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
+});
+
+test("selected inbox discovery preserves real registered repo defaults and unknown malformed evidence", (t) => {
+  const f = fixture(t), observer = createSelectedRegistryObserver(f.options)!; t.after(() => observer.close());
+  mkdirSync(join(f.root, ".remudero"));
+  const path = join(f.root, ".remudero", "daemon-instances.yaml"); writeFileSync(path, selectedText("core"));
+  assert.deepEqual(Reflect.apply(knownPlanRepos, undefined, [f.root, observer]), new Set(["none", "repo"]));
+  assert.equal(f.rows.at(-1)?.fields.action, "inbox-discovery");
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown");
+  assert.equal(f.rows.at(-1)?.fields.reason, "synchronous_seam");
+  writeFileSync(path, "instances: [invalid]");
+  assert.equal(Reflect.apply(knownPlanRepos, undefined, [f.root, observer]), undefined, "legacy unreadable/malformed still refuses no repo");
 });
 
 test("selected readiness absent opt-in preserves legacy checks without a selected read or receipt", async (t) => {
