@@ -157,3 +157,15 @@ test("a doctrine path cited outside doctrine/ — CONTROL: only an open shard's 
   assert.ok(!plannedDoctrinePages([shard("blocked", { retirement: "superseded" })]).has(page), "a retired shard creates nothing");
   assert.deepEqual([...plannedDoctrinePages([{ status: "queued", files: ["doctrine/s/", "docs/a.md"] }])], [], "only a doctrine page is a page");
 });
+
+test("a doctrine body a queued task declares in files: is a planned output, not a dangling citation", () => {
+  const planned = plannedDoctrinePages([
+    { status: "queued", files: ["src/lib/plan.ts", "doctrine/s/to-be-written.md"] },
+    { status: "queued", files: ["CLAUDE.md"] },
+    { status: "queued" },
+  ]);
+  assert.deepEqual([...planned], ["doctrine/s/to-be-written.md"]);
+  const texts = ["files: doctrine/s/to-be-written.md", "typo: doctrine/s/to-be-writen.md"];
+  // Only the declared path resolves; a near-miss spelling is still caught.
+  assert.deepEqual(unresolvedDoctrineCitations(texts, new Set(["s"]), (p) => planned.has(p)), ["doctrine/s/to-be-writen.md"]);
+});
