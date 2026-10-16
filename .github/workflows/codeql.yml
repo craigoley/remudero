@@ -63,6 +63,10 @@ jobs:
           # remudero orchestrates its own fleet of workflows — scan them too.
           - language: actions
             build-mode: none
+          # Runtime artifact policy is executable Python, not workflow config.
+          # Analyze it without importing or installing the candidate packages.
+          - language: python
+            build-mode: none
 
     steps:
       - name: Checkout

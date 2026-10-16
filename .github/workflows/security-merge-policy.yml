@@ -7,7 +7,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_run:
-    workflows: [CodeQL]
+    workflows: [CodeQL, Semgrep runtime compatibility]
     types: [requested, in_progress, completed]
   merge_group:
     types: [checks_requested]
@@ -30,6 +30,7 @@ jobs:
       contents: read
       pull-requests: read
       checks: read
+      actions: read
       statuses: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
