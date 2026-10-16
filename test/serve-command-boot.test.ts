@@ -76,7 +76,7 @@ test("selected loaded CLI config reaches benchmark delayed draft evaluation and 
       const before = rows().filter(row => row.step === "instance_registry.consumer_shadow_observed").length;
       const runtime = benchmarkAaReadinessRuntime(join(root, "state"));
       // Capture config BEFORE its caller can mutate it; this runs the actual default registry reader.
-      if (runtime.config.selectedRegistryMode) runtime.config.selectedRegistryMode.mode = "legacy";
+      if (runtime.config.selectedRegistryMode) runtime.config.selectedRegistryMode.registryPath = join(home, "later-unavailable.yaml");
       const result = runtime.defaultInstanceRoots();
       assert.ok("roots" in result || "reason" in result);
       const routingRows: Record<string, unknown>[] = [];
