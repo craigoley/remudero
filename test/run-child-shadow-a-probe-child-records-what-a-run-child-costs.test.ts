@@ -246,7 +246,7 @@ test("W1-T9082: the run-child mode parses and an absent block is off", () => {
   assert.equal(loadRunChildMode(file), "off");
   writeFileSync(file, "sweep: [unclosed\n");
   assert.throws(() => loadRunChildMode(file), PolicyError);
-  assert.equal(loadRunChildMode(), "shadow", "this installation's policy.yaml ships the shadow mode");
+  assert.equal(loadRunChildMode(), "auto", "this installation's policy.yaml ships the auto mode (W1-T9087)");
 });
 
 test("W1-T9082: off starts nothing, on and auto say they run as shadow", async () => {

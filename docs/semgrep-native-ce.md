@@ -6,7 +6,7 @@ Scan avoids Docker Hub container initialization with an isolated, fully hash-loc
 
 Operator-approved CE 1.180.0 replaces 1.167.0, whose dependency constraints forced
 MCP 1.23.3 and PyJWT 2.13.0 with reported security advisories. The reviewed new closure
-uses MCP 1.29.0 and PyJWT 2.15.1; PyPI reported no advisories for this exact closure at
+uses MCP 1.30.0 and PyJWT 2.15.1; PyPI reported no advisories for this exact closure at
 lock preparation. That point-in-time result is not an exhaustive vulnerability audit.
 
 `.github/workflows/semgrep.yml` uses Ubuntu 24.04 x86_64 and Python 3.12.15 through a
