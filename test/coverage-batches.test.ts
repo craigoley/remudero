@@ -23,12 +23,32 @@ test("coverage command waits for an aborted child's close even when its signal h
   const running = runCoverageCommand(["-e", `const fs=require('node:fs');process.on('SIGTERM',()=>process.exit(0));fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));setInterval(()=>{},1000)`],
     { cwd: fixture.dir, env: process.env, signal: abort.signal });
   fixture.until(running);
+  try {
   for (let i = 0; i < 100 && !existsSync(pidPath); i++) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.ok(existsSync(pidPath), "real child reached its signal handler");
   const pid = Number(readFileSync(pidPath, "utf8")); abort.abort();
   const result = await running;
   assert.equal(result.status, 0); assert.equal(result.interrupted, "lease-lost");
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally { abort.abort(); await running; }
+});
+
+test("coverage command reaps its own stubborn child and reports a real spawn failure", async (t) => {
+  const fixture = ownedFixtureDir(t, "batch-stubborn"), pidPath = join(fixture.dir, "pid");
+  const abort = new AbortController();
+  const running = runCoverageCommand(["-e", `const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));setInterval(()=>{},1000)`],
+    { cwd: fixture.dir, env: process.env, signal: abort.signal, terminateAfterMs: 20 });
+  fixture.until(running);
+  try {
+    for (let i = 0; i < 100 && !existsSync(pidPath); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(existsSync(pidPath)); const pid = Number(readFileSync(pidPath, "utf8"));
+    abort.abort(); const result = await running;
+    assert.equal(result.signal, "SIGKILL"); assert.notEqual(result.status, 0);
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally { abort.abort(); await running; }
+  const logs: string[] = [];
+  const failed = await runCoverageCommand(["-e", "0"], { cwd: join(fixture.dir, "missing"), env: process.env, log: (text: string) => logs.push(text) });
+  assert.notEqual(failed.status, 0); assert.match(failed.error, /ENOENT/); assert.equal(logs.length, 1);
 });
 
 test("coverage batch authority refuses released replaced and vanished lease anchors", (t) => {

@@ -20,20 +20,26 @@ const GATE = fileURLToPath(new URL('./diff-coverage.mjs', import.meta.url));
 
 /** Await actual child close, including its stdio. Forward only this runner's signals and retain
  * the original outcome; an interrupted child which reports zero cannot qualify a batch. */
-export function runCoverageCommand(args, { cwd, env, signal: abort, log = console.error } = {}) {
+export function runCoverageCommand(args, { cwd, env, signal: abort, terminateAfterMs = 5000, log = console.error } = {}) {
   return new Promise((done) => {
     const command = lowPriorityCommand(process.execPath, args);
     const child = spawn(command.file, command.args, { cwd, env, stdio: ['ignore', 'inherit', 'inherit'] });
-    let error, interrupted;
-    const handlers = ['SIGINT', 'SIGTERM'].map((signal) => [signal, () => { interrupted = signal; child.kill(signal); }]);
+    let error, interrupted, escalation;
+    const stop = (reason = 'lease-lost', signal = 'SIGTERM') => {
+      interrupted = reason; child.kill(signal);
+      if (!escalation) escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }, Number.isFinite(terminateAfterMs) && terminateAfterMs >= 0 ? Math.min(5000, terminateAfterMs) : 5000);
+    };
+    const handlers = ['SIGINT', 'SIGTERM'].map((signal) => [signal, () => stop(signal, signal)]);
     for (const [signal, handler] of handlers) process.on(signal, handler);
-    const stop = () => { interrupted = 'lease-lost'; child.kill('SIGTERM'); };
-    abort?.addEventListener('abort', stop, { once: true });
-    if (abort?.aborted) stop();
+    const onAbort = () => stop();
+    abort?.addEventListener('abort', onAbort, { once: true });
+    if (abort?.aborted) onAbort();
     child.on('error', (failure) => { error = failure.message; log(error); });
     child.on('close', (status, signal) => {
       for (const [name, handler] of handlers) process.off(name, handler);
-      abort?.removeEventListener('abort', stop);
+      abort?.removeEventListener('abort', onAbort); clearTimeout(escalation);
       done({ status: status ?? 1, signal, error, interrupted });
     });
   });
