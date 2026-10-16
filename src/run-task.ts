@@ -1039,6 +1039,7 @@ import {
   type RetroAttemptRecord,
   type RetroBackoffDecision,
   type RetroBackoffPolicy,
+  serializeRetroDispatch,
 } from "./lib/retro.js";
 import {
   runRetroPrepublishPreflight,
@@ -33821,6 +33822,20 @@ export function readPlanCoherenceInputs(root: string): {
   }
 }
 
+/** W1-T9363: one retro at a time per root. The lane lock is held from the open-PR read through
+ *  publication, so a second retro (an operator run beside the daemon's) defers instead of
+ *  synthesizing from the same merge-base. `--dry-run` writes nothing, so it never takes the lock. */
+async function serializedRetroCommand(rest: string[], opts: Parameters<typeof retroCommand>[1] = {}): Promise<number> {
+  if (rest.includes("--dry-run")) return await retroCommand(rest, opts);
+  const config = loadConfig();
+  const lane = await serializeRetroDispatch(join(config.root, "state", "retro.lock"), () => retroCommand(rest, opts));
+  if (lane.kind === "completed") return lane.value;
+  appendLedger(ledgerPathFor(config), { run_id: `RETRO-${Date.now()}`, task_id: "RETRO", step: "retro.skipped_in_flight",
+    lane: "retro", holder_pid: lane.holder.pid, holder_host: lane.holder.host, holder_started_at: lane.holder.startedAt });
+  console.log(`\n### [retro] retro skipped — another retro (pid ${lane.holder.pid} on ${lane.holder.host}) holds the lane`);
+  return 1;
+}
+
 async function retroCommand(
   rest: string[],
   opts: {
@@ -58152,7 +58167,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       // c8 ignore next
       const automated = encodedAutomatedDecision === undefined ? undefined : decodeAutomatedRetroDecision(encodedAutomatedDecision);
       /* node:coverage ignore next -- real retro execution reads ledger/plan state and may spawn; retroCommand has injectable tests */
-      return await retroCommand(rest, automated ? { automated } : {});
+      return await serializedRetroCommand(rest, automated ? { automated } : {});
     },
   ],
   [
@@ -58515,7 +58530,7 @@ if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === 
   });
 }
 
-export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, initCommand, projectCommand };
+export { runTask, runReview, waitForCiGreen, reviewCommand, depReviewCommand, retroCommand, serializedRetroCommand, initCommand, projectCommand };
 // Exported for a behavioral test of the drain gateway-targeting fix (W1-T53): drainCommand's
 // injectable deps (config/planPath/skipGitSync/githubFactory) let a test prove `--repo` scopes
 // the merged-status gateway to the NAMED repo, not a hardcoded literal — logic unchanged, export
