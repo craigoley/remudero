@@ -6,7 +6,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=b816350f77cf5e5d
   attempts: 0
   files:
     - plan/tasks.d/W1-T9307-a-draft-repair-names-only-callers-the-tree-holds.yaml

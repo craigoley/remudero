@@ -6,7 +6,9 @@
   verify: auto
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=d1fe2a9c47ce271a
   attempts: 0
   files:
     - src/lib/worker-home.ts

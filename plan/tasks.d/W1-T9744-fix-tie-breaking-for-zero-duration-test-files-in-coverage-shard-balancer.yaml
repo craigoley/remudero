@@ -7,7 +7,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=d7b074a5e11d4535
   attempts: 0
   files:
     - scripts/test-tier-manifest.mjs

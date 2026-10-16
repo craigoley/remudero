@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.1
   status: queued
@@ -48,3 +48,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/lib/daemon.ts and a new test file. Neither is a secrets, auth, permissions, merge, deploy, or review-policy path, and the description shows no deletion or irreversible action."
+      - "The failing test (daemon freshness uses the once-captured loaded code sha) is named in the record, and the acceptance is a grep for a test in a file that doesn't exist yet. That is verifiable from what is shown and needs no operator decision."
+      - "The record shows repeated hand fixes to src/lib/daemon.ts (PRs #10741, #10868, #11051, #11390), so the change is in a recurring-friction area and a fix may not hold. The family track record is mixed (27 merged, 40 declined), but the change still goes through CI and review, and the gardener re-measures afterward."
+    judged_at: "2026-10-16T15:58:35.170Z"
+    pin: "2860ff197bb02b053be3f226cc3ba8b67cb0cf63dda74c588cc0843e71dd700d"

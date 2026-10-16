@@ -390,6 +390,9 @@ components:
             Bounded worker observability. It names the active role/provider/model and the
             current or last tool, but never carries prompts, tool arguments, or tool output.
           properties:
+            runId:
+              type: string
+              description: Proven by this task's current run start, never inferred from task id or another event.
             role:
               type: string
               enum: [recon, implementer, reviewer, fixer, triage, retro, unknown]
@@ -9561,18 +9564,7 @@ components:
                 entries:
                   type: array
                   items:
-                    type: object
-                    required: [ts, verb, taskId, title]
-                    properties:
-                      ts: {type: string}
-                      verb:
-                        type: string
-                        description: A RecentActivityEntry verb; a consumer renders an unknown one.
-                      taskId: {type: string}
-                      title: {type: string}
-                      detail: {type: string}
-                      costUsd: {type: number}
-                      prUrl: {type: string}
+                    $ref: "#/components/schemas/RecentActivityEntry"
                 mergedToday:
                   type: object
                   description: Exact merges today (UTC), one per task and pull request, over full history.
@@ -9868,8 +9860,18 @@ components:
             openedAt: {type: string}
         worker:
           type: object
+          description: Stable current-dispatch identity; event timing and tool activity stay on recent entries.
           properties:
-            servedModel: {type: string}
+            runId:
+              type: string
+              description: Proven by this instance task's current run start; absent when no dispatch identity is evidenced.
+            role:
+              type: string
+              enum: [recon, implementer, reviewer, fixer, triage, retro, unknown]
+            provider: {type: string}
+            servedModel:
+              type: string
+              description: Only an explicit receipt from this run, never an assignment or requested model.
             requestedModel: {type: string}
         workerState:
           type: string
