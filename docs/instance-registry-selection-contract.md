@@ -65,8 +65,6 @@ instance draining; incompatible shared state, claims, credentials or config
 requires an approved full affected-writer stop, all workers only if all are
 affected. No scheduler, deployment or admission activation is included.
 
-### Carried lifecycle fields
-
 ### Serve and discovery observations
 
 W1-T9793 carries the same explicit `mode: shadow` intent through the maintained
