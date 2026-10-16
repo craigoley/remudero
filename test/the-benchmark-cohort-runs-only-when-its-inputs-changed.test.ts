@@ -3,10 +3,9 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildBenchmarkCohortDaemonHooks } from "../src/run-task.js";
-import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "../src/lib/benchmark-cohort.js";
+import { benchmarkCohortCadence, runBenchmarkCohortPass, type BenchmarkCohortCadence,
+  type BenchmarkCohortPassResult } from "../src/lib/benchmark-cohort.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
 
 const MINUTE = 60_000;
 
@@ -15,24 +14,24 @@ function assignment(id: string): string {
     worker_assignment: { id, selected: { provider: "cash", model: "gpt-5-nano" } } }) + "\n";
 }
 
-function fixture(): { home: string; stateDir: string; config: Config } {
+function fixture(): { home: string; stateDir: string } {
   const home = mkdtempSync(join(tmpdir(), "rmd-cohort-pace-"));
   const stateDir = join(home, "state");
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, "ledger.ndjson"), assignment("a0"));
-  return { home, stateDir, config: { root: home } as Config };
+  return { home, stateDir };
 }
 
 /** One daemon tick: the loop asks `check`, and only a due pass runs (daemon.ts awaits it detached). */
-async function tick(hooks: ReturnType<typeof buildBenchmarkCohortDaemonHooks>): Promise<void> {
+async function tick(hooks: BenchmarkCohortCadence): Promise<void> {
   if (hooks.checkBenchmarkCohort()) await hooks.runBenchmarkCohortPass();
 }
 
 test("W1-T8876: the benchmark cohort runs only when its inputs changed", async () => {
-  const { home, stateDir, config } = fixture();
+  const { home, stateDir } = fixture();
   let now = 1_000_000;
   let runs = 0;
-  const hooks = buildBenchmarkCohortDaemonHooks({ config, clock: clockFromMillisFn(() => now),
+  const hooks = benchmarkCohortCadence({ stateDir: () => stateDir, clock: clockFromMillisFn(() => now),
     run: (dir) => { runs += 1; return runBenchmarkCohortPass(dir, { maxSources: 4 }); } });
   try {
     for (let elapsed = 0; elapsed <= 10 * MINUTE; elapsed += 30_000) { now = 1_000_000 + elapsed; await tick(hooks); }
@@ -72,11 +71,11 @@ test("W1-T8876: the benchmark cohort runs only when its inputs changed", async (
 });
 
 test("W1-T8876: an unfinished cohort pass is retried at the floor even when its inputs are unchanged", async () => {
-  const { home, config } = fixture();
+  const { home, stateDir } = fixture();
   let now = 5_000_000;
   const outcomes: Array<"partial" | "throw" | "complete"> = ["partial", "throw", "complete"];
   let runs = 0;
-  const hooks = buildBenchmarkCohortDaemonHooks({ config, clock: clockFromMillisFn(() => now), run: async () => {
+  const hooks = benchmarkCohortCadence({ stateDir: () => stateDir, clock: clockFromMillisFn(() => now), run: async () => {
     runs += 1;
     const outcome = outcomes.shift();
     if (outcome === "throw") throw new Error("checkpoint unreadable");
@@ -96,10 +95,10 @@ test("W1-T8876: an unfinished cohort pass is retried at the floor even when its 
 });
 
 test("W1-T8876: an unreadable ledger directory never pins the cohort as unchanged", async () => {
-  const { home, stateDir, config } = fixture();
+  const { home, stateDir } = fixture();
   let now = 9_000_000;
   let runs = 0;
-  const hooks = buildBenchmarkCohortDaemonHooks({ config, clock: clockFromMillisFn(() => now),
+  const hooks = benchmarkCohortCadence({ stateDir: () => stateDir, clock: clockFromMillisFn(() => now),
     run: async () => { runs += 1; return { state: "complete", pendingSources: 0 } as BenchmarkCohortPassResult; } });
   try {
     rmSync(stateDir, { recursive: true, force: true });
