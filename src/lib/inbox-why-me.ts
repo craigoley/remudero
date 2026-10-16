@@ -1,7 +1,7 @@
 /** Source-qualified advisory corrections. Settled Inbox intent receipts are the durable history;
  * the slow lane alone projects that history. Neither a correction nor its observation grants authority. */
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { inboxThreadId } from "./inbox-thread.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -42,6 +42,29 @@ export interface WhyMeReceipt {
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const stableFacts = (facts: Original["sourceFacts"]) => facts.filter(f => f.source !== "judge");
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+const MAX_RECEIPT_BYTES = 1024 * 1024;
+class OversizedReceiptError extends Error {}
+/** Check and read one opened regular file; a pathname replacement cannot change its identity. */
+function readWhyMeReceipt(path: string): WhyMeReceipt {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("correction receipt is not a regular file");
+    if (stat.size > MAX_RECEIPT_BYTES)
+      throw new OversizedReceiptError("correction receipt exceeds the verification bound");
+    const chunks: Buffer[] = []; let total = 0;
+    while (true) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_RECEIPT_BYTES + 1 - total));
+      const count = readSync(fd, chunk, 0, chunk.length, null);
+      if (count === 0) return JSON.parse(Buffer.concat(chunks, total).toString("utf8"));
+      total += count;
+      if (total > MAX_RECEIPT_BYTES)
+        throw new OversizedReceiptError("correction receipt exceeds the verification bound");
+      chunks.push(chunk.subarray(0, count));
+    }
+  } finally { closeSync(fd); }
+}
 
 function validJudgment(value: unknown): boolean {
   return value === undefined || record(value) && typeof value.reason === "string" &&
@@ -122,8 +145,7 @@ export function projectWhyMeFeedback(stateDir: string, scope: WhyMeScope, census
   for (const name of names) {
     try {
       const path = join(dir, name);
-      if (statSync(path).size > 1024 * 1024) throw new Error("receipt is oversized");
-      const receipt: WhyMeReceipt = JSON.parse(readFileSync(path, "utf8"));
+      const receipt = readWhyMeReceipt(path);
       if (receipt.action !== WHY_ME_ACTION) continue;
       if (`${receipt.key}.json` !== name) throw new Error("receipt filename does not match identity");
       const correction = correctionOf(receipt, scope);
@@ -176,7 +198,7 @@ export function observeWhyMeFeedback(stateDir: string, feedback: WhyMeFeedback |
       state: !c.currentSnapshot ? "snapshot_changed" : !c.active ? "superseded" : !item ? "item_absent" : held ? "held" : item.judgment?.state === "judged" ? "assessment_observed" : "awaiting_assessment",
       ...(item ? { classification: item.classification, ...(item.judgment ? { judgment: item.judgment } : {}) } : {}) };
     const path = join(stateDir, INBOX_RECEIPT_DIR, `${c.receiptId}.json`);
-    const receipt: WhyMeReceipt = JSON.parse(readFileSync(path, "utf8"));
+    const receipt = readWhyMeReceipt(path);
     if (receipt.key !== c.receiptId || !correctionOf(receipt, feedback.scope)) throw new Error("why-me outcome source is unverified");
     if (receipt.whyMeOutcome?.snapshotKey === outcome.snapshotKey && receipt.whyMeOutcome.state === outcome.state) continue;
     writeAtomic(path, JSON.stringify({ ...receipt, whyMeOutcome: outcome }) + "\n");
@@ -219,13 +241,13 @@ export function withWhyMeJudgmentInput<T extends { id: string }>(
     for (const projected of feedback.items.filter(c => c.latest && c.proposalId === proposalId)) {
       try {
         const path = join(stateDir, INBOX_RECEIPT_DIR, projected.receiptId + ".json");
-        if (statSync(path).size > 1024 * 1024) return unavailable(shard, "correction receipt exceeds the verification bound");
-        const correction = correctionOf(JSON.parse(readFileSync(path, "utf8")), feedback.scope);
+        const correction = correctionOf(readWhyMeReceipt(path), feedback.scope);
         const { outcome: _outcome, mismatch: _mismatch, active: _active, latest: _latest, sameAskFacts: _sameAskFacts, currentSnapshot: _currentSnapshot, ...published } = projected;
         if (!correction || correction.receiptId !== projected.receiptId || digest(correction) !== digest(published) ||
           digest(stableFacts(correction.original.sourceFacts)) !== digest(stableFacts(item.sourceFacts))) return unavailable(shard, "correction receipt or current ask facts are unverified");
         receipts.push({ ...correction, context: correction.snapshotKey === census.snapshotKey ? "current_snapshot" : "historical_matching_facts" });
       } catch (error) {
+        if (error instanceof OversizedReceiptError) return unavailable(shard, error.message);
         const reason = `correction receipt cannot be verified: ${(error as NodeJS.ErrnoException).code ?? (error as Error).name}`;
         return unavailable(shard, reason);
       }

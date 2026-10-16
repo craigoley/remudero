@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, appendFileSync, copyFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { writeAtomic } from "../src/lib/fs-race-safe.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { readPersistedInbox, persistedInboxPath, triageFleetLane } from "../src/lib/fleet-lane.js";
 import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 import { INBOX_RECEIPT_DIR, mountInstanceInboxRoutes, type InstanceInboxBinding } from "../src/lib/instance-inbox-contract.js";
 import { defaultInstanceInboxSources } from "../src/lib/instance-gateway.js";
-import { WHY_ME_PRESENCE_DIR, whyMePresencePath, correctionOf, observeWhyMeFeedback, withWhyMeJudgmentInput, validWhyMeFeedback, whyMeMismatch, whyMePayload } from "../src/lib/inbox-why-me.js";
+import { WHY_ME_PRESENCE_DIR, whyMePresencePath, correctionOf, observeWhyMeFeedback, projectWhyMeFeedback, withWhyMeJudgmentInput, validWhyMeFeedback, whyMeMismatch, whyMePayload } from "../src/lib/inbox-why-me.js";
 import { verifyHumanCadence } from "../src/lib/measurement-cadence.js";
 import { buildVerifyHumanJudgePrompt, observedStateKey, currentVerifyHumanRulings, type ShardUnderJudgement, type VerifyHumanVerdict } from "../src/lib/verify-human-judge.js";
 import { inboxThreadId } from "../src/lib/inbox-thread.js";
@@ -541,4 +544,122 @@ test("the scoped census declares its real read-write and read-only contract mode
       if (mode === "read-only") renameSync(w.registry + ".saved", w.registry);
     }
   }
+});
+
+
+/** Force a real pathname change immediately after its check; the opened inode must win. */
+function checkedReceiptIo<T>(t: TestContext, path: string, change: () => void, run: () => T): T {
+  const open = fs.openSync, stat = fs.statSync, fstat = fs.fstatSync;
+  const descriptors = new Set<number>(); let changed = 0;
+  const changeOnce = () => { if (changed++ === 0) change(); };
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    const fd = Reflect.apply(open, fs, args) as number;
+    if (String(args[0]) === path) descriptors.add(fd);
+    return fd;
+  });
+  t.mock.method(fs, "statSync", (...args: Parameters<typeof fs.statSync>) => {
+    const result = Reflect.apply(stat, fs, args);
+    if (String(args[0]) === path) changeOnce();
+    return result;
+  });
+  t.mock.method(fs, "fstatSync", (...args: Parameters<typeof fs.fstatSync>) => {
+    const result = Reflect.apply(fstat, fs, args);
+    if (descriptors.has(args[0])) changeOnce();
+    return result;
+  });
+  syncBuiltinESMExports();
+  try { const result = run(); assert.ok(changed > 0, "the receipt check was reached"); return result; }
+  finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    for (const fd of descriptors) assert.throws(() => fstat(fd), { code: "EBADF" }, "opened receipt is closed");
+  }
+}
+
+for (const reader of ["projection", "judge intake"] as const) {
+  test(`why-me ${reader} reads the checked inode after a real pathname replacement`, async t => {
+    const w = await world(t), ack = await w.call(w.request("why-me-inode-identity"));
+    await w.refresh();
+    const source = readPersistedInbox(w.state)!;
+    const path = join(w.state, INBOX_RECEIPT_DIR, ack.body.correction.receiptId + ".json");
+    const outcome = checkedReceiptIo(t, path, () => {
+      renameSync(path, path + ".original"); writeFileSync(path, JSON.stringify({ action: "reply" }));
+    }, () => reader === "projection"
+      ? projectWhyMeFeedback(w.state, OWN_SCOPE, source.attentionCensus!, source.generatedAt)
+      : withWhyMeJudgmentInput([{ id: "W1-T216" }], w.state, source, Date.now(), OWN_SCOPE)[0]!);
+    if ("items" in outcome) {
+      assert.equal(outcome.state, "observed");
+      assert.deepEqual(outcome.items.map(item => item.receiptId), [ack.body.correction.receiptId]);
+    } else {
+      assert.equal(outcome.whyMeFeedbackUnavailable, undefined);
+      assert.equal(outcome.whyMeFeedback!.receipts[0]!.receiptId, ack.body.correction.receiptId);
+    }
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).action, "reply", "the replacement actually exists");
+  });
+}
+
+test("why-me receipt growth after its checked size stays bounded and explicitly unknown", async t => {
+  const w = await world(t), ack = await w.call(w.request("why-me-growth-bound")); await w.refresh();
+  const source = readPersistedInbox(w.state)!, path = join(w.state, INBOX_RECEIPT_DIR, ack.body.correction.receiptId + ".json");
+  const original = readFileSync(path, "utf8"), bound = 1024 * 1024;
+  writeFileSync(path, original + " ".repeat(bound - Buffer.byteLength(original)));
+  assert.equal(projectWhyMeFeedback(w.state, OWN_SCOPE, source.attentionCensus!, source.generatedAt).items.length, 1,
+    "a valid receipt exactly at the limit is measured");
+  writeFileSync(path, original);
+  const read = fs.readSync; let bytesRead = 0;
+  t.mock.method(fs, "readSync", (...args: Parameters<typeof fs.readSync>) => {
+    const count = Reflect.apply(read, fs, args) as number; bytesRead += count; return count;
+  });
+  const grown = checkedReceiptIo(t, path, () => appendFileSync(path, " ".repeat(bound + 1)), () =>
+    projectWhyMeFeedback(w.state, OWN_SCOPE, source.attentionCensus!, source.generatedAt));
+  assert.equal(grown.state, "partial"); assert.equal(grown.items.length, 0);
+  assert.equal(bytesRead, bound + 1, "growth reads only one byte beyond the bound before refusing");
+  const intake = withWhyMeJudgmentInput([{ id: "W1-T216" }], w.state, source, Date.now(), OWN_SCOPE)[0]!;
+  assert.equal(intake.whyMeFeedback, undefined);
+  assert.match(intake.whyMeFeedbackUnavailable!, /verification bound/);
+});
+
+test("why-me receipt symlinks and non-regular files never become verified history or outcomes", async t => {
+  const w = await world(t), ack = await w.call(w.request("why-me-nonregular")); await w.refresh();
+  const source = readPersistedInbox(w.state)!, path = join(w.state, INBOX_RECEIPT_DIR, ack.body.correction.receiptId + ".json");
+  renameSync(path, path + ".saved"); fs.symlinkSync(path + ".saved", path);
+  const history = projectWhyMeFeedback(w.state, OWN_SCOPE, source.attentionCensus!, source.generatedAt);
+  assert.equal(history.state, "partial"); assert.equal(history.items.length, 0);
+  assert.ok(withWhyMeJudgmentInput([{ id: "W1-T216" }], w.state, source, Date.now(), OWN_SCOPE)[0]!.whyMeFeedbackUnavailable);
+  assert.throws(() => observeWhyMeFeedback(w.state, source.whyMeFeedback, source.attentionCensus, source.generatedAt, source.generatedAt));
+  rmSync(path); mkdirSync(path);
+  const directory = projectWhyMeFeedback(w.state, OWN_SCOPE, source.attentionCensus!, source.generatedAt);
+  assert.equal(directory.state, "partial"); assert.equal(directory.items.length, 0);
+});
+
+test("why-me receipt descriptors close after malformed JSON and real descriptor read failure", async t => {
+  const w = await world(t), ack = await w.call(w.request("why-me-close-on-error")); await w.refresh();
+  const source = readPersistedInbox(w.state)!, path = join(w.state, INBOX_RECEIPT_DIR, ack.body.correction.receiptId + ".json");
+  const original = readFileSync(path, "utf8"); writeFileSync(path, "broken JSON");
+  const malformed = checkedReceiptIo(t, path, () => {}, () => projectWhyMeFeedback(w.state, OWN_SCOPE, source.attentionCensus!, source.generatedAt));
+  assert.equal(malformed.state, "partial");
+  writeFileSync(path, original);
+  const read = fs.readSync;
+  t.mock.method(fs, "readSync", () => { throw Object.assign(new Error("read failed"), { code: "EIO" }); });
+  syncBuiltinESMExports();
+  try {
+    const failed = checkedReceiptIo(t, path, () => {}, () =>
+      withWhyMeJudgmentInput([{ id: "W1-T216" }], w.state, source, Date.now(), OWN_SCOPE)[0]!);
+    assert.match(failed.whyMeFeedbackUnavailable!, /EIO/);
+  } finally { fs.readSync = read; syncBuiltinESMExports(); }
+});
+
+test("why-me receipt FIFOs are refused without waiting for a writer", t => {
+  const state = makeTempDir("why-me-receipt-fifo");
+  t.after(() => rmSync(state, { recursive: true, force: true }));
+  const dir = join(state, INBOX_RECEIPT_DIR); mkdirSync(dir);
+  assert.equal(spawnSync("mkfifo", [join(dir, "a".repeat(64) + ".json")]).status, 0);
+  const script = `import { projectWhyMeFeedback } from "./src/lib/inbox-why-me.ts";
+    const view = projectWhyMeFeedback(${JSON.stringify(state)}, ${JSON.stringify(OWN_SCOPE)},
+      { items: [], snapshotKey: "a".repeat(64) }, new Date().toISOString());
+    console.log(JSON.stringify(view));`;
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 5000 });
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  const view = JSON.parse(child.stdout);
+  assert.equal(view.state, "partial"); assert.equal(view.total, 0);
 });
