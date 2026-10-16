@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: read-only investigation of the core daemon's CPU and memory, 02:25-02:57Z (coordinator brief, task A)"
   plan_refs: [W1-T9374, W1-T8776, W1-T8777, W1-T8778, W1-T9077, W1-T9117, W1-T9091, W1-T9555]
   files: [src/lib/child-entry-argv.ts, src/lib/child-entry-store.ts, test/the-daemon-fills-the-child-entry-store-for-its-own-tree.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

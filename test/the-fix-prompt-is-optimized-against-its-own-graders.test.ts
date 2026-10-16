@@ -21,6 +21,7 @@ const BASE_PROMPT = "You are the fix-rung worker. Read the failing proof and rep
 function transcript(overrides: Partial<FixTranscript> & { taskId: string }): FixTranscript {
   return {
     taskShape: "fix",
+    model: "claude-sonnet-5",
     commitRefusedReason: "diff touched a file outside the declared scope",
     excerpt: "the diff edited src/lib/unrelated.ts, which is not in files:",
     ...overrides,
@@ -114,12 +115,12 @@ test("W1-T4665: candidates are proposed from recorded fix transcripts and scored
   // The optional fields are refused individually too, not only when a required field is missing --
   // an out-of-bounds commitRefusedReason or reviewerVerdict is never silently accepted.
   assert.equal(
-    validateFixTranscript({ taskId: "y", taskShape: "fix", excerpt: "ok", commitRefusedReason: "" }),
+    validateFixTranscript({ taskId: "y", taskShape: "fix", model: "m", excerpt: "ok", commitRefusedReason: "" }),
     null,
     "an empty commitRefusedReason must be refused",
   );
   assert.equal(
-    validateFixTranscript({ taskId: "z", taskShape: "fix", excerpt: "ok", reviewerVerdict: "v".repeat(400) }),
+    validateFixTranscript({ taskId: "z", taskShape: "fix", model: "m", excerpt: "ok", reviewerVerdict: "v".repeat(400) }),
     null,
     "an over-long reviewerVerdict must be refused",
   );
@@ -127,6 +128,7 @@ test("W1-T4665: candidates are proposed from recorded fix transcripts and scored
   const withVerdict = validateFixTranscript({
     taskId: "verdict-only",
     taskShape: "fix",
+    model: "m",
     excerpt: "ok",
     reviewerVerdict: "changes requested: scope violation",
   });
@@ -136,7 +138,7 @@ test("W1-T4665: candidates are proposed from recorded fix transcripts and scored
   // counted on either side of the split.
   const withDuplicatesAndJunk = [
     ...corpus,
-    { taskId: "scope-0", taskShape: "fix", excerpt: "duplicate of an already-seen taskId" },
+    { taskId: "scope-0", taskShape: "fix", model: "claude-sonnet-5", excerpt: "duplicate of an already-seen taskId" },
     "not-an-object",
     { taskId: "bad" },
   ];
@@ -158,6 +160,7 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
     basePrompt: BASE_PROMPT,
     transcripts: corpus,
     seed: "fix-rung-prompt-v1",
+    model: "claude-sonnet-5",
     baseline: "fix-rung-prompt-v0",
     scope: { repo: "owner/repo", policyScope: "fix-rung-prompt", taskType: "fix" },
     comparisonPopulation: "owner/repo fix-rung tasks on main",

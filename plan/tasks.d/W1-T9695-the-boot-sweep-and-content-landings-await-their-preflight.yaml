@@ -1,0 +1,80 @@
+- id: W1-T9695
+  title: "THE BOOT SWEEP, THE CONTENT LANDINGS AND THE CI-LEARNING VERB STILL DRIVE THE SYNCHRONOUS PLAN-PR PREFLIGHT — W1-T9660's census row for runInTree (plan-pr-emitter's spawnSync in-tree checks: lint-plan precheck, task-id existence, check-proof, the shard census) names three sync drivers no conversion covers: daemonBoot's sweepFeedbackLanding, landContent (the measurement cadence's plan-reconcile landing and the evidence-coverage filer's status landing) and landCiLearningShards; each runs driveLanding with syncPreflightOf"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which plan-PR preflight the boot sweep and the content landings drive; the trees, commits, pushes and verdicts are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: W1-T9660 (#12081, fcfaeb5d4) recorded runInTree's census row with no conversion filed for these drivers"
+  plan_refs: [W1-T9660, W1-T9615, W1-T9638, W1-T5620, W1-T5521, W1-T5965, W1-T5460, W1-T3970, W1-T5689, W1-T147]
+  files:
+    - src/lib/feedback-landing.ts
+    - src/lib/daemon.ts
+    - src/lib/evidence-coverage-gardener.ts
+    - src/run-task.ts
+    - test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: merged
+  priority: 2  # operator-2026-10-15: W1-T9615 measured this preflight holding the loop 60-190 s per landing
+  attempts: 0
+  rationale: |
+    READ at origin/main 03269ad67 (2026-10-15):
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts holds `runInTree: 1`, with the comment "via
+      defaultPreflightChecks, driven sync by the boot sweep, landContent and landCiLearningShards
+      (syncPreflightOf); W1-T9615 converted the SRE capture, W1-T9638 the per-poll landing".
+    - src/lib/feedback-landing.ts `syncPreflightOf` defaults to `planPrPreflightAtCommit`. That runs
+      `defaultPreflightChecks`, and each of its checks spawnSyncs through `runInTree` (src/lib/plan-pr-emitter.ts).
+      `planPrPreflightAtCommitAsync` / `runInTreeAsync` and `driveLandingAsync` already exist beside them.
+    - THE BOOT SWEEP. src/lib/daemon.ts `daemonBoot` calls the injected `sweepFeedbackLanding()` synchronously.
+      run-task.ts `feedbackLandingSweepRungs` wires it as `atBoot: () => sweepFeedbackLanding(root, opts)`, the
+      sync form; `perPoll` already awaits `sweepFeedbackLandingAsync` (W1-T5620).
+    - LANDCONTENT. `landContent` runs `driveLanding(landContentSteps(...), syncPreflightOf(root, opts))`.
+      Daemon-side callers:
+      - `landPlanReconcileShards`, from run-task.ts `buildPlanReconcileProductionInput`'s `land` closure in the
+        measurement-cadence hooks (W1-T3970);
+      - `landFeedbackStatusContent` when no `stateRoot` is passed, from src/lib/evidence-coverage-gardener.ts
+        `feedbackEvidenceCoverageFiler`.
+      `landFeedbackStatusContent` already queues under a `stateRoot` (W1-T5460's queueFeedbackLanding). Then no
+      preflight runs; the per-poll async sweep lands the record.
+    - LANDCILEARNINGSHARDS. The daemon awaits `landCiLearningShardsAsync` (W1-T5965). The sync form's one caller is
+      run-task.ts `ciLearningCommand` (the `rmd ci-learning` verb). The name-based census reaches it through the
+      command table.
+    Shared surface: W1-T147 (the overnight chaos drill) also declares src/lib/daemon.ts and src/run-task.ts. It
+    injects faults and checks recovery rows; it does not touch the landing's preflight, so the two do not overlap in
+    substance.
+  design: |
+    1. The boot sweep awaits `sweepFeedbackLandingAsync`. `feedbackLandingSweepRungs.atBoot` returns a promise.
+       daemonBoot awaits it inside its existing try, keeps the `daemon.feedback_landing_sweep` row, and still
+       never throws onward.
+    2. Each landContent driver the daemon reaches stops running the sync preflight:
+       - a status landing passes a `stateRoot`, so it queues for the per-poll async sweep. The evidence-coverage
+         filer gets the daemon's state root from its garden wiring;
+       - the plan-reconcile landing awaits an async `landContent` form built on `driveLandingAsync` and
+         `asyncSeamsOf`, the same pairing landCiLearningShardsAsync uses. The cadence hook already turns a thrown
+         landing into a recorded error.
+       A CLI-only caller may keep a sync form only where the census walk does not reach it from daemonCommand.
+    3. `ciLearningCommand` awaits `landCiLearningShardsAsync`. The sync `landCiLearningShards` is deleted once it
+       has no caller.
+    4. Re-measure runInTree's reach at the build's base with the census walk. When no other driver reaches it,
+       delete its row. Otherwise rewrite its comment to name only the drivers left: captureFeedback's inline
+       landFeedback (the next task, which depends on this one) and anything the base adds. Never leave a stale
+       driver named.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - daemonBoot with an async sweep stub that resolves after a tick: boot awaits it and logs its row;
+       - the plan-reconcile land closure drives the async preflight and never the sync one. Inject a sync
+         preflight that throws if called; the positive control is an async one that is called;
+       - the evidence-coverage filer's status landing queues under the state root and runs no preflight.
+  acceptance:
+    - claim: "the boot sweep, the plan-reconcile landing and the evidence-coverage status landing never drive the synchronous plan-pr preflight"
+      proof: 'unit test: test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts'
+    - claim: "daemonBoot awaits the async feedback-landing sweep"
+      proof: 'grep: test("W1-T9695: the boot sweep awaits the async feedback landing" in test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts'
+    - claim: "the measurement cadence's plan-reconcile landing awaits the async preflight"
+      proof: 'grep: test("W1-T9695: the plan-reconcile landing never drives the sync preflight" in test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts'
+  falsifier: |
+    At origin/main, buildPlanReconcileProductionInput's land closure with no injected `land` calls
+    landPlanReconcileShards, which runs syncPreflightOf's planPrPreflightAtCommit. A throwing sync preflight
+    reached through it fails the second test.

@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-14 (chat, \"go\"): file the #11519 capacity-estimator fix at priority 1; standing rulings: no hard fixed thresholds, never raise core memory.max"
   plan_refs: [W1-T7094, W1-T7095, W1-T9097, W1-T9106]
   files: [src/lib/host-memory-priority.ts, src/lib/host-memory-shadow.ts, test/the-capacity-decision-charges-the-daemons-typical-growth.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

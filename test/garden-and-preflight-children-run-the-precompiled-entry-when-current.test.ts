@@ -126,18 +126,18 @@ test("W1-T8778: the pre-open preflight runs the bundle when current and bin/rmd 
   writeFileSync(join(root, "bin", "rmd"), "#!/usr/bin/env bash\n");
   const { log } = rows();
 
-  // A worktree with its own bin/rmd and a current bundle: plain node on the bundle, no --repo-root.
-  assert.deepEqual(preopenGateLaunch(root, log), { file: process.execPath, args: [bundle, "preflight", "--fast"] });
-
-  // A consumer worktree (no bin/rmd of its own) runs the harness's current bundle against `--repo-root <cwd>`.
+  // W1-T9619: the HARNESS's current bundle runs against `--repo-root <cwd>`, for a worktree holding its own
+  // bin/rmd and bundle (that tree's own code never runs) and for a consumer worktree alike.
+  const core = makeTree();
+  mkdirSync(join(core, "bin"));
+  writeFileSync(join(core, "bin", "rmd"), "#!/usr/bin/env bash\n");
+  assert.deepEqual(preopenGateLaunch(core, log, "/h/bin/rmd", root), { file: process.execPath, args: [bundle, "preflight", "--fast", "--repo-root", core] });
   const consumer = scratch("t8778-consumer");
   assert.deepEqual(preopenGateLaunch(consumer, log, "/h/bin/rmd", root), { file: process.execPath, args: [bundle, "preflight", "--fast", "--repo-root", consumer] });
 
-  // No current bundle: today's launch, unchanged.
+  // No current harness bundle: the harness's bin/rmd, still with `--repo-root`.
   const stale = makeTree();
-  mkdirSync(join(stale, "bin"));
-  writeFileSync(join(stale, "bin", "rmd"), "#!/usr/bin/env bash\n");
-  assert.deepEqual(preopenGateLaunch(stale, log), { file: join(stale, "bin", "rmd"), args: ["preflight", "--fast"] });
+  assert.deepEqual(preopenGateLaunch(root, log, "/h/bin/rmd", stale), { file: "/h/bin/rmd", args: ["preflight", "--fast", "--repo-root", root] });
   assert.deepEqual(preopenGateLaunch(consumer, log, "/h/bin/rmd", stale), { file: "/h/bin/rmd", args: ["preflight", "--fast", "--repo-root", consumer] });
 });
 
@@ -158,8 +158,8 @@ test("W1-T8778: each switched spawn ledgers its entry kind and reason", async ()
   ]);
 
   const gate = rows();
-  preopenGateLaunch(root, gate.log);
-  preopenGateLaunch(bare, gate.log);
+  preopenGateLaunch(bare, gate.log, "/h/bin/rmd", root);
+  preopenGateLaunch(root, gate.log, "/h/bin/rmd", bare);
   assert.deepEqual(spawnedRows(gate.out).map((r) => r.extra), [
     { name: NAME, verb: "preflight --fast", kind: "bundle", reason: "source-hash-match" },
     { name: NAME, verb: "preflight --fast", kind: "tsx", reason: "no-manifest" },

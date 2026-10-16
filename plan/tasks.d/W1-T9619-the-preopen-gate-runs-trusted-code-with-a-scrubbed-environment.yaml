@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: security finding in src/lib/preopen-gate.ts, read at origin/main; operator approved filing on 2026-10-15"
   plan_refs: [W1-T9556, W1-T9602, W1-T8920, W1-T8778, W1-T8945, W1-T6124, W1-T3280]
   files: [src/lib/preopen-gate.ts, test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts, test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts, test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts, test/the-fast-gate-backstop-holds-while-the-loop-is-frozen.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

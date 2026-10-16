@@ -5,17 +5,21 @@ import { splitHeldOut, type FixRungOutcome, type FixTranscript } from "../src/li
 
 const BASE_PROMPT = "You are the fix-rung worker. Read the failing proof and repair only what it names.";
 const SEED = "fix-rung-prompt-v1";
+// W1-T9640: every transcript names its worker model, and a promotion is proposed for one model.
+const MODEL = "claude-sonnet-5";
 
 function corpus(): FixTranscript[] {
   const scope = Array.from({ length: 10 }, (_, i): FixTranscript => ({
     taskId: `scope-${i}`,
     taskShape: "fix",
+    model: MODEL,
     commitRefusedReason: "diff touched a file outside the declared scope",
     excerpt: "the diff edited a file outside the task's declared files: list",
   }));
   const proof = Array.from({ length: 10 }, (_, i): FixTranscript => ({
     taskId: `proof-${i}`,
     taskShape: "implement",
+    model: MODEL,
     commitRefusedReason: "acceptance proof was never re-run before commit",
     excerpt: "the worker committed without re-running the grep proof named in acceptance",
   }));
@@ -27,6 +31,7 @@ function input(overrides: Partial<PromptEvolutionPromotionInput> = {}): PromptEv
     basePrompt: BASE_PROMPT,
     transcripts: corpus(),
     seed: SEED,
+    model: MODEL,
     baseline: "fix-rung-prompt-v0",
     scope: { repo: "owner/repo", policyScope: "fix-rung-prompt", taskType: "fix" },
     comparisonPopulation: "owner/repo fix-rung tasks on main",

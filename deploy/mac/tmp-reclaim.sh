@@ -31,7 +31,12 @@ else
 fi
 
 APPLY=0
-[ "${1:-}" = "--apply" ] && APPLY=1
+TSX_ONLY=0
+for option in "$@"; do
+  case "$option" in --apply) APPLY=1 ;; --dry-run) APPLY=0 ;; --tsx-only) TSX_ONLY=1 ;;
+    *) printf 'unknown cleanup option: %s\n' "$option" >&2; exit 2 ;;
+  esac
+done
 ROOT="${RMD_RECLAIM_ROOT:-/private/tmp}"
 SESSION_ROOT="${RMD_RECLAIM_SESSION_ROOT:-$HOME/Remudero/.session-scratch}"
 REPORT="${RMD_RECLAIM_REPORT:-$HOME/Library/Logs/remudero/tmp-reclaim-kept.txt}"
@@ -68,6 +73,7 @@ esac
 BEFORE_AVAIL_KB=$(df -k "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
 # tsx's transpile cache is regenerable, so it follows the same fixed six-hour window.
 TSX_AGE_MIN=$AGE_MIN
+TSX_FIND="${RMD_RECLAIM_TSX_FIND:-find}"
 LSOF_CMD="${RMD_RECLAIM_LSOF:-$(command -v lsof 2>/dev/null || printf '/usr/sbin/lsof')}"
 if [ -n "${TMPDIR:-}" ]; then
   TSX_TMP_ROOT="${TMPDIR%/}"
@@ -282,13 +288,30 @@ prune_old_tree_files() {
 # prune only regular, account-owned entries older than the age window. An open-file scan
 # fails closed so an active compiler's cache is not disturbed.
 prune_tsx_cache() {
-  local dir="$1" files owner_name count active
+  local dir="$1" strict="${2:-0}" files owner_name count active parent entry entries
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   owner_name=$(owner "$dir" 2>/dev/null)
   if [ "$owner_name" != "$ME" ]; then
     TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache owned by ${owner_name:-unknown}" "$dir"; return 0
   fi
-  if ! files=$(find "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -print 2>/dev/null); then
+  if [ "$strict" = 1 ]; then
+    parent="$dir"
+    while [ "$parent" != / ]; do
+      if [ -e "$parent/.git" ] || [ -L "$parent/.git" ] || [ -e "$parent/.rmd-janitor-keep" ]; then
+        report_risk 'TSX discovery retains Git-owned or explicitly retained data' "$dir"; return 0
+      fi
+      parent=${parent%/*}; [ -n "$parent" ] || parent=/
+    done
+    if active=$(rmd_dependency_seed_risk "$dir"); then report_risk "$active" "$dir"; return 0; fi
+    entries=$(find -P "$dir" -xdev ! -type d -print 2>/dev/null) || { report_risk 'TSX content scan unavailable' "$dir"; return 0; }
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      if [ ! -f "$entry" ] || [ -L "$entry" ] || [[ ! "${entry##*/}" =~ ^[0-9]+-[0-9a-f]{40}$ ]]; then
+        report_risk 'TSX discovery contains unrecognized or special data' "$dir"; return 0
+      fi
+    done <<< "$entries"
+  fi
+  if ! files=$("$TSX_FIND" "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -cmin "+$TSX_AGE_MIN" -print 2>/dev/null); then
     TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache age scan unverified' "$dir"; return 0
   fi
   [ -n "$files" ] || return 0
@@ -301,7 +324,7 @@ prune_tsx_cache() {
     if active=$(path_is_live_or_unknown "$(cd "$dir" 2>/dev/null && pwd -P)"); then
       TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache $active" "$dir"; return 0
     fi
-    if ! find "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -exec rm -f -- {} +; then
+    if ! "$TSX_FIND" "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -cmin "+$TSX_AGE_MIN" -exec rm -f -- {} +; then
       TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache prune incomplete' "$dir"; return 0
     fi
     TSX_PRUNED_N=$((TSX_PRUNED_N+count))
@@ -407,6 +430,23 @@ process_session_scratch_dir() {
 
 cd "$ROOT" || exit 1
 ROOT_REAL=$(pwd -P)
+discover_tsx_caches() {
+  # Scheduled janitor calls cover each configured root, including historical
+  # job TMPDIRs. Never follow symlinks, enter dependencies/Git/runtime state,
+  # or interpret an incomplete discovery as an empty population.
+  caches=$(find -P "$ROOT_REAL" -xdev -maxdepth 8 \
+    \( -name .git -o -name node_modules -o -name .claude -o -name .codex -o -name .ssh -o -name state -o -name lanes \) -prune -o \
+    -type d -name 'tsx-[0-9]*' -print -prune 2>/dev/null)
+  discovery_status=$?
+  if [ "$discovery_status" -ne 0 ]; then report_risk 'TSX discovery incomplete' "$ROOT_REAL"; fi
+  while IFS= read -r cache; do
+    [ -n "$cache" ] || continue
+    cache_uid=${cache##*/}; cache_uid=${cache_uid#tsx-}
+    case "$cache_uid" in ''|*[!0-9]*) continue ;; esac
+    prune_tsx_cache "$cache" 1
+  done <<< "$caches"
+}
+if [ "$TSX_ONLY" = 0 ]; then
 for p in ./* ./.[!.]*; do
   e=${p#./}
   [ -e "./$e" ] || continue
@@ -422,8 +462,10 @@ for p in ./* ./.[!.]*; do
   fi
   process_tmp_entry "./$e"
 done
+fi
+discover_tsx_caches
 TMP_REAL=$(cd "$TSX_TMP_ROOT" 2>/dev/null && pwd -P)
-if [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
+if [ "$TSX_ONLY" = 0 ] && [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
   for p in "$TSX_TMP_ROOT"/tsx-*; do
     [ -d "$p" ] && [ ! -L "$p" ] && prune_tsx_cache "$p"
   done
@@ -432,7 +474,7 @@ fi
 # The account-local Remudero session scratch root is opt-in by existence, never created here.
 # Without a test override, insist on the canonical ~/Remudero/.session-scratch location and reject
 # symlinked roots/parents so a path swap cannot redirect cleanup elsewhere.
-if [ -e "$SESSION_ROOT" ] || [ -L "$SESSION_ROOT" ]; then
+if [ "$TSX_ONLY" = 0 ] && { [ -e "$SESSION_ROOT" ] || [ -L "$SESSION_ROOT" ]; }; then
   session_root_ok=1
   if [ -L "$SESSION_ROOT" ] || [ ! -d "$SESSION_ROOT" ]; then
     report_risk 'session scratch root is not a real directory' "$SESSION_ROOT"; session_root_ok=0

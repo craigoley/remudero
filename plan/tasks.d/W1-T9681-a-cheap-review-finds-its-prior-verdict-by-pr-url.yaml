@@ -10,11 +10,12 @@
   band_meaning: span
   origin: "operator session 2026-10-15 flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-15/RESULTS.txt section 8 and finding 4): a W1-T9558 / W1-T3901 follow-up"
   plan_refs: [W1-T9558, W1-T3901, W1-T5839, W1-T5713]
-  files: [src/run-task.ts, test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts]
-  status: queued
+  files: [src/run-task.ts, src/lib/review.ts, test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts, test/review-reuse-discrimination-outcome.test.ts, test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts]
+  status: merged
   priority: 2  # operator-2026-10-15: costs review lane time, not correctness; every cheap head still gets a full review
   attempts: 0
   rationale: |
+    AMENDED 2026-10-15 (builder B7's finding): the original claim 2 named a PLAN FILING, but assessReviewReuse in src/lib/sweep.ts (W1-T4423) refuses to discriminate any plan-only verdict ("a plan-only verdict needs a full review to re-run lint-plan"), so a plan filing still takes a full review after this task; it now finds its verdict by URL and names that cause. Claim 2 therefore names a HAND PR, the case the fix makes cheap. The helpers live in src/lib/review.ts and the runner wiring is proven in the existing review-reuse suite, because a new suite importing src/run-task.ts trips the affected-reach ratchet.
     MEASURED 2026-10-15 (core ledger union, read-only; cheap-review-out.txt):
     - In window A: 7 discriminate-only admissions, 0 review-reused, and 124 full-review admissions on the light
       pass. Since 10-14 23:19Z, 10 of 10 discriminate-only admissions wrote
@@ -42,8 +43,8 @@
   acceptance:
     - claim: "a discriminate-only review of a PR with no task id reuses its prior verdict found by PR URL"
       proof: 'unit test: test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts'
-    - claim: "a plan filing with a prior success verdict runs the discriminate-only path, not a full review"
-      proof: 'grep: test("W1-T9681: a plan filing with no task id runs its cheap review from the verdict its url names" in test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts'
+    - claim: "a hand PR with no task id and a prior success verdict runs the discriminate-only path, not a full review"
+      proof: 'grep: test("W1-T9681: a hand PR with no task id runs its cheap review from the verdict its url names" in test/review-reuse-discrimination-outcome.test.ts'
     - claim: "a fallback names which reuse fact was missing"
       proof: 'grep: test("W1-T9681: a cheap review fallback names the one fact it could not read" in test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts'
   falsifier: |

@@ -148,3 +148,162 @@ test("producer CLI refuses an implicit run and exposes explicit prepare and coll
   assert.equal(main([]), 2); assert.equal(main(["run", "--directory", "/nonexistent"]), 2);
   assert.equal(main(["--help"]), 0);
 });
+
+// Child isolation keeps syncBuiltinESMExports interception out of other tests. Except for the explicitly
+// simulated capability/metadata cases, the default production helper performs real open/stat/read/close.
+function corpusProbe(body: string, timeout = 3000) {
+  const program = `
+    import assert from "node:assert/strict";
+    import fs from "node:fs";
+    import {syncBuiltinESMExports} from "node:module";
+    import {runInNewContext} from "node:vm";
+    import {createHash} from "node:crypto";
+    import {spawnSync} from "node:child_process";
+    import {tmpdir} from "node:os";
+    import {join} from "node:path";
+    const moduleUrl = ${JSON.stringify(new URL("../scripts/lib/read-map-corpus.mjs", import.meta.url).href)};
+    const {readCorpusBytes} = await import(moduleUrl);
+    const real = {openSync:fs.openSync, closeSync:fs.closeSync, fstatSync:fs.fstatSync, readSync:fs.readSync};
+    const home = fs.mkdtempSync(join(tmpdir(), "rmd-corpus-descriptor-")), path = join(home, "input");
+    const epoch = Math.floor(Date.now()/1000)-60;
+    const reset = () => {fs.writeFileSync(path,"ORIGINAL");fs.utimesSync(path,epoch,epoch);};
+    let evidence = {};
+    try { reset(); ${body}; console.log(JSON.stringify(evidence)); }
+    finally {Object.assign(fs,real);syncBuiltinESMExports();fs.rmSync(home,{recursive:true,force:true});}
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", program], {
+    cwd: ROOT, encoding: "utf8", timeout, env: { ...process.env },
+  });
+  assert.equal(child.error, undefined, child.error?.message);
+  assert.equal(child.status, 0, child.stderr || child.stdout);
+  return JSON.parse(child.stdout);
+}
+
+test("corpus byte bounds reject invalid limits before open and retain every caller limit", () => {
+  const result = corpusProbe(`
+    let opens=0;fs.openSync=(...args)=>{opens++;return real.openSync(...args);};syncBuiltinESMExports();
+    for(const limit of [NaN,Infinity,-Infinity,0,-1,8.5,"8",null,2**53,256*1024**2+1])
+      assert.throws(()=>readCorpusBytes(path,limit),/maximumBytes/);
+    assert.equal(opens,0);
+    for(const limit of [8,4*1024**2,8*1024**2,16*1024**2,256*1024**2])
+      assert.equal(readCorpusBytes(path,limit).bytes.toString(),"ORIGINAL");
+    assert.throws(()=>readCorpusBytes(path,7),/bounded regular/);
+    evidence={invalidRefusedBeforeOpen:true,validCallerLimits:5,opens};
+  `);
+  assert.equal(result.invalidRefusedBeforeOpen, true);
+  assert.equal(result.opens, 6);
+});
+
+test("corpus byte reads refuse simulated unavailable or meaningless flags before open", () => {
+  const result = corpusProbe(`
+    const source=fs.readFileSync(new URL(moduleUrl),"utf8");
+    const text=source.match(/export function readCorpusBytes[\\s\\S]*?\\n}/)[0].replace(/^export /,"");
+    let refused=0;
+    for(const key of ["O_NOFOLLOW","O_NONBLOCK"])for(const value of [undefined,0,-1,NaN,Infinity,2**32,1.5]){
+      let opens=0;
+      const helper=runInNewContext("("+text+")",{...real,
+        constants:{...fs.constants,[key]:value},Buffer,
+        openSync:()=>{opens++;throw Error("must refuse before open");},
+        digest:bytes=>createHash("sha256").update(bytes).digest("hex")});
+      assert.throws(()=>helper(path),/file flags unavailable/);assert.equal(opens,0);refused++;
+    }
+    evidence={simulated:true,refused};
+  `);
+  assert.equal(result.simulated, true); assert.equal(result.refused, 14);
+});
+
+test("corpus descriptor snapshot rejects real partial-read mutation despite restored mtime", () => {
+  const result = corpusProbe(`
+    let reads=0,closed=0,mutation;
+    fs.readSync=(fd,buffer,offset,length,position)=>{
+      const count=real.readSync(fd,buffer,offset,Math.min(length,4),position);reads++;
+      if(reads===1){const before=real.fstatSync(fd),tick=performance.now();while(performance.now()-tick<3){}
+        fs.writeFileSync(path,"MUTATED!");fs.utimesSync(path,epoch,epoch);const after=real.fstatSync(fd);
+        mutation={sameInode:before.ino===after.ino,sameDev:before.dev===after.dev,sameSize:before.size===after.size,
+          sameMtime:before.mtimeMs===after.mtimeMs,changedCtime:before.ctimeMs!==after.ctimeMs};}
+      return count;
+    };
+    fs.closeSync=fd=>{closed++;return real.closeSync(fd);};syncBuiltinESMExports();
+    assert.throws(()=>readCorpusBytes(path),/changed during capture/);
+    assert.deepEqual(mutation,{sameInode:true,sameDev:true,sameSize:true,sameMtime:true,changedCtime:true});
+    assert.equal(reads,2);assert.equal(closed,1);
+    evidence={controlledInterception:true,mutation,reads,closed};
+  `);
+  assert.equal(result.mutation.changedCtime, true); assert.equal(result.reads, 2);
+});
+
+test("corpus descriptor snapshot reads the opened inode rather than a replacement pathname", () => {
+  const result = corpusProbe(`
+    const saved=join(home,"opened"),sentinel=join(home,"sentinel");fs.writeFileSync(sentinel,"FORBIDDEN");
+    let opened=0,reads=0;
+    fs.openSync=(...args)=>{const fd=real.openSync(...args);opened++;
+      fs.renameSync(path,saved);fs.symlinkSync(sentinel,path);return fd;};
+    fs.readSync=(...args)=>{reads++;return real.readSync(...args);};syncBuiltinESMExports();
+    assert.equal(readCorpusBytes(path).bytes.toString(),"ORIGINAL");
+    assert.equal(opened,1);assert.equal(reads,1);assert.equal(fs.readFileSync(path,"utf8"),"FORBIDDEN");
+    evidence={opened,reads,replacementNotRead:true};
+  `);
+  assert.equal(result.replacementNotRead, true);
+});
+
+test("corpus descriptor snapshot accepts stable partial reads and refuses EOF growth and truncation", () => {
+  const result = corpusProbe(`
+    let partialReads=0;fs.readSync=(fd,b,o,n,p)=>{partialReads++;return real.readSync(fd,b,o,Math.min(2,n),p);};
+    syncBuiltinESMExports();assert.equal(readCorpusBytes(path).bytes.toString(),"ORIGINAL");assert.equal(partialReads,4);
+    for(const kind of ["EOF","growth","truncation"]){reset();let reads=0;
+      fs.readSync=(fd,b,o,n,p)=>{reads++;if(reads===1){
+        const got=real.readSync(fd,b,o,Math.min(2,n),p);
+        if(kind==="growth")fs.appendFileSync(path,"extra");if(kind==="truncation")fs.truncateSync(path,2);return got;}
+        return kind==="EOF"?0:real.readSync(fd,b,o,n,p);};syncBuiltinESMExports();
+      assert.throws(()=>readCorpusBytes(path),/changed during capture/);assert.ok(reads>=2);
+    }
+    evidence={partialReads,refused:["EOF","growth","truncation"]};
+  `);
+  assert.equal(result.partialReads, 4); assert.equal(result.refused.length, 3);
+});
+
+test("corpus descriptor metadata must remain observable and device-bound", () => {
+  const result = corpusProbe(`
+    let refused=0;
+    for(const change of [{ctimeMs:NaN},{dev:undefined},{ino:2**53}]){
+      fs.fstatSync=fd=>Object.assign(real.fstatSync(fd),change);syncBuiltinESMExports();
+      assert.throws(()=>readCorpusBytes(path),/bounded regular/);refused++;
+    }
+    let stats=0;fs.fstatSync=fd=>{const s=real.fstatSync(fd);if(++stats===2)s.dev++;return s;};
+    syncBuiltinESMExports();assert.throws(()=>readCorpusBytes(path),/changed during capture/);assert.equal(stats,2);
+    evidence={simulatedMetadata:true,refused,deviceChangeRefused:true};
+  `);
+  assert.equal(result.refused, 3); assert.equal(result.deviceChangeRefused, true);
+});
+
+test("corpus FIFO without writer refuses as nonregular within a hard child deadline", () => {
+  const result = corpusProbe(`
+    const made=spawnSync("mkfifo",[path+".fifo"],{encoding:"utf8",timeout:500});assert.equal(made.status,0,made.stderr);
+    assert.equal(fs.lstatSync(path+".fifo").isFIFO(),true);
+    let closed=0;fs.closeSync=fd=>{closed++;return real.closeSync(fd);};syncBuiltinESMExports();
+    assert.throws(()=>readCorpusBytes(path+".fifo"),/bounded regular/);assert.equal(closed,1);
+    evidence={realFIFO:true,closed};
+  `, 1500);
+  assert.equal(result.realFIFO, true); assert.equal(result.closed, 1);
+});
+
+test("corpus descriptors close on refusals and propagate open stat read and close errors", () => {
+  const result = corpusProbe(`
+    let cases=0;
+    for(const kind of ["success","oversize","empty","directory","stat","read","close"]){
+      Object.assign(fs,real);reset();if(kind==="empty")fs.writeFileSync(path,"");
+      let fd,closed=0;fs.openSync=(...args)=>fd=real.openSync(...args);
+      fs.closeSync=value=>{real.closeSync(value);closed++;if(kind==="close")throw Error("controlled close failure");};
+      if(kind==="stat")fs.fstatSync=()=>{throw Error("controlled stat failure");};
+      if(kind==="read")fs.readSync=()=>{throw Error("controlled read failure");};syncBuiltinESMExports();
+      if(kind==="success")assert.equal(readCorpusBytes(path).bytes.length,8);
+      else assert.throws(()=>readCorpusBytes(kind==="directory"?home:path,kind==="oversize"?1:8),
+        kind==="stat"?/controlled stat/:kind==="read"?/controlled read/:kind==="close"?/controlled close/:/bounded regular/);
+      assert.equal(closed,1);assert.throws(()=>real.fstatSync(fd),{code:"EBADF"});cases++;
+    }
+    Object.assign(fs,real);syncBuiltinESMExports();assert.throws(()=>readCorpusBytes(path+".absent"),{code:"ENOENT"});
+    const alias=join(home,"alias");fs.symlinkSync(path,alias);assert.throws(()=>readCorpusBytes(alias),/bounded regular/);
+    evidence={closedCases:cases,openErrorsRefused:true};
+  `);
+  assert.equal(result.closedCases, 7); assert.equal(result.openErrorsRefused, true);
+});

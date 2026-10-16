@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isAllocatableTaskId, MAX_ALLOCATABLE_TASK_ID } from "./task-id.js";
 import { assertClaimRefPushAllowed } from "./live-write-guard.js";
 import { systemClock, type Clock } from "./clock.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 
 /**
  * Atomic reservation of a minted task id — the piece {@link mintNextTaskIdWithHistory} skips. The
@@ -1059,6 +1060,38 @@ export function reserveTaskIdBlockRemote(
   };
 }
 
+export function parseTaskIdCount(rest: readonly string[]): { count: number; explicit: boolean } | { error: string } {
+  if (!rest.includes("--count")) return { count: 1, explicit: false };
+  const raw = rest[rest.indexOf("--count") + 1];
+  if (raw === undefined || !/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw)))
+    return { error: `### rmd next-task-id: --count needs a positive whole number, got ${raw === undefined ? "nothing" : JSON.stringify(raw)}` };
+  const clash = ["--offline", "--no-reserve", "--audit", "--prefix", "--repo"].find((f) => rest.includes(f));
+  if (clash) return { error: `### rmd next-task-id: --count and ${clash} are contradictory — --count reserves ids on this repo's origin` };
+  return { count: Number(raw), explicit: true };
+}
+
+export function reserveTaskIdsKeepingHeld(
+  startId: number,
+  count: number,
+  reserveOne: (from: number) => RemoteReservationHandle,
+): { held: RemoteReservationHandle[]; error?: unknown } {
+  const held: RemoteReservationHandle[] = [];
+  for (let next = startId; held.length < count; next = held[held.length - 1].id + 1) {
+    try {
+      held.push(reserveOne(next));
+    } catch (e) {
+      return { held, error: e };
+    }
+  }
+  return { held };
+}
+
+export function describeHeldTaskIds(held: readonly { taskId: string }[], count: number): { held: string; partial?: string } {
+  const line = `HELD ${held.length} of ${count}: ${held.map((h) => h.taskId).join(" ") || "(none)"}`;
+  if (held.length >= count || held.length === 0) return { held: line };
+  return { held: line, partial: `### rmd next-task-id --count: PARTIAL — holds ${held.length} of ${count}; could not reserve the other ${count - held.length}` };
+}
+
 // ── CONSUMER-REPO PREFIXES (W1-T4388): CONSOLE-T, PORTAL-T and W1-T alike, on each repo's own origin.
 
 /** `CONSOLE-T58` → `{ prefix: "CONSOLE", n: 58 }`; `null` for anything else, a suffixed `W1-T1B` included. */
@@ -1144,9 +1177,12 @@ export type ReservationAnchorRead =
 
 type GitAnswer = { status: number; stdout: string; stderr: string };
 
+const anchorReadFailure = (verb: string, answer: GitAnswer): ReservationAnchorRead =>
+  ({ status: "unknown", reason: `${verb} failed: ${answer.stderr.trim() || `exited ${answer.status}`}` });
+
 function unreadAnchorListing(ids: readonly string[], listed: GitAnswer): Map<string, ReservationAnchorRead> | undefined {
   if (listed.status === 0) return undefined;
-  return new Map(ids.map((id) => [id, { status: "unknown", reason: `ls-remote failed: ${listed.stderr.trim()}` }]));
+  return new Map(ids.map((id) => [id, anchorReadFailure("ls-remote", listed)]));
 }
 
 function anchorShaByRef(listed: GitAnswer): Map<string, string> {
@@ -1158,7 +1194,7 @@ const anchorFetchArgs = (id: string): string[] => ["fetch", "--quiet", "--no-tag
 const anchorLogArgs = (sha: string): string[] => ["log", "--first-parent", "-n", "16", "--format=%B%x00", sha];
 
 function anchorReadFrom(body: GitAnswer): ReservationAnchorRead {
-  if (body.status !== 0) return { status: "unknown", reason: body.stderr.trim() };
+  if (body.status !== 0) return anchorReadFailure("log", body);
   const messages = body.stdout.includes("\0") ? body.stdout.split("\0").slice(0, -1) : [body.stdout];
   const chain = messages.map((message, index) => index === 0 ? message : message.replace(/^\n/, ""));
   const message = body.stdout.includes("\0") ? `${chain[0] ?? ""}\n` : body.stdout;
@@ -1183,7 +1219,7 @@ export function readReservationAnchors(
       continue;
     }
     const fetched = run(anchorFetchArgs(id));
-    reads.set(id, anchorReadFrom(fetched.status === 0 ? run(anchorLogArgs(sha)) : fetched));
+    reads.set(id, fetched.status === 0 ? anchorReadFrom(run(anchorLogArgs(sha))) : anchorReadFailure("fetch", fetched));
   }
   return reads;
 }
@@ -1206,7 +1242,7 @@ export async function readReservationAnchorsAsync(
       continue;
     }
     const fetched = await run(anchorFetchArgs(id));
-    reads.set(id, anchorReadFrom(fetched.status === 0 ? await run(anchorLogArgs(sha)) : fetched));
+    reads.set(id, fetched.status === 0 ? anchorReadFrom(await run(anchorLogArgs(sha))) : anchorReadFailure("fetch", fetched));
   }
   return reads;
 }
@@ -1222,21 +1258,16 @@ export function gitReservationRunnerAsync(
   const timeoutMs = opts.timeoutMs ?? RESERVATION_ANCHOR_GIT_TIMEOUT_MS;
   return (args) =>
     new Promise((resolve) => {
-      let timedOut = false;
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
-        clearTimeout(timer);
-        if (!err) return resolve({ status: 0, stdout, stderr });
-        if (timedOut) {
+        bound.cancel();
+        if (bound.timedOut) {
           const said = stderr.trim() ? ` git said: ${stderr.trim()}` : "";
           return resolve({ status: 1, stdout, stderr: `git ${args[0]} timed out after ${timeoutMs}ms and was killed.${said}` });
         }
+        if (!err) return resolve({ status: 0, stdout, stderr });
         const code = (err as { code?: unknown }).code;
         return resolve({ status: typeof code === "number" ? code : 1, stdout, stderr: stderr || err.message });
       });
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killAfterGrace(child, opts.graceMs);
-      }, timeoutMs);
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
 }
