@@ -12,6 +12,8 @@ import {readSecurityMergeDecision,readSecurityMergeDecisionSync,publishSecurityM
 import {runSecurityMergeProducer} from '../scripts/security-merge-producer.mjs';
 // @ts-expect-error — metadata companion is plain ESM outside tsconfig roots.
 import {semgrepRuntimeMetadataRequests} from '../src/lib/semgrep-runtime-merge-policy.mjs';
+// @ts-expect-error — shared read-only CLI argument mapping is plain ESM.
+import {securityMetadataGhArgs} from '../src/lib/security-metadata-gh-args.mjs';
 
 const head='a'.repeat(40),base='b'.repeat(40),blob='c'.repeat(40),foreign='d'.repeat(40);
 const workflow='.github/workflows/semgrep-runtime-compatibility.yml',context='semgrep-runtime-compatibility';
@@ -27,7 +29,7 @@ function fixture(){
   app:{id:15368,slug:'github-actions',owner:{login:'github'}},check_suite:{id:33},
   details_url:'https://github.com/craigoley/remudero/actions/runs/44/job/55'};
  const checks:any[]=[security,runtime];
- const run:any={id:44,repository:{full_name:'craigoley/remudero'},event:'pull_request',head_sha:head,
+ const run:any={id:44,node_id:'WFR_runtime_fixture_44',repository:{full_name:'craigoley/remudero'},event:'pull_request',head_sha:head,
   path:workflow,workflow_id:66,run_attempt:1,check_suite_id:33,status:'completed',conclusion:'success',
   pull_requests:[{number:11468,head:{sha:head},base:{sha:base,repo:{url:'https://api.github.com/repos/craigoley/remudero'}}}]};
  const job:any={id:55,run_id:44,run_attempt:1,head_sha:head,name:context,
@@ -35,6 +37,9 @@ function fixture(){
   steps:['Detect runtime lock changes','Set up pinned Python','Verify hash-locked install and dependency closure']
    .map((name,i)=>({name,number:i+1,status:'completed',conclusion:'success'}))};
  const trusted:any={type:'file',path:workflow,sha:blob,size:4096},proposed:any={...trusted};
+ const executed:any={data:{node:{__typename:'WorkflowRun',url:'https://github.com/craigoley/remudero/actions/runs/44',runAttempt:1,file:{path:workflow,
+  repositoryName:'craigoley/remudero',repositoryFileUrl:'https://github.com/craigoley/remudero/blob/'+foreign+'/'+workflow,
+  run:{url:'https://github.com/craigoley/remudero/actions/runs/44',runAttempt:1}}}}};
  const reads:string[]=[];
  const read=(path:string):any=>{
   reads.push(path);
@@ -43,11 +48,13 @@ function fixture(){
   if(path===prefix+'/commits/'+head+'/check-runs?filter=all&per_page=100&page=1')return {total_count:checks.length,check_runs:checks};
   if(path===prefix+'/actions/runs/44')return run;
   if(path===prefix+'/actions/jobs/55')return job;
+  if(path==='security-workflow-source:'+run.node_id)return executed;
   if(path===prefix+'/contents/'+workflow+'?ref='+base)return trusted;
   if(path===prefix+'/contents/'+workflow+'?ref='+head)return proposed;
+  if(path===prefix+'/contents/'+workflow+'?ref='+foreign)return trusted;
   throw Error('unexpected metadata read: '+path);
  };
- return {pr,files,security,runtime,checks,run,job,trusted,proposed,reads,read};
+ return {pr,files,security,runtime,checks,run,job,trusted,proposed,executed,reads,read};
 }
 
 test('runtime metadata helper has an explicit unchanged-lock fast path and refuses incomplete identity',()=>{
@@ -62,12 +69,24 @@ test('runtime metadata helper has an explicit unchanged-lock fast path and refus
  }
 });
 
+test('workflow-source metadata mapping can issue only its fixed read-only query and preserves ordinary REST reads',()=>{
+ assert.deepEqual(securityMetadataGhArgs('repos/craigoley/remudero/pulls/11468'),['api','repos/craigoley/remudero/pulls/11468']);
+ const args=securityMetadataGhArgs('security-workflow-source:WFR_fixture_123');
+ assert.deepEqual(args.slice(0,3),['api','graphql','-f']);assert.ok(args[3].startsWith('query=query{node(id:"WFR_fixture_123")'));
+ assert.equal(args[3].includes('mutation'),false);assert.equal(args[3].includes('databaseId'),false);
+ assert.ok(args[3].includes('repositoryFileUrl'));
+ for(const input of [null,'security-workflow-source','security-workflow-source:short','security-workflow-source:WFR_12345\n',
+  'security-workflow-source:WFR_bad"}mutation{x}','security-workflow-source:'+('x'.repeat(201))]){
+  assert.throws(()=>securityMetadataGhArgs(input));
+ }
+});
+
 test('runtime lock changes require trusted workflow bytes and exact-head run/job closure in both merge effectors',async()=>{
  const f=fixture(),sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
  assert.deepEqual(sync,asyncResult);
  assert.deepEqual(sync.decision,{state:'safe',mergeAllowed:true,reason:'trusted-exact-head-security-and-runtime-compatible'});
  assert.equal(f.reads.filter(p=>p.includes('/actions/runs/')).length,2);
- assert.equal(f.reads.filter(p=>p.includes('/contents/')).length,4);
+ assert.equal(f.reads.filter(p=>p.includes('/contents/')).length,6);
  for(const filename of ['.github/semgrep/requirements.txt','.github/semgrep/build-requirements.txt']){
   const renamed=fixture();renamed.files[0]={filename:'docs/retired.txt',previous_filename:filename};renamed.checks.pop();
   assert.equal(readSecurityMergeDecisionSync(target,renamed.read).decision.mergeAllowed,false);
@@ -107,7 +126,7 @@ const mutations:[string,(f:ReturnType<typeof fixture>)=>void][]=[
  ['empty workflow',f=>{f.trusted.size=f.proposed.size=0;}],['unclosed run',f=>{f.run.status='in_progress';}],
  ['run conclusion mismatch',f=>{f.run.conclusion='failure';}],['skipped check',f=>{f.runtime.conclusion=f.job.conclusion=f.run.conclusion='skipped';}],
  ['missing base identity',f=>{delete f.pr.base.sha;}],
- ['other PR',f=>{f.run.pull_requests[0].number++;}],['old run base',f=>{f.run.pull_requests[0].base.sha=foreign;}],
+ ['other PR',f=>{f.run.pull_requests[0].number++;}],
  ['old associated head',f=>{f.run.pull_requests[0].head.sha=foreign;}],['missing PR association',f=>{f.run.pull_requests=[];}],
  ['ambiguous PR association',f=>{f.run.pull_requests.push(f.run.pull_requests[0]);}],
  ['foreign associated base',f=>{f.run.pull_requests[0].base.repo.url='https://api.github.com/repos/attacker/repo';}],
@@ -115,6 +134,14 @@ const mutations:[string,(f:ReturnType<typeof fixture>)=>void][]=[
  ['duplicate installation step',f=>{f.job.steps.push({...f.job.steps[2]});}],
  ['unfinished installation step',f=>{f.job.steps[2].status='in_progress';}],['invalid step number',f=>{f.job.steps[2].number=0;}],
  ['generation bound',f=>{for(let i=0;i<8;i++)f.checks.push({...f.runtime,id:30+i});}],
+ ['missing workflow node',f=>{delete f.run.node_id;}],['malformed workflow node',f=>{f.run.node_id='bad" query';}],
+ ['GraphQL errors',f=>{(f.executed as any).errors=[{message:'unavailable'}];}],
+ ['wrong source run',f=>{f.executed.data.node.url='https://github.com/craigoley/remudero/actions/runs/45';}],['wrong source attempt',f=>{f.executed.data.node.runAttempt=2;}],
+ ['wrong source type',f=>{f.executed.data.node.__typename='Commit';}],['wrong source path',f=>{f.executed.data.node.file.path='other.yml';}],
+ ['wrong source repo',f=>{f.executed.data.node.file.repositoryName='attacker/repo';}],
+ ['mutable source URL',f=>{f.executed.data.node.file.repositoryFileUrl='https://github.com/craigoley/remudero/blob/main/'+workflow;}],
+ ['wrong source parent run',f=>{f.executed.data.node.file.run.url='https://github.com/craigoley/remudero/actions/runs/45';}],
+ ['wrong source parent attempt',f=>{f.executed.data.node.file.run.runAttempt=2;}],
 ];
 for(const [label,mutate] of mutations)test('runtime compatibility refuses '+label,()=>{
  const f=fixture();mutate(f);const result=readSecurityMergeDecisionSync(target,f.read);
@@ -157,6 +184,14 @@ test('a verified other-workflow name collision cannot mask the newest genuine ru
  assert.equal(readSecurityMergeDecisionSync(target,read).decision.reason,'semgrep-runtime-compatibility-pending');
 });
 
+test('a changed association base cannot substitute for immutable executed workflow bytes or force an unnecessary head refresh',()=>{
+ const f=fixture();f.run.pull_requests[0].base.sha=foreign;
+ assert.equal(readSecurityMergeDecisionSync(target,f.read).decision.mergeAllowed,true);
+ const actual={...f.trusted,sha:head};
+ const read=(p:string)=>p===prefix+'/contents/'+workflow+'?ref='+foreign?actual:f.read(p);
+ assert.equal(readSecurityMergeDecisionSync(target,read).decision.mergeAllowed,false);
+});
+
 test('runtime completion wakes the trusted policy producer using metadata only',async()=>{
  const f=fixture(),writes:any[]=[];
  const results=await runSecurityMergeProducer('workflow_run',{repository:{full_name:'craigoley/remudero'},
@@ -174,7 +209,7 @@ test('runtime compatibility uses the real producer CLI and preserves genuine ins
  const shim=ghShim([{when:'POST',stdout:'{}'},{when:'/files?',stdout:JSON.stringify(f.files)},
   {when:'/check-runs?',stdout:JSON.stringify({total_count:2,check_runs:f.checks})},
   {when:'/actions/runs/44',stdout:JSON.stringify(f.run)},{when:'/actions/jobs/55',stdout:JSON.stringify(f.job)},
-  {when:'/contents/',stdout:JSON.stringify(f.trusted)},{when:'GET',stdout:JSON.stringify(f.pr)}]);
+  {when:'graphql',stdout:JSON.stringify(f.executed)},{when:'/contents/',stdout:JSON.stringify(f.trusted)},{when:'GET',stdout:JSON.stringify(f.pr)}]);
  t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
  const run=()=>spawnSync(process.execPath,[new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname],
   {env:{...process.env,PATH:shim.dir+':'+process.env.PATH,GH_TOKEN:'',GITHUB_EVENT_PATH:eventPath,

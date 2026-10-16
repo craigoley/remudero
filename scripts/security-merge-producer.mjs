@@ -2,6 +2,7 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import {isMainModule} from './lib/argv.mjs';
 import {publishSecurityMergeDecision, SECURITY_MERGE_CONTEXT} from '../src/lib/code-scanning-merge-adapter.mjs';
+import {securityMetadataGhArgs} from '../src/lib/security-metadata-gh-args.mjs';
 
 /** Runs from the trusted default branch. Never execute the event's head checkout.
  * Network failures and unsupported merge-group evidence cannot produce a successful merge-policy status.
@@ -38,8 +39,11 @@ export async function runSecurityMergeProducer(eventName, event, transport, targ
 }
 
 if (isMainModule(import.meta.url)) {
-  const read=path=>JSON.parse(execFileSync('gh',['api','--method','GET',path],
-    {encoding:'utf8',timeout:15000,maxBuffer:2<<20}));
+  const read=path=>{
+    const args=securityMetadataGhArgs(path);
+    if (args[1] !== 'graphql') args.splice(1,0,'--method','GET');
+    return JSON.parse(execFileSync('gh',args,{encoding:'utf8',timeout:15000,maxBuffer:2<<20}));
+  };
   // Fields travel as argv `-f` (raw string) pairs, never a stdin body: a child that exits without
   // draining stdin would otherwise surface a spurious EPIPE instead of its real exit status.
   const status=payload=>{
