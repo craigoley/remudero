@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, mock } from "node:test";
-import { buildOnboardingReadinessRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
+import { buildOnboardingGoLiveRoutes, buildOnboardingReadinessRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
+import { buildInstanceGatewayRoutes, watchInstanceLiveness, type InstanceGatewayOptions } from "../src/lib/instance-gateway.js";
+import { fixedClock } from "../src/lib/clock.js";
 import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -109,6 +111,60 @@ test("selected serve composition forwards one shadow context to the real registr
   for (let n = 0; n < 100 && f.rows.filter(row => row.step === STEP).length < 3; n++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(f.rows.filter(row => row.step === STEP).map(row => row.fields.action).sort(), ["repo-dashboard", "serve-readiness", "serve-registry"]);
   assert.ok(f.rows.every(row => row.fields.publication_permission === "not-granted"));
+});
+
+test("selected gateway observes the actual core request identity without changing its response", async (t) => {
+  const f = fixture(t); writeFileSync(f.legacy, selectedText("core")); writeFileSync(f.path, selectedText("core"));
+  const observer = createSelectedRegistryObserver(f.options)!; t.after(() => observer.close());
+  const options = { registryPath: f.legacy, selectedRegistryObserver: observer };
+  let effects = 0;
+  const routes = buildInstanceGatewayRoutes([{ method: "GET", path: "/v1/status", scope: "read", handler: (_req, res) => {
+    effects++; res.writeHead(200); res.end("legacy-core");
+  } }], options);
+  const route = routes.find(route => route.path === "/v1/i/core/status"); assert.ok(route);
+  let result = "";
+  await route.handler({ url: route.path } as never, { writeHead() {}, end: (text: string) => { result += text; } } as never, { params: {} });
+  await observer.settled();
+  assert.equal(effects, 1); assert.equal(result, "legacy-core");
+  const row = f.rows.find(row => row.fields.action === "serve-topology"); assert.ok(row);
+  assert.equal(row.fields.target_instance, "core"); assert.equal(row.fields.target_repo, "owner/repo");
+  assert.equal(row.fields.selected_state, "ready"); assert.equal(row.fields.publication_permission, "not-granted");
+});
+
+test("selected liveness rides the existing callback with real target and shutdown ownership", async (t) => {
+  const f = fixture(t);
+  writeFileSync(f.legacy, selectedText("core") + "  site:\n    github_repo: owner/site\n    mode: shadow\n");
+  writeFileSync(f.path, selectedText("site", "owner/site"));
+  const observer = createSelectedRegistryObserver(f.options)!; t.after(() => observer.close());
+  const clock = fixedClock(Date.parse("2026-10-16T00:00:00Z"));
+  let tick!: () => void, timers = 0, stopped = 0, reads = 0;
+  const options: InstanceGatewayOptions & { ledgerPath: string; selectedRegistryObserver: typeof observer } = {
+    registryPath: f.legacy, stateBase: f.root, ledgerPath: join(f.root, "ledger.ndjson"), selectedRegistryObserver: observer, clock,
+    every: (run, ms) => { timers++; assert.equal(ms, 60000); tick = run; return () => { stopped++; }; },
+    readLastRows: (instance) => { reads++; assert.equal(instance.name, "site"); return [{ ts: clock.iso(), step: "sweep.summary" }]; },
+    gh: () => assert.fail("healthy control must never open or close a real issue"),
+  };
+  const stop = watchInstanceLiveness(options); t.after(stop);
+  assert.equal(timers, 1); tick(); await observer.settled();
+  assert.equal(reads, 1, "no second legacy scan is introduced by the observation");
+  const row = f.rows.find(row => row.fields.action === "serve-liveness"); assert.ok(row);
+  assert.equal(row.fields.target_instance, "site"); assert.equal(row.fields.target_repo, "owner/site"); assert.equal(row.fields.selected_state, "ready");
+  stop(); assert.equal(stopped, 1);
+});
+
+test("selected go-live observation cannot replace the verified-owner refusal or authorize publication", async (t) => {
+  const f = fixture(t); writeFileSync(f.legacy, selectedText("core")); writeFileSync(f.path, selectedText("core"));
+  const deps = { ledgerPath: join(f.root, "ledger.ndjson"), questionsRoot: f.root, log: () => {},
+    instances: { registryPath: f.legacy }, selectedRegistryObservation: f.options,
+    onboardingGoLive: { readRows: () => assert.fail("non-owner must never reach go-live evidence or publication") },
+  } as unknown as ServeDeps;
+  const route = buildOnboardingGoLiveRoutes(deps).find(route => route.method === "POST"); assert.ok(route);
+  let code = 0, body = "";
+  await route.handler({ url: route.path, [Symbol.for("remudero.service.rawBody")]: "{}" } as never,
+    { writeHead: (n: number) => { code = n; }, end: (text: string) => { body += text; } } as never, { params: {} });
+  assert.equal(code, 403); assert.deepEqual(JSON.parse(body), { error: "verified_operator_required" });
+  const row = await observed(f.rows); assert.ok(row); assert.equal(row.action, "serve-go-live");
+  assert.equal(row.target_instance, "core"); assert.equal(row.target_repo, "owner/repo"); assert.equal(row.publication_permission, "not-granted");
 });
 
 test("selected readiness absent opt-in preserves legacy checks without a selected read or receipt", async (t) => {
