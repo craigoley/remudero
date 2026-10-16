@@ -14383,6 +14383,11 @@ export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
 }
 
+/** W1-T8172: the reviews in flight NOW, by identity, so a latched restart can tell what it waited on from the latch. */
+export function inFlightReviewRunsNow(): Promise<void>[] {
+  return [...inFlightReviewRuns];
+}
+
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
 export async function drainInFlightReviews(opts: { boundMs: number }): Promise<number> {
