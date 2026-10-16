@@ -117,7 +117,8 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
   const slot = await acquire('coverage:local-batches', { slots: 1, waitBoundMs: 0 });
   let heartbeat, monitor, lost, released = false;
   const abort = new AbortController();
-  const env = { ...process.env, ...slot.childEnvironment, NODE_DISABLE_COMPILE_CACHE: '1', NODE_V8_COVERAGE: '' };
+  const env = { ...process.env, ...slot.childEnvironment, NODE_TEST_CONTEXT: undefined,
+    NODE_DISABLE_COMPILE_CACHE: '1', NODE_V8_COVERAGE: '' };
   try {
     if (slot.outcome !== 'acquired' || slot.executionAllowed === false) {
       receipt.reason = slot.note; save(); return { status: 75, receiptPath };
