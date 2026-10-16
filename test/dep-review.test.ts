@@ -23,6 +23,7 @@ import {
   parseVersionBumps,
   renderDepReviewMigrationFeedback,
   redChecks,
+  readSelectedDepReviewChecks,
   type DepReviewCheck,
   CONVENTIONAL_TITLE_PREFIX_RE,
 } from "../src/lib/dep-review.js";
@@ -813,6 +814,56 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
     } finally {
       clearInterval(pulse); process.env.PATH = savedPath; console.log = savedLog;
       rmSync(tmp, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("W1-T9689 selected evidence retains snapshots and explicit unknown shape outcomes", async (t) => {
+  const sha = "a".repeat(40), target = { number: 3654, url: "https://github.com/craigoley/remudero/pull/3654", headSha: sha, body: "body" };
+  const pull = { id: 8, number: 3654, html_url: target.url, state: "open", merged: false, head: { sha },
+    base: { repo: { id: 55, full_name: "craigoley/remudero" } }, body: "body" };
+  const check = { id: 100, name: "external scan", head_sha: sha, status: "completed", conclusion: "success", started_at: "2026-10-15T11:00:00Z" };
+  const checks = { total_count: 1, check_runs: [check] }, statuses = { sha, total_count: 0, statuses: [] };
+  const workflow = { id: 10, workflow_id: 5, check_suite_id: 30, head_sha: sha, run_attempt: 1 };
+  const cases = [
+    { label: "selected input snapshot", expected: "observed", mutate: true },
+    { label: "invalid selected identity", expected: "unknown", target: { ...target, number: 0 }, noRead: true },
+    { label: "invalid selected SHA", expected: "unknown", target: { ...target, headSha: "not-a-sha" }, noRead: true },
+    { label: "wrong selected repository URL", expected: "unknown", target: { ...target, url: "https://github.com/another/repo/pull/3654" }, noRead: true },
+    { label: "unread selected pull", expected: "unknown", pull: null },
+    { label: "closed selected pull", expected: "unknown", pull: { ...pull, state: "closed" } },
+    { label: "duplicate check identities", expected: "unknown", checks: { total_count: 2, check_runs: [check, check] } },
+    { label: "null check row", expected: "unknown", checks: { total_count: 1, check_runs: [null] } },
+    { label: "unread statuses", expected: "unknown", statuses: null },
+    { label: "wrong status head", expected: "unknown", statuses: { ...statuses, sha: "b".repeat(40) } },
+    { label: "unread workflow listing", expected: "unknown", workflows: null },
+    { label: "truncated workflows", expected: "unknown", workflows: { total_count: 1, workflow_runs: [] } },
+    { label: "invalid workflow identity", expected: "unknown", workflows: { total_count: 1, workflow_runs: [{ ...workflow, workflow_id: 0 }] } },
+    { label: "ambiguous check suite", expected: "unknown", checks: { total_count: 1, check_runs: [{ ...check, check_suite: { id: 30 } }] },
+      workflows: { total_count: 2, workflow_runs: [workflow, { ...workflow, id: 11 }] } },
+    { label: "run identity contradicts check suite", expected: "unknown", checks: { total_count: 1, check_runs: [{ ...check, check_suite: { id: 31 }, external_id: "run:10:1:job:1" }] },
+      workflows: { total_count: 2, workflow_runs: [workflow, { ...workflow, id: 11, check_suite_id: 31 }] } },
+    { label: "native Actions check suite supplies real identity", expected: "observed", checks: { total_count: 1, check_runs: [{ ...check, check_suite: { id: 30 }, app: { slug: "github-actions" } }] },
+      workflows: { total_count: 1, workflow_runs: [workflow] } },
+    { label: "mapper cannot read malformed details URL", expected: "unknown", checks: { total_count: 1, check_runs: [{ ...check, details_url: 12 }] },
+      workflows: { total_count: 1, workflow_runs: [workflow] } },
+  ];
+  for (const row of cases) await t.test(row.label, async () => {
+    const selected = { ...(row.target ?? target) }; let reads = 0;
+    const result = await readSelectedDepReviewChecks("craigoley", "remudero", selected, async args => {
+      reads++;
+      if (row.mutate) selected.headSha = "b".repeat(40);
+      if (args[1].includes("/pulls/")) return "pull" in row ? row.pull : pull;
+      if (args[1].includes("/check-runs")) return row.checks ?? checks;
+      if (args[1].includes("/status")) return "statuses" in row ? row.statuses : statuses;
+      assert.ok(args[1].includes("head_sha=" + sha));
+      return "workflows" in row ? row.workflows : { total_count: 0, workflow_runs: [] };
+    });
+    assert.equal(result.kind, row.expected);
+    if (row.noRead) assert.equal(reads, 0, "invalid identity cannot issue an API read");
+    if (result.kind === "unknown") assert.ok(result.reason.length > 0);
+    if (row.label === "native Actions check suite supplies real identity" && result.kind === "observed") {
+      assert.equal(result.checks[0].workflowRunId, 10); assert.equal(result.checks[0].workflowId, 5);
     }
   });
 });
