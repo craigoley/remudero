@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
+// @ts-expect-error The maintained generator is an executable .mjs script without declarations.
+import { renderApiClient } from "../scripts/generate-api-client.mjs";
 
 // ── W3-T1b: packages/api-client GENERATOR + stale-client drift check (MASTER-PLAN §7A) ─────────
 //
@@ -204,4 +207,47 @@ test("the real generated client's components.schemas.Error mirrors src/lib/servi
   // W1-T404: the tier field the Error schema grew alongside required_scope -- carries the same
   // proof forward rather than adding a parallel one, so a future drift here fails THIS assertion.
   assert.match(generated, /required_tier\?: "low" \| "middle" \| "high";/);
+});
+
+
+test("generate-api-client preserves nested allOf union and array precedence", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rmd-api-client-intersection-"));
+  try {
+    const source = join(tmp, "daemon.yaml"), out = join(tmp, "schema.d.ts");
+    writeFileSync(source, MINIMAL_SPEC.replace("paths: {}", `
+    Intersection:
+      allOf:
+        - oneOf: [{type: string}, {type: number}]
+        - {type: string, enum: [ready]}
+    EmptyIntersection:
+      allOf: []
+    IntersectionRows:
+      type: array
+      items:
+        allOf:
+          - oneOf: [{type: string}, {type: number}]
+          - {type: string, enum: [ready]}
+    NestedUnion:
+      oneOf:
+        - allOf: [{type: string}, {type: string, enum: [ready]}]
+        - {type: 'null'}
+    ReferencedIntersection:
+      allOf:
+        - {$ref: '#/components/schemas/Widget'}
+        - {type: object, required: [scope], properties: {scope: {type: string}}}
+paths: {}
+`));
+    const generated = runGenerate(source, out);
+    assert.equal(generated.status, 0, generated.stdout + generated.stderr);
+    const written = readFileSync(out, "utf8");
+    assert.equal(renderApiClient(parseYaml(readFileSync(source, "utf8")), source), written);
+    assert.ok(written.includes('EmptyIntersection: unknown;'));
+    assert.ok(written.includes('Intersection: ((string) | (number)) & ("ready");'));
+    assert.ok(written.includes('IntersectionRows: (((string) | (number)) & ("ready"))[];'));
+    assert.ok(written.includes('NestedUnion: ((string) & ("ready")) | (null);'));
+    assert.match(written, /ReferencedIntersection: \(Widget\) & \(\{\n\s+scope: string;/);
+    assert.equal(runCheck(source, out).status, 0, "the real generator accepts its exact output");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
