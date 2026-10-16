@@ -14421,6 +14421,10 @@ export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
 }
 
+export function inFlightReviewRunsNow(): Promise<void>[] {
+  return [...inFlightReviewRuns];
+}
+
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
  *  awaited, so the drain cannot be extended by new work. Returns how many were still running at the bound. */
 export async function drainInFlightReviews(opts: { boundMs: number }): Promise<number> {
