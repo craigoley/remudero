@@ -19,7 +19,8 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { serveCommand } from "../src/run-task.js";
+import { serveCommand, benchmarkAaReadinessRuntime, buildInboxDraftSpawnArgs, lintPlanCommand, main } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -50,6 +51,56 @@ function instance(serve?: { host?: string; port?: number }): { home: string; roo
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT, serve }));
   return { home, root };
 }
+
+test("selected loaded CLI config reaches benchmark delayed draft evaluation and actual offline lint without activation", async (t) => {
+  const { home, root } = instance(), repo = gitRepo({ kind: "selected-cli-lint" });
+  const saved = { HOME: process.env.HOME, RMD_INSTANCE_REGISTRY: process.env.RMD_INSTANCE_REGISTRY, GH_TOKEN: process.env.GH_TOKEN };
+  const configPath = join(home, ".config", "remudero", "config.json"), selectedPath = join(home, "selected.yaml");
+  const planPath = join(repo.dir, "plan", "tasks.yaml"); mkdirSync(join(repo.dir, "plan")); writeFileSync(planPath, "[]\n");
+  writeFileSync(selectedPath, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
+  const initial = JSON.parse(readFileSync(configPath, "utf8"));
+  const rows = (): Array<Record<string, unknown>> => {
+    try { return readFileSync(join(root, "state", "ledger.ndjson"), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  };
+  const realArgv = process.argv;
+  const exit = t.mock.method(process, "exit", ((code?: number): never => { throw Object.assign(new Error("isolated-exit"), { code }); }) as typeof process.exit);
+  const quiet = [t.mock.method(console, "log", () => {}), t.mock.method(console, "error", () => {})];
+  try {
+    process.env.HOME = home; process.env.RMD_INSTANCE_REGISTRY = selectedPath; process.env.GH_TOKEN = "fixture-no-network";
+    for (const enabled of [false, true]) {
+      const config = { ...initial, ...(enabled ? { selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selectedPath } } : {}) };
+      writeFileSync(configPath, JSON.stringify(config));
+      const before = rows().filter(row => row.step === "instance_registry.consumer_shadow_observed").length;
+      const runtime = benchmarkAaReadinessRuntime(join(root, "state"));
+      // Capture config BEFORE its caller can mutate it; this runs the actual default registry reader.
+      if (runtime.config.selectedRegistryMode) runtime.config.selectedRegistryMode.mode = "legacy";
+      const result = runtime.defaultInstanceRoots();
+      assert.ok("roots" in result || "reason" in result);
+      const routingRows: Record<string, unknown>[] = [];
+      const args = buildInboxDraftSpawnArgs({ cwd: repo.dir, settingsFile: "/unused/read-only-settings", prompt: "draft", mount: { model: "fixture" } as never,
+        config, disallowedTools: [], proposalId: "P-selected", draftRoutingLog: (step, fields) => { routingRows.push({ step, ...fields }); } });
+      if (config.selectedRegistryMode) config.selectedRegistryMode.mode = "legacy";
+      assert.equal(args.draftRouting?.evaluate({ text: "FRAGMENT\nnot valid: [\nEND FRAGMENT\nSTAMP\nstamp\nEND STAMP", blocks: [] } as never).clean, false);
+      assert.equal(routingRows.some(row => row.step === "instance_registry.consumer_shadow_observed"), enabled,
+        "the actual delayed evaluation must retain the loaded opt-in, but ambient env must not enable it");
+      // Main's existing invocation config read, not a new read in the offline lint helper.
+      process.argv = ["node", "rmd", "lint-plan", "--all"];
+      await assert.rejects(main({ checkFreshness: () => ({ kind: "guarded" } as never), dispatch: async () =>
+        lintPlanCommand(["--all"], { repoRoot: repo.dir, offline: true }) }), error => (error as { code?: number }).code === 0);
+      const observations = rows().filter(row => row.step === "instance_registry.consumer_shadow_observed").slice(before);
+      assert.equal(observations.some(row => row.action === "benchmark-discovery"), enabled);
+      assert.equal(observations.some(row => row.action === "inbox-discovery"), enabled);
+      assert.ok(observations.every(row => row.selected_state === "unknown" && row.target_instance === undefined && row.publication_permission === "not-granted"));
+      assert.ok(!JSON.stringify([...observations, ...routingRows]).includes(selectedPath));
+      assert.equal(readFileSync(planPath, "utf8"), "[]\n", "qualification must not file, approve or activate anything");
+    }
+  } finally {
+    process.argv = realArgv; exit.mock.restore(); for (const q of quiet) q.mock.restore();
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    repo.cleanup(); rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("selected real serve CLI forwards loaded opt-in but environment alone never enables it", { timeout: 90000 }, async (t) => {
   const selection = instance(), selectionPath = join(selection.home, "selected.yaml");

@@ -6,7 +6,8 @@ import { buildOnboardingGoLiveRoutes, buildOnboardingReadinessRoute, buildServeR
 import { buildInstanceGatewayRoutes, watchInstanceLiveness, type InstanceGatewayOptions } from "../src/lib/instance-gateway.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { registryInstanceRoots } from "../src/lib/benchmark-aa-readiness.js";
-import { knownPlanRepos } from "../src/lib/inbox.js";
+import { knownPlanRepos, lintDraftedFragment, fileRatificationDraft, fileRatificationBatch } from "../src/lib/inbox.js";
+import { repoSummarySync } from "../src/lib/repo-dashboard-route.js";
 import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -206,6 +207,69 @@ test("selected inbox discovery preserves real registered repo defaults and unkno
   assert.equal(f.rows.at(-1)?.fields.reason, "synchronous_seam");
   writeFileSync(path, "instances: [invalid]");
   assert.equal(Reflect.apply(knownPlanRepos, undefined, [f.root, observer]), undefined, "legacy unreadable/malformed still refuses no repo");
+});
+
+test("selected discovery scopes isolate concurrent nested absent and escaped invocations", async (t) => {
+  const f = fixture(t), other = fixture(t), ready = pendingValue<void>(), release = pendingValue<void>();
+  const run = Reflect.get(registryConsumers, "withSelectedRegistryContext");
+  const sync = Reflect.get(registryConsumers, "withSelectedRegistryContextSync");
+  assert.equal(typeof run, "function"); assert.equal(typeof sync, "function");
+  const first = createSelectedRegistryObserver(f.options), second = createSelectedRegistryObserver(other.options);
+  let escaped!: () => ReadonlySet<string> | undefined;
+  const expected = knownPlanRepos(f.root);
+  const a = Reflect.apply(run, undefined, [first, async () => {
+    ready.resolve(); await release.promise;
+    Reflect.apply(sync, undefined, [undefined, () => knownPlanRepos(f.root)]);
+    assert.equal(f.rows.length, 0, "an absent nested invocation must mask the outer opt-in");
+    assert.deepEqual(knownPlanRepos(f.root), expected);
+    escaped = () => knownPlanRepos(other.root);
+    return "first-result";
+  }]) as Promise<string>;
+  await ready.promise;
+  const b = Reflect.apply(run, undefined, [second, async () => {
+    await Promise.resolve(); knownPlanRepos(other.root); return "second-result";
+  }]) as Promise<string>;
+  assert.equal(await b, "second-result"); release.resolve(); assert.equal(await a, "first-result");
+  assert.equal(f.rows.length, 1); assert.equal(other.rows.length, 1);
+  assert.equal(f.rows[0]?.fields.reason, "target_unavailable", "aggregate discovery cannot invent a configured single-instance target");
+  assert.equal(f.rows[0]?.fields.target_instance, undefined);
+  assert.equal(f.rows[0]?.fields.publication_permission, "not-granted");
+  const before = f.rows.length; escaped(); knownPlanRepos(f.root);
+  assert.equal(f.rows.length, before, "neither an escaped nor a later no-config call inherits authority");
+  const failure = new Error("private-operation-sentinel");
+  await assert.rejects(Reflect.apply(run, undefined, [undefined, async () => { throw failure; }]), error => error === failure);
+  assert.throws(() => Reflect.apply(sync, undefined, [undefined, () => { throw failure; }]), error => error === failure);
+});
+
+test("selected inbox context reaches real lint and ratification defaults before any filing write", (t) => {
+  const f = fixture(t), sync = Reflect.get(registryConsumers, "withSelectedRegistryContextSync");
+  assert.equal(typeof sync, "function");
+  const invalid = "not valid: [", expected = lintDraftedFragment(invalid, "P-selected");
+  assert.deepEqual(Reflect.apply(sync, undefined, [createSelectedRegistryObserver(f.options), () => lintDraftedFragment(invalid, "P-selected")]), expected);
+  assert.equal(f.rows.at(-1)?.fields.action, "inbox-discovery");
+  // The real fileability guard must refuse before the supplied filesystem can write anything.
+  const fs = { mkdirSync: () => assert.fail("invalid draft must not create directories"),
+    writeFileSync: () => assert.fail("invalid draft must not write"), readFileSync: () => "" };
+  const payload = { fragmentYaml: invalid, proposalId: "P-selected", stampLine: "stamp" };
+  for (const batch of [false, true]) {
+    f.rows.length = 0;
+    assert.throws(() => Reflect.apply(sync, undefined, [createSelectedRegistryObserver(f.options), () => batch
+      ? fileRatificationBatch(f.root, [payload], () => assert.fail("invalid draft must not mint"), fs, join)
+      : fileRatificationDraft(f.root, payload, fs, join)]), /refus/i);
+    assert.equal(f.rows.length, 1, "actual single/batch defaults must observe independently of their refusal");
+    assert.equal(f.rows[0]?.fields.legacy_outcome, "returned", "discovery returns; the separate filing guard refuses");
+  }
+});
+
+test("selected direct synchronous dashboard observes actual identity without changing projection", (t) => {
+  const f = fixture(t), deps = { root: f.root, instanceRepository: { owner: "owner", repo: "repo" } };
+  const expected = repoSummarySync(deps, 12345);
+  const actual = repoSummarySync({ ...deps, selectedRegistryObserver: createSelectedRegistryObserver(f.options) }, 12345);
+  assert.deepEqual(actual, expected);
+  assert.equal(f.rows.at(-1)?.fields.action, "repo-dashboard");
+  assert.equal(f.rows.at(-1)?.fields.target_repo, "owner/repo");
+  assert.equal(f.rows.at(-1)?.fields.reason, "synchronous_seam");
+  assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
 });
 
 
