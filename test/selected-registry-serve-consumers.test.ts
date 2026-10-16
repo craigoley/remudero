@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createServer as createNetServer } from "node:net";
 import { test, mock } from "node:test";
 import { buildOnboardingGoLiveRoutes, buildOnboardingReadinessRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { buildInstanceGatewayRoutes, watchInstanceLiveness, type InstanceGatewayOptions } from "../src/lib/instance-gateway.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { registryInstanceRoots } from "../src/lib/benchmark-aa-readiness.js";
 import { knownPlanRepos } from "../src/lib/inbox.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { ghShim } from "./helpers/gh-shim.js";
 import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -211,59 +208,6 @@ test("selected inbox discovery preserves real registered repo defaults and unkno
   assert.equal(Reflect.apply(knownPlanRepos, undefined, [f.root, observer]), undefined, "legacy unreadable/malformed still refuses no repo");
 });
 
-test("selected real serve CLI forwards loaded opt-in but environment alone never enables it", { timeout: 90000 }, async (t) => {
-  const f = fixture(t), { serveCommand } = await import("../src/run-task.js");
-  const shim = ghShim([{ when: "api ", stdout: "[]" }], { kind: "selected-serve-cli" });
-  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
-  const keys = ["HOME", "PATH", "RMD_INSTANCE_REGISTRY", "GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"];
-  const prior = new Map(keys.map(key => [key, process.env[key]]));
-  const consoleLog = console.log, consoleError = console.error;
-  try {
-    process.env.PATH = `${shim.dir}:${process.env.PATH}`; process.env.RMD_INSTANCE_REGISTRY = f.path;
-    for (const key of keys.slice(3)) delete process.env[key];
-    for (const enabled of [false, true]) {
-      const home = join(f.root, enabled ? "configured" : "legacy"), root = join(home, "operator");
-      mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-      const probe = createNetServer();
-      await new Promise<void>(resolve => probe.listen(0, "127.0.0.1", resolve));
-      const port = (probe.address() as { port: number }).port;
-      await new Promise<void>(resolve => probe.close(() => resolve()));
-      writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
-        root, claudeBin: "/bin/true", installRoot: join(import.meta.dirname, ".."), serve: { host: "127.0.0.1", port },
-        ...(enabled ? { selectedRegistryMode: f.options.settings } : {}),
-      }));
-      process.env.HOME = home;
-      let listening = false;
-      console.log = (...values: unknown[]) => { if (values.join(" ").includes("listening on")) listening = true; };
-      console.error = () => {};
-      const running = serveCommand([], { branch: () => "main", boardGhBin: join(shim.dir, "gh"),
-        buildBatchedGithub: () => fakeGitHub({ listMergedHeadBranches: () => [], listOpenHeadBranches: () => [] }) });
-      try {
-        for (let n = 0; n < 300 && !listening; n++) await new Promise(resolve => setTimeout(resolve, 50));
-        assert.equal(listening, true, "real isolated CLI must bind before its request is qualified");
-        const tokens = JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { read: string };
-        const response = await fetch(`http://127.0.0.1:${port}/v1/registry`, { headers: { authorization: `Bearer ${tokens.read}`, connection: "close" } });
-        assert.equal(response.status, 200);
-        assert.ok(!(await response.text()).includes("selected-material-sentinel"));
-        const rows = (): Row[] => readFileSync(join(root, "state", "ledger.ndjson"), "utf8").split("\n").filter(Boolean)
-          .map(line => JSON.parse(line) as { step: string } & Record<string, unknown>).map(row => ({ step: row.step, fields: row }));
-        for (let n = 0; n < (enabled ? 100 : 10) && !rows().some(row => row.step === STEP); n++) await new Promise(resolve => setTimeout(resolve, 20));
-        const receipt = rows().find(row => row.step === STEP && row.fields.action === "serve-registry");
-        if (!enabled) assert.equal(receipt, undefined, "ambient selection must never activate the feature");
-        else {
-          assert.ok(receipt, "the actual CLI loaded config must reach production composition");
-          assert.equal(receipt.fields.target_instance, "core", "observe the actual serving instance, not configured boot text");
-          assert.equal(receipt.fields.selected_state, "absent", "the selected fixture is not the actual serving core identity");
-          assert.equal(receipt.fields.publication_permission, "not-granted");
-          assert.ok(!JSON.stringify(receipt).includes(f.path));
-        }
-      } finally { process.emit("SIGTERM"); assert.equal(await running, 0); }
-    }
-  } finally {
-    console.log = consoleLog; console.error = consoleError;
-    for (const [key, value] of prior) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-  }
-});
 
 test("selected trusted-worker intent snapshots data without carrying ports or granting authority", async (t) => {
   const f = fixture(t), capturePort = Reflect.get(registryConsumers, "captureSelectedRegistryIntent");

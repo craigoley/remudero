@@ -14,7 +14,7 @@
  * `server.close()` on shutdown really does release everything this test opened.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +50,58 @@ function instance(serve?: { host?: string; port?: number }): { home: string; roo
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT, serve }));
   return { home, root };
 }
+
+test("selected real serve CLI forwards loaded opt-in but environment alone never enables it", { timeout: 90000 }, async (t) => {
+  const selection = instance(), selectionPath = join(selection.home, "selected.yaml");
+  const homes = [selection.home];
+  writeFileSync(selectionPath, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n    state_dir: /private/selected-material-sentinel\n");
+  const settings = { mode: "shadow", instanceName: "fixture", registryPath: selectionPath };
+  const keys = ["HOME", "RMD_INSTANCE_REGISTRY", "GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_PATH"];
+  const prior = new Map(keys.map(key => [key, process.env[key]]));
+  const consoleLog = console.log, consoleError = console.error;
+  try {
+    process.env.RMD_INSTANCE_REGISTRY = selectionPath;
+    for (const key of keys.slice(2)) delete process.env[key];
+    for (const enabled of [false, true]) {
+      const port = await freePort(), { home, root } = instance({ host: "127.0.0.1", port });
+      homes.push(home);
+      const configPath = join(home, ".config", "remudero", "config.json");
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      writeFileSync(configPath, JSON.stringify({ ...config, ...(enabled ? { selectedRegistryMode: settings } : {}) }));
+      process.env.HOME = home;
+      let listening = false;
+      console.log = (...values: unknown[]) => { if (values.join(" ").includes("listening on")) listening = true; };
+      console.error = () => {};
+      // Reuse this suite's actual boot gateway; the shared test preload refuses any escaped live transport.
+      const running = serveCommand([], { branch: () => "main", buildBatchedGithub: () => fakeGitHub(BOARD_BRANCH_LISTS) });
+      try {
+        for (let n = 0; n < 300 && !listening; n++) await sleep(50);
+        assert.equal(listening, true, "real isolated CLI must bind before its request is qualified");
+        const tokens = JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { read: string };
+        const response = await fetch(`http://127.0.0.1:${port}/v1/registry`, { headers: { authorization: `Bearer ${tokens.read}`, connection: "close" } });
+        assert.equal(response.status, 200);
+        assert.ok(!(await response.text()).includes("selected-material-sentinel"));
+        const rows = (): Array<Record<string, unknown>> => readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+          .split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+        for (let n = 0; n < (enabled ? 100 : 10) && !rows().some(row => row.step === "instance_registry.consumer_shadow_observed"); n++) await sleep(20);
+        const receipt = rows().find(row => row.step === "instance_registry.consumer_shadow_observed" && row.action === "serve-registry");
+        if (!enabled) assert.equal(receipt, undefined, "ambient selection must never activate the feature");
+        else {
+          assert.ok(receipt, "the actual CLI loaded config must reach production composition");
+          assert.equal(receipt.target_instance, "core", "observe the actual serving instance, not configured boot text");
+          assert.equal(receipt.selected_state, "absent", "the selected fixture is not the actual serving core identity");
+          assert.equal(receipt.publication_permission, "not-granted");
+          assert.ok(!JSON.stringify(receipt).includes(selectionPath));
+        }
+      } finally { process.emit("SIGTERM"); assert.equal(await running, 0); }
+    }
+  } finally {
+    console.log = consoleLog; console.error = consoleError;
+    for (const [key, value] of prior) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    // Every server owned by this case has returned from its normal shutdown before its fixture is removed.
+    for (const home of homes) rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("serve boots on main, secures its logs 0600, and answers on the config-resolved interface", async (t) => {
   const port = await freePort();
