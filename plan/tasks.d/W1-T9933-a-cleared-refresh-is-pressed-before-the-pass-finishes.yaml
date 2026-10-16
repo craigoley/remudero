@@ -31,6 +31,12 @@
       refresh. W1-T9595's light-pass wiring deliberately passes no updateBranch, so no other surface presses it.
     - Settled full passes earlier the same day ran 6.2-31.0 min, and one 120.6 min (daemon.sweep.settled, archives
       ledger.2026-10-16T15-37-45-989Z and T17-23-25-589Z). So the delay is routine, not a one-off.
+    - That pass was itself `daemon.sweep.abandoned` at 19:51:11Z (elapsed 3,696,432 ms against a learned bound of
+      3,690,294 ms) and settled at 19:52:22Z (3,767,264 ms). The next full pass started at 19:57:11Z with a learned bound of
+      5,523,822 ms (92 min). At 20:13:20Z a freshness restart latched mid-pass (`daemon.freshness_drain.started`, reason
+      upper_age, 11 detached sweep actions, 4 reviews in flight), while #12388 and #12391 read "main is green, but the
+      branch refresh is unwired on this surface (light pass)". A refresh that waits for the end of the loop is lost
+      whenever the pass is abandoned or the daemon restarts first.
     NOT COVERED ELSEWHERE: W1-T9595 (merged) built the admission and its end-of-loop run. W1-T9563 (merged) learns the
     pass bound. W1-T9918 (queued) is the light pass's own ready-refresh reads. None presses an admitted refresh before
     the loop ends.
