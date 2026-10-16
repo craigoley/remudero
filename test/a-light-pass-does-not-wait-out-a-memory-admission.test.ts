@@ -17,8 +17,9 @@ import { awaitMemoryAdmission, resetMemoryAdmissionStateForTests, type Admission
 import type { HostMemoryReading, ReadingEntry } from "../src/lib/host-memory-ledger.js";
 import { resetShadowMemoryStateForTests, type HostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import * as sweep from "../src/lib/sweep.js";
 import {
-  detachedSweepActionCount, drainDetachedSweepActions, lightPassMemoryWaitPorts, productionFixProgressJudge, runSweepLightPass,
+  detachedSweepActionCount, drainDetachedSweepActions, productionFixProgressJudge, runSweepLightPass,
   type FixDispatchEvidence, type OpenPrView, type SweepDeps,
 } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -205,6 +206,7 @@ test("W1-T9780: a later pass does not re-admit a head whose action is still wait
 
 test("W1-T9780: outside a light pass the memory-wait port only sleeps", async () => {
   const started = Date.now();
-  await lightPassMemoryWaitPorts().sleep(5);
+  // A namespace read, so the base this file proves against still loads and fails here, not at import.
+  await sweep.lightPassMemoryWaitPorts().sleep(5);
   assert.ok(Date.now() - started >= 4, "the port still waits out the admission's back-off");
 });
