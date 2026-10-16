@@ -47,6 +47,24 @@ raw: "FOUR MEASURED SESSION TRAPS, landed here at discovery per the 2026-09-16
 origin: operator-session#shift-left-audit-2026-09-16
 status: proposed
 attachments: []
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/12466
+summary:
+  headline: Four session traps caused avoidable test, coverage, and PR confusion
+  what_happened: One interactive session uncovered four traps that the run ledger
+    cannot capture. They are recorded here because the learnings corpus was at
+    capacity; two may move to doctrine, while the other two await restored
+    headroom.
+  decision: Keep the four measured traps recorded and apply their safeguards when
+    staging changes, diagnosing coverage, and reviewing stacked PRs.
+  options:
+    - label: Keep all four here for now
+      consequence: Preserves the session record while the learnings corpus awaits room.
+    - label: Move traps 1 and 2 to doctrine
+      consequence: Makes workstation and fixture guidance available where maintainers
+        can find it.
+      intent: reframe
+    - label: Move traps 3 and 4 after headroom returns
+      consequence: Adds the coverage and stacked-PR lessons to learnings once the cap
+        allows it.
+      intent: keep
 answered_by: null
