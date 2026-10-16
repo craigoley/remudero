@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/run-child-auto-reads-its-whole-window-past-rotation.test.ts
   status: queued
-  priority: 2  # operator-2026-10-16: auto is live on core; a forgotten loss re-promotes the detached-child contract it was demoted for, and the 30-min boot window keeps promotion from ever happening on a daemon that lives longer
+  priority: 1  # raised 2026-10-16 (R1 freshness-yield investigation): run children are the fix for 279 freshness yields in 6 days, and this read decides whether they ever stay on; was 2 (operator-2026-10-16: auto is live on core; a forgotten loss re-promotes the detached-child contract it was demoted for, and the 30-min boot window keeps promotion from ever happening on a daemon that lives longer)
   attempts: 0
   rationale: |
     READ at origin/main db88033a3 (2026-10-16):
@@ -41,9 +41,32 @@
       (b) PROMOTION STARVES. A daemon that lives more than 30 min across a rotation loses the previous
           `daemon.start`, so the next boot reads `held: no whole boot cycle in the evidence yet (no previous boot)`.
           Core restarts run about 40 min apart (memory: restarts-cost-a-quarter-of-capacity).
+      (c) ON IS FORGOTTEN. `mode` is the last `run_child.mode_decision` row, and that row rotates out too. A daemon
+          that is `on` and boots after a rotation reads `from: shadow`. It must then pass a whole new promotion, and by
+          (b) that read usually holds. So the fleet falls back to in-process runs with no loss to explain it.
     - Core ledger (read 2026-10-16, archives 10-15..16 plus live): the only `run_child.mode_decision` row is
       2026-10-16T14:18:00.567Z, run DAEMON-1792160213250, shadow to shadow, reason "held: no whole boot cycle in the
       evidence yet (no previous boot)", although core booted earlier that day. Consequence (b) is live.
+    - WHY P1 (R1 investigation 2026-10-16, core ledger union 10-10..10-16; scripts and rows in
+      ~/Remudero-notes/r1-freshness-2026-10-16/ on the operator Mac):
+      - From 10-11 to 10-16, 311 build runs ended `handed_off/freshness_yield`: 279 for a daemon restart and 32 for a
+        recycle. By day: 74, 88, 61, 37, 26, 25. They were 311 of the 521 verdicts (60%).
+      - Each freshness restart yields every in-process run, because the run lives in the daemon's process (ADR 0007
+        cause 2). A yield gives a running build no fresh code; it only lets the daemon exit.
+      - The latch holdout rarely saves a run. Of 72 runs held in `implementing`, 63 still yielded, most of them on
+        `estimate_elapsed`, and 9 finished. 69 of 103 `daemon.restart_yield_asked` rows give `estimate_elapsed`.
+      - A yield seldom loses the work itself: 254 of the 311 next runs restored the pushed checkpoint. It costs time.
+        The task waits a median 32 minutes (p90 621) before it starts again. And 170 of the 265 next runs yielded
+        again: 42 tasks yielded 3 or more times, 192 yields between them.
+      - On 10-16 to 16:03Z, 29.3 of 35.8 run lane-hours ended in freshness_yield, and 9 PRs opened.
+      - Under `on`, a restart does not touch a child (`restartAtWorkerBoundary` returns nothing when
+        `hasChildTask`), and W1-T9086 lets the next boot adopt it. So `on` removes all 279 restart-triggered yields.
+        It was live for 25 minutes, 15:06-15:31Z on 10-16. All 3 children were lost ("Cannot find module 'tsx'" and
+        "Cannot find package 'yaml'" from engines/6a34d2fd.../), and auto demoted.
+      - W1-T9738 (#12345, merged 16:00Z) fixes that engine link. Re-promotion then needs this window read.
+        Only 3 `run_child.mode_decision` rows exist in 7 days, and the first was starved by (b).
+      - The live file read at 16:03Z holds one `run_child.*` row and one `daemon.start`. The 15:06Z promotion and
+        the 15:31Z demotion rows are already only in archives.
     - OVERLAP CHECKED: W1-T9087's shard says nothing of rotation. W1-T9086, W1-T9089 and W1-T9114 do not touch the
       tracker's seed. The recent open heads naming createRunChildModeTracker are W1-T9087's own merged run branches.
   design: |
@@ -57,7 +80,8 @@
     4. Tests (new file, `test(` titles verbatim as in the proofs below):
        - a lost child in the window that only an archive holds still holds promotion at the next boot;
        - a previous `daemon.start` that only an archive holds still opens a whole boot cycle;
-       - an unreadable union holds shadow and names the unread file.
+       - an unreadable union holds shadow and names the unread file;
+       - a daemon that is `on` and boots after a rotation stays `on`, because its last decision is read from the archive.
   acceptance:
     - claim: "a lost child that rotation moved to an archive still holds promotion at the next boot"
       proof: 'grep: test("W1-T9816: a rotated-away lost child still holds run-child promotion" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
@@ -65,6 +89,8 @@
       proof: 'grep: test("W1-T9816: an archived previous boot still opens the run-child window" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
     - claim: "an unreadable evidence window holds shadow and names what was unread"
       proof: 'grep: test("W1-T9816: an unreadable run-child window holds shadow" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
+    - claim: "a daemon that was on and boots after a rotation stays on, because its last decision is read from the archive"
+      proof: 'grep: test("W1-T9816: an archived on decision keeps run-child mode on across a rotation" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
   falsifier: |
     At origin/main, a state dir is built whose archive holds daemon.start B and run_child.lost L, and whose live
     file holds daemon.start B, two `run_child.shadow` contract-ok rows with peaks within estimate, daemon.start C and
