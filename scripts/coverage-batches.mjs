@@ -240,12 +240,12 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
   }
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2), { run = runCoverageBatches } = {}) {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     'batch-size': { type: 'string' }, base: { type: 'string', default: 'origin/main' },
     lcov: { type: 'string', default: 'coverage/lcov.info' }, 'keep-raw': { type: 'boolean', default: false },
   } });
-  const result = await runCoverageBatches({ flags: extractCoverageFlags(readCiYaml()), files: positionals,
+  const result = await run({ flags: extractCoverageFlags(readCiYaml()), files: positionals,
     batchSize: Number(values['batch-size']), lcov: resolve(values.lcov), base: values.base, keepRaw: values['keep-raw'] });
   return result.status;
 }

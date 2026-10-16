@@ -1,16 +1,64 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import childProcess from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, fstatSync, mkdirSync, readFileSync, readSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
 import { testSlotProcessFacts } from "../src/lib/test-slot.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 // @ts-expect-error Plain repository CLI exports are exercised through their real implementation.
-import { coverageArtifactDigest, guardCoverageLease, releaseCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
+import { coverageArtifactDigest, guardCoverageLease, main as batchMain, releaseCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
 // @ts-expect-error Plain repository CLI exports supply the real CI coverage scope.
-import { extractCoverageFlags, readCiYaml } from "../scripts/diff-coverage-local.mjs";
+import { extractCoverageFlags, main as localMain, readCiYaml } from "../scripts/diff-coverage-local.mjs";
+
+test("coverage batch CLI preserves explicit selection retention and refused exit status", async () => {
+  let calls = 0;
+  const status = await batchMain(["--batch-size", "2", "--base", "HEAD", "--lcov", "/private/fixture/lcov.info",
+    "--keep-raw", "test/first.test.ts", "test/second.test.ts"], { run: async (options: {
+      files: string[]; flags: string[]; batchSize: number; base: string; lcov: string; keepRaw: boolean;
+    }) => {
+    calls++;
+    assert.deepEqual(options.files, ["test/first.test.ts", "test/second.test.ts"]);
+    assert.ok(options.flags.includes("--experimental-test-coverage"));
+    assert.equal(options.batchSize, 2); assert.equal(options.base, "HEAD");
+    assert.equal(options.lcov, "/private/fixture/lcov.info"); assert.equal(options.keepRaw, true);
+    return { status: 75 };
+  } });
+  assert.equal(calls, 1); assert.equal(status, 75);
+});
+
+test("the actual coverage CLI rejects an invalid batch before running work", () => {
+  const result = childProcess.spawnSync(process.execPath, ["--max-old-space-size=512", "--import", "tsx",
+    "scripts/coverage-batches.mjs", "--batch-size", "0", "test/coverage-batches.test.ts"], {
+    cwd: new URL("..", import.meta.url), env: { ...process.env }, encoding: "utf8", timeout: 10_000, maxBuffer: 128 * 1024,
+  });
+  assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 1);
+  assert.match(result.stderr, /batch size must be a positive integer/);
+  assert.doesNotMatch(result.stderr, /coverage-batches: receipt/);
+});
+
+test("the local batch delegate preserves failed and unavailable child outcomes", async (t) => {
+  assert.equal(await localMain(["--batch-size", "0", "test/coverage-batches.test.ts"]), 1,
+    "the real default delegate reaches the CLI validation failure");
+  const argv = ["--batch-size", "1", "--keep-raw", "test/coverage-batches.test.ts"];
+  let status: number | null = 7, calls = 0;
+  const stub = t.mock.method(childProcess, "spawnSync", ((file: string, args: string[], options: {
+    env: NodeJS.ProcessEnv; stdio: string;
+  }) => {
+    calls++; assert.equal(file, process.execPath); assert.deepEqual(args.slice(-argv.length), argv);
+    assert.equal(options.env.NODE_V8_COVERAGE, ""); assert.equal(options.stdio, "inherit");
+    return { status };
+  }) as typeof childProcess.spawnSync);
+  syncBuiltinESMExports();
+  try {
+    assert.equal(await localMain(argv), 7);
+    status = null; assert.equal(await localMain(argv), 1, "a killed or unstarted child is not success");
+    status = 0; assert.equal(await localMain(argv), 0); assert.equal(calls, 3);
+  } finally { stub.mock.restore(); syncBuiltinESMExports(); }
+});
 
 test("coverage artifact hashing reads the opened regular file and refuses empty linked or replaced evidence", (t) => {
   const { dir } = ownedFixtureDir(t, "batch-artifact"), file = join(dir, "lcov.info");
@@ -190,4 +238,21 @@ test("coverage batches refuse ghost inputs and retain an actual failing batch wi
   assert.ok(existsSync(receipt.batches[0].raw));
   assert.match(readFileSync(receipt.batches[0].tap, "utf8"), /original batch failure/);
   rmSync(receipt.batches[0].raw, { recursive: true, force: true });
+});
+
+test("coverage batches preserve an admission refusal without starting a child", async (t) => {
+  const repo = gitRepo({ scope: t, seedCommit: false }); mkdirSync(join(repo.dir, "test"));
+  writeFileSync(join(repo.dir, ".gitignore"), "coverage\n");
+  writeFileSync(join(repo.dir, "test/ready.test.mjs"), "import{test}from'node:test';test('ready',()=>{});\n");
+  repo.git("add", "."); repo.git("commit", "-m", "test: refused batch fixture");
+  let released = 0, spawned = 0;
+  const result = await runCoverageBatches({ cwd: repo.dir, flags: [], files: ["test/ready.test.mjs"], batchSize: 1,
+    lcov: join(repo.dir, "coverage/lcov.info") }, { log() {},
+    acquire: async () => ({ outcome: "not-run", executionAllowed: false, note: "another owner retains the slot", release() { released++; } }),
+    run: async () => { spawned++; throw new Error("unadmitted child started"); },
+  });
+  const receipt = JSON.parse(readFileSync(result.receiptPath, "utf8"));
+  assert.equal(result.status, 75); assert.equal(receipt.state, "not-run");
+  assert.equal(receipt.reason, "another owner retains the slot"); assert.deepEqual(receipt.batches, []);
+  assert.equal(spawned, 0); assert.equal(released, 1);
 });

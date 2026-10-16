@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { linkSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Script } from "node:vm";
@@ -38,6 +40,31 @@ test("workspace accounting deduplicates hardlinks and excludes borrowed cache ta
   assert.equal(borrowed.dependencyMethod, "borrowed-link"); assert.equal(borrowed.completeness, "unknown");
   assert.equal(borrowed.generatedPathBytes, null);
   assert.equal(readFileSync(join(outside, ".cache", "keep"), "utf8"), "borrowed");
+});
+
+test("workspace read failures retain unknown capacity and incomplete generated usage", (t) => {
+  const { dir } = ownedFixtureDir(t, "workspace-read-failure");
+  mkdirSync(join(dir, "coverage")); const payload = join(dir, "coverage/payload"); writeFileSync(payload, "retained");
+  const unavailable = t.mock.method(fs, "statfsSync", () => { throw new Error("filesystem observation unavailable"); });
+  syncBuiltinESMExports();
+  try {
+    const sample = sampleWorkspaceUsage(dir, { maxMs: 1000 });
+    assert.equal(sample.hostFreeBytes, null); assert.ok(sample.reasons.includes("host-free-unavailable"));
+    assert.equal(assessWorkspaceDiskBudget(sample.hostFreeBytes, { minimumFreeBytes: 1, reservedBytes: 0, estimatedPeakBytes: 0 }), "unknown");
+  } finally { unavailable.mock.restore(); syncBuiltinESMExports(); }
+  const original = fs.lstatSync;
+  const unreadable = t.mock.method(fs, "lstatSync", ((...args: Parameters<typeof fs.lstatSync>) => {
+    if (String(args[0]) === payload) throw Object.assign(new Error("entry unreadable"), { code: "EACCES" });
+    return Reflect.apply(original, fs, args);
+  }) as typeof fs.lstatSync);
+  syncBuiltinESMExports();
+  try {
+    const sample = sampleWorkspaceUsage(dir, { maxMs: 1000 });
+    assert.equal(sample.completeness, "lower-bound"); assert.ok(sample.reasons.includes("entry-unreadable-or-changed"));
+    assert.notEqual(sample.generatedPathBytes, null);
+  } finally { unreadable.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(readFileSync(payload, "utf8"), "retained");
+  assert.equal(sampleWorkspaceUsage(dir, { maxMs: 1000 }).completeness, "complete");
 });
 
 test("workspace seed metadata records APFS materialization without claiming unique physical disk cost", (t) => {
