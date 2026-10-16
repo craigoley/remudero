@@ -24,7 +24,8 @@ const registry = (mode: string | undefined, privateValue = "/private/selected-mo
 const pr = { prUrl: "https://github.com/owner/repo/pull/1", prNumber: 1,
   taskId: "W1-T9572", headSha: "a".repeat(40) } as OpenPrView;
 
-function fixture(mode: string | null = "shadow", legacy: "shadow" | "live" = "live", optedIn = true) {
+function fixture(mode: string | null = "shadow", legacy: "shadow" | "live" = "live", optedIn = true,
+  physical?: "armAuto" | "mergeDirect" | "enqueue") {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-consumer-`));
   const selected = join(root, "selected.yaml"), other = join(root, "other.yaml");
   writeFileSync(selected, registry(mode === null ? undefined : mode, root)); writeFileSync(other, registry("live", root));
@@ -39,7 +40,11 @@ function fixture(mode: string | null = "shadow", legacy: "shadow" | "live" = "li
     runId: "SWEEP-selected-mode-fixture", plan: loadPlanFromYaml("[]", "selected-mode consumer fixture"),
     instanceRegistryTextImpl: () => registry(legacy),
     log: (step: string, fields: Record<string, unknown> = {}) => logs.push({ step, fields }),
-    armImpl: async () => { arms += 1; return "armed" as const; },
+    armImpl: async (url?: string, _task?: string, ports?: ArmDeps<true>) => {
+      arms += 1;
+      if (physical) { assert.ok(ports); await ports[physical]!(url!); }
+      return "armed" as const;
+    },
   };
   const effects = buildSweepEffects(deps);
   return { root, selected, other, settings, config, effects, logs, arms: () => arms,
@@ -182,4 +187,48 @@ test("selected mode shadow qualification never activates selected permissions", 
     assert.equal(observed.rows().at(-1)?.publication_permission, "not-granted");
     assert.equal(observed.arms(), 1, "a would-shadow observation is not an enforced hold");
   } finally { observed.cleanup(); }
+});
+
+test("selected mode production sweep roots forward to each real physical default", async (t) => {
+  for (const physical of ["armAuto", "mergeDirect", "enqueue"] as const) await t.test(physical, async () => {
+    const fx = fixture("shadow", "live", true, physical), shim = ghShim(), path = process.env.PATH;
+    process.env.PATH = `${shim.dir}:${path}`;
+    try {
+      assert.equal(await withLiveWritesAllowed(() => fx.effects.arm!(pr)), "armed");
+      const action = physical === "armAuto" ? "arm" : physical === "mergeDirect" ? "direct-merge" : "queue";
+      const row = fx.rows().find(row => row.action === action);
+      assert.equal(row?.selected_outcome, "would-shadow", "the actual composition root must forward to the actual write");
+      assert.equal(row?.publication_permission, "not-granted");
+      assert.equal(shim.calls().length, 1, "one contained real default transport");
+    } finally { process.env.PATH = path; rmSync(shim.dir, { recursive: true, force: true }); fx.cleanup(); }
+  });
+});
+
+test("selected mode observations bind each real target and never dedupe another PR", async () => {
+  const fx = fixture("shadow");
+  try {
+    assert.equal(await fx.effects.arm!(pr), "armed");
+    assert.equal(await fx.effects.arm!({ ...pr, prUrl: "https://github.com/owner/repo/pull/2", prNumber: 2 }), "armed");
+    assert.equal(fx.rows().length, 2, "distinct PR effects cannot disappear behind an identical mode/result");
+    assert.deepEqual(fx.rows().map(row => [row.target_repo, row.target_pr]), [["owner/repo", 1], ["owner/repo", 2]]);
+    assert.equal(await fx.effects.arm!({ ...pr, prUrl: "https://github.com/other/repo/pull/3", prNumber: 3 }), "armed");
+    assert.equal(fx.rows().at(-1)?.selected_outcome, "would-refuse");
+    assert.equal(fx.rows().at(-1)?.reason, "target_mismatch");
+    assert.equal(fx.arms(), 3, "mismatched observation never blocks the independent SHADOW effect");
+  } finally { fx.cleanup(); }
+});
+
+test("selected mode hostile opt-in and receipt mutation never change legacy effects", async () => {
+  const fx = fixture("shadow");
+  try {
+    const settings = Object.defineProperty({}, "mode", { get() { throw new Error(fx.root); } }) as Settings;
+    let row: Record<string, unknown> | undefined, calls = 0;
+    const q = createSelectedModeQualification(settings, "owner/repo", {}, (_step, fields) => { row = fields; });
+    assert.ok(q, "unreadable opt-in is unknown, not an uncaught effect failure");
+    assert.equal(await Reflect.apply(q.observe, q, ["arm", () => { calls++; return "armed"; }, pr.prUrl]), "armed");
+    assert.equal(row?.reason, "input_unreadable");
+    assert.equal(Object.isFrozen(row), true, "sinks cannot mutate the immutable redacted observation");
+    assert.equal(Reflect.set(row!, "publication_permission", "granted"), false);
+    assert.equal(calls, 1); assert.equal(JSON.stringify(row).includes(fx.root), false);
+  } finally { fx.cleanup(); }
 });
