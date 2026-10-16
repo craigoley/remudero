@@ -997,7 +997,6 @@ function upstreamCapture(root: string, captured: FeedbackEntry, opts: CaptureFee
 
 // ── Read / lifecycle ─────────────────────────────────────────────────────────
 
-/** W1-T9852: an entry with no `attachments:` key (a hand-landed or gate-written file) reads as `[]`; a non-list is refused. */
 function feedbackEntryFrom(parsed: unknown, id: string): FeedbackEntry {
   if (typeof parsed !== "object" || parsed === null) return parsed as FeedbackEntry;
   const attachments = (parsed as { attachments?: unknown }).attachments;
