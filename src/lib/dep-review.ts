@@ -596,7 +596,8 @@ export async function readSelectedDepReviewChecks(
     const rollup = rollupFromRest(checks as Parameters<typeof rollupFromRest>[0], statuses as Parameters<typeof rollupFromRest>[1], workflows as NonNullable<Parameters<typeof rollupFromRest>[2]>);
     for (let index = 0; index < checks.length; index++) {
       const check = checks[index], entry = rollup[index], suite = record(check.check_suite)?.id;
-      const matching = workflows.filter(r => r.check_suite_id === suite);
+      const posted = typeof check.external_id === "string" && /^run:\d+:\d+:job:\d+$/.test(check.external_id);
+      const matching = posted ? [] : workflows.filter(r => r.check_suite_id === suite);
       const direct = workflows.find(r => r.id === entry.workflowRunId), run = direct ?? matching[0];
       if (matching.length > 1 || (direct && matching[0] && direct.id !== matching[0].id) ||
           ((entry.workflowRunId !== undefined || record(check.app)?.slug === "github-actions") && run === undefined)) return unknown("workflow_identity_unresolved");
