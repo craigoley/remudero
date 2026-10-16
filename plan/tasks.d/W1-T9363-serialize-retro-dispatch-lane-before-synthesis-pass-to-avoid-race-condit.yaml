@@ -14,21 +14,22 @@
   files:
     - src/lib/retro.ts
     - src/run-task.ts
-    - test/a-retro-in-flight-holds-off-a-second-retro.test.ts
+    - test/retro-open-pr-guard.test.ts
   acceptance:
     - claim: retro-dispatch lane serializes pending retro syncs before synthesis
       proof: "grep: export function serializeRetroDispatch in src/lib/retro.ts"
     - claim: the retro command runs its synthesis inside the serializer
       proof: "grep: serializeRetroDispatch( in src/run-task.ts"
     - claim: a retro that finds another retro in flight skips without synthesizing
-      proof: 'grep: test("W1-T9363: a retro that finds another retro in flight skips without synthesizing" in test/a-retro-in-flight-holds-off-a-second-retro.test.ts'
+      proof: 'grep: test("W1-T9363: a retro that finds another retro in flight skips without synthesizing" in test/retro-open-pr-guard.test.ts'
   origin: architect
 
   # AMENDED 2026-10-16 (operator session, PR #12043): drain.ts never runs a retro; the retro
   # synthesis pass is retroCommand in src/run-task.ts, run as the `rmd retro` child the daemon's
   # cadence trigger spawns. Claim 2 named a file that cannot carry the call, so fix rounds on
   # #12043 ended NEEDS_SCOPE src/run-task.ts and then NEEDS_DESIGN (claim-mismatch). Claim 2 now
-  # names the real caller and claim 3 pins the behavioral test. W1-T4909 (#8152) already blocks a
+  # names the real caller and claim 3 pins the behavioral test, which joins W1-T4909's suite
+  # because a new suite importing src/run-task.ts trips the affected-reach ratchet. W1-T4909 (#8152) already blocks a
   # retro while an earlier retro PR is open; this lock covers two retros in flight before either
   # opens one.
   rationale: >-
