@@ -11,7 +11,7 @@
   origin: "operator request 2026-10-16 11:25Z (get #12219 merged and fix the root cause); fan-out 2026-10-15/16 agent D3"
   plan_refs: [W1-T9087, W1-T7724, W1-T5403, W1-T5523, W1-T2284, W1-T454, W1-T1031, W1-T970, W1-T5911, W1-T2244, W1-T100, W1-T9748]
   files: [src/lib/risk-judge.ts, src/lib/sweep.ts, src/run-task.ts, test/the-risk-judge-reads-the-shard-it-judges.test.ts, test/risk-judge-description-is-the-defect.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
