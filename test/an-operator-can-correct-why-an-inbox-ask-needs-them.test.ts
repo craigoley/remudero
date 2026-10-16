@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { writeAtomic } from "../src/lib/fs-race-safe.js";
+import { GENERIC_EXIT_CODE, RmdError, exitCodeFor } from "../src/lib/errors.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { readPersistedInbox, persistedInboxPath, triageFleetLane } from "../src/lib/fleet-lane.js";
 import { refreshInboxClassification } from "../src/lib/inbox-view.js";
@@ -616,6 +617,10 @@ test("why-me receipt growth after its checked size stays bounded and explicitly 
   const intake = withWhyMeJudgmentInput([{ id: "W1-T216" }], w.state, source, Date.now(), OWN_SCOPE)[0]!;
   assert.equal(intake.whyMeFeedback, undefined);
   assert.match(intake.whyMeFeedbackUnavailable!, /verification bound/);
+  assert.throws(() => observeWhyMeFeedback(w.state, source.whyMeFeedback, source.attentionCensus,
+    source.generatedAt, source.generatedAt), error => error instanceof RmdError &&
+      error.kind === "registry" && exitCodeFor(error) === GENERIC_EXIT_CODE &&
+      error.message === "correction receipt exceeds the verification bound");
 });
 
 test("why-me receipt symlinks and non-regular files never become verified history or outcomes", async t => {

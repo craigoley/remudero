@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { inboxThreadId } from "./inbox-thread.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import type { AttentionCensus } from "./inbox-responder.js";
 
 export const INBOX_RECEIPT_DIR = "inbox-intent-receipts";
@@ -45,7 +46,9 @@ const record = (v: unknown): v is Record<string, unknown> => typeof v === "objec
 
 // BACKSTOP: cap receipt-verification I/O; oversize or growth remains explicitly unknown evidence.
 const MAX_RECEIPT_BYTES = 1024 * 1024;
-class OversizedReceiptError extends Error {}
+class OversizedReceiptError extends RmdError {
+  constructor(message: string) { super("registry", GENERIC_EXIT_CODE, message); }
+}
 /** Check and read one opened regular file; a pathname replacement cannot change its identity. */
 function readWhyMeReceipt(path: string): WhyMeReceipt {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
