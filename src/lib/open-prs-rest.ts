@@ -1943,8 +1943,9 @@ export function hydrateMergeConflictEvidence(
   dirtyPrs: readonly { number: number; headRefOid: string }[],
   fetch: GhApiFetcher,
   cap: number = MERGE_STATE_HYDRATION_CAP,
+  gaps?: Map<number, string>,
 ): Map<number, MergeConflictEvidence> {
-  return runGhReadSteps(hydrateMergeConflictEvidenceSteps(owner, repo, targetBranch, dirtyPrs, fetch, cap));
+  return runGhReadSteps(hydrateMergeConflictEvidenceSteps(owner, repo, targetBranch, dirtyPrs, fetch, cap, gaps));
 }
 
 export function* hydrateMergeConflictEvidenceSteps(
@@ -1954,13 +1955,16 @@ export function* hydrateMergeConflictEvidenceSteps(
   dirtyPrs: readonly { number: number; headRefOid: string }[],
   fetch: GhApiFetcher,
   cap: number = MERGE_STATE_HYDRATION_CAP,
+  gaps?: Map<number, string>,
 ): GhReadSteps<Map<number, MergeConflictEvidence>> {
   const out = new Map<number, MergeConflictEvidence>();
+  for (const p of dirtyPrs.slice(cap)) gaps?.set(p.number, `over the ${cap}-PR conflict-evidence cap this pass`);
   for (const p of dirtyPrs.slice(0, cap)) {
     try {
       out.set(p.number, yield* mergeConflictEvidenceSteps(owner, repo, targetBranch, p.headRefOid, fetch));
-    } catch {
-      /* best-effort: this PR keeps the pre-existing undefined mergeConflict, the pass continues */
+    } catch (error) {
+      // W1-T9723: best-effort, but the failure is the evidence gap the escalation names.
+      gaps?.set(p.number, `the compare read failed: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
     }
   }
   return out;
