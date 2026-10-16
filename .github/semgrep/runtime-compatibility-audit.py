@@ -579,15 +579,23 @@ def phase_unit(root, workspace, head):
         need(digest(raw) == sha256, "UNIT_SOURCE_HASH", name)
         _once(stage / name, raw)
     wheel = _bootstrap_pip(root)
+    # Exercise the real strict production loader on the pinned interpreter too;
+    # the synthetic controls deliberately use their own fresh child context.
+    production_loader = load_approved_pip_wheel(str(wheel))
     receipt = stage / "unit-result.json"
     _run(root, [sys.executable, "-I", "-S", stage / "test_runtime_compatibility_audit.py",
                 "--pip-wheel", wheel, "--auditor-sha256", expected["runtime-compatibility-audit.py"],
                 "--receipt", receipt], seconds=90)
     report = json.loads(_regular(receipt, 65536))
     verify_unit_receipt(report, expected)
-    _json_once(root / "unit-audit.json", {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
+    summary = {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
                "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 107,
-               "pythonVersion": report["pythonVersion"], "runnerQualified": False})
+               "pythonVersion": report["pythonVersion"], "productionLoader": production_loader.provenance,
+               "runnerQualified": False}
+    _json_once(root / "unit-audit.json", summary)
+    # Preserve a bounded machine-readable receipt in native Actions logs, not
+    # only in a disposable runner's filesystem. This contains no candidate code.
+    print(json.dumps(summary, sort_keys=True), flush=True)
 
 
 def phase_download(root, workspace, head):

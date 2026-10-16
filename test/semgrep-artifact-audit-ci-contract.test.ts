@@ -31,6 +31,10 @@ test('Semgrep policy changes require pinned audit controls before every candidat
  }
  assert.ok(unit.run.includes('"-I", "-S"'));assert.ok(unit.run.includes('git("cat-file", "blob", blob)'));
  assert.ok(unit.run.includes('hashlib.sha256(raw).hexdigest() == expected'));
+ const code=readFileSync(auditor,'utf8');
+ assert.ok(code.includes('production_loader = load_approved_pip_wheel(str(wheel))'));
+ assert.ok(code.includes('"productionLoader": production_loader.provenance'));
+ assert.ok(code.includes('print(json.dumps(summary, sort_keys=True), flush=True)'));
 });
 
 test('Semgrep Python audit has its own CodeQL language without importing candidate artifacts',()=>{
