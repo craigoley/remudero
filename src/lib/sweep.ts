@@ -209,6 +209,7 @@ import {
   type CapacityDecision,
   type ReviewDemandOptions,
 } from "./host-memory-priority.js";
+import { clearRepairMemoryDemand, noteRepairMemoryRefusal, repairMemoryDemandMark, repairYieldLedgerFields, settleRepairMemoryPass, type RepairYieldDecision } from "./repair-memory-demand.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
   workerTranscript,
@@ -15082,6 +15083,8 @@ export function createSweepFixAdmissionController(input: {
       refresh();
       if (available <= 0) {
         fixesRefused++;
+        if (charge) noteRepairMemoryRefusal({ prNumber: pr.prNumber, waitingSinceMs: since ?? systemClock.now(), refusedAtMs: systemClock.now(),
+          shortMib: Math.max(0, charge.fixEstimateMib - (charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib)) }); // W1-T9706
         emit(order());
         const arithmetic = refusalArithmetic();
         ahead = undefined;
@@ -15095,6 +15098,7 @@ export function createSweepFixAdmissionController(input: {
       }
       reservations++;
       fixesAdmitted++;
+      clearRepairMemoryDemand(pr.prNumber); // W1-T9706: an admission ends this repair's wait for memory.
       compute();
       if (since !== undefined) overtake(since);
       emit(order());
@@ -15499,6 +15503,7 @@ export async function runSweep(
   const readLedger = deps.readLedger ?? readLedgerLines;
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
+  const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
   const log = deps.log ?? (() => {});
   const mergeBaseKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const judgmentPool = sweepJudgmentPool(deps);
@@ -20086,6 +20091,7 @@ export async function runSweep(
       }
     }
   }
+  settleRepairMemoryPass(repairDemandMark, deps.repairAdmissionSurface === "full" ? undefined : openPrs.map((pr) => pr.prNumber));
   return summary;
 }
 
@@ -21375,9 +21381,10 @@ export interface MemoryGovernorResult {
   binding?: "host" | "container";
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
-  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
+  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for" | "yield-to-repair"; // W1-T9706: deferred for a waiting repair.
   /** W1-T8401/W1-T9358: the daemon's reclaim before a container-short or host-short hold (see {@link reclaimBeforeHold}). */
   reclaim?: SlackReclaimRecord;
+  repairYield?: RepairYieldDecision; // W1-T9706: the build's yield decision against the top repair waiting for memory.
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
@@ -21439,6 +21446,7 @@ export function logMemoryObservation(
       tier: result.tier,
     }),
     ...reclaimLedgerFields(result.reclaim),
+    ...repairYieldLedgerFields(result.repairYield),
   });
 }
 

@@ -3196,6 +3196,7 @@ import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
+import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -36063,7 +36064,7 @@ export function memoryGovernorGateFor(
     const once = () => checkMemoryGovernor(
       readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy), policy, readContainer?.(), ownWorkLive,
     );
-    const result = reclaimBeforeHold(once(), once, reclaim);
+    const result = buildYieldsToRepair(reclaimBeforeHold(once(), once, reclaim), ownWorkLive); // W1-T9706: a fitting build yields to a waiting repair.
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
