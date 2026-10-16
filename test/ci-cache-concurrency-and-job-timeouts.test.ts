@@ -22,9 +22,14 @@ const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
 const CI_YAML_PATH = join(WORKFLOWS_DIR, "ci.yml");
 const CI_GATE_YAML_PATH = join(WORKFLOWS_DIR, "ci-gate.yml");
 
-type WorkflowStep = { uses?: string; with?: Record<string, unknown>; id?: string; if?: string; run?: string };
+type WorkflowStep = {
+  uses?: string; with?: Record<string, unknown>; id?: string; if?: string; run?: string;
+  env?: Record<string, unknown>;
+};
 type WorkflowJob = {
   "timeout-minutes"?: number;
+  if?: string;
+  outputs?: Record<string, string>;
   uses?: string; // a job whose body IS a reusable-workflow call — no timeout-minutes is valid there
   steps?: WorkflowStep[];
 };
@@ -46,6 +51,72 @@ async function loadWorkflowFiles(): Promise<Array<{ file: string; doc: WorkflowD
 }
 
 function assertSetupCache(file: string, jobId: string, steps: WorkflowStep[], index: number): void {
+  if (file === "ci.yml" && jobId === "coverage-ledger") {
+    const context = "ci.yml: dependency-free coverage-ledger bootstrap";
+    assert.doesNotMatch(steps.map(step => step.run ?? "").join("\n"),
+      /\b(?:npm|npx|pnpm|yarn)\b|\bbun\s+(?:install|add|x)\b/,
+      `${context} must not install dependencies anywhere in the job`);
+    assert.equal(steps.length, 5, `${context} must retain its five known steps`);
+    assert.equal(index, 1, `${context} must set up Node immediately after sparse checkout`);
+    const [checkout, setup, resolve, publish, finish] = steps;
+    assert.match(checkout?.uses ?? "", /^actions\/checkout@[a-f0-9]{40}$/i);
+    assert.equal(checkout?.with?.["fetch-depth"], 2);
+    assert.equal(checkout?.with?.["sparse-checkout-cone-mode"], false);
+    assert.deepEqual(String(checkout?.with?.["sparse-checkout"]).split(/\s+/).filter(Boolean),
+      [".nvmrc", "scripts/", "src/lib/plan-scope.ts"],
+      `${context} must not acquire a package-lock or a dependency checkout`);
+    assert.match(setup?.uses ?? "", /^actions\/setup-node@[a-f0-9]{40}$/i);
+    assert.equal(setup?.with?.cache, undefined, `${context} must remain uncached without a lockfile`);
+    assert.deepEqual(setup?.with, { "node-version-file": ".nvmrc" });
+    assert.equal(setup?.if, undefined, `${context} must preserve the Node pin on every event`);
+    assert.equal(resolve?.id, "resolve");
+    assert.equal(resolve?.uses, undefined);
+    assert.equal(resolve?.if, undefined);
+    assert.deepEqual(resolve?.env, { GH_TOKEN: "${{ github.token }}" });
+    const body = resolve?.run ?? "";
+    assert.match(body, /^\s*set\s+-euo\s+pipefail\b/);
+    assert.ok(body.includes('CHOICE_NAME="coverage-ledger-choice-${GITHUB_RUN_ID}"'),
+      `${context} must bind the immutable choice to this run`);
+    assert.ok(body.includes('[ "${GITHUB_RUN_ATTEMPT:-1}" = "1" ] || die'),
+      `${context} must refuse a lost rerun choice`);
+    const runBodies = steps.map(step => step.run ?? "").join("\n").replace(/\\\n\s*/g, " ");
+    const nodeCommands = runBodies.split("\n")
+      .map(line => line.trim()).filter(line => /\bnode\s/.test(line));
+    assert.deepEqual([...runBodies.matchAll(/\bnode\s+(\S+)/g)].map(match => match[1]),
+      ["scripts/diff-class.mjs", "scripts/test-tier-manifest.mjs", "scripts/test-tier-manifest.mjs"],
+      `${context} must run only the dependency-free classifier and strict ledger CLI`);
+    assert.match(nodeCommands[0]!, /--coverage-class\b/);
+    assert.match(nodeCommands[0]!, /--changed-files\s+ledger-changed-files\.txt\b/);
+    for (const [command, verb, directory] of [
+      [nodeCommands[1]!, "verify", "INCOMING"], [nodeCommands[2]!, "write", "PUBLISH"],
+    ]) {
+      assert.ok(command!.includes(`--${verb}-resolved-ledger`));
+      for (const [flag, value] of [["resolved-ledger", `$${directory}/ledger-choice.json`],
+        ["snapshot", `$${directory}/ledger-snapshot.manifest`], ["github-output", "$GITHUB_OUTPUT"]]) {
+        assert.ok(command!.replace(/\s+/g, " ").includes(`--${flag} "${value}"`),
+          `${context} must keep the ${verb} CLI's ${flag} identity`);
+      }
+    }
+    assert.ok(nodeCommands[2]!.includes('"${FLAGS[@]}"'), `${context} must retain the selected source/artifact flags`);
+    assert.equal(publish?.id, "publish");
+    assert.equal(publish?.if, undefined);
+    assert.match(publish?.uses ?? "", /^actions\/upload-artifact@[a-f0-9]{40}$/i);
+    assert.deepEqual(publish?.with, {
+      name: "coverage-ledger-choice-${{ github.run_id }}", path: "${{ runner.temp }}/coverage-ledger-publish",
+      "retention-days": 1, "if-no-files-found": "ignore",
+    }, `${context} must publish the immutable run identity without overwrite`);
+    assert.equal(finish?.id, "finish");
+    assert.equal(finish?.if, undefined);
+    assert.equal(finish?.uses, undefined);
+    assert.deepEqual(finish?.env, {
+      DIGEST: "${{ steps.resolve.outputs.digest }}", EXISTING_ID: "${{ steps.resolve.outputs.existing_artifact_id }}",
+      PUBLISHED_ID: "${{ steps.publish.outputs.artifact-id }}",
+    });
+    assert.ok(finish?.run?.includes('[[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] ||'),
+      `${context} must refuse an unpublished identity`);
+    for (const step of [checkout, setup, publish]) assert.equal(step?.run, undefined);
+    return;
+  }
   const step = steps[index]!;
   if (step.with?.cache === "npm") return;
   const context = `${file}: job '${jobId}'s uncached setup-node`;
@@ -103,6 +174,65 @@ test("npm cache census refuses a missing cache, mismatched guard or installer be
   dependentAdmission[index + 1]!.run += "\nnpx install-something";
   assert.throws(() => assertSetupCache("ci.yml", "ci", dependentAdmission, index), /dependency-free/);
   assert.throws(() => assertSetupCache("other.yml", "ci", steps, index), /other workflows/);
+});
+
+test("uncached ledger bootstrap preserves its pin and identity without admitting another installer", async () => {
+  const doc = parseYaml(await readFile(CI_YAML_PATH, "utf8")) as WorkflowDoc;
+  const job = doc.jobs["coverage-ledger"]!;
+  const steps = job.steps!;
+  const index = steps.findIndex(step => step.uses?.startsWith("actions/setup-node@"));
+  assert.equal(job["timeout-minutes"], 1);
+  assert.equal(job.if, undefined);
+  assert.deepEqual(job.outputs, {
+    artifact_id: "${{ steps.finish.outputs.artifact_id }}", digest: "${{ steps.resolve.outputs.digest }}",
+  });
+  assert.match(await readFile(join(REPO_ROOT, ".nvmrc"), "utf8"), /^\d+\.\d+\.\d+\s*$/);
+  assertSetupCache("ci.yml", "coverage-ledger", steps, index);
+  for (const installer of ["npm ci", "npx install-something", "pnpm install", "yarn install", "bun install"]) {
+    for (const at of [0, steps.length]) {
+      const planted = structuredClone(steps);
+      planted.splice(at, 0, { run: installer });
+      assert.throws(() => assertSetupCache("ci.yml", "coverage-ledger", planted, index + (at === 0 ? 1 : 0)),
+        /must not install dependencies anywhere/, `${installer} at step ${at} must not qualify as bootstrap`);
+    }
+    const inside = structuredClone(steps);
+    inside[2]!.run += `\n${installer}`;
+    assert.throws(() => assertSetupCache("ci.yml", "coverage-ledger", inside, index), /must not install dependencies anywhere/);
+  }
+  for (const cache of ["npm", "yarn", "pnpm"]) {
+    const cached = structuredClone(steps);
+    cached[index]!.with!.cache = cache;
+    assert.throws(() => assertSetupCache("ci.yml", "coverage-ledger", cached, index), /must remain uncached/);
+  }
+  assert.throws(() => assertSetupCache("other.yml", "coverage-ledger", steps, index), /other workflows/);
+  assert.throws(() => assertSetupCache("ci.yml", "other-job", steps, index), /guarded ci admission/);
+  const changed = (mutate: (copy: WorkflowStep[]) => void) => {
+    const copy = structuredClone(steps); mutate(copy);
+    assert.throws(() => assertSetupCache("ci.yml", "coverage-ledger", copy, index));
+  };
+  for (const floating of ["actions/setup-node@v4", "other/setup-node@" + "a".repeat(40)]) {
+    changed(copy => { copy[index]!.uses = floating; });
+  }
+  for (const at of [0, index, 3]) {
+    const repinned = structuredClone(steps);
+    repinned[at]!.uses = repinned[at]!.uses!.replace(/@.*/, "@" + "b".repeat(40));
+    assertSetupCache("ci.yml", "coverage-ledger", repinned, index);
+  }
+  changed(copy => { copy[index]!.with!["node-version-file"] = ".other-node-version"; });
+  changed(copy => { copy[0]!.with!["sparse-checkout"] += "package-lock.json\n"; });
+  changed(copy => { copy[2]!.run += "\nnode scripts/unrelated.mjs"; });
+  changed(copy => { copy[4]!.run += "\nnode scripts/unrelated.mjs"; });
+  changed(copy => {
+    const verifierFlags = '--snapshot "$INCOMING/ledger-snapshot.manifest" --github-output "$GITHUB_OUTPUT"';
+    assert.ok(copy[2]!.run!.includes(verifierFlags), "the same-line plant must follow the complete verifier flags");
+    copy[2]!.run = copy[2]!.run!.replace(verifierFlags,
+      verifierFlags + "; node scripts/unrelated.mjs");
+  });
+  changed(copy => { copy[2]!.run = copy[2]!.run!.replace("${GITHUB_RUN_ID}", "another-run"); });
+  changed(copy => { copy[2]!.run = copy[2]!.run!.replace("--verify-resolved-ledger", "--select-all"); });
+  changed(copy => { copy[2]!.run = copy[2]!.run!.replace("--write-resolved-ledger", "--select-all"); });
+  changed(copy => { copy[3]!.with!.overwrite = true; });
+  changed(copy => { copy[4]!.env!.PUBLISHED_ID = "another-artifact"; });
 });
 
 // ── acceptance 2: ci.yml declares a concurrency group that cancels only PR runs ─────────────

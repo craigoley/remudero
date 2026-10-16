@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15 flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-15/RESULTS.txt section 5 and finding 1): a W1-T9498 follow-up"
   plan_refs: [W1-T9498, W1-T9582, W1-T9595]
   files: [src/lib/sweep.ts, test/fix-admission-never-starves-on-a-learned-peak-above-the-headroom.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: the most urgent lead; a red PR no fix can be admitted for stays red, and the red board grew 64% in one day
   attempts: 0
   rationale: |

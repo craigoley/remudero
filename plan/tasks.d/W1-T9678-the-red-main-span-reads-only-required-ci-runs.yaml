@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: main.repair.located named 037a58d8f by first-red-run while 131248633 had no completed CI run"
   plan_refs: [W1-T7760, W1-T6403, W1-T5806]
   files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, test/the-red-main-span-reads-only-required-ci-runs.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: naming the wrong merge sent three fix rounds after a commit that could not be the cause
   attempts: 0
   rationale: |

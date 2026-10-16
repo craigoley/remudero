@@ -13,7 +13,7 @@
   files:
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
     - test/helpers/daemon-loop-walk.ts
-  status: queued
+  status: merged
   priority: 3  # census precision: the two captures cost the loop nothing; the rows are false reach
   attempts: 0
   rationale: |

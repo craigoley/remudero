@@ -1,0 +1,65 @@
+- id: W1-T9718
+  title: "THE BOARD ORACLE AUDITS A ROTATING SLICE THAT COVERS EVERY TASK, NOT EVERY TASK EVERY 10 MINUTES — oracleWith re-projects all ~4,145 core tasks each BOARD_ORACLE_INTERVAL_MS, and twice more when it finds a mismatch, which on a production-sized store is a ~1.2 GB read per projection; on 2026-10-15 core ran it 76 times and 14 of them escalated (three projections each)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, which tasks one oracle pass audits; what it compares, heals and escalates is unchanged
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9604 (#12121) follow-up K, named in W1-T9604 design step 5 as a candidate'
+  plan_refs: [W1-T9604, W1-T6016, W1-T9436, W1-T6014]
+  files:
+    - src/lib/board-projection.ts
+    - test/the-board-oracle-audits-a-rotating-slice.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols in src/lib/board-projection.ts):
+    - update() runs oracleWith(plan, ...) once lastOracleAt is BOARD_ORACLE_INTERVAL_MS (10 min) old.
+    - oracleWith calls project(plan, credit, overrides) with no reuse, so every plan task re-derives and reads its
+      whole history through taskBucket. On a mismatch it projects again (to tell transient from real), heals, and
+      projects a third time to check the heal survived.
+    - The oracle is the measurement behind every dirt rule ("the rules above are measured, not assumed"), so its
+      coverage cannot simply drop: each task must still be audited within a bounded time.
+    - W1-T9604's design step 5 names this as a follow-up candidate and leaves it out of its scope.
+    OBSERVED, core ledger 2026-10-15 12:00-19:17Z, read_model.now_slow_stage rows for instance core (thread views):
+    325 slow board stages, median 7.8 s, max 87.7 s, 4,486 s in total (snapshot: 160, 1,007 s).
+    OBSERVED offline by the W1-T9604 builder (#12121, head f5ef8e690; synthetic store of 779k fact rows and 4,085
+    tasks, 13 now-view builds per arm, bodies byte-identical between arms; logs-8864/W1-T9604-bench): a steady build
+    reads 106.4 MB on main and 71.3 MB with W1-T9604; taskFacts task buckets are 67.0 MB of each, ~94% of what is
+    left. A full re-derive after a daemon.boot row read 1,238 MB on main and 1,161 MB at head.
+    OBSERVED, core ledger 2026-10-13..15, read_model.board_oracle rows: one pass per instance about every 10 min
+    (2026-10-15 to 19:10Z: core 76, console 85, site 89). compared: core 4,145, console 182, site 38. Core
+    outcomes on 2026-10-15: 62 agree, 14 escalated (one mismatch each, e.g. W1-T9087 workerTelemetry, "the board
+    drifted again within 24 h of an earlier self-heal"). So the oracle is catching real drift about hourly.
+    INFERRED: a core pass costs about one full re-derive's read (~1.2 GB) and an escalated pass about three, so the
+    oracle alone reads ~7-10 GB an hour on core; a slice of 1/N of the reused tasks cuts that by ~N.
+  design: |
+    1. Each oracle pass audits a slice: the reused tasks whose position in a stable order (for example a hash of
+       the task id) falls in this pass's window, so N consecutive passes cover every plan task. The slice's
+       projections are compared, healed and persisted exactly as today, and the second and third projections of a
+       mismatch also project only the slice.
+    2. Always audited, whatever the slice: every task healed within BOARD_ORACLE_RECURRENCE_MS, so recurring drift
+       (the escalations above) is checked every pass.
+    3. N (or the coverage period) is an OPERATOR DECISION. The PR proposes a value from measured cost and the
+       observed drift rate (a drift found in a slice is found within N intervals, not one) and names it; it does not
+       choose it. Until the operator rules, N defaults to 1, which is today's behaviour.
+    4. read_model.board_oracle gains `slice: {index, of, audited, always_audited}` and the bytes the pass read,
+       so the fleet can see the cut and the coverage period from the ledger.
+    Tests go in test/the-board-oracle-audits-a-rotating-slice.test.ts, titled verbatim as in the proofs, over
+    createBoardProjection with a real in-memory fact store and an injected clock.
+  acceptance:
+    - claim: "N consecutive oracle passes audit every plan task exactly once, and one pass projects only its slice"
+      proof: 'grep: test("W1-T9718: N oracle passes audit every task once and each projects only its slice" in test/the-board-oracle-audits-a-rotating-slice.test.ts'
+    - claim: "a drift planted in a task is healed within N passes, and a recently healed task is audited every pass"
+      proof: 'grep: test("W1-T9718: a drift is healed within N passes and a recently healed task every pass" in test/the-board-oracle-audits-a-rotating-slice.test.ts'
+    - claim: "with N = 1 the oracle compares every task, as before"
+      proof: 'grep: test("W1-T9718: with one slice the oracle compares every task as before" in test/the-board-oracle-audits-a-rotating-slice.test.ts'
+  falsifier: |
+    On origin/main, count the tasks project() derives in one oracle pass over a 40-task plan with N = 4: it derives
+    all 40, so the first test fails. Choose the slice by a fresh random draw each pass: some task is missed in 4
+    passes and the first test fails. Drop the always-audited set: a task healed in pass 1 and drifted again in pass 2
+    outside the slice is not seen until pass 5, and the second test fails.

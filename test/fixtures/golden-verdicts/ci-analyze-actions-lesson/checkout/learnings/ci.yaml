@@ -1,0 +1,16 @@
+- id: analyze-actions-refusal-needs-per-pr-cause
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/codeql.yml", ".github/workflows/**"]
+  fact: >-
+    When the CodeQL `Analyze (actions)` check refuses a pull request, inspect that pull request's
+    failed job step and repair diff before choosing a remedy. A count of refusals and a later repair
+    do not establish a shared cause; do not apply a generic pre-push ritual as though it fixes this
+    gate. Record the observed failing step and the change that cleared it so the next worker can
+    act on the actual failure.
+  evidence: >-
+    The ci-learning finding lists PRs #10578, #10628, and #10671 as `Analyze (actions)` refusals
+    followed by repairs. The PR failure logs and repair diffs were not available to this run, so a
+    shared cause and an effective gate-specific prevention are NOT established.
+  src: "ci-learning:10578:Analyze (actions)"
+  cited: "2026-10-15"

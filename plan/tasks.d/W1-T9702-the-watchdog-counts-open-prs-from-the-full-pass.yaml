@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: fan-out lead F3-1, the 17:09:32Z progress-watchdog verdict (read-only on the host)"
   plan_refs: [W1-T100, W1-T5687, W1-T6598, W1-T1236, W1-T463, W1-T3202, W1-T9627]
   files: [src/lib/progress-watchdog.ts, src/lib/sweep.ts, src/run-task.ts, docs/cli-reference.md, test/the-watchdog-counts-open-prs-from-the-full-pass.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

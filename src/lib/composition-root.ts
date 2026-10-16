@@ -9,7 +9,6 @@ import {
   realOnboardFsDeps,
   realOnboardGhGateway,
   resolveTargetOwnerRepo,
-  type GitRemoteDeps,
   type OnboardFsDeps,
   type OnboardGhGateway,
 } from "./onboard/inventory.js";
@@ -73,7 +72,6 @@ export interface CompositionRootConfig {
 export interface ComposedRealGraph {
   arm: ArmDeps;
   deployFor: (opts: RealDeployOpts) => DeployDeps;
-  gitRemote: GitRemoteDeps;
   onboard: {
     fs: OnboardFsDeps;
     gh: OnboardGhGateway;
@@ -100,7 +98,6 @@ export function composeRealDeps(config: CompositionRootConfig): ComposedRealGrap
   return {
     arm: realArmDeps(loadConfigImpl),
     deployFor: realDeployDeps,
-    gitRemote: realGitRemoteDeps,
     onboard: {
       fs: realOnboardFsDeps,
       gh: realOnboardGhGateway(),

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: #11995's direct merge was refused twice on an unreadable merged tree"
   plan_refs: [W1-T5748, W1-T5780, W1-T9536, W1-T9651, W1-T6136]
   files: [src/lib/plan-pr-merge-safety.ts, src/lib/arm-auto-merge.ts, test/an-unreadable-merged-plan-names-gits-own-words.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: each refusal turns a mergeable plan PR into an update-branch and a fresh CI round
   attempts: 0
   rationale: |

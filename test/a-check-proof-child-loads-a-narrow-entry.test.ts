@@ -1,3 +1,4 @@
+// @census-reads: src/ — the import graph walked from src/check-proof-main.ts
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
