@@ -723,6 +723,25 @@ test("W1-T9689 dep review selects current attempts without reviving superseded r
   });
 });
 
+test("W1-T9689 dep review holds current red pending and unread evidence", async (t) => {
+  for (const item of [
+    { label: "current red", checks: [{ name: "ci-gate", conclusion: "FAILURE" }], code: 1 },
+    { label: "current pending", checks: [{ name: "ci-gate", status: "IN_PROGRESS" }], code: 1 },
+    { label: "unknown conclusion", checks: [{ name: "ci-gate", conclusion: "FUTURE_STATE" }], code: 1 },
+    { label: "no check evidence", checks: [], code: 1 },
+    { label: "lane-owned status exclusion", checks: [...GREEN_CHECKS, { context: "remudero-review", state: "FAILURE" }], code: 0 },
+    { label: "real green control", checks: GREEN_CHECKS, code: 0 },
+  ]) await t.test(item.label, async () => {
+    const r = await driveMigrationDepReview({ title: PR80_TITLE, body: PR80_BODY, diff: PR80_DIFF, checks: item.checks });
+    try {
+      assert.equal(r.code, item.code);
+      assert.equal(r.statusPosts.length, item.code === 0 ? 1 : 0);
+      assert.equal(r.armCalls.length, item.code === 0 ? 1 : 0);
+      assert.equal(r.mutations.closes.length, 0);
+    } finally { rmSync(r.tmp, { recursive: true, force: true }); }
+  });
+});
+
 test("depReviewCommand posts verified pin-only status with a lane-specific decision revision", async () => {
   const r = await driveMigrationDepReview({
     prNumber: 8020,
