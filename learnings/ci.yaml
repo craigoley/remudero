@@ -701,3 +701,22 @@
     established. This guidance is limited to the evidence requirement before selecting a remedy.
   src: "ci-learning:10578:Analyze (actions)"
   cited: "2026-10-15"
+
+# ── clock-sweep-report refusal (ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver), PR #11896) ──
+- id: clock-sweep-report-refusal-needs-per-pr-cause
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/**", "package.json", "src/run-task.ts"]
+  fact: >-
+    When the clock-sweep-report (merge the shards, classify, deliver) gate refuses a pull request, read
+    that pull request's failed job step and its repair diff before choosing a remedy. A refusal that was
+    later repaired does not establish a shared cause, and no generic pre-push ritual is known to prevent
+    it. Record the observed failing step and the change that cleared it, so the next worker acts on the
+    actual failure.
+  evidence: >-
+    The ci-learning finding for PR #11896 records the gate going red and being repaired by a change that
+    touched many .github/workflows files, package.json and src/run-task.ts. The failing step and the
+    repair's causal link were NOT read from the CI log in this entry, so the trigger is not verified here.
+    The recorded recommended action is unclear, and guidance changes are parked for a person's decision.
+  src: "ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver)"
+  cited: "2026-10-16"
