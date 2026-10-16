@@ -1,7 +1,7 @@
 - id: W1-T9733
   title: "A FIX ROUND CALLS A CENSUS RED ITS OWN PR CAUSED 'DIFF-CANNOT-REACH' — W1-T9561's redAttribution asks whether the diff reaches the failing test through its import closure, but a census walks the tree and imports none of it, so a PR that adds a site the census reports passes at main, reaches nothing it imports, and is rerouted as a flake; the fix.scope_rerouted row it writes then counts toward a flake incident, the blind spot W1-T9708 closes in the flake gardener"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T9708]
   type: implement
   verify: auto
   principles: {tdd: strict}
