@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { buildSweepEffects } from "../src/run-task.js";
+import { buildSweepEffects, runTask } from "../src/run-task.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -12,6 +13,7 @@ import { createSelectedModeQualification } from "../src/lib/instance-mode.js";
 import { realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import type { WorkerResult } from "../src/lib/worker.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const OBSERVED = "instance_mode.shadow_observed";
@@ -231,4 +233,71 @@ test("selected mode hostile opt-in and receipt mutation never change legacy effe
     assert.equal(Reflect.set(row!, "publication_permission", "granted"), false);
     assert.equal(calls, 1); assert.equal(JSON.stringify(row).includes(fx.root), false);
   } finally { fx.cleanup(); }
+});
+
+test("selected mode real run retains its original binding through deferred arming", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-run-`));
+  const origin = join(root, "origin.git"), seed = join(root, "seed"), repoDir = join(root, "repos", "remudero");
+  const selected = join(root, "selected.yaml"), planPath = join(root, "tasks.yaml");
+  const now = Date.now(), branch = `run-T-SELECTED-${now}`, head = "deadbeef";
+  const selectedText = (mode: string) => registry(mode, root).replace("owner/repo", "owner/remudero");
+  writeFileSync(selected, selectedText("shadow"));
+  writeFileSync(planPath, "- id: T-SELECTED\n  title: selected deferred arm fixture\n  repo: remudero\n  type: implement\n  verify: auto\n  risk: medium\n  files: [src/lib/daemon.ts]\n  origin: architect\n  status: queued\n");
+  const git = (args: string[]) => execFileSync("git", args, { stdio: "pipe" });
+  git(["init", "-q", "--bare", "--initial-branch=main", origin]);
+  git(["clone", "-q", origin, seed]);
+  for (const args of [["user.name", "selected-mode-fixture"], ["user.email", "selected@example.invalid"]]) git(["-C", seed, "config", ...args]);
+  writeFileSync(join(seed, "README.md"), "fixture\n"); git(["-C", seed, "add", "README.md"]);
+  git(["-C", seed, "commit", "-qm", "test: seed"]); git(["-C", seed, "push", "-q", "origin", "main"]);
+  mkdirSync(join(root, "repos")); git(["clone", "-q", origin, repoDir]);
+  for (const args of [["user.name", "selected-mode-fixture"], ["user.email", "selected@example.invalid"]]) git(["-C", repoDir, "config", ...args]);
+  const shim = ghShim([
+    { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch }) },
+    { when: "--json body", stdout: JSON.stringify({ body: "Remudero-Task: T-SELECTED" }) },
+    { when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] }) },
+    { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }) },
+    { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
+    { when: "api repos/owner/remudero/pulls/1/files", stdout: "[]" },
+    { when: "api repos/owner/remudero/pulls/1", stdout: JSON.stringify({ number: 1, state: "closed", merged: true, merged_at: new Date(now).toISOString(), head: { sha: head } }) },
+  ]);
+  const previous = { path: process.env.PATH, registry: process.env.RMD_INSTANCE_REGISTRY, name: process.env.RMD_INSTANCE_NAME };
+  process.env.PATH = `${shim.dir}:${previous.path}`; delete process.env.RMD_INSTANCE_REGISTRY; delete process.env.RMD_INSTANCE_NAME;
+  const clock = t.mock.method(Date, "now", () => now);
+  let spawned = 0;
+  try {
+    const res = await withLiveWritesAllowed(() => runTask("T-SELECTED", {
+      owner: "owner", skipGitSync: true, planPath,
+      config: { root, claudeBin: "/bin/true", installRoot: REPO_ROOT,
+        selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selected } },
+      github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+      spawn: async () => {
+        spawned++;
+        return { sessionId: `selected-${spawned}`, costUsd: 0, numTurns: 0,
+          text: spawned === 1 ? "RECON REPORT\nOBSERVED: fixture\nINFERRED: none\nCOULDN'T-VERIFY: none\n"
+            : spawned === 2 ? "REPORT\nPR_URL: https://github.com/owner/remudero/pull/1\n"
+            : "RISK_VERDICT: low\nRISK_CONFIDENCE: 0.95\nRISK_REASON: fixture\n",
+          blocks: [], stderr: "", subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+          model: "default", effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+          modelUsage: {}, compactionEvents: [], qualitySuspect: false } satisfies WorkerResult;
+      },
+      containmentExec: async token => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+      isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+      runReview: async () => {
+        writeFileSync(selected, selectedText("live"));
+        return { state: "success", criteria: [], testTheater: false, summary: "fixture pass", floorDegraded: false,
+          capped: false, keywordOnly: false, planOnly: false, headSha: head, reviewerOutcome: "success" };
+      },
+    }));
+    assert.equal(res.verdict, "merged", "the contained independent legacy run still finishes normally");
+    const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const observed = rows.filter(row => row.step === OBSERVED);
+    assert.ok(observed.length > 0, "the REAL runTaskBody deferred arm must carry the original selected binding");
+    assert.ok(observed.some(row => row.reason === "revision_changed" && row.selected_outcome === "would-refuse"));
+    assert.ok(observed.every(row => row.publication_permission === "not-granted"));
+  } finally {
+    clock.mock.restore(); process.env.PATH = previous.path;
+    if (previous.registry === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = previous.registry;
+    if (previous.name === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = previous.name;
+    rmSync(shim.dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
+  }
 });
