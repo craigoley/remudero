@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: fan-out lead F3-2, the 16:52:41Z-17:14:51Z progress gap (read-only on the host)"
   plan_refs: [W1-T5762, W1-T5761, W1-T4075, W1-T9564, W1-T7734, W1-T9563]
   files: [src/lib/read-plane.ts, test/a-tick-read-is-aged-from-when-it-was-published.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

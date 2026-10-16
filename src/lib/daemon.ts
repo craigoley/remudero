@@ -67,6 +67,7 @@ import {
   tallyDispatchFilters,
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
+  laneCredentialRefusal,
   laneDeliveryFailure,
   type PriorityBackfillEstimates,
   type PriorityDeferral,
@@ -133,7 +134,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
-import { clockFromDateFn, clockFromIsoFn, fixedClock, systemClock, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -1328,6 +1329,9 @@ export interface DaemonDeps {
    *  parsed by `runBranchTaskIds`. Injected for the same reason it is on `DrainDeps`: this module reads
    *  its world through deps (W1-T916). A promised read is awaited; a throw or rejection is ledgered. */
   readPushedRunBranches?: () => string | Promise<string>;
+  /** W1-T9680: is the fleet's push credential alive? Asked before one lane's credential refusal can stop the
+   *  daemon. Absent reads `unreadable`, so the refusal stays fatal as before W1-T9680. */
+  probeFleetPushCredential?: () => Promise<FleetCredentialProbe>;
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
@@ -1842,6 +1846,57 @@ function runBranchDispatchOpts(
     // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
     // row, which has three emitters and no reader.
     onSkipRunBranch: (t: Task) => log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+  };
+}
+
+/** W1-T9680: the fleet credential probe's answer. Only `alive` makes a lane's credential refusal lane-local. */
+export type FleetCredentialProbe = { state: "alive" } | { state: "refused" | "unreadable"; detail: string };
+
+/** W1-T9680: where the probe's push token comes from — a mint like the credential socket's, or a fixed token. */
+export type PushTokenSource = () => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
+
+/** W1-T9680: the token a worker push sends — the credential socket's scoped mint while it listens, else GH_TOKEN. */
+export function daemonPushTokenSource(
+  repo: string,
+  mint: ((repo: string) => ReturnType<PushTokenSource>) | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): PushTokenSource {
+  return async () => {
+    if (mint) return mint(repo);
+    const token = env.GH_TOKEN;
+    return token ? { ok: true, token } : { ok: false, reason: "GH_TOKEN is not set" };
+  };
+}
+
+/**
+ * W1-T9680 — the fleet push credential probe: receive-pack discovery at `originUrl` with the token a worker push
+ * sends. The repo is public, so an upload-pack read (`git ls-remote`) answers 200 with no credential at all;
+ * receive-pack answers 401 to a missing or wrong token and pushes nothing. Bounded by loop-available time.
+ */
+export function receivePackCredentialProbe(opts: {
+  originUrl: string;
+  token: PushTokenSource;
+  timeoutMs?: number;
+  clock?: Clock;
+}): () => Promise<FleetCredentialProbe> {
+  return async () => {
+    const minted = await opts.token().catch((error: unknown) => ({ ok: false as const, reason: String((error as Error)?.message ?? error) }));
+    if (!minted.ok) return { state: "refused", detail: `no push token: ${minted.reason}` };
+    const controller = new AbortController();
+    const cancel = loopAvailableDeadline(opts.clock ?? systemClock, opts.timeoutMs ?? 15_000, () => controller.abort());
+    try {
+      const auth = Buffer.from(`x-access-token:${minted.token}`).toString("base64");
+      const url = `${opts.originUrl.replace(/\/+$/, "")}/info/refs?service=git-receive-pack`;
+      const response = await fetch(url, { headers: { Authorization: `Basic ${auth}` }, signal: controller.signal });
+      await response.body?.cancel();
+      if (response.status === 200) return { state: "alive" };
+      const state = response.status === 401 || response.status === 403 ? "refused" : "unreadable";
+      return { state, detail: `receive-pack discovery answered HTTP ${response.status}` };
+    } catch (error) {
+      return { state: "unreadable", detail: `receive-pack discovery failed: ${String((error as Error)?.message ?? error)}` };
+    } finally {
+      cancel();
+    }
   };
 }
 
@@ -3712,6 +3767,17 @@ export async function runDaemon(
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
   const laneDeliveryParks = priorLaneDeliveryParks(bootLedgerLines);
+  // W1-T9680: one probe per credential refusal, shared by its lane's refill and the settle loop.
+  const credentialProbes = new WeakMap<object, Promise<FleetCredentialProbe>>();
+  const fleetCredentialFor = (err: object): Promise<FleetCredentialProbe> => {
+    let probe = credentialProbes.get(err);
+    if (probe === undefined) {
+      const ask = deps.probeFleetPushCredential ?? (async (): Promise<FleetCredentialProbe> => ({ state: "unreadable", detail: "no fleet credential probe is wired" }));
+      probe = ask().catch((error: unknown): FleetCredentialProbe => ({ state: "unreadable", detail: String((error as Error)?.message ?? error) }));
+      credentialProbes.set(err, probe);
+    }
+    return probe;
+  };
   // Needs-human escalation dedup for the same recurrence, keyed on sha so a sustained pin notifies
   // once rather than once per tick, mirroring `starvationEscalated`'s own discipline.
   let staleReviewerNeedsHumanSha: string | undefined;
@@ -6466,7 +6532,18 @@ export async function runDaemon(
       if (inFlightFreshness) laneIdleSince.set(lane, daemonClock.now());
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
-        if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
+        if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) {
+          // W1-T9680: a credential refusal closes refill only once the fleet credential probe does not read alive.
+          if (laneCredentialRefusal(outcome.reason) !== undefined) {
+            return fleetCredentialFor(outcome.reason as object).then((probe) => {
+              if (probe.state !== "alive") refillClosed ??= "a lane rejected";
+              const decision = decideRefill(lane, finished);
+              wakeParkedLanes(true);
+              return decision;
+            });
+          }
+          refillClosed ??= "a lane rejected";
+        }
       }
       // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
@@ -6965,7 +7042,7 @@ export async function runDaemon(
         // unprefixed throw (rmd's own TypeError) still reaches `fatalError` and still exits 1.
         const delivery =
           !spawnInfra && transientTransport === undefined && ghRead === undefined ? laneDeliveryFailure(err) : undefined;
-        if (delivery !== undefined) {
+        const parkLane = (failureClass: string, firstLine: string, extra: Record<string, unknown> = {}): void => {
           const prior = laneDeliveryParks.get(t.id);
           const revision = preDispatchContractRevision(t);
           const consecutive = prior !== undefined && prior.revision === revision ? prior.consecutive + 1 : 1;
@@ -6974,14 +7051,31 @@ export async function runDaemon(
           laneDeliveryParks.set(t.id, { consecutive, parkedUntilMs, revision });
           reporting.report("daemon.lane_failed", {
             task: t.id,
-            class: delivery.failureClass,
-            error: delivery.firstLine,
+            class: failureClass,
+            error: firstLine,
             consecutive,
             backoff_ms: backoffMs,
             parked_until_ms: parkedUntilMs,
             revision,
+            ...extra,
           });
+        };
+        if (delivery !== undefined) {
+          parkLane(delivery.failureClass, delivery.firstLine);
           return;
+        }
+        // W1-T9680: one lane's credential refusal stops the daemon only when the fleet credential probe agrees.
+        const credential =
+          !spawnInfra && transientTransport === undefined && ghRead === undefined ? laneCredentialRefusal(err) : undefined;
+        if (credential !== undefined) {
+          const probe = await fleetCredentialFor(err as object);
+          if (probe.state === "alive") {
+            parkLane("push_credential_missing", credential.firstLine, { stderr: credential.stderr, fleet_credential: probe.state });
+            return;
+          }
+          const message = String((err as Error)?.message ?? err);
+          const named = `${message}\nfleet credential probe: ${probe.state} (${probe.detail})`;
+          return { taskId: t.id, message: phase ? `${phase}: ${named}` : named };
         }
         if (!spawnInfra && transientTransport === undefined && ghRead === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
