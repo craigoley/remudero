@@ -10,17 +10,19 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mock, test } from "node:test";
 
+// Namespace imports for what the fix adds, so at the base the file still loads and each case fails on its own claim.
+import * as admission from "../src/lib/host-memory-admission.js";
 import {
   ENFORCE_ADMIT_STEP,
   ENFORCE_DEFER_STEP,
   awaitMemoryAdmission,
-  openDeferralStreaks,
   resetMemoryAdmissionStateForTests,
   type AdmissionPorts,
   type AdmissionRequest,
 } from "../src/lib/host-memory-admission.js";
 import type { HostMemoryReading, ReadingEntry } from "../src/lib/host-memory-ledger.js";
-import { childGardenPassSpawn, gardenCadence, startGardenOffLoop, type GardenDeferral, type GardenPassOutcome } from "../src/lib/garden-registry.js";
+import * as registry from "../src/lib/garden-registry.js";
+import { childGardenPassSpawn, startGardenOffLoop, type GardenDeferral, type GardenPassOutcome } from "../src/lib/garden-registry.js";
 import { resetShadowMemoryStateForTests, type HostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
 import type { LedgerLine } from "../src/lib/ledger.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -163,7 +165,7 @@ test("W1-T9761: a garden deferred for its own pass cadence is admitted on the ag
   assert.equal(row!.cadence_ms, CADENCE_MS);
   assert.equal(row!.cadence_basis, "measured");
   assert.deepEqual(row!.overrode, ["psi", "unrealized-reservations"]);
-  assert.deepEqual(openDeferralStreaks(), [], "the admission clears the streak");
+  assert.deepEqual(admission.openDeferralStreaks?.(), [], "the admission clears the streak");
 });
 
 test("W1-T9761: a garden younger than its cadence is still deferred and the row names its streak", async () => {
@@ -253,8 +255,8 @@ test("W1-T9761: the garden loop hands its spawn its measured cadence and ends a 
   mock.timers.enable({ apis: ["setInterval"] });
   const w = fresh();
   try {
-    assert.equal(gardenCadence([0, 10], 5).cadenceBasis, "scheduled", "one gap is not a measurement");
-    assert.equal(gardenCadence([0, 10, 30, 60], 5).cadenceMs, 20, "the median of an odd count of gaps");
+    assert.equal(registry.gardenCadence?.([0, 10], 5).cadenceBasis, "scheduled", "one gap is not a measurement");
+    assert.equal(registry.gardenCadence?.([0, 10, 30, 60], 5).cadenceMs, 20, "the median of an odd count of gaps");
     const seen: GardenDeferral[] = [];
     const outcomes: GardenPassOutcome[] = [0, 0, 0, { kind: "deferred", reason: "memory-budget-shortfall" }, 0];
     const due = [true, false, true, true, true];
@@ -268,9 +270,9 @@ test("W1-T9761: the garden loop hands its spawn its measured cadence and ends a 
     };
     await new Promise((resolve) => setImmediate(resolve));
     await ask(w, "gate");
-    assert.equal(openDeferralStreaks().length, 1);
+    assert.equal(admission.openDeferralStreaks?.().length, 1);
     await step(); // not due: the garden no longer asks
-    assert.equal(openDeferralStreaks().length, 0, "a garden that is not due ends its streak");
+    assert.equal(admission.openDeferralStreaks?.().length, 0, "a garden that is not due ends its streak");
     for (let i = 0; i < 4; i++) await step();
     loop.stop();
     assert.deepEqual(seen.map((d) => d.firstAsk), [true, false, false, false, false]);
