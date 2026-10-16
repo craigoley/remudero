@@ -8,7 +8,7 @@ Linux Python 3.12 only; the real patch is reported. No download/install/build,
 candidate import, production target-loader call or observed-host fallback.
 The reviewed auditor digest is mandatory and has no environment/default value.
 
-No selection/filter: require exclusive JSON, exit 0, literal inventory=140,
+No selection/filter: require exclusive JSON, exit 0, literal inventory=141,
 zero other outcomes, source/tool hashes and invariantErrors=[]. Node wrappers
 are separate cases. Historical failed receipts remain immutable.
 """
@@ -32,7 +32,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 
-METADATA_TESTS_SHA256 = "c4653a510f37e3da5cf9f2431fa8ec99d73d295006378190606e8d6acd386c8b"
+METADATA_TESTS_SHA256 = "8bc686e91f25fe56a7908d1ea7ed85b7173b385765b0e407c179436d7f05fd5b"
 FIXTURES_SHA256 = "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d"
 APPROVED_PIP_SHA = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
 RAW_CONFIGURATION_NAMES = (
@@ -849,6 +849,7 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_original_mcp_129_dependency_accepts_129_positive",
     "AuditSyntheticModuleTests.test_original_mcp_129_dependency_rejects_130_negative",
     "AuditSyntheticModuleTests.test_other_platform_marker_is_inactive_on_actual_linux",
+    "AuditSyntheticModuleTests.test_printable_space_paths_keep_safety_guards",
     "AuditSyntheticModuleTests.test_purelib_pth_alias_is_rejected_without_execution",
     "AuditSyntheticModuleTests.test_raw_current_pip_entrypoint_overwrite_blocks",
     "AuditSyntheticModuleTests.test_raw_current_python_entrypoint_overwrite_blocks",
@@ -884,7 +885,7 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_wheel_dynamic_import_field_still_enforces_final_syntax",
     "AuditSyntheticModuleTests.test_wheel_dynamic_python_still_enforces_final_requires_python",
 )
-EXPECTED_TEST_COUNT = 140
+EXPECTED_TEST_COUNT = 141
 
 
 def canonical_id(test):
@@ -903,8 +904,8 @@ def build_suite():
     first = unittest.defaultTestLoader.loadTestsFromTestCase(AuditSyntheticModuleTests)
     second = additionalCases(H, CONTEXT)
     third = unittest.defaultTestLoader.loadTestsFromTestCase(AuditLoaderMarkerRegressions)
-    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (77, 55, 8):
-        raise AssertionError("77+55+8 exact-layout/metadata inventory changed")
+    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (78, 55, 8):
+        raise AssertionError("78+55+8 exact-layout/metadata inventory changed")
     suite = unittest.TestSuite([first, second, third])
     actual = tuple(sorted(canonical_id(test) for test in flatten_suite(suite)))
     if len(EXPECTED_TEST_IDS) != EXPECTED_TEST_COUNT or len(set(EXPECTED_TEST_IDS)) != EXPECTED_TEST_COUNT:
@@ -953,7 +954,7 @@ def json_once(path, value):
 
 def main():
     global H, CONTEXT
-    parser = argparse.ArgumentParser(description="140 literal-inventory source-module controls; no runtime qualification")
+    parser = argparse.ArgumentParser(description="141 literal-inventory source-module controls; no runtime qualification")
     parser.add_argument("--pip-wheel", required=True, type=pathlib.Path)
     parser.add_argument("--auditor-sha256", required=True, help="reviewed workflow/controller literal, never computed as an approval")
     parser.add_argument("--receipt", required=True, type=pathlib.Path, help="new JSON in an existing private neutral directory")

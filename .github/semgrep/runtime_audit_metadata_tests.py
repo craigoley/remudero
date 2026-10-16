@@ -158,6 +158,18 @@ def attach_metadata_cases(case, H):
                 self.p.metadata_distribution(H.metadata("attack", "1.0"), b"", "attack", "1.0", self.api, source_kind="unknown")
             self.assertEqual(raised.exception.code, "METADATA_ORIGIN")
 
+        def test_printable_space_paths_keep_safety_guards(self):
+            self.positive(H.wheel("attack", files={"attack/launcher manifest.xml": b"fixture data\n"}))
+            for path, code in (("attack/bad\tname", "ARCHIVE_PATH"), ("attack/bad\nname", "ARCHIVE_PATH"),
+                               ("attack/../escape file", "ARCHIVE_TRAVERSAL"), ("attack/./same file", "ARCHIVE_TRAVERSAL"),
+                               ("attack//same file", "ARCHIVE_TRAVERSAL"), ("attack/ leading", "ARCHIVE_TRAVERSAL"),
+                               ("attack/trailing ", "ARCHIVE_TRAVERSAL"), ("/attack/space file", "ARCHIVE_PATH"),
+                               ("attack\\space file", "ARCHIVE_PATH"), ("C:/space file", "ARCHIVE_PATH")):
+                self.blocked(code, H.wheel("attack", files={path: b"refused fixture data\n"}))
+            with self.assertRaises(self.p.AuditBlocked) as raised:
+                self.p.safe_member("attack/nul\x00file")
+            self.assertEqual(raised.exception.code, "ARCHIVE_PATH")
+
     for name, method in vars(MetadataCases).items():
         if name == "metadata25" or name.startswith("test_"):
             if hasattr(case, name):

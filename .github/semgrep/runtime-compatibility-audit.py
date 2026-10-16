@@ -161,11 +161,11 @@ APPROVED_SPECIAL_MEMBERS = {
     },
 }
 AUDIT_TEST_SOURCES = {
-    "runtime_audit_metadata_tests.py": "c4653a510f37e3da5cf9f2431fa8ec99d73d295006378190606e8d6acd386c8b",
+    "runtime_audit_metadata_tests.py": "8bc686e91f25fe56a7908d1ea7ed85b7173b385765b0e407c179436d7f05fd5b",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "cb9096bc59de52c2b8881604b9344eff6d8f496696933b5cce4c539f2fd14dda",
+    "test_runtime_compatibility_audit.py": "3bc6ca7a19c539265ad537537b744f151b6efe5e710f49ea82886874c7702639",
 }
-AUDIT_TEST_INVENTORY = "7fd8140e720e6909c40f191ad4f147abbbc598724224deb80f1ba0a2e111a190"
+AUDIT_TEST_INVENTORY = "dda4360e711eac640d43dfc6c89b4f0190de7adf2067e851f067a713a176da7b"
 
 
 class AuditBlocked(ValueError):
@@ -334,11 +334,11 @@ def metadata_distribution(raw: bytes, entries: bytes, name: str, version: str, a
 
 
 def safe_member(path: str) -> tuple[str, ...]:
-    need(isinstance(path, str) and 0 < len(path) <= 512 and re.fullmatch(r"[!-~]+", path) is not None,
+    need(isinstance(path, str) and 0 < len(path) <= 512 and re.fullmatch(r"[ -~]+", path) is not None,
          "ARCHIVE_PATH", repr(path))
     need("\\" not in path and ":" not in path and not path.startswith("/"), "ARCHIVE_PATH", path)
     parts = tuple(path.removesuffix("/").split("/"))
-    need(all(p not in {"", ".", ".."} for p in parts), "ARCHIVE_TRAVERSAL", path)
+    need(all(p not in {"", ".", ".."} and p == p.strip() for p in parts), "ARCHIVE_TRAVERSAL", path)
     return parts
 
 
@@ -735,7 +735,7 @@ def _bootstrap_pip(root):
 def verify_unit_receipt(report, expected_sources):
     need(report.get("schema") == "semgrep-audit-unit-controls/v1" and
          report.get("state") == "SOURCE_MODULE_CONTROLS_PASS", "UNIT_RESULT", "wrong result type")
-    need(all(type(report.get(k)) is int and report[k] == 140 for k in ("selected", "executed", "pass")) and
+    need(all(type(report.get(k)) is int and report[k] == 141 for k in ("selected", "executed", "pass")) and
          all(type(report.get(k)) is int and report[k] == 0 for k in
              ("fail", "error", "skipped", "unrun", "expectedFailures", "unexpectedSuccesses")),
          "UNIT_COUNTS", "exact complete non-skipped inventory required")
@@ -744,8 +744,8 @@ def verify_unit_receipt(report, expected_sources):
          report.get("invariantErrors") == [] and report.get("failures") == [] and report.get("errors") == [],
          "UNIT_CLOSURE", "incomplete or failed source controls")
     ids = report.get("literalInventory")
-    need(isinstance(ids, list) and len(ids) == 140 and all(isinstance(v, str) for v in ids) and
-         len(set(ids)) == 140 and ids == sorted(ids) and
+    need(isinstance(ids, list) and len(ids) == 141 and all(isinstance(v, str) for v in ids) and
+         len(set(ids)) == 141 and ids == sorted(ids) and
          digest(("\n".join(ids) + "\n").encode()) == AUDIT_TEST_INVENTORY and
          report.get("inventorySha256") == AUDIT_TEST_INVENTORY and
          sorted(report.get("executedIds", [])) == ids and sorted(report.get("successfulIds", [])) == ids,
@@ -780,7 +780,7 @@ def phase_unit(root, workspace, head):
     report = json.loads(_regular(receipt, 65536))
     verify_unit_receipt(report, expected)
     summary = {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
-               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 140,
+               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 141,
                "pythonVersion": report["pythonVersion"], "productionLoader": production_loader.provenance,
                "runnerQualified": False}
     _json_once(root / "unit-audit.json", summary)
