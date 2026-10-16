@@ -16,12 +16,14 @@ test("missing Python fails a real janitor safety proof instead of skipping its e
     chmodSync(python, 0o755);
     // Execute the unchanged real proof with an unavailable interpreter. This
     // negative control must itself fail if an availability skip replaces it.
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, TMPDIR: root, PATH: root + ":" + (process.env.PATH ?? "/usr/bin:/bin") };
+    delete env.NODE_TEST_CONTEXT;
     const child = spawnSync(process.execPath, [
       "--test", "--test-reporter=tap", "--import", "tsx",
       "--test-name-pattern", proof, join(repo, "test/mac-generated-cache-safety.test.ts"),
     ], {
       cwd: repo, encoding: "utf8", timeout: 30_000,
-      env: { ...process.env, HOME: root, TMPDIR: root, PATH: root + ":" + (process.env.PATH ?? "/usr/bin:/bin") },
+      env,
     });
     assert.ifError(child.error);
     const output = child.stdout + child.stderr;
