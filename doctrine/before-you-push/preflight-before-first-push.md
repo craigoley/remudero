@@ -40,6 +40,54 @@ The paired real-Git fixture in `test/author-publication-identity.test.ts` models
 the same `codex/...` destination and code tree refuse without a trailer and admit after a new commit
 carries the fixture-only `Remudero-Task: PR-12409` trailer.
 
+Publication-identity falsifier handoff (execution belongs to the main agent's admitted Azure run):
+
+- The default fixture subject is the real author module. Only the test suite reads
+  `RMD_TEST_AUTHOR_PUBLICATION_MUTANT=remove-early-refusal`; it imports a disposable copy under
+  `test/mutants-*/` using the existing mutation helper. Exactly one early refusal block is removed
+  from `main`; the pure identity helper, its call, the identity receipt and every assertion stay.
+  A changed mutation target or an unknown mode refuses the fixture setup. Production files and donors are not
+  written, no slot is acquired by this helper, and its copies use the existing exit cleanup.
+- Run control, mutant, then restored control with the SAME five named cases below. Expected:
+  controls execute five cases with `# fail 0`; mutant fails the code-destination refusal and
+  PR-number repair cases because a refused identity now reaches selection and returns success.
+  The admitted run destination, unknown target and direct pure-helper merge case must still pass.
+  A setup/import crash, missing TAP summary or unexpected failed title is not this falsifier.
+- Save each leg's output separately in a new receipt directory. Keep the mutant JSON marker
+  (`removedBlocks: 1`, source/mutant digests and `helperPreserved: true`), exact commit, physical
+  suite path, TAP summaries/titles, before/after source/donor identity, and the main run's genuine
+  admission/release evidence. Preserve earlier receipts. No stock author run or Mac execution.
+
+```sh
+publication_cases='^author publication identity (admits the actual run destination|refuses a code destination|admits the same codex destination|leaves an unknown target|reads only the exact head)'
+publication_argv=(--test --test-reporter=tap --test-concurrency=1 --import tsx --import ./test/setup/tmp-hygiene.ts "--test-name-pattern=$publication_cases" test/author-publication-identity.test.ts)
+env -u RMD_TEST_AUTHOR_PUBLICATION_MUTANT NODE_V8_COVERAGE= node "${publication_argv[@]}"
+env RMD_TEST_AUTHOR_PUBLICATION_MUTANT=remove-early-refusal NODE_V8_COVERAGE= node "${publication_argv[@]}"
+env -u RMD_TEST_AUTHOR_PUBLICATION_MUTANT NODE_V8_COVERAGE= node "${publication_argv[@]}"
+```
+
+Focused coverage selection: the full nine-case `test/author-publication-identity.test.ts`, in a
+separate CONTROL-only instrumented run, with `scripts/preflight-author.mjs` and
+`scripts/head-identity-gate.mjs` included and `test/**` excluded. Use Node's
+`--experimental-test-coverage`, TAP plus LCOV reporters and a fresh output path. Prove both exact
+`SF:` records are present before reading line hits; bind LCOV and diff to the same committed tree.
+Never merge mutant coverage into that record. This selection measures this repair's branches,
+not the whole author pipeline, hosted CI or an automatic production consumer.
+
+Tracked-source call-site census at `97694b5e7055a4f99a7446ccd9cc5ddc43ff4e62`:
+820 tracked entries under `.github/`, `hooks/`, `scripts/`, `src/`, `bin/`, `.claude/` and
+`package.json` (9,721 tracked entries overall). Literal caller searches have positive controls:
+`scripts/calibrate-author-runtime.mjs` imports only `authorEnvironment`/`completeTestResult`,
+and `scripts/lib/author-workflow-contract.mjs` names the path as an input; the compaction/provider
+mentions are commentary. There is no production caller of the new identity helper or author
+entry point supplying `--head-ref` in this source census. `src/lib/git-push.ts`'s
+`prePushGateSteps` supplies refspec-derived stdin to `hooks/pre-push` when hooks are configured.
+That hook sends the target to `head-identity-gate.mjs` (advisory first-push check),
+`worker-branch-shape.mjs` (also the selected
+SHA), and `proof-resolve-precheck.mjs`; it does not call `preflight-author.mjs`. The narrow
+identity-loss transition remains separately blocking. External wrappers/live execution were not
+inspected, so this is a repository-source census, not a claim about all possible callers.
+
 The selector's symbol-level narrow set remains shadow-only. A highly connected module may select
 most of the repository; this is an honest result, not a reason to bypass its dependencies.
 `--dry-run` records selection only and never claims verification. Dirty trees, a failed fetch,

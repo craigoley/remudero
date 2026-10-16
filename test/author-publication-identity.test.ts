@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitRepo } from './helpers/git-repo.js';
+import { authorPublicationIdentitySubjectUrl } from './helpers/author-publication-identity-subject.js';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 type Identity = {
   state: 'passed' | 'refused' | 'unknown-target';
   headRef: string | null;
@@ -16,7 +15,7 @@ type Identity = {
   message: string;
 };
 type IdentityInput = { headRef?: string; headSha: string; baseSha: string; publicationSha?: string };
-const author = await import(pathToFileURL(join(ROOT, 'scripts/preflight-author.mjs')).href) as {
+const author = await import(authorPublicationIdentitySubjectUrl()) as {
   authorPublicationIdentity: (input: IdentityInput, git: (args: string[]) => string) => Identity;
   main: (argv: string[], deps: { root: string; select: () => unknown; spawn?: typeof spawnSync }) => number;
 };
