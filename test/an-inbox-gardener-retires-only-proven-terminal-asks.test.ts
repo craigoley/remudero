@@ -199,7 +199,13 @@ test("the bounded cursor covers a healthy corpus above one hundred without trunc
   const events = f.store().events; assert.equal(events.filter(e => e.receipt.kind === "retire").length, 121);
   assert.equal(states.includes("pending"), true); assert.equal(states.at(-1), "complete");
   assert.equal(new Set(events.map(e => e.receipt.id)).size, events.length);
-  await f.refresh(); const census = f.source().attentionCensus!;
+  const completed = await f.refresh(); const census = f.source().attentionCensus!;
+  const censusBytes = Buffer.byteLength(JSON.stringify({ repository: f.repository, instance: f.instance, contract: "read-write", ...census }));
+  t.diagnostic(`completed owned retirement census: ${censusBytes} bytes`);
+  assert.ok(censusBytes <= 64 * 1024, "the whole owned census stays within its wire budget with real history");
+  assert.equal(census.items.some(item => item.proposalId === "verify-human:W1-T216"), true, "current held ask remains present");
+  for (const body of completed.bodies) assert.ok(Buffer.byteLength(JSON.stringify({ ...body, repository: f.repository, instance: f.instance })) <= 64 * 1024, "completed section plus envelope remains bounded");
+
   assert.equal(census.retirementHistory.total, 121); assert.equal(census.retirementHistory.truncated, true);
   assert.equal(census.retirementHistory.returned, census.retirements.length);
   assert.equal(Buffer.byteLength(JSON.stringify(census.retirements)) <= 16 * 1024, true);
@@ -409,4 +415,13 @@ test("the default GitHub transport shells out to an owned offline executable", a
   assert.equal((await ports.proof(candidate))?.kind, "merged-task");
   writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
   await assert.rejects(ports.proof(candidate), /failed|exit|Command|7/);
+});
+
+
+test("generic proposal text changes cannot inherit the mechanical producer purpose", async t => {
+  const f = await fixture(t);
+  updateProposalRegistry(f.registry, all => all.map(p => p.id === ID ? { ...p, summary: "A new unanswered tenant budget and policy question" } : p));
+  await f.refresh(); f.advance(); const result = await f.run();
+  assert.equal("retired" in result && result.retired, 0); assert.equal(f.store().events.length, 0);
+  const c = f.source().classifications.find(c => c.proposalId === ID)!; assert.equal(c.state, "not_ready"); assert.match(c.needsTriageReason ?? "", /purpose|ownership|criteria/);
 });
