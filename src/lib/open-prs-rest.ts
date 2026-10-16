@@ -1108,15 +1108,17 @@ export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined
   return latest !== undefined && (latest.conclusion ?? "").toUpperCase() === "FAILURE";
 }
 
+/** W1-T9731: a pull_request CodeQL analysis is filed under `refs/pull/<n>/merge`; `/head` lists nothing (#12088). */
 export function codeqlHeadAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {
-  return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/head&state=open&per_page=${SCANNER_PAGE_SIZE}`];
+  return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/merge&state=open&per_page=${SCANNER_PAGE_SIZE}`];
 }
 
 interface RestHeadAlert extends RestScannerAlert {
   rule?: { id?: unknown; severity?: unknown; security_severity_level?: unknown } | null;
 }
 
-export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): CodeqlHeadObservation | undefined {
+/** `mergeRef`: an instance on the PR's own merge ref counts; the caller pins it to this head's CodeQL verdict. */
+export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown, mergeRef?: string): CodeqlHeadObservation | undefined {
   if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) return undefined;
   const found: CodeqlHeadAlert[] = [];
   for (const raw of alerts as RestHeadAlert[]) {
@@ -1130,7 +1132,7 @@ export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): Code
       typeof raw.number !== "number" ||
       typeof raw.rule?.id !== "string" ||
       instance === undefined ||
-      instance.commit_sha !== headSha ||
+      (instance.commit_sha !== headSha && (mergeRef === undefined || instance.ref !== mergeRef)) ||
       typeof location?.path !== "string" ||
       typeof location.start_line !== "number"
     ) continue;
@@ -1176,7 +1178,7 @@ export function* hydrateCodeqlHeadAlertsSteps(
       onUnreadable(candidate.number, reason);
       continue;
     }
-    const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing);
+    const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing, `refs/pull/${candidate.number}/merge`);
     if (observed !== undefined) out.set(candidate.number, observed);
   }
   return out;

@@ -58,14 +58,18 @@ export function securityArmRefusalAtHead(
   return match ? { state: match[1] as SecurityArmRefusal["state"], reason: match[2]! } : undefined;
 }
 
-/** W1-T9633 — the disposed row's sentence for a security hold: the verdict, its owner, and each alert read at this head. */
+/** W1-T9633 — the disposed row's sentence for a security hold: the verdict, its owner, and each alert read at this head.
+ *  W1-T9731: each alert carries its message (bounded at hydration); with none read, or a pass that stood down, it says so. */
 export function securityHoldReason(refusal: SecurityArmRefusal,
-  alerts?: readonly { alertNumber: number; ruleId: string; path: string; line: number }[]): string {
+  alerts?: readonly { alertNumber: number; ruleId: string; path: string; line: number; message?: string }[],
+  standDown?: string): string {
+  const said = (a: { message?: string }) => a.message?.replace(/\s+/g, " ").trim();
   const named = alerts?.length
-    ? ` (${alerts.map(a => `alert #${a.alertNumber} ${a.ruleId} at ${a.path}:${a.line}`).join(", ")})` : "";
+    ? ` (${alerts.map(a => `alert #${a.alertNumber} ${a.ruleId} at ${a.path}:${a.line}${said(a) ? `: "${said(a)}"` : ""}`).join(", ")})`
+    : " (no high or critical CodeQL alert was read at this head this pass)";
   return refusal.state === "blocked"
     ? `security hold: the code-scanning merge policy refused the arm at this head on a new high or critical alert` +
-      `${named} (security merge blocked: ${refusal.reason}) — owner fix-lane`
+      `${named} (security merge blocked: ${refusal.reason}) — owner fix-lane${standDown ? `; this pass: ${standDown}` : ""}`
     : `security hold: the code-scanning merge policy could not classify this head's CodeQL result ` +
       `(security merge unknown: ${refusal.reason}) — owner security-policy; the policy, not the arm, must change`;
 }
