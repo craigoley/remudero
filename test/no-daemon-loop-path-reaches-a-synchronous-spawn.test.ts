@@ -112,7 +112,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   defaultUpstreamGit: 1,
   defaultWhich: 1,
   defuseCandidates: 1,
-  depReviewCommand: 4,
+  depReviewCommand: 3,
   discoverLiveLedgerRoot: 1,
   dispatchClaimReserverFor: 1,
   draftProposalBatch: 1,
