@@ -13,6 +13,8 @@ import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from ".
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
@@ -1991,7 +1993,8 @@ export function productionFixProgressJudge(opts: {
       `Round count: ${input.rounds.length}`,
       scrubRiskJudgeText(JSON.stringify(input)).text,
     ].join("\n");
-    const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt });
+    const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt,
+      memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() } });
     if (result.subtype !== undefined && result.subtype !== "success") return undefined;
     return parseFixProgressVerdict(result.text);
   };
@@ -14303,7 +14306,8 @@ function repeatedFixRefusalReason(reason: string): string {
  *  rejection is ledgered by `detachFixDispatch` (W1-T5932, W1-T5951); any other is swallowed. */
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
-export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort";
+export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
+  | "light-pass-action";
 export type DetachedFixPhase = "worker" | "ci-wait";
 
 interface DetachedSweepActionRegistration {
@@ -14327,7 +14331,7 @@ export function detachSweepAction(
 ): (phase: DetachedFixPhase) => void {
   const registration: DetachedSweepActionRegistration = {
     ...action, startedAtMs: Date.now(),
-    phase: action.actionKind === "fix-dispatch" ? action.phase ?? "worker" : "best-effort",
+    phase: action.actionKind === "fix-dispatch" || action.actionKind === "light-pass-action" ? action.phase ?? "worker" : "best-effort",
   };
   const onPhase = (phase: DetachedFixPhase) => {
     registration.phase = phase;
@@ -20012,6 +20016,35 @@ const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight 
 // Closed by `drainInFlightReviews` (an exit), reopened by the next light pass.
 let lightPassRefillsClosed = false;
 
+const lightPassActionScope = new AsyncLocalStorage<{ onMemoryWait: () => void }>();
+const lightPassMemoryWaits = new Map<string, { sinceMs: number }>();
+
+/** W1-T9780: an enforced admission backs off through `sleep`, so its first call detaches the waiting light-pass action. */
+export function lightPassMemoryWaitPorts(): Pick<AdmissionPorts, "sleep"> {
+  return {
+    sleep: async (ms) => {
+      lightPassActionScope.getStore()?.onMemoryWait();
+      await delay(ms);
+    },
+  };
+}
+
+function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: number): SweepSummary {
+  const reason = sinceMs === undefined
+    ? "light-pass action detached while waiting for memory admission"
+    : `light-pass action for this head is still waiting for memory admission (detached ` +
+      `${Math.round(Math.max(0, (deps.now ? deps.now() : systemClock.now()) - sinceMs) / 1000)}s ago) — not re-admitted until it settles`;
+  if (sinceMs !== undefined && !deps.dryRun) {
+    (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+      step: "sweep.disposed", pr_number: pr.prNumber, pr_url: pr.prUrl, disposition: "wait", acted: false, reason,
+      stand_down_reason: reason, head_sha: pr.headSha, in_flight_action: "light-pass-action" });
+  }
+  const byDisposition = ZERO_COUNTS();
+  byDisposition.wait = 1;
+  return { total: 1, byDisposition, actionsTaken: 0, actionsFailed: 0, noneCount: 0,
+    actions: [{ prNumber: pr.prNumber, prUrl: pr.prUrl, taskId: pr.taskId, disposition: "wait", reason, acted: false }] };
+}
+
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight;
@@ -20023,6 +20056,11 @@ export async function runSweepLightPass(
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
+  const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
+  if (memoryHeld.length > 0) {
+    const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
+    return [...held, ...await runSweepLightPass(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy)];
+  }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
     return [await runSweep([], deps, policy)];
@@ -20136,6 +20174,7 @@ export async function runSweepLightPass(
   const reevaluationRows = deps.appendLine ?? appendLedger;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
+  const memoryDetachedNumbers = new Set<number>();
   // W1-T9498: this pass's spawning reviews not yet settled; the repair admission reads it live.
   let unsettledSpawning = spawning.length;
   for (const pr of [...spawning, ...planFilings]) {
@@ -20191,9 +20230,8 @@ export async function runSweepLightPass(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
       const baseStandDownReasonFor = deps.standDownReasonFor;
-      // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick this
-      // pass runs inside is awaited whichever PR won the post-review admission, so the fix rung's
-      // CI wait must leave the await on both branches.
+      // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick awaits this
+      // pass whichever PR won the post-review admission, so the fix rung's CI wait leaves it on both branches.
       const scopedDeps: SweepDeps =
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
           ? {
@@ -20267,7 +20305,9 @@ export async function runSweepLightPass(
         if (previousPlanMerge !== undefined) await previousPlanMerge;
         return runSweep([pr], scopedDeps, policy);
       };
-      return sweepOne().then(async (summary) => {
+      let onMemoryWait!: () => void;
+      const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
+      const settled = lightPassActionScope.run({ onMemoryWait: () => onMemoryWait() }, sweepOne).then(async (summary) => {
         if (heldAtSelection !== undefined && !deps.dryRun) {
           const disposed = readLedger(deps.ledgerPath).findLast((l) => l.step === "sweep.disposed" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
@@ -20281,6 +20321,18 @@ export async function runSweepLightPass(
         planMergeTurn?.finish();
         if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
+      });
+      return Promise.race([settled, memoryWait]).then((first) => {
+        if (first !== "memory-wait") return first;
+        const key = lightPassHeadKey(pr);
+        const hold = { sinceMs: deps.now ? deps.now() : systemClock.now() };
+        lightPassMemoryWaits.set(key, hold);
+        memoryDetachedNumbers.add(pr.prNumber);
+        detachSweepAction(settled.finally(() => {
+          if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
+        }), { actionKind: "light-pass-action", taskId: pr.taskId ?? `PR-${pr.prNumber}` });
+        deps.log?.("sweep.light_pass.memory_wait_detached", { pr_number: pr.prNumber, head_sha: pr.headSha });
+        return lightPassMemoryWaitSummary(pr, deps);
       });
     }),
   );
@@ -20395,7 +20447,7 @@ export async function runSweepLightPass(
   } finally {
     releasePlanMerge();
     for (const [number, release] of releases) {
-      if (!detachedNumbers.has(number)) release();
+      if (!detachedNumbers.has(number) && !memoryDetachedNumbers.has(number)) release();
     }
   }
 }
