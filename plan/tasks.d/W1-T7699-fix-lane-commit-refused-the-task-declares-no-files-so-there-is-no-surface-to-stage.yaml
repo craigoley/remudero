@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.25
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "fix-lane:commit-refused:the task declares no files, so there is no surface to stage"
