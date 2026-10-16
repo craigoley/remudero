@@ -3079,6 +3079,7 @@ export function handedOffHeadRiskJudge(
   });
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
+import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
@@ -12993,6 +12994,7 @@ export async function runFixRung(opts: {
     // check arm (`runSweep`, sweep.ts) already use: never fall through to a strike, never log
     // `fix.dispatch` (the one ledger step a strike is counted from) — ledger the reason and stand
     // down, exactly as those sites do.
+    if (noReviewYet && currentCiFailures !== undefined) currentCiFailures = dropDerivativeAggregateCiFailure(currentCiFailures);
     if (currentMergeConflict === undefined && noReviewYet && currentCiFailures !== undefined && currentCiFailures.length === 0) {
       const reason =
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
