@@ -2889,7 +2889,7 @@ export function buildSweepEffects(
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, {}, pushFixRound, prior),
+      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
@@ -19118,12 +19118,13 @@ export async function pushFixRound(
 }
 
 /**
- * W1-T4797: the pre-push DIFF-COVERAGE precheck's answer, as three DISTINCT values — never collapsed.
+ * W1-T4797: the pre-push DIFF-COVERAGE precheck's answers — never collapsed.
  * `uncovered` refuses the round before any push, carrying CI's own uncovered-lines text; `covered`
  * pushes as today; `unavailable` (timeout, spawn failure, unreadable lcov, a selector that cannot
- * scope) ALSO pushes: a precheck that cannot look must never block.
+ * scope) ALSO pushes: a precheck that cannot look must never block; consumer repos return `not-applicable`.
  */
 export type CoveragePrecheck =
+  | { outcome: "not-applicable"; repo: string; reason: string }
   | { outcome: "covered"; reason: string; suites: number }
   | { outcome: "uncovered"; text: string; suites: number }
   | { outcome: "unavailable"; reason: string };
@@ -19133,6 +19134,7 @@ export type CoverageRunResult = { status: number | null; output: string; timedOu
 
 /** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
 export type CoveragePrecheckPorts = {
+  repo?: string;
   changedFiles?: (wt: string) => string[] | Promise<string[]>;
   select?: (wt: string, changed: string[]) => AffectedSelection | Promise<AffectedSelection>;
   manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
@@ -19252,6 +19254,9 @@ function coverageRefusalText(output: string): string {
  * bound is `unavailable`, not `uncovered`.
  */
 export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): Promise<CoveragePrecheck> {
+  if (ports.repo !== undefined && !fixCensusAppliesToRepo(ports.repo, () => {})) {
+    return { outcome: "not-applicable", repo: ports.repo, reason: `core's diff-coverage selector does not apply to ${ports.repo}` };
+  }
   const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
   let changed: string[];
   try {
@@ -19306,7 +19311,8 @@ export function coveragePushRefusal(
     site,
     outcome: result.outcome,
     reason: result.outcome === "uncovered" ? "diff-coverage would refuse this head" : result.reason,
-    ...(result.outcome === "unavailable" ? {} : { suites: result.suites }),
+    ...(result.outcome === "covered" || result.outcome === "uncovered" ? { suites: result.suites } : {}),
+    ...(result.outcome === "not-applicable" ? { repo: result.repo } : {}),
     ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
   });
   if (result.outcome !== "uncovered") return undefined;
@@ -21430,7 +21436,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
+      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await gitPushRunBranchAsync(worktreePath);
@@ -21444,7 +21450,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
           ...(refusalLabel === "coverage-refused"
-            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push.repair") }
+            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push.repair") }
             : {}),
         });
         if (rung.outcome === "refused") {
@@ -21783,7 +21789,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
+          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, { repo: task.repo }, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           escalationIssues: ghIssueGatewayAsync(owner, task.repo),
