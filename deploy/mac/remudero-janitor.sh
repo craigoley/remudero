@@ -432,6 +432,11 @@ refresh_process_snapshot() {
 clean_artifact() {
   local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
+  # Unique test results/materialization receipts are durable even inside a
+  # generated dependency tree. The bounded duplicate helper preserves them.
+  if [ "${artifact##*/}" = node_modules ] && { [ -e "$artifact/.vite" ] || [ -L "$artifact/.vite" ] || [ -e "$artifact/.rmd-dependency-seed.json" ] || [ -L "$artifact/.rmd-dependency-seed.json" ]; }; then
+    log "SKIP retained-dependency-evidence $artifact"; return
+  fi
   if seed_reason=$(rmd_dependency_seed_risk "$artifact"); then log "SKIP protected $artifact ($seed_reason)"; return; fi
   found=$(find "$artifact" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || {
     log "SKIP content scan failed (unknown) $artifact"; return;
@@ -1182,6 +1187,13 @@ fi
 rmd_decision_summary "$DECISION_LOG"
 log "decision-report: $DECISION_LOG (six-hour guard; published Git workspaces only)"
 
+# This helper owns only exact ignored duplicate packages and Turbopack caches
+# below this account's artifact root. Source/Git/build outputs never retire.
+if [ -f "$SCRIPT_DIR/cache-reclaim.py" ] && command -v python3 >/dev/null 2>&1; then
+  cache_mode=()
+  [ "$APPLY" != 1 ] || cache_mode=(--apply)
+  python3 "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" >> "$LOG" 2>&1 || log "WARN generated-cache helper refused or could not verify a removal"
+fi
 AFTER=$(free_gib)
 log "=== done: removed=$removed reclaimed=$((reclaimed_kb/1024))M planned=$planned estimated=$((estimated_kb/1024))M worktrees-removed=$removed_worktrees worktrees-planned=$planned_worktrees worktrees-skipped=$skipped_worktrees live-skip=$skipped_live cwd-skip=$skipped_cwd owner-skip=$skipped_owner open-skip=$skipped_open young-skip=$skipped_young free=${BEFORE}->${AFTER}GiB ==="
 

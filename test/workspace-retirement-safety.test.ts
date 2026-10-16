@@ -258,7 +258,7 @@ test("Mac installer installs both safety helpers and preserves the previous scri
     const dest = join(fx.root, "install"); mkdirSync(dest); writeFileSync(join(dest, "remudero-janitor.sh"), "old script");
     const r = spawnSync("bash", ["deploy/mac/install-janitor.sh"], { encoding: "utf8", env: { ...process.env, REMUDERO_JANITOR_INSTALL_DIR: dest } });
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    for (const name of ["workspace-retirement-guard.sh", "dependency-seed-guard.sh", "remudero-janitor.sh", "tmp-reclaim.sh"]) assert.equal(existsSync(join(dest, name)), true);
+    for (const name of ["workspace-retirement-guard.sh", "dependency-seed-guard.sh", "remudero-janitor.sh", "tmp-reclaim.sh", "cache-reclaim.py", "retire-legacy-sweeper.py"]) assert.equal(existsSync(join(dest, name)), true);
     assert.equal(readFileSync(join(dest, "remudero-janitor.sh"), "utf8"), readFileSync(MAC, "utf8"));
     assert.equal(readFileSync(join(dest, "tmp-reclaim.sh"), "utf8"), readFileSync("deploy/mac/tmp-reclaim.sh", "utf8"));
     assert.match(r.stdout, /schedules unchanged/);
@@ -307,5 +307,6 @@ test("the scheduled Mac janitor invokes nested-cache cleanup from its installed 
     assert.equal(r.status, 0, r.stderr + r.stdout); assert.equal(existsSync(file), false, r.stdout);
     assert.ok(existsSync(join(job, "fixture", ".git")));
     assert.match(r.stdout, /generated-cache: pruned tsx cache files=1/);
+    assert.match(readFileSync(join(fx.root, "mac.log"), "utf8"), /cache-reclaim:.*"sourceOrGitRetired":false/);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
