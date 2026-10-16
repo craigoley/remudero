@@ -1484,6 +1484,8 @@ import {
   verifyBundlePin,
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learnings.js";
+import { doctrineCitationFactsAt } from "./lib/doctrine-citation-facts.js";
+import type { DoctrineCitationFacts } from "./lib/doctrine-citations.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
@@ -30025,6 +30027,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
+  let doctrineCitations: DoctrineCitationFacts | undefined;
   let releasedIdsForAdmission = new Set<string>();
   if (scope && !offline) {
     try {
@@ -30142,6 +30145,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         }
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
+      // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
+      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      opts.doctrineCitations = doctrineCitations;
       opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
