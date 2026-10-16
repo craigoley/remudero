@@ -171,7 +171,7 @@ export interface RunChildProbeInput {
 export interface RunChildProbePorts {
   /** `sweep.runChild.mode`; the default reads this installation's policy.yaml. */
   readMode?: () => RunChildMode;
-  /** main's tip, for `newestCurrentEngine`. */
+  /** main's tip, for `newestCurrentEngine`; default {@link mainTipSha}. */
   mainSha?: (repoDir: string) => Promise<string>;
   engine?: Pick<NewestEngineOptions, "git" | "isCurrent">;
   /** The launch argv for the probe; the default resolves a bundle in the engine tree, else tsx from it. */
@@ -193,6 +193,18 @@ export type RunChildProbeOutcome =
   | { started: true; row: Record<string, unknown> };
 
 const reasonOf = (error: unknown): string => String((error as Error)?.message ?? error).slice(0, 400);
+
+/**
+ * W1-T9906: main's tip as last fetched into `repoDir`, the commit a run child's engine must be reachable from. Never the
+ * checkout's HEAD: that moves only at a restart, and every engine is cut at a run worktree's origin/main.
+ */
+export async function mainTipSha(repoDir: string): Promise<string> {
+  try {
+    return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"])).trim();
+  } catch (error) {
+    throw new Error(`origin/main tip unreadable: ${reasonOf(error)}`);
+  }
+}
 
 function sanitiseId(id: string): string {
   return id.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -275,7 +287,12 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
   const runId = `probe-${sanitiseId(input.taskId)}-${clock()}-${randomBytes(2).toString("hex")}`;
   try {
     if (listEngines(input.stateRoot).length === 0) return skip("no engine tree has been built yet");
-    const mainSha = (await (seams.mainSha ?? ((dir) => hostWorktreeGitAsync(dir, ["rev-parse", "HEAD"])))(input.repoDir)).trim();
+    let mainSha: string;
+    try {
+      mainSha = (await (seams.mainSha ?? mainTipSha)(input.repoDir)).trim();
+    } catch (error) {
+      return skip(reasonOf(error));
+    }
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
     if (!engine) return skip("no current engine tree for main");
     const admitted = await within(input.plan, seams.planWaitMs ?? PROBE_PLAN_WAIT_MS);
@@ -529,7 +546,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
   let engineSha = "";
   try {
     if (listEngines(input.stateRoot).length === 0) return unavailable("no engine tree has been built yet");
-    const mainSha = (await (ports.mainSha ?? ((repo) => hostWorktreeGitAsync(repo, ["rev-parse", "HEAD"])))(input.repoDir)).trim();
+    const mainSha = (await (ports.mainSha ?? mainTipSha)(input.repoDir)).trim();
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...ports.engine });
     if (!engine) return unavailable("no current engine tree for main");
     engineSha = engine.sha;
