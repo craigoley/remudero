@@ -5,7 +5,7 @@ import { classificationSnapshotKey } from "./read-page.js";
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { declinedReasonInLedger, deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
+import { ledgerProposalVerdicts, deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
@@ -522,13 +522,14 @@ export function registryThreadItems(stateDir: string, ledgerPath: string): Inbox
   const proposals = parseProposalRegistry(existsSync(`${stateDir}/inbox-proposals.json`) ? readFileSync(`${stateDir}/inbox-proposals.json`, "utf8") : undefined);
   const plainStore = readPlainStore(plainStorePath(stateDir));
   const lines = readLedgerLines(ledgerPath);
+  const verdicts = ledgerProposalVerdicts(lines);
   return proposals
     .filter((p) => inboxOwner(p) === "operator")
     .map((p) => ({
       proposalId: p.id,
       summary: p.summary,
       plain: plainInboxMessage(p, plainStore),
-      state: declinedReasonInLedger(lines, p.id) !== undefined ? ("declined" as const) : ("ready" as const),
+      state: verdicts.isDeclined(p.id) !== undefined ? ("declined" as const) : ("ready" as const),
     }));
 }
 

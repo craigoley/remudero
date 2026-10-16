@@ -1,0 +1,255 @@
+- id: W1-T9925
+  title: "AN LLM JUDGE RE-RANKS THE QUEUE BY MEASURED COST OF DELAY AND IS JUDGED ON ITS OWN PREDICTIONS — on origin/main 07a425844 the 526 queued tasks hold 81 at plain priority 1, 53 at 1.x and 168 at 2, the fleet starts about 4-6 runs an hour, and operator-pinned protective P1s W1-T9706 and W1-T9761 waited 15+ hours while newer tasks started"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — a new registered gardener that rewrites queued tasks' `priority:` through its own reviewed plan PR; how dispatch turns priority into urgency (dispatch-value.ts), the backlog gardener's bands and the machine-filing judge's rulings are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-16 (\"LLM judge re-ranks the queue\"): priority has lost its meaning; a gardener periodically re-scores queued tasks by measured cost of delay, writes the result back as priority with a reason, and checks its record against outcomes; no fixed caps. Standing rulings: no hard fixed thresholds; machine work flows through an LLM judge (2026-09-29); a gardener's bound is earned from its record (2026-10-13, W1-T9035)"
+  plan_refs: [W1-T9323, W1-T4941, W1-T6307, W1-T5361, W1-T8830, W1-T7762, W1-T9035, W1-T4802, W1-T5114, W1-T9706, W1-T9761, W1-T9711, W1-T9087, W1-T9089, W1-T9091, W1-T9092]
+  files:
+    - src/lib/queue-judge-gardener.ts
+    - src/lib/garden-registry.ts
+    - src/run-task.ts
+    - test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-16: priority has lost its meaning; protective P1s waited 15+ h behind 81 other plain P1s
+  attempts: 0
+  rationale: |
+    THE SYMPTOM, MEASURED 2026-10-16 ~19:10Z (read-only; origin/main 07a425844, origin heads, ~/Remudero-notes).
+    - Queue census. Every plan/tasks.d shard on origin/main loaded with parseTasksFromYaml. 526 tasks read
+      `status: queued` with no `retirement`: priority 1: 81, 1.x: 53, 2: 168, 2.x: 30, 3: 38, 4: 113, 5: 2, none: 41.
+      (`status:` lags merges, so a few of these shipped; the shape is the point.) 102 still carry a
+      `# backlog gardener: band=` marker, 64 are machine-authored (60 with a pinned `risk_ruling`), 187 have a
+      `depends_on`, and 19 carry an operator pin on the priority line (`priority: N  # operator-YYYY-MM-DD: ...`).
+    - Starts. The fleet starts about 4-6 runs an hour. With 81 plain P1s, priority 1 no longer orders anything.
+    - W1-T9706 (operator pin `# operator-2026-10-15`, a protective memory fix) was added to main 2026-10-15T21:40:50Z.
+      W1-T9761 (operator pin, garden starvation) was added 2026-10-16T02:50:46Z. At ~19:10Z neither had a
+      run-<id>-* head. In that window, run heads show starts for newer tasks: W1-T9743 (P1, filed 10-16 01:07Z,
+      started 18:10Z), W1-T9722 (P2, filed 02:05Z, started 11:41Z), W1-T9626 and W1-T9628 (P2.5, filed 01:39Z,
+      started 16:39Z and 16:56Z), W1-T9828 (P2, filed 17:22Z, started 17:56Z). Heads also show W1-T9097 started 6
+      times and W1-T9541 5 times since 10-15 22:57Z. Overlap packing on src/run-task.ts may also have held W1-T9706.
+      That is why the judge's record (design 5) scores a task held by something other than its rank as "not
+      ranking", never as a hit or a miss.
+    - Capacity. ~/Remudero-notes/capacity-2026-10-16/RESULTS.md (lane.idle_summary, ~193 min x 3 lanes): restart
+      idle is 246 of ~580 lane slot-minutes, about 42%, against 68 selection_empty, 11 memory and 9 phase_bound.
+      The binding constraint is restart idle. The ADR 0007 cheap-restart chain removes it. On main, W1-T9087
+      merged as #12219 (2026-10-16 12:08Z; the RESULTS.md note still lists it as queued). W1-T9089 (priority 2) is
+      now runnable and heads the rest of the chain. W1-T9091 (priority 1.5) depends on it. W1-T9092 (priority 1.5)
+      has no open dependency. All three sit among 134 tasks at priority 1-1.x or above.
+    HOW DISPATCH ORDERS TODAY (symbols, not lines).
+    - src/lib/dispatch-value.ts `costOfDelayContext` scores each open task. The score is the validity share near
+      its age (`validityShareNearAge`), times (1 + open dependent fan-out), times its class score
+      (`scoreByClass`), times its class merge posterior, times `dispatchUrgency(tierGap, age / medianWait)`.
+    - `dispatchUrgency` = `2^-tierGap * (1 + log2(1 + waits))` (W1-T9323, #11584). `priorityTiers` measures the
+      tier gap from the smallest declared priority. An absent priority sits one tier below the lowest declared one.
+    - The stride pass is (1 + non-refused starts) / score. Its result is ledgered as `dispatch.cost_of_delay.ready`
+      (`costOfDelayReadyRow`) or refused, and then the fallback order runs.
+    - Per-class value is ledgered by run-task.ts as `dispatch.value.calibrated`.
+    - So `priority` is the ONE intent input. Every other factor is measured. When most of the queue shares a tier,
+      the tier gap is 0 for all of them, and only age and fan-out remain. A protective fix filed today ranks
+      with, and behind, 80 older P1s.
+    WHAT ALREADY WRITES PRIORITY, AND WHY IT DOES NOT FIX THIS.
+    - src/lib/backlog-gardener.ts (W1-T4941). It places only UNPRIORITIZED tasks into bands 2/3/4 with a fixed
+      rule (`judgeBacklog`). It marks them `  # backlog gardener: band=N evidence=<16 hex>`. It treats any other
+      priority as authoritative (`MARKER` ownership in `backlogInventory`). It never re-ranks a declared priority
+      and never touches the P1 pile.
+    - src/lib/machine-filing.ts `costPriority` prices a machine finding once, at filing, by its filer's cost
+      quantile. The value sits inside the `risk_ruling` pin: `taskRulingPin` hashes `priority`, and
+      `reparkStaleRuling` re-parks an edited judged record to `verify: human`, as `applyBacklogActions` does.
+    - Operators pin by hand: `priority: N  # operator-YYYY-MM-DD: <why>`. That inline comment is this repo's
+      priority-reason field. 68 shards use it.
+    MACHINERY TO REUSE.
+    - Garden framework: src/lib/gardener.ts `GardenSpec` / `runGardenAsync`. It gives a per-class Beta record
+      (`GardenState.classes`, fresh Beta(3, 1)), one pending PR at a time, and `judgedByOutcomeNote` for a reviewed
+      class. A close declines its targets (`declinedTargets`). An effects file (`gardenEffectsPath`) is folded by
+      `foldGardenEffects`. `landingRefusal` is the lint-plan preflight. `cheapFingerprint` and `gardenPassDue` make
+      an idle tick free.
+    - Registration: src/lib/garden-registry.ts `REGISTERED_GARDEN_NAMES` and `gardenSchedule`, and run-task.ts
+      `buildRegisteredGarden`. A pass runs as an off-loop child (W1-T5114). Garden plan changes land as plan PRs
+      that the fleet's review merges. The backlog spec's `apply` is the model: plan-only paths, a title, a body
+      with `## Acceptance` grep proofs on its markers.
+    - The LLM judge seam: src/lib/issue-revalidation-garden.ts `issueRevalidationJudgeText`. It is one tool-less
+      spawn on the escalation judge's mount (`benchmarkNonDispatchSpawn`, `withReceiptIdentity`).
+    - Strict JSON verdict parsing: src/lib/fix-progress-judge.ts `parseFixProgressVerdict` / `judgeFixProgress`.
+      A malformed or failed answer is "unavailable" and is re-asked next pass, never guessed.
+    - Earned authority:
+      - src/lib/machine-filing-judge.ts `familyTrackRecord` / `earnedConfidenceBar`, and its re-ask schedule
+        (`reaskIntervalMs`, W1-T8830).
+      - W1-T9035's allowance, max(1, floor(alpha / (beta + undone))), is the 10-13 operator ruling's shape.
+    NOT COVERED ELSEWHERE.
+    - Swept plan/tasks.d on origin/main for re-rank, reprioriti, priority judge, queue judge, priority_reason and
+      priority inflation. Hits are incidental (W1-T4111 and W1-T4949 are merged and different; W1-T6307 is the
+      backlog gardener's fractional-priority read).
+    - Swept the added lines of every origin head's diff against its merge base with main (all 441 heads, fetched
+      19:08Z) for the same terms. The only hit is a comment in W1-T7728's run heads ("report, do not re-rank"),
+      which is unrelated.
+    - No queued task edits backlog-gardener.ts or dispatch-value.ts.
+    - garden-registry.ts is also in W1-T9711, W1-T9761 and W1-T9901 (queued, and W1-T9761 is being built now).
+      Overlap packing serializes them. This task only appends one name and one schedule arm.
+  design: |
+    No fixed count, interval, ratio or cap anywhere (standing operator rule). Every bound below is read from a
+    measurement and is reported with its inputs.
+    1. A NEW REGISTERED GARDENER `queue-judge` in src/lib/queue-judge-gardener.ts.
+       - It is a `GardenSpec` with classes `raise` and `lower`, both reviewed: `review` says "priority is a judgement
+         call", and the PR opens with `judgedByOutcomeNote`.
+       - The module exports `queueJudgeGardenSpec(deps, overrides?)`, built like `backlogGardenSpec`. Its one caller
+         is the new `"queue-judge"` case in run-task.ts `buildRegisteredGarden`.
+       - Append it to `REGISTERED_GARDEN_NAMES` and wire it in `buildRegisteredGarden` with the escalate dep, as
+         the backlog case does. The off switch is the framework's upper-cased name prefix.
+       - It changes nothing in dispatch-value.ts. Dispatch already turns priority into urgency. This gardener
+         makes the priority mean something again.
+    2. INPUTS: ONE EVIDENCE PACK PER QUEUED TASK, read-only, built before the judge is asked.
+       - Dependents: `openDependentFanout` over `depends_on`, with the dependent ids.
+       - Incidents and escalations: open incident records (src/lib/incident-lifecycle.ts store, status not
+         `verified`) and open escalations whose text names the task id or a fingerprint the shard cites.
+       - Red-PR blockers it would fix: open PRs whose newest `sweep.disposed` row (pr_number, disposition, reason,
+         task_id) names the task id or a ledger step the shard cites. Report the count and the PR numbers, and
+         separately whether a STUCK disposition (held, escalated, blocked) cites it.
+       - Age: filing time from `filingDatesFromPlanHistory`, expressed in measured median waits, the same unit as
+         `costOfDelayContext`.
+       - Attempts and failures: run.start count, non-worker refusals (`streakRefusal`), the last verdict, and the
+         shard's `attempts`.
+       - Operator origin: an operator pin on the priority line, an `origin:` that names an operator session or
+         approval, or neither.
+       - Its current dispatch score and stride pass, from the newest `dispatch.cost_of_delay.ready` context when
+         one is available.
+       - Why it is not dispatching, when that is not its rank: an unmerged dependency, a `dispatch_hold`, a
+         `not_before`, `verify: human`, or a file overlap with an in-flight run.
+       - Each fact names its source (ledger step and ts, file, PR number), so the judge cites evidence rather than
+         recalling it.
+       - The ledger read is bounded to the steps named here (readLedgerUnionRawLinesSync with a pattern, as
+         W1-T5363 bounds the backlog read). It is never an unfiltered union read.
+    3. THE JUDGE.
+       - One tool-less spawn per pass on the escalation judge's mount (the `issueRevalidationJudgeText` seam). The
+         prompt holds:
+         - the evidence packs;
+         - the operator's rule, verbatim: cost of delay = what waiting costs (dependents and capacity unblocked,
+           incidents and red PRs it ends, protective intent), never the task's age alone;
+         - its own record (design 6).
+       - It answers strict JSON. For each task it moves: `{id, priority, reason, evidence: [refs from the pack],
+         expected_cost_of_delay, expected_outcome: {unblocks_tasks, ends_incidents, unsticks_prs, starts_within}}`.
+       - Parse it like `parseFixProgressVerdict`. A malformed answer, or a failed spawn, writes nothing. It ledgers
+         `queue_judge.unavailable` with the reason and is asked again next pass.
+       - Deterministic checks after the judge. Refuse, row by row:
+         - an unknown id;
+         - a cited evidence ref that is not in the pack;
+         - a task that is not queued;
+         - a value outside lint's [0, 99].
+       - Operator pins. A task whose priority line carries an operator pin (`# operator-YYYY-MM-DD` or
+         `# operator YYYY-MM-DD`) is NEVER moved to a larger number. The judge may propose it. The proposal becomes
+         ONE escalation through the gardener's escalate dep, carrying the judge's reason and evidence and asking
+         the operator to confirm. Nothing is written to the shard. The pin may be raised (a smaller number) like
+         any task. No judged value may sit below the smallest operator-pinned priority on the queue without the
+         same escalation. The judge reorders within the operator's frame and never above it.
+       - The judge OWNS a priority only while it equals the value in its marker, the same ownership rule as the
+         backlog gardener's `MARKER`. Any other edit, by an operator or another gardener, is authoritative for
+         that pass and is re-judged from fresh evidence.
+    4. OUTPUT: PRIORITY WITH A ONE-LINE REASON AND THE EVIDENCE, through a reviewed plan PR.
+       - The write-back uses this repo's existing reason field, the inline comment on the priority line:
+         `  priority: <n>  # queue-judge-YYYY-MM-DD: <one-line reason>`
+         Below `status: queued` goes a marker:
+         `  # queue judge: priority=<n> evidence=<16 hex>`
+         The hex is a hash of the evidence pack, the same scheme as `evidenceHash`.
+       - Where it replaces a `# backlog gardener: band=` marker, it removes that marker. The backlog gardener
+         then reads the value as declared and leaves it alone.
+       - A judged machine record goes through `reparkStaleRuling`, exactly as `applyBacklogActions` does, because
+         priority is inside its `risk_ruling` pin. The machine-filing judge re-rules it on its next pass (W1-T8830).
+       - `landingRefusal` is `backlogLandingGuard` (or the same lint-plan and machine-shard checks). A draft lint
+         would refuse is a recorded filing failure, never a red PR.
+       - The PR body lists each move: from and to, the reason, the cited evidence, the expected outcome.
+         `## Acceptance` holds one `grep:` per moved shard on its marker line.
+       - It ledgers one `queue_judge.prediction` row per move: task_id, from, to, expected_cost_of_delay,
+         expected_outcome, evidence_signature, pr_url.
+       - Only the `raise` or `lower` class drawn this pass acts, as `planGarden` decides. One pending PR at a time,
+         per the framework.
+    5. PACE AND SIZE, BOTH MEASURED.
+       - Cadence comes from queue churn, not a timer. A pass is due (`cheapFingerprint`) when the queue has turned
+         over the head its last ranking covered. The changes since its last landed ranking count tasks filed,
+         merged, retired or re-prioritized, read from main's first-parent plan history. The pass is due once that
+         count reaches the number of distinct tasks its last pass predicted would start before the next one. That
+         number is the measured starts per hour (distinct task_id `run.start` rows) times the measured open-to-merge
+         time of its own PRs.
+       - High churn shortens the interval and a quiet queue lengthens it. An unchanged queue reads nothing
+         (`gardenPassDue` returns on the same fingerprint). A first pass, with no record, is due at once.
+       - Size comes from its own measured review cost. For each of its merged PRs, review cost per moved shard is
+         the minutes from PR open to its first PASS `review.posted` row, divided by the shards it changed. Take the
+         median of that.
+       - A pass moves no more shards than fit, at that cost, inside the time until its next pass is due. It also
+         moves no more than its record allows: max(1, floor(alpha / (beta + misses))) for the acting class (design
+         6). It takes the smaller of the two.
+       - Moves are ranked by the size of the predicted cost-of-delay change, largest first. Every other proposed
+         move is named as deferred in `queue_judge.scorecard`, with the bound and its inputs.
+       - Until it has a merged PR, the review prior is the backlog gardener's own merged plan PRs, measured the
+         same way, and the row says so.
+    6. SELF-CHECK: PREDICTIONS SCORED AGAINST OUTCOMES, AND AUTHORITY EARNED FROM THE RECORD.
+       - Each pass first scores every open prediction whose task merged or retired, or whose queue has turned over
+         twice past its predicted start.
+       - A RAISE is a hit when:
+         - the task started within its predicted window; and
+         - after it merged, what it claimed happened: a named dependent dispatched, a linked incident reached
+           `verified`, or a named stuck PR merged or left its stuck disposition.
+       - A LOWER is a hit when no incident, escalation or stuck-PR disposition cited the task while it waited.
+       - A task held by something other than its rank is scored `not_ranking`, with the holder named. That covers
+         an unmerged dependency, a hold, `verify: human`, a file overlap and a lane outage. It is neither a hit nor
+         a miss.
+       - Each verdict is ledgered as `queue_judge.outcome`: task_id, prediction ts, verdict, the observed facts.
+       - Each verdict becomes an effect in the gardener's effects file (`writeGardenEffects`), which
+         `foldGardenEffects` folds into that class's Beta record.
+       - `misses` in the allowance counts the class's scored misses since its last credit. So authority grows with
+         hits and shrinks with misses and with closed (declined) PRs, as the framework already debits them.
+       - When a class's posterior mean falls to or below the fleet's own prior for garden classes, that class runs
+         in shadow. It still asks the judge and ledgers predictions and outcomes, but opens no PR. Its shadow hits
+         earn it back.
+       - The judge's prompt carries this record. Every scorecard reports it, so the operator can read the judge's
+         precision directly.
+    7. EXPECTED FIRST OUTCOME (an evidence check, not a hard-coded rule). With today's inputs, the cheap-restart
+       chain should land at or near the head:
+       - W1-T9089 is runnable now that W1-T9087 merged. Its dependent is W1-T9091. Its cost of delay is the ~42%
+         of lane slot-minutes lost to restart idle, per the capacity read.
+       - W1-T9092 has no open dependency.
+       The test fixture models this queue in miniature (design 8). A first live pass that ranks the chain low,
+       with today's evidence, is a defect to report.
+    8. TESTS. A new file, test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts, with `test(`
+       titles verbatim as in the proofs.
+       - Fixture: a temp plan root with shards; an injected ledger reader; an injected judge text function, with no
+         spawn; and an injected clock.
+       - Cases: the operator-pin case; the empty-queue case; a malformed judge answer; a judge that lowers an
+         operator pin; a judge that cites evidence missing from the pack; a scored hit and a scored miss; a task
+         held by overlap scored `not_ranking`; and the review-cost bound with a deferred move.
+       - The empty-queue pass reads no ledger rows beyond its cheap fingerprint, calls the judge zero times, writes
+         no file and opens no PR.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts"
+    - claim: "an operator-pinned priority is never moved to a larger number; the judge's lowering becomes one escalation and the shard is unchanged"
+      proof: 'grep: test("W1-T9925: an operator-pinned priority is never lowered and a judged lowering escalates instead" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+    - claim: "a pass over an empty queue calls no judge, writes no file and opens no PR"
+      proof: 'grep: test("W1-T9925: a pass over an empty queue is a no-op" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+    - claim: "a re-rank writes the priority with a one-line queue-judge reason, a marker and a prediction row naming its evidence"
+      proof: 'grep: test("W1-T9925: a re-rank writes the priority with a one-line reason and the evidence it read" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+    - claim: "the evidence pack carries dependents, incident and escalation links, stuck-PR citations, age, attempts and operator origin"
+      proof: 'grep: test("W1-T9925: the evidence pack names dependents, incidents, stuck-PR citations, age, attempts and operator origin" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+    - claim: "a malformed judge answer, or one citing evidence missing from the pack, writes nothing and is asked again"
+      proof: 'grep: test("W1-T9925: a malformed or unsupported judge answer writes nothing and is asked again" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+    - claim: "a pass is due only once the queue has turned over its last ranked head, and a pass moves no more shards than its measured review cost and record allow"
+      proof: 'grep: test("W1-T9925: cadence follows measured churn and each diff is bounded by measured review cost" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+    - claim: "a scored hit credits and a scored miss debits the acting class and moves its allowance, and a task held by something other than its rank scores not_ranking"
+      proof: 'grep: test("W1-T9925: predictions are scored against outcomes and the record sets the allowance" in test/the-queue-judge-re-ranks-queued-tasks-by-measured-cost-of-delay.test.ts'
+    - claim: "the gardener is registered"
+      proof: 'grep: "queue-judge", in src/lib/garden-registry.ts'
+    - claim: "the daemon's garden registry builds the queue judge's spec"
+      proof: 'grep: queueJudgeGardenSpec( in src/run-task.ts'
+    - claim: "the gardener ledgers its predictions"
+      proof: 'grep: queue_judge\.prediction in src/lib/queue-judge-gardener.ts'
+  falsifier: |
+    At origin/main no gardener changes a declared priority. A fixture queue with 30 plain priority-1 tasks, one of
+    which has two open dependents and an open incident that cites it, gets no write. Every test above fails for lack
+    of the module.
+    With the fix, delete the operator-pin check and the pinned task is written at a larger number: the pin test
+    fails. Make the empty-queue pass call the judge and the no-op test fails. Replace the measured review-cost bound
+    with a constant and the cadence/size test fails, because its fixture's measured cost allows fewer moves than the
+    judge proposes and asserts the deferred list.

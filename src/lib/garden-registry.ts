@@ -33,12 +33,12 @@ import {
   selectorShadowFlakeLedger,
 } from "./selector-shadow-gardener.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
-import { awaitMemoryAdmission, type AdmissionPorts } from "./host-memory-admission.js";
+import { awaitMemoryAdmission, endDeferralStreak, type AdmissionPorts } from "./host-memory-admission.js";
 import { daemonOwnedProcess, openLearnedReservation, type LearnedReservation } from "./host-memory-learning.js";
 import { recordShadowMemoryVerdict } from "./host-memory-shadow.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { randomUUID } from "node:crypto";
-import type { GardenerRuntimeEvent } from "./gardener-runtime.js";
+import { GARDENER_RUNTIME_FILE, parseGardenerRuntime, type GardenerRuntimeEvent } from "./gardener-runtime.js";
 import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./worker-containment.js";
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
@@ -87,8 +87,24 @@ export const GARDEN_HOURLY_FLAG = "--hourly";
 
 /** A resource hold did not start a process; it is neither a signal exit nor a successful pass. */
 export type GardenPassOutcome = number | null | { kind: "deferred"; reason: "memory-budget-shortfall" };
+/** W1-T9761: the garden's own pass cadence (the median gap between its completed passes, or its scheduled interval with
+ *  fewer than two gaps), and whether this is its first ask in this process, when a restart's wait is seeded. */
+export interface GardenDeferral { cadenceMs: number; cadenceBasis: "measured" | "scheduled"; firstAsk: boolean }
 /** Runs ONE pass, preserving pre-spawn admission deferral separately from its process exit. */
-export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void }) => Promise<GardenPassOutcome>;
+export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void; readonly deferral?: GardenDeferral }) => Promise<GardenPassOutcome>;
+
+/** The run id a garden's admission rows and deferral streak carry. */
+export function gardenRunId(name: string): string {
+  return `garden-${name}`;
+}
+
+/** The median gap between completed passes, or the scheduled interval while fewer than two gaps are measured. Pure. */
+export function gardenCadence(completedMs: readonly number[], scheduledMs: number): Pick<GardenDeferral, "cadenceMs" | "cadenceBasis"> {
+  const gaps = completedMs.slice(1).map((at, i) => at - completedMs[i]!).sort((a, b) => a - b);
+  if (gaps.length < 2) return { cadenceMs: scheduledMs, cadenceBasis: "scheduled" };
+  const mid = gaps.length >> 1;
+  return { cadenceMs: gaps.length % 2 === 1 ? gaps[mid]! : (gaps[mid - 1]! + gaps[mid]!) / 2, cadenceBasis: "measured" };
+}
 
 /** Share a small host budget across all garden starters. A busy garden keeps its own pending
  * pass rather than spawning a second child, while queued passes from other gardens wait here. */
@@ -278,6 +294,8 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
   let lastStartMs = -Infinity;
   let reportedBucket: number | undefined;
   let idleBucket: number | undefined;
+  const completedMs: number[] = [];
+  let asked = false;
   const observe = (event: GardenerRuntimeEvent): void => {
     try { wiring.observe?.(event); }
     catch { wiring.log("garden.telemetry_failed", { name, reason: "observer-failed" }); }
@@ -298,6 +316,13 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     const lowYield = name === "host-resource" || name === "flow-remedy";
     if (!lowYield || idleBucket !== bucket) observe(event("idle", { reason: "inputs-unchanged" }));
     idleBucket = bucket;
+    asked = true;
+    endDeferralStreak(gardenRunId(name)); // a garden that is not due no longer asks
+  };
+  const deferral = (): GardenDeferral => {
+    const firstAsk = !asked;
+    asked = true;
+    return { ...gardenCadence(completedMs, Math.max(timerIntervalMs, schedule.minIntervalMs)), firstAsk };
   };
   const runPass = (bucket: number, hourly: boolean): void => {
     running = true;
@@ -308,6 +333,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     observe(event("queued", { passId, nextDueAt: null }));
     const passSignal = {
       passId,
+      deferral: deferral(),
       get stopped() { return signal.stopped; },
       admitted: () => {
         admittedMs = clock.now();
@@ -322,6 +348,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
       // One completion timestamp for both destinations: the logger's own latency
       // is not child execution, and the persisted card can correlate this row.
       const finishedMs = clock.now();
+      if (!deferred) completedMs.push(finishedMs);
       const queueMs = admittedMs === undefined ? null : Math.max(0, admittedMs - startedMs);
       const executionMs = deferred || admittedMs === undefined ? null : Math.max(0, finishedMs - admittedMs);
       wiring.log(GARDEN_PASS_STEP, { name, passId, ms: finishedMs - startedMs, queueMs, executionMs, exit,
@@ -381,6 +408,19 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
       clearInterval(timer);
     },
   };
+}
+
+/** Each garden's last completed pass in the runtime file the previous daemon generation left; none when unreadable. */
+function priorGardenCompletions(stateDir: string): Map<string, number> {
+  const out = new Map<string, number>();
+  try {
+    for (const g of parseGardenerRuntime(JSON.parse(readFileSync(join(stateDir, GARDENER_RUNTIME_FILE), "utf8"))).gardens) {
+      if (g.lastCompletedAt !== null) out.set(g.name, Date.parse(g.lastCompletedAt));
+    }
+  } catch {
+    // deliberate: no readable runtime file means no earlier pass to seed a wait from; the streak starts at its first ask.
+  }
+  return out;
 }
 
 /**
@@ -492,9 +532,14 @@ export function childGardenPassSpawn(
   const root = opts.root ?? join(homedir(), "Remudero");
   const reserve = opts.reserve ??
     (() => (daemonOwnedProcess() ? openLearnedReservation({ workerClass: "garden", root }) : undefined));
+  // Read BEFORE this generation's runtime writer replaces the file: the last generation's completed passes.
+  const lastCompleted = priorGardenCompletions(join(root, "state"));
   return async (name, args, signal) => {
-    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: `garden-${name}`, reserve,
-      onShortfall: "defer" }, opts.admission);
+    const d = signal.deferral;
+    const last = d?.firstAsk ? lastCompleted.get(name) : undefined;
+    const admission = await awaitMemoryAdmission({ workerClass: "garden", root, taskId: "GARDEN", runId: gardenRunId(name), reserve,
+      onShortfall: "defer", ...(d ? { deferral: { cadenceMs: d.cadenceMs, cadenceBasis: d.cadenceBasis,
+        ...(last === undefined ? {} : { dueSinceMs: last + d.cadenceMs }) } } : {}) }, opts.admission);
     if (admission.kind === "deferred") return { kind: "deferred", reason: "memory-budget-shortfall" };
     const reservation = "reservation" in admission ? admission.reservation :
       admission.kind === "error" && admission.reservationAttempted ? undefined : reserve();
@@ -507,6 +552,7 @@ export function childGardenPassSpawn(
     const release = (): void => {
       if (released) return;
       released = true;
+      if (admission.kind === "admitted") admission.endAged?.();
       reservation?.releaseOccupancy();
     };
     return new Promise<number | null>((resolve, reject) => {

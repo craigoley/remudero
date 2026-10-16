@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { NEVER_ROTATE_FILENAME } from "../../src/lib/log-rotation.js";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
+import { ownedFixtureDir, type FixtureScope } from "./owned-fixture-dir.js";
 
 /** One already-rotated archive to seed alongside the live ledger. */
 export interface LedgerRotationFixture {
@@ -33,6 +34,8 @@ export interface LedgerRotationFixture {
 }
 
 export interface LedgerFixtureOpts {
+  /** Dispose fresh scratch after this test/suite; caller-supplied dirs remain caller-owned. */
+  scope?: FixtureScope;
   /** Directory to write into. A fresh `mkdtempSync`'d dir when omitted. */
   dir?: string;
   /** Already-rotated archives to seed alongside the live ledger — see
@@ -62,7 +65,8 @@ function rotatedName(at: string, gz: boolean): string {
 /** Build a throwaway ledger: the live `ledger.ndjson` seeded with `rows`, plus any
  *  {@link LedgerFixtureOpts.rotations}. */
 export function writeLedger(rows: Array<Record<string, unknown>> = [], opts: LedgerFixtureOpts = {}): LedgerFixture {
-  const dir = opts.dir ?? mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ledger-fixture-`));
+  const dir = opts.dir ?? (opts.scope ? ownedFixtureDir(opts.scope, "ledger-fixture").dir :
+    mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ledger-fixture-`)));
   mkdirSync(dir, { recursive: true });
   const path = join(dir, NEVER_ROTATE_FILENAME);
   writeFileSync(path, ndjson(rows));

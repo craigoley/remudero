@@ -401,6 +401,81 @@ test("the Dockerfile installs jq AND runs it in the same layer, so a broken pack
   assert.match(upToLayerEnd, /jq --version/, "and INVOKED in the same RUN, not merely installed");
 });
 
+function imagePythonSmoke(text: string): string {
+  const smoke = text.match(/python3 -I -c "([^"\n]+)"/);
+  assert.ok(smoke, "invoke the isolated interpreter, not merely command -v");
+  assert.match(smoke[1]!, /import argparse, contextlib, hashlib, json, os, pathlib, plistlib, pwd, re, shutil, stat, subprocess, sys, tempfile, time, uuid/);
+  assert.match(smoke[1]!, /assert sys.version_info >= \(3, 9\)/);
+  return smoke[1]!;
+}
+
+function assertPythonImageLayer(text: string): void {
+  const block = text.split(/(?=^RUN )/m).find(part => part.includes("bubblewrap socat procps lsof"));
+  assert.ok(block, "sandbox/toolchain install layer must exist");
+  const layer = block.split("\n#")[0]!;
+  const installed = layer.split("&&")[1]!;
+  assert.match(installed, /apt-get install[^]*\bpython3\b/, "python3 must be installed, not only mentioned in its smoke command");
+  imagePythonSmoke(layer);
+}
+
+test("the reviewer image installs Python and executes its janitor stdlib in the same build layer", () => {
+  const text = readFileSync(join(REPO_ROOT, "deploy/Dockerfile"), "utf8");
+  assertPythonImageLayer(text);
+  const withoutPackage = text.replace("lsof jq python3", "lsof jq");
+  assert.notEqual(withoutPackage, text);
+  assert.throws(() => assertPythonImageLayer(withoutPackage), /must be installed/);
+  const withoutSmoke = text.replace(/ && python3 -I -c "[^"\n]+"/, "");
+  assert.notEqual(withoutSmoke, text);
+  assert.throws(() => assertPythonImageLayer(withoutSmoke), /invoke the isolated interpreter/);
+});
+
+test("the reviewer Python smoke arrives whole under runtime uid1000 and matches the build check", () => {
+  const run = runVerifier("good");
+  assert.deepEqual(deliveryDefects(run), []);
+  const argv = run.argvs.find(a => a[0] === "run" && a.at(-1)?.includes("ALL_RUNNABLE"));
+  assert.ok(argv);
+  assert.equal(argv[argv.indexOf("--user") + 1], "1000:1000");
+  const payload = argv.at(-1)!;
+  assert.equal(imagePythonSmoke(payload), imagePythonSmoke(readFileSync(join(REPO_ROOT, "deploy/Dockerfile"), "utf8")));
+  assert.match(payload, /MISS python3 stdlib/);
+});
+
+function runPythonBinaryProbe(mode: "good" | "broken" | "absent") {
+  const dir = makeTempDir("image-python-probe-");
+  for (const tool of ["ps", "pgrep", "lsof", "jq"]) {
+    writeFileSync(join(dir, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    chmodSync(join(dir, tool), 0o755);
+  }
+  const argv = join(dir, "python-argv");
+  if (mode !== "absent") {
+    writeFileSync(join(dir, "python3"), '#!/bin/sh\nprintf "%s\\n" "$@" > "$PYTHON_ARGV"\nexit ' + (mode === "broken" ? "7" : "0") + "\n", { mode: 0o755 });
+    chmodSync(join(dir, "python3"), 0o755);
+  }
+  const result = spawnSync("/bin/sh", ["-c", binariesProbeDelivered()], {
+    encoding: "utf8", timeout: 5_000, env: { PATH: dir, PYTHON_ARGV: argv },
+  });
+  assert.ifError(result.error);
+  return { result, argv: mode === "absent" ? null : readFileSync(argv, "utf8").trimEnd().split("\n") };
+}
+
+test("the runtime Python smoke invokes the interpreter with isolated stdlib code before success", () => {
+  // This executes the delivered shell against a recording interpreter, not a real image.
+  // Only the actual image build and uid1000 smoke can qualify the packaged Python.
+  const run = runPythonBinaryProbe("good");
+  assert.equal(run.result.status, 0, run.result.stderr);
+  assert.deepEqual(run.argv, ["-I", "-c", imagePythonSmoke(readFileSync(SCRIPT, "utf8"))]);
+  assert.match(run.result.stdout, /^ALL_RUNNABLE$/m);
+});
+
+test("the runtime Python smoke refuses both an absent and a present but broken interpreter", () => {
+  for (const mode of ["absent", "broken"] as const) {
+    const run = runPythonBinaryProbe(mode);
+    assert.notEqual(run.result.status, 0, mode);
+    assert.match(run.result.stdout, /^MISS python3 stdlib$/m, mode);
+    assert.doesNotMatch(run.result.stdout, /^ALL_RUNNABLE$/m, mode);
+  }
+});
+
 // ── THE VERSION-VALUE CHECK, EXECUTED RATHER THAN READ ───────────────────────────────────────
 //
 // The stub above REPLAYS canned probe output, so the verdict tests prove the script's exit-code
