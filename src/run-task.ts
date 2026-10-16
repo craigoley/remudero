@@ -32108,11 +32108,9 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   return { checkLedgerCompaction: check, runLedgerCompaction: run };
 }
 
-interface BenchmarkCohortHookDeps extends Omit<BenchmarkCohortCadenceDeps, "stateDir"> {
-  config?: Config;
-}
-
-export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = {}): BenchmarkCohortCadence {
+export function buildBenchmarkCohortDaemonHooks(
+  deps: Omit<BenchmarkCohortCadenceDeps, "stateDir"> & { config?: Config } = {},
+): BenchmarkCohortCadence {
   return benchmarkCohortCadence({ ...deps, stateDir: () => dirname(ledgerPathFor(deps.config ?? loadConfig())) });
 }
 
