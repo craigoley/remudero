@@ -53,13 +53,13 @@ import {
   parseAcceptanceBlock,
   parseWhitelistedProof,
   resolvePlanCriteriaAtHead,
+  resolveTestPath,
   wrappedGrepPattern,
 } from "../src/lib/review.ts";
 import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
 import { loadPlan } from "../src/lib/plan.ts";
 import { isInPlanScope } from "../src/lib/plan-scope.ts";
 import { lintTask } from "../src/lib/task-linter.ts";
-import { resolveTestPath } from "../src/lib/test-path-resolver.ts";
 import { taskIdFromRunBranch } from "../src/lib/status.ts";
 import { execFileSync } from "node:child_process";
 import { REPO_ROOT } from "./lib/repo-root.mjs";

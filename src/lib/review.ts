@@ -7,6 +7,8 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from "./test-path-resolver.js";
+// Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
+export { resolveTestPath };
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
