@@ -9,7 +9,7 @@ import { loadPlanFromYaml } from "../src/lib/plan.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { createSelectedModeQualification } from "../src/lib/instance-mode.js";
-import { mergeDirectViaRestAsync, realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
+import { mergeDirectViaRestAsync, realArmDeps, realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { registryFileIO } from "../src/lib/instance-registry-selection.js";
@@ -414,4 +414,25 @@ test("selected mode rechecks after actual asynchronous security admission before
     assert.equal(rows.at(-1)?.selected_outcome, "would-refuse"); assert.equal(rows.at(-1)?.reason, "revision_changed");
     assert.equal(rows.at(-1)?.binding_digest, original); assert.equal(rows.at(-1)?.publication_permission, "not-granted");
   } finally { fx.cleanup(); }
+});
+
+test("selected mode actual synchronous defaults preserve unknown and absent-context writes", async (t) => {
+  for (const optedIn of [false, true]) for (const method of ["armAuto", "mergeDirect", "enqueue"] as const) {
+    await t.test(`${method} opt-in ${optedIn}`, () => {
+      const fx = fixture("shadow"), shim = ghShim(), path = process.env.PATH;
+      process.env.PATH = `${shim.dir}:${path}`;
+      try {
+        const q = optedIn ? createSelectedModeQualification(fx.settings, "owner/repo", {},
+          (step, fields) => { fx.logs.push({ step, fields }); }, registryFileIO, "sync") : undefined;
+        const ports = realArmDeps(() => fx.config, q);
+        withLiveWritesAllowed(() => ports[method]!(pr.prUrl));
+        assert.equal(shim.calls().length, 1, "the same real synchronous transport, contained by the PATH fixture");
+        if (optedIn) {
+          assert.equal(fx.rows().at(-1)?.selected_outcome, "would-refuse");
+          assert.equal(fx.rows().at(-1)?.reason, "synchronous_seam");
+          assert.equal(fx.rows().at(-1)?.publication_permission, "not-granted");
+        } else assert.equal(fx.rows().length, 0, "absent context adds neither selected reads nor receipts");
+      } finally { process.env.PATH = path; rmSync(shim.dir, { recursive: true, force: true }); fx.cleanup(); }
+    });
+  }
 });
