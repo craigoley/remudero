@@ -166,10 +166,37 @@ test("W1-T9092: the closure is memoized per sha and entry, and a failed read is 
     }
     return real(args);
   };
-  const leaf = "src/lib/unloaded.ts"; // an entry with no edge line: git grep exits 1 at its tree, a leaf, not a failure
+  const leaf = "src/lib/unloaded.ts"; // an entry with no edge line of its own is a leaf
   assert.equal((await daemonProcessClosure(flaky, sha, leaf)).status, "unreadable");
   const retried = await daemonProcessClosure(flaky, sha, leaf);
   assert.deepEqual(retried.status === "read" && [...retried.paths].sort(), ["package.json", "src/lib/unloaded.ts"]);
+  tree.cleanup();
+});
+
+test("W1-T9092: a tree with no edge line is read, and a grep that fails is unreadable", async () => {
+  const tree = gitRepo({ kind: "w1-t9092-bare-tree" });
+  mkdirSync(join(tree.dir, "src"), { recursive: true });
+  writeFileSync(join(tree.dir, "src", "only.ts"), `export const only = "${process.pid} ${Math.random()}";\n`);
+  tree.git("add", ".");
+  tree.git("commit", "--quiet", "-m", "seed");
+  const sha = tree.git("rev-parse", "HEAD");
+  const real = daemonClosureGit(tree.dir);
+  // git grep exits 1 when nothing matches: no edges, not an unreadable tree.
+  const read = await daemonProcessClosure(real, sha, "src/only.ts");
+  assert.deepEqual(read.status === "read" && [...read.paths], ["src/only.ts"]);
+  const grepDies: ClosureGit = async (args) => {
+    if (args[0] === "grep") throw Object.assign(new Error("fatal: bad object"), { code: 128 });
+    return real(args);
+  };
+  const failed = await daemonProcessClosure(grepDies, `${sha}`, "src/other.ts");
+  assert.equal(failed.status, "unreadable", "an entry the tree lacks is unreadable before git grep runs");
+  writeFileSync(join(tree.dir, "src", "other.ts"), "export const other = 2;\n");
+  tree.git("add", ".");
+  tree.git("commit", "--quiet", "-m", "other");
+  const next = tree.git("rev-parse", "HEAD");
+  const died = await daemonProcessClosure(grepDies, next, "src/other.ts");
+  assert.equal(died.status, "unreadable");
+  assert.match(died.status === "unreadable" ? died.reason : "", /bad object/);
   tree.cleanup();
 });
 
