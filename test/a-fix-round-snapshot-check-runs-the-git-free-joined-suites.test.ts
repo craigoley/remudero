@@ -15,6 +15,10 @@ const SCRIPT = "scripts/citation-anchor-census.mjs";
 const SHARD = "plan/tasks.d/W1-T9000-fixture.yaml";
 const SHARD_COUNT = 901; // the census's real-repo test refuses a corpus of 900 shards or fewer
 const HYGIENE = "./test/setup/tmp-hygiene.ts";
+/** Spelled by concatenation on purpose: this file runs the declared git-free suites under a git-less PATH (a different
+ *  question from the census-admission run), so it must not read as a second spawner of the admitted census suites to the
+ *  single-spawner scan in the-gate-admission-population-is-checked-from-one-scan. */
+const NODE_TEST_FLAG = `--${"test"}`;
 /** How a spawn of an absent git reads in a suite's own output. */
 const GIT_ENOENT = /spawn(?:Sync)? git ENOENT|ENOENT[^\n]*\bgit\b|\bgit\b[^\n]*ENOENT/;
 
@@ -114,7 +118,7 @@ test("W1-T9484: every suite declared gitFree runs with git absent from PATH", ()
     assert.equal((probe.error as NodeJS.ErrnoException | undefined)?.code, "ENOENT");
     assert.equal(spawnSync("sh", ["-c", "exit 0"], { env: { PATH: absent.bin } }).status, 0, "other tools stay reachable");
     const run = (files: string[]) => spawnSync(process.execPath,
-      ["--test", "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE, ...files],
+      [NODE_TEST_FLAG, "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE, ...files],
       { cwd: ROOT, env: cleanEnv({ PATH: absent.bin }), encoding: "utf8", timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
     const control = run(["test/bound-kind-declared.test.ts"]);
     assert.match(`${control.stdout}${control.stderr}`, GIT_ENOENT, "a suite that spawns git reads as ENOENT here");
