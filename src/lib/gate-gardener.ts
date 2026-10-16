@@ -14,6 +14,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency } from "./test-slot.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
 import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retirementHoldsOrigin, taskLandedArgs } from "./plan.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { loadPolicy } from "./policy.js";
 
 /**
@@ -225,7 +226,7 @@ function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateD
   }
   if (byFile.size === 0) return [];
   // W1-T9729: a retirement whose superseding task has not landed still covers its origin.
-  const landed = (id: string) => run("git", taskLandedArgs(id)).trim() !== "";
+  const landed = (id: string) => hostWorktreeGit(deps.repoRoot, taskLandedArgs(id)).trim() !== "";
   const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks
     .filter((t) => (t.status === "queued" && !t.retirement) || (t.origin?.startsWith("expiring-fixture:") === true && retirementHoldsOrigin(t, landed)))
     .map((t) => t.origin) : [];

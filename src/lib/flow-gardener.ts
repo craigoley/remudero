@@ -19,8 +19,9 @@ import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, feedbackContentDigest, type AdmissionSettings, type AdmissionDecision } from "./contributor-admission.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { defaultGitRunnerAsync, loadPlan, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
+import { loadPlan, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 const MIN_MS = 60_000;
 const DAY_MS = 24 * 60 * MIN_MS;
@@ -635,7 +636,7 @@ async function fileRegressions(
   // W1-T9729: a retirement whose superseding task has not landed still holds its origin.
   const landed = new Set<string>();
   try {
-    const isLanded = sources.isLanded ?? ((id: string) => taskLandedOnMain(id, defaultGitRunnerAsync(deps.repoRoot)));
+    const isLanded = sources.isLanded ?? ((id: string) => taskLandedOnMain(id, (args) => hostWorktreeGitAsync(deps.repoRoot, args)));
     const keys = new Set(regressed.map((s) => origin(s.key)));
     for (const t of tasks) if (t.superseded_by !== undefined && keys.has(t.origin ?? "") && await isLanded(t.superseded_by)) landed.add(t.superseded_by);
   } catch (e) {

@@ -30,10 +30,11 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { defaultGitRunnerAsync, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
+import { retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
 import {
   selectorShadowPlanTasksAsync, type SelectorShadowMainFailures, type SelectorShadowTaskIdMinter,
 } from "./selector-shadow-gardener.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
 
@@ -325,7 +326,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   let plan: PlanTaskLite[] | undefined;
   const planTasks = async (): Promise<PlanTaskLite[]> => (plan ??= await (sources.planTasks ?? (() => selectorShadowPlanTasksAsync(deps.repoRoot)))());
   const closed = new Set(["merged", "done"]);
-  const isLanded = sources.isLanded ?? ((id: string) => taskLandedOnMain(id, defaultGitRunnerAsync(deps.repoRoot)));
+  const isLanded = sources.isLanded ?? ((id: string) => taskLandedOnMain(id, (args) => hostWorktreeGitAsync(deps.repoRoot, args)));
   /** Why an origin is already held, as the skip reason: a plan task neither merged nor retired, a retirement
    *  whose superseding task has not landed (W1-T9729), or a recent filing whose PR may not have landed. */
   const openTaskFor = async (origin: string): Promise<string | undefined> => {
