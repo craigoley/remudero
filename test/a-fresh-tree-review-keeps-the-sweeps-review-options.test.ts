@@ -43,10 +43,10 @@ async function freshTreeArgs(reviewDeps: { planOnlyFiling?: boolean; executionMo
 
 test("a fresh-tree review receives the sweep's plan-only filing fact and execution mode as flags", async () => {
   assert.deepEqual(await freshTreeArgs({ planOnlyFiling: true, executionMode: "semantic" }), [
-    "--repo", "remudero", "--plan-only-filing", "--execution-mode", "semantic",
+    "--repo", "remudero", "--plan-only-filing", "--execution-mode", "semantic", "--judge-at-own-start",
   ]);
-  assert.deepEqual(await freshTreeArgs({ planOnlyFiling: false }), ["--repo", "remudero", "--not-plan-only-filing"]);
-  assert.deepEqual(await freshTreeArgs({}), ["--repo", "remudero"]);
+  assert.deepEqual(await freshTreeArgs({ planOnlyFiling: false }), ["--repo", "remudero", "--not-plan-only-filing", "--judge-at-own-start"]);
+  assert.deepEqual(await freshTreeArgs({}), ["--repo", "remudero", "--judge-at-own-start"], "W1-T9727: the child judges at its own start");
 });
 
 test("the review CLI reads the forwarded flags back into the same options", () => {
