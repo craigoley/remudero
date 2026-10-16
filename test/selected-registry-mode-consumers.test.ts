@@ -9,7 +9,7 @@ import { loadPlanFromYaml } from "../src/lib/plan.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { createSelectedModeQualification } from "../src/lib/instance-mode.js";
-import { realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
+import { mergeDirectViaRestAsync, realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { registryFileIO } from "../src/lib/instance-registry-selection.js";
@@ -385,4 +385,33 @@ test("selected mode armed-idle root carries its binding through the independent 
     assert.match(shim.calls()[0]!, /repos\/owner\/repo\/pulls\/1\/merge/);
     assert.ok(shim.calls()[0]!.includes(pr.headSha!), "the original real expected-head guard survives the custom direct path");
   } finally { process.env.PATH = path; rmSync(shim.dir, { recursive: true, force: true }); fx.cleanup(); }
+});
+
+test("selected mode rechecks after actual asynchronous security admission before the REST effect", async () => {
+  const fx = fixture("shadow"), rows: Array<Record<string, unknown>> = [];
+  const url = "https://github.com/craigoley/remudero/pull/11468", head = "a".repeat(40), base = "b".repeat(40);
+  const content = (mode: string) => registry(mode, fx.root).replace("owner/repo", "craigoley/remudero");
+  writeFileSync(fx.selected, content("shadow"));
+  let writes = 0, reads = 0;
+  try {
+    const q = createSelectedModeQualification(fx.settings, "craigoley/remudero", {}, (_step, row) => { rows.push(row); })!;
+    await q.observe("arm", () => "armed", url);
+    assert.equal(rows.at(-1)?.selected_outcome, "would-shadow", "real selected source is initially bound");
+    const original = rows.at(-1)?.binding_digest;
+    await mergeDirectViaRestAsync(url, async (_file, args) => {
+      writes++; assert.ok(args.includes(`sha=${head}`));
+    }, async path => {
+      reads++; await new Promise<void>(resolve => setImmediate(resolve));
+      writeFileSync(fx.selected, content("live"));
+      if (path.includes("/files?")) return [{ filename: "src/a.ts" }];
+      if (path.includes("/check-runs?")) return { total_count: 1, check_runs: [{ id: 1, name: "CodeQL", head_sha: head,
+        status: "completed", conclusion: "success", app: { id: 57789, slug: "github-advanced-security", owner: { login: "github" } },
+        output: { title: "No new alerts in code changed by this pull request",
+          summary: "[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A11468+tool%3ACodeQL+is%3Aopen)." } }] };
+      return { state: "open", head: { sha: head }, base: { sha: base, ref: "main", repo: { full_name: "craigoley/remudero" } }, changed_files: 1 };
+    }, head, q);
+    assert.ok(reads > 0); assert.equal(writes, 1, "SHADOW observes, it does not deny the security-approved independent effect");
+    assert.equal(rows.at(-1)?.selected_outcome, "would-refuse"); assert.equal(rows.at(-1)?.reason, "revision_changed");
+    assert.equal(rows.at(-1)?.binding_digest, original); assert.equal(rows.at(-1)?.publication_permission, "not-granted");
+  } finally { fx.cleanup(); }
 });
