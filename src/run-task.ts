@@ -1676,11 +1676,10 @@ import {
   ghGateway,
   ghRequiredStatusCheckContexts,
   isGhRateLimitError,
-  addLifetimeDispatchTallies,
   effectiveLifetimeDispatches,
   hasRepeatedTaskAttributableLifetimeDispatches,
-  lifetimeInfrastructureRefusal,
-  lifetimeDispatchTally,
+  orphanedRunIds,
+  streakRefusal,
   taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
   projectPlan,
@@ -13711,7 +13710,7 @@ export async function runFixRung(opts: {
       ...lastCommitRefusalPromptLines(
         (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
         opts.taskId,
-        opts.task.files ?? [],
+        fixDeclaredPaths,
       ),
       ...(censusRefusalIsCurrent()
         ? ["", "PRE-PUSH CENSUS (W1-T4693): hooks/pre-push refused the last round's push with the census rows above; the PR still shows its old head.", CENSUS_PUSH_NEVER_BYPASS]
@@ -35314,16 +35313,73 @@ function replayedLifetimeLedgerLine(
   return false;
 }
 
-function recordLifetimeTally(
-  tallies: Map<string, LifetimeDispatchTally>,
-  row: Record<string, unknown>,
-): void {
-  const taskId = row.step === "run.start" ? row.task_id : row.task;
-  if (typeof taskId !== "string") return;
-  const tally = tallies.get(taskId) ?? { starts: 0, capacityBlocked: 0 };
-  if (row.step === "run.start" && row.task_id === taskId) tally.starts += 1;
-  if (row.step === "daemon.spawn_infra_blocked" && row.task === taskId) tally.capacityBlocked += 1;
-  tallies.set(taskId, tally);
+function lifetimeAccounting() {
+  const tallies = new Map<string, LifetimeDispatchTally>();
+  const starts = new Set<string>();
+  const pending = new Map<string, { taskId: string; charged: boolean }>();
+  const earlyVerdicts = new Map<string, boolean>();
+  let unavailableReason: LifetimeArchiveHistoryUnavailableReason | undefined;
+  const tallyFor = (taskId: string) => {
+    const tally = tallies.get(taskId) ?? { starts: 0, capacityBlocked: 0 };
+    tallies.set(taskId, tally);
+    return tally;
+  };
+  const record = (row: Record<string, unknown>) => {
+    if (row.step === "daemon.spawn_infra_blocked") {
+      if (typeof row.task === "string") tallyFor(row.task).capacityBlocked += 1;
+      return;
+    }
+    const identity = lifetimeStartIdentity(row);
+    if (identity === undefined) {
+      if (row.step === "run.start") unavailableReason ??= "start_identity_missing";
+      return;
+    }
+    if (row.step === "verdict") {
+      const excluded = streakRefusal(row) !== undefined;
+      const run = pending.get(identity);
+      if (run) {
+        tallyFor(run.taskId).starts += Number(!excluded) - Number(run.charged);
+        pending.delete(identity);
+      } else if (!starts.has(identity)) {
+        // Retention can put a terminal row before its start. This join is bounded too.
+        if (!earlyVerdicts.has(identity) && starts.size + earlyVerdicts.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
+          unavailableReason ??= "start_identity_ceiling";
+          return;
+        }
+        earlyVerdicts.set(identity, excluded);
+      }
+      return;
+    }
+    if (row.step !== "run.start" || starts.has(identity)) return;
+    const terminal = earlyVerdicts.get(identity);
+    earlyVerdicts.delete(identity);
+    if (starts.size + earlyVerdicts.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
+      unavailableReason ??= "start_identity_ceiling";
+      return;
+    }
+    starts.add(identity);
+    const taskId = row.task_id as string;
+    tallyFor(taskId).starts += Number(terminal !== true);
+    if (terminal === undefined) pending.set(identity, { taskId, charged: true });
+  };
+  return {
+    record,
+    unavailableReason: () => unavailableReason,
+    tallyFor(taskId: string, rows: ReadonlyArray<Record<string, unknown>>): LifetimeDispatchTally | undefined {
+      if (unavailableReason !== undefined) return undefined;
+      const orphans = orphanedRunIds(rows, taskId);
+      const visible = new Set(rows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
+      for (const [identity, run] of pending) {
+        if (run.taskId !== taskId) continue;
+        const runId = identity.slice(identity.indexOf("\u0000") + 1);
+        if (!visible.has(runId)) continue; // a start rotated out after boot keeps its last attribution
+        const charged = !orphans.has(runId);
+        tallyFor(taskId).starts += Number(charged) - Number(run.charged);
+        run.charged = charged;
+      }
+      return { ...tallyFor(taskId) };
+    },
+  };
 }
 
 /** The live overlay is incremental while a daemon is running. On a rotation its inode changes;
@@ -35332,35 +35388,29 @@ function recordLifetimeTally(
  * double-charging the same dispatch. */
 export interface LifetimeHistory {
   /** W1-T6358: `live` is a pass-shared read; absent, the overlay reads the file itself. */
-  tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content">) => LifetimeDispatchTally;
+  tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => LifetimeDispatchTally | undefined;
 }
 
 function lifetimeHistory(
   ledgerPath: string,
-  historic: ReadonlyMap<string, LifetimeDispatchTally>,
+  accounting: ReturnType<typeof lifetimeAccounting>,
   recentByStep: Map<string, LifetimeReplayWindow>,
 ): LifetimeHistory {
-  const live = new Map<string, LifetimeDispatchTally>();
   let identity: string | undefined;
   let offsetChars = 0;
-  const refresh = (supplied?: Pick<LedgerSnapshot, "identity" | "content">) => {
-    let snapshot: { identity: string; content: string };
-    let fd: number | undefined;
+  const refresh = (supplied?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => {
+    let snapshot: Pick<LedgerSnapshot, "identity" | "content" | "lines">;
     if (supplied) {
-      if (supplied.identity === undefined) return;
-      snapshot = { identity: supplied.identity, content: supplied.content };
+      snapshot = supplied;
     } else try {
-      fd = openSync(ledgerPath, "r");
-      const stat = fstatSync(fd);
-      snapshot = { identity: `${stat.dev}:${stat.ino}`, content: readFileSync(fd, "utf8") };
+      snapshot = readLedgerSnapshot(ledgerPath);
     } catch (error) {
       return {
         ok: false,
         reason: error instanceof Error ? error.message : "live ledger unreadable",
       };
-    } finally {
-      if (fd !== undefined) closeSync(fd);
     }
+    if (snapshot.identity === undefined) return { ok: true, rows: snapshot.lines };
     const nextIdentity = snapshot.identity;
     const content = snapshot.content;
     const sameFile = identity === nextIdentity && content.length >= offsetChars;
@@ -35380,23 +35430,24 @@ function lifetimeHistory(
         // Keep the live reader's existing torn-line behaviour: a malformed tail buys neither a
         // capacity exemption nor a daemon failure; later complete rows remain observable.
       }
-      if (row === undefined || (row.step !== "run.start" && row.step !== "daemon.spawn_infra_blocked")) continue;
+      if (row === undefined || (row.step !== "run.start" && row.step !== "daemon.spawn_infra_blocked" && row.step !== "verdict")) continue;
       if (replayedLifetimeLedgerLine(recentByStep, row.step, line)) continue;
-      recordLifetimeTally(live, row);
+      accounting.record(row);
     }
     identity = nextIdentity;
     offsetChars = sameFile ? offsetChars + completedAt + 1 : completedAt + 1;
+    return { ok: true, rows: snapshot.lines };
   };
   return {
     tallyFor(taskId, supplied) {
-      refresh(supplied);
-      return addLifetimeDispatchTallies(historic.get(taskId) ?? { starts: 0, capacityBlocked: 0 }, live.get(taskId) ?? { starts: 0, capacityBlocked: 0 });
+      const refreshed = refresh(supplied);
+      return accounting.tallyFor(taskId, refreshed.rows ?? []);
     },
   };
 }
 
-/** The one archive-side projection W1-T3758 needs. It retains one two-integer tally per task
- * plus the producer-bounded replay window, never raw corpus rows or a global `seen` set.
+/** Archive attribution retains per-task tallies and bounded start identities and pending verdict joins.
+ * Per-run attribution is released at its terminal verdict; unknown starts remain charged.
  * `auditLedgerUnion` scans both rotation forms; if any archive is unreadable, this returns
  * `undefined` and the caller deliberately keeps the old live-only lifetime decision. */
 export async function auditedLifetimeTalliesFromArchives(
@@ -35409,35 +35460,20 @@ export async function auditedLifetimeTalliesFromArchives(
   unread: readonly string[];
   records: number;
 }> {
-  const tallies = new Map<string, LifetimeDispatchTally>();
+  const accounting = lifetimeAccounting();
   const recentByStep = new Map<string, LifetimeReplayWindow>();
-  const startIdentities = new Set<string>();
-  let startIdentityUnavailable: LifetimeArchiveHistoryUnavailableReason | undefined;
   const scan = await auditLedgerUnion(stateDir, {
-    step: ["run.start", "daemon.spawn_infra_blocked"],
+    step: ["run.start", "daemon.spawn_infra_blocked", "verdict"],
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     onRecord: (row, raw) => {
       const step = typeof row.step === "string" ? row.step : "";
       if (replayedLifetimeLedgerLine(recentByStep, step, raw)) return;
-      if (step === "run.start") {
-        const identity = lifetimeStartIdentity(row);
-        if (identity === undefined) {
-          startIdentityUnavailable ??= "start_identity_missing";
-          return;
-        }
-        if (startIdentities.has(identity)) return;
-        if (startIdentities.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
-          startIdentityUnavailable ??= "start_identity_ceiling";
-          return;
-        }
-        startIdentities.add(identity);
-      }
-      recordLifetimeTally(tallies, row);
+      accounting.record(row);
     },
   });
-  const unavailableReason = !scan.ok ? "archive_unreadable" : startIdentityUnavailable;
+  const unavailableReason = !scan.ok ? "archive_unreadable" : accounting.unavailableReason();
   return {
-    history: unavailableReason === undefined ? lifetimeHistory(ledgerPath, tallies, recentByStep) : undefined,
+    history: unavailableReason === undefined ? lifetimeHistory(ledgerPath, accounting, recentByStep) : undefined,
     unavailableReason,
     archiveCount: scan.archiveCount,
     unread: scan.unread,
@@ -35523,17 +35559,12 @@ export function breakerGateFor(
     const snap = current();
     let pressure = pressures.get(taskId);
     if (pressure === undefined) {
-      // W1-T4025: the old count is now a SENSOR. Archive history is the audited boot projection;
-      // the live ledger contributes only attributable attempts so orphaned workers and capacity
-      // refusals do not spend adaptive pressure. A repeated signal routes through the judge but
-      // never refuses the task here.
-      const live = snap.lines;
-      const liveTally = lifetimeDispatchTally(live, taskId);
-      const attributableLive = taskAttributableLifetimeDispatches(live, taskId);
-      const archived = auditedLifetimeHistory?.tallyFor(taskId, snap) ?? { starts: 0, capacityBlocked: 0 };
-      pressure =
-        hasRepeatedTaskAttributableLifetimeDispatches(live, taskId) ||
-        effectiveLifetimeDispatches(addLifetimeDispatchTallies(archived, { starts: attributableLive, capacityBlocked: liveTally.capacityBlocked })) > 1;
+      // The audited history already overlays live attribution; net its capacity receipts once.
+      // Unavailable history keeps the live-only sensor. Pressure still never refuses dispatch.
+      const tally = auditedLifetimeHistory?.tallyFor(taskId, snap);
+      pressure = tally === undefined
+        ? hasRepeatedTaskAttributableLifetimeDispatches(snap.lines, taskId)
+        : effectiveLifetimeDispatches(tally) > 1;
       pressures.set(taskId, pressure);
     }
     return pressure;
@@ -52332,7 +52363,7 @@ export async function routeAdaptiveLifetimePressure(
     const lastTerminal = terminalRows.at(-1);
     const lastVerdict = typeof lastTerminal?.verdict === "string" ? lastTerminal.verdict : "unavailable";
     const attributableHistory = terminalRows
-      .filter((row) => lifetimeInfrastructureRefusal(row) === undefined)
+      .filter((row) => streakRefusal(row) === undefined)
       .map((row) => `${String(row.verdict ?? "unavailable")}: ${String(row.reason ?? row.stage ?? "no reason recorded")}`);
     const ruling = latestLifetimeOperatorRuling(task.note);
     const key = `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
