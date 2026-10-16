@@ -6,7 +6,9 @@
   verify: human
   risk: high
   band_meaning: span
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=567c13e1edf56a3b
   attempts: 0
   files:
     - MASTER-PLAN.md
