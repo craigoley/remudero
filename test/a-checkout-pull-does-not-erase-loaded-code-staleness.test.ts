@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { asyncGit, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService } from "../src/lib/self-sync.js";
+import { SELF_SYNC_GUARD_ENV, asyncGit, checkServiceFreshness, checkServiceFreshnessAsync, daemonFreshnessFromService } from "../src/lib/self-sync.js";
 import { daemonCommand } from "../src/run-task.js";
 import type { DaemonSummary } from "../src/lib/daemon.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -58,6 +58,11 @@ test("test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts", async 
     const plan = join(home, "tasks.yaml"); writeFileSync(plan, "[]\n");
     const moduleRoot = dirname(dirname(fileURLToPath(new URL("../src/run-task.ts", import.meta.url))));
     const oldHome = process.env.HOME; process.env.HOME = home;
+    // Hosted CI sets CI/GITHUB_ACTIONS, which makes the freshness read answer "guarded" before it
+    // looks at any commit; this test needs the real assessment, so neutralise those for its duration.
+    const guardedEnv = ["CI", "GITHUB_ACTIONS", SELF_SYNC_GUARD_ENV] as const;
+    const savedEnv = guardedEnv.map((name) => [name, process.env[name]] as const);
+    for (const name of guardedEnv) delete process.env[name];
     const originalSync = childProcess.execFileSync, originalAsync = childProcess.execFile;
     let captures = 0;
     let recoveredLoaded: string | undefined;
@@ -97,6 +102,7 @@ test("test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts", async 
     } finally {
       sync.mock.restore(); async.mock.restore(); syncBuiltinESMExports();
       if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+      for (const [name, value] of savedEnv) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     }
   });
 
