@@ -10,7 +10,9 @@
   origin: architect
   plan_refs: ["W1-T4261"]
   files: ["src/lib/inbox-responder.ts","test/inbox-responder-verdict-index.test.ts"]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=057b2fc629ed5098
   attempts: 0
   rationale: |
     Origin: operator-approved bounded runtime repair, feedback#fb-1792164749761-342906 (plan/feedback/fb-1792164749761-342906.yaml, submission_key operator-registry-ledger-index-20261016T151530Z). Craig authorized: "have the fleet repair registryThreadItems using the existing one-pass verdict index. Keep the fleet as the only branch writer."

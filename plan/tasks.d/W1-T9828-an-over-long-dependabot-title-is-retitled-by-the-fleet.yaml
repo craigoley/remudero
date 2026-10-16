@@ -1,0 +1,106 @@
+- id: W1-T9828
+  title: "AN OVER-LONG DEPENDABOT TITLE STAYS RED UNTIL A HUMAN RETITLES IT — commitlint's header-max-length (100) holds for every author, Dependabot names a dependency in full, and nothing in the dep-review lane shortens the title; retitle it deterministically, keeping type(scope), the dependency and from→to"
+  repo: remudero
+  depends_on: []  # #12343 (reverting #12322's Dependabot exemption) is the ruling's other half; this task changes no gate
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the dep-review lane edits an over-long Dependabot PR TITLE; commitlint's config, the workflow, the arm/migrate/hold verdicts and every other effect are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-16: header-max-length stays for every author, Dependabot included (#12322 exemption rejected, reverted in #12343); the fleet retitles such PRs instead"
+  plan_refs: [W1-T54, W1-T3781, W1-T5349, W1-T6258, W1-T9586]
+  files:
+    - src/lib/dep-review.ts
+    - src/run-task.ts
+    - test/an-over-long-dependabot-title-is-retitled.test.ts
+  status: queued
+  priority: 2  # every over-long Dependabot title (a one-update group names the dependency in full) is a red only a hand retitle clears
+  attempts: 0
+  rationale: |
+    READ at origin/main ba6e16276 (2026-10-16):
+    - #11968 (a Dependabot bump of the OSV Scanner reusable workflow) opened with a 162-character auto-generated
+      title. `.github/workflows/pr-title-lint.yml` job `commitlint` went red on header-max-length and stayed red until
+      a hand retitle on 10-15. Read 15:34Z: #11968 is still open as "chore(deps): bump OSV Scanner reusable workflow
+      to 2.7.0" (56 chars). The hand title dropped `from <a>`, so `parseDependabotBumpFacts` reads no fact from it.
+      That is the failure a fit must avoid. #12322 exempted Dependabot in commitlint.config.mjs (PR_TITLE_AUTHOR); the operator
+      rejected that and #12343 reverts it. The limit is `CONVENTIONAL_LIMITS.headerMaxLength` in
+      src/lib/commit-message.ts, the mirror of @commitlint/config-conventional.
+    - THE RE-TRIGGER ALREADY EXISTS: pr-title-lint.yml runs `on: pull_request: types: [opened, synchronize, reopened,
+      edited]` and reads the title LIVE (`gh pr view "$PR_NUMBER" ... --json title`). A title PATCH made under the fleet
+      App's token fires `pull_request.edited`, so the check re-runs on the new title with a fresh event; no job re-run
+      (which would replay the old payload) is needed. test/title-edit-commitlint-workflow.test.ts (W1-T3781) pins the
+      `edited` trigger. A GITHUB_TOKEN edit would NOT fire it, so the write must use the daemon's own gh identity.
+      doctrine/ci-and-merging/title-needs-a-re-run.md ("`edited` still fires nothing", W1-T351, re-derived 08-06)
+      predates #6062 (09-19), which moved the title lint to pr-title-lint.yml with `edited`; it describes ci.yml only.
+    - THE TWO EXISTING RETITLE PATHS NEVER SEE A DEPENDABOT PR:
+      src/lib/sweep.ts `decidePlanRepair` returns `{ signature: "title-length", action: "retitle" }` (fitted by
+      `fitPlanPrTitle`, effect `repairPlanPr` → PATCH + job rerun) only for a fleet machine-lane PLAN head
+      (`isMachineLanePlanHead` && `isFleetAppAuthor`). src/run-task.ts `repairPrMetadata` (wired as
+      `repairMetadataImpl`, reached through the sweep's `metadataOnlyRed` rung) retitles a commitlint red via
+      `shapeCommitMessage`, but the disposition rule `when: (pr) => pr.isDependabot === true` routes every Dependabot
+      PR to the W1-T54 dep-review lane (`deps.depReview` → `depReviewCommand` in src/run-task.ts) before that rung.
+    - BOTH EXISTING FITTERS TAIL-TRUNCATE: `fitConventionalTitle` and `shapeCommitMessage` cut the subject at the
+      budget and append `…`. On a Dependabot title that drops `from <a> to <b>` first and then the dependency itself,
+      and src/lib/dep-review.ts reads the title for its verdict: `parseDependabotBumpFacts` / `overallSemverLevel`
+      parse `bump <dep> from <a> to <b>` out of it. A tail-cut title makes the lane's own facts unparseable.
+    - THE LANE WOULD MISROUTE THE RED TODAY: a commitlint red that main passes reads `dependabotOwnRedSignal` =
+      "main-passes", and the hold branch of `depReviewCommand` runs `reconcileDependabotOwnRed` (W1-T9586), which files
+      an owned-build proposal; a fleet build cannot change a Dependabot title.
+    - PRECEDENT FOR THE EFFECT: `depReviewCommand`'s `isDependabotAuthor` block already acts on a Dependabot head
+      before the verdict (`syncNodePinForImageBump`, ledger `dep-review.node_pin_synced`, return 1). The REST title
+      write exists: `prMetadataRestArgs(prUrl, { title })` (PATCH repos/<o>/<r>/pulls/<n>, `-f title=`).
+    - SWEEP: plan/tasks.d on main naming header-max-length, retitle or a Dependabot title (W1-T351, W1-T416, W1-T5349,
+      W1-T6013, W1-T7952, W1-T8399, W1-T8463, W1-T9289) covers fleet-authored titles only; W1-T9689, W1-T9797,
+      W1-T9798 (#11968's other holds) do not touch the title. No open head adds a Dependabot retitle in src/ or
+      plan/tasks.d (swept 426 heads at 15:20Z; only run-unfiled-1792164042013, the #12343 revert, touches
+      commitlint.config.mjs).
+  design: |
+    Deterministic, no LLM, no new fixed bound: the only limit is commitlint's own `CONVENTIONAL_LIMITS.headerMaxLength`,
+    read from src/lib/commit-message.ts, never a literal.
+    1. PURE FITTER in src/lib/dep-review.ts: `fitDependabotTitle(title, body)` returns `{ kind: "fits" }` when
+       `checkCommitMessage(title)` has no header-max-length violation, `{ kind: "fitted", title }`, or
+       `{ kind: "unfittable", reason }`. It parses Dependabot's own grammar (`CONVENTIONAL_TITLE_PREFIX_RE` prefix, then
+       the `parseDependabotBumpFacts` patterns) and applies each step only while still over the limit:
+       a. keep the type(scope) prefix byte-for-byte (e.g. `chore(deps):`, `ci(deps):`);
+       b. drop the trailing location/group clauses (` in /<dir>`, ` in the <group> group`);
+       c. collapse whitespace; then elide the dependency's interior path segments (`owner/repo/…/file.yml`), keeping
+          its first two and last segment, never its first or last;
+       d. otherwise `unfittable` — the dependency and both versions are never cut, and nothing is ever tail-truncated.
+       The fitted title must keep `bump <dep> from <a> to <b>` so `parseDependabotBumpFacts(fitted, body)` and
+       `overallSemverLevel(fitted, body)` equal the original's: an elided title fact folds into the body summary fact
+       with the same versions and matching first/last segments, so no second fact (and no second migration key) appears.
+       A grouped title with no single dependency gets step b only, then `unfittable`.
+    2. THE EFFECT, in `depReviewCommand`'s `isDependabotAuthor` block (src/run-task.ts), before the verdict and after
+       the node-pin sync: on `fitted`, write through a new `DepReviewPrMutations.retitle(prUrl, title)` whose default is
+       `ghExec(prMetadataRestArgs(prUrl, { title }))`, ledger `dep-review.retitled` with pr_number, pr_url, head_sha,
+       old_title and new_title, print the edit, and return 1 (hold) so this pass reconciles neither refresh nor own-red.
+       The `pull_request.edited` event re-runs pr-title-lint on the new title. A thrown write ledgers
+       `dep-review.retitle_failed` (old_title, candidate, error) and holds. `unfittable` ledgers
+       `dep-review.retitle_refused` once per pr@head@title and continues to the existing hold, whose escalation asks.
+       The live title passing after the edit is the idempotence: a fitting title is never written.
+    3. NO OWN-RED FOR A TITLE RED: while the live title fails header-max-length, the hold branch does not reconcile own-red
+       for a `commitlint` red, so no owned-build proposal is filed for a title.
+    4. Unchanged: commitlint.config.mjs, pr-title-lint.yml, ci-gate's required list, `decidePlanRepair`,
+       `repairPrMetadata`, and every arm/migrate/refuse/escalate effect.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below): the recorded #11968 title fixture is fitted
+       under the limit with prefix, dependency and versions kept and `checkCommitMessage` clean; fitted and original
+       titles parse to the same bump facts and semver level; `depReviewCommand` over the node-pin fixture shape with an
+       over-long Dependabot title calls `retitle` once, ledgers both titles and posts no review; a dependency name
+       alone over the budget is refused, never cut; a fitting title is not written.
+  acceptance:
+    - claim: "an over-long Dependabot title is fitted under header-max-length keeping its type(scope), dependency and from-to versions"
+      proof: 'grep: test("W1-T9828: an over-long Dependabot title is fitted keeping its dependency and versions" in test/an-over-long-dependabot-title-is-retitled.test.ts'
+    - claim: "the fitted title parses to the same bump facts and semver level as Dependabot's original, so the lane's verdict is unchanged"
+      proof: 'grep: test("W1-T9828: a fitted Dependabot title parses to the same bump facts as the original" in test/an-over-long-dependabot-title-is-retitled.test.ts'
+    - claim: "the dep-review pass retitles the PR through the REST pulls endpoint, ledgers old and new titles with the PR, and holds without an own-red proposal"
+      proof: 'grep: test("W1-T9828: dep-review retitles an over-long Dependabot PR and ledgers both titles" in test/an-over-long-dependabot-title-is-retitled.test.ts'
+    - claim: "a title that cannot fit without cutting the dependency or a version is refused and ledgered, never truncated"
+      proof: 'grep: test("W1-T9828: an unfittable Dependabot title is refused, never truncated" in test/an-over-long-dependabot-title-is-retitled.test.ts'
+    - claim: "the title check re-runs on the edited title because pr-title-lint.yml fires on pull_request edited"
+      kind: guard
+      proof: "unit test: W1-T3781: title edits use a standalone commitlint workflow without widening the expensive CI trigger"
+  falsifier: |
+    At origin/main, `fitDependabotTitle` does not exist and `depReviewCommand` on a Dependabot PR whose title is the
+    162-character #11968 title performs no title write and ledgers no `dep-review.retitled` row; the hold branch instead
+    reaches `reconcileDependabotOwnRed`. The first and third tests fail.

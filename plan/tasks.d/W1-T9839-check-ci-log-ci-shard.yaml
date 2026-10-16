@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.16
   status: queued
@@ -46,3 +46,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/lib/prompt-render.ts and a new test file (test/check-ci-log-ci-shard.test.ts). Neither touches secrets, auth, permissions, merge/deploy policy, infrastructure, or data deletion, so none of the escalation criteria in the rule appear to apply."
+      - "The remedy is a code-path change plus a test with a named acceptance grep. The verification is automatic (verify: auto) and checkable from the filed record. The change is not a docs-only record, which matches the \"structurally different\" instruction."
+      - "The rationale's log excerpts show TypeScript implicit-any and type errors in a file that imports prompt-render.ts. This is ordinary code-level friction, not an operator-only decision."
+      - "The family track record is mixed (27 merged, 40 declined, Beta mean 0.62), which argues for care. But the task is machine-filed, still passes CI and review, and gives no sign of irreversible action. The absence of an ACTUAL CHANGE view means the change's shape is unverified, which lowers my confidence."
+    judged_at: "2026-10-16T17:05:06.981Z"
+    pin: "4f1768d791e6e04a9a4b8456e3e085f56e60add22b7379564c905d6cb1412de2"

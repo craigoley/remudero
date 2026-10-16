@@ -1,0 +1,75 @@
+- id: W1-T9852
+  title: "A FEEDBACK ENTRY WITH NO `attachments:` KEY REACHES THE TRIAGE PROMPT AS AN EMPTY LIST — readFeedbackEntry casts the parsed YAML to FeedbackEntry unchecked, so fb-1789601878740-3711ab (hand-landed by #5838 without the key, re-queued at status: new by #12033) throws `Cannot read properties of undefined (reading 'length')` in triagePrompt on every auto-triage fire: 15 of 15 fires since 2026-10-15T16:22Z, no verdict, 74 other entries waiting behind it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern, the shape readFeedbackEntry hands its callers; medium for reach: every triage and feedback reader goes through it
+  band_meaning: span
+  origin: "fan-out 2026-10-16 agent E1: why TRIAGE-fb-1789601878740-3711ab started 16 times and never wrote a verdict (investigator S1 lead)"
+  plan_refs: [W1-T41, W1-T2700, W1-T4203, W1-T4769, W1-T3320]
+  files: [src/lib/feedback.ts, test/a-feedback-entry-without-attachments-reaches-triage.test.ts]
+  status: queued
+  priority: 1  # live: auto-triage is wedged on one entry; every fire since 2026-10-15T16:22Z is spent on it
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 on the core daemon's ledger (host remudero, ~/rmd-state2/state), read-only and niced, over the
+    live file and every 2026-10-15/16 rotation. Coverage control: all 11 rotations from 2026-10-15T17:18Z on and the
+    live file contributed rows naming the entry; no earlier rotation does, matching its first fire.
+    - 15 run.start rows for TRIAGE-fb-1789601878740-3711ab, 2026-10-15T16:22:21Z to 2026-10-16T15:42:31Z, across 9
+      daemon processes. Each one writes triage.start, worktree.add, triage.claim, prompt.manifest, then
+      triage.error "Cannot read properties of undefined (reading 'length')" 12-67 s after run.start, then
+      triage.claim_released. No verdict row, no triage.synthesized row: no worker was spawned, and no spend.
+    - The daemon side: 15 auto_triage.fired, 15 auto_triage.detached and 15 auto_triage.run_failed rows with that
+      error. The fires are the 15 timestamps in state/last-auto-triage.json, so each one also spent a floor slot
+      and a slot of the rolling 24 h cap. Every fire reason reads "the backlog's own depth reached 74-75 at status:
+      new ... oldest waiting 28.7-29.7d".
+    - Since 2026-10-15T16:22Z every auto-triage fire went to this entry (15 of 15). The entry before it in the queue,
+      fb-1791856366578-58872f, had 8 fires on 2026-10-15 up to 13:52Z.
+    READ at origin/main (symbols, not lines):
+    - src/lib/feedback.ts `readFeedbackEntry` returns `parseYaml(...) as FeedbackEntry` with no shape check.
+      `FeedbackEntry.attachments` is typed `string[]`, but nothing supplies it when the file has no key.
+    - src/lib/triage.ts `triagePrompt` reads `entry.attachments.length`. The run-task.ts triage body builds
+      `initialPrompt: triagePrompt(...)` right after the prompt.manifest row, so the TypeError lands in that body's
+      outer catch, which writes triage.error and rethrows. No verdict is written and the entry's status stays new.
+    - auto-triage.ts `decideAutoTriage` fires on the OLDEST status: new candidate not held by a live claim. The
+      claim is released in the triage body's finally, so the same entry heads the queue on every pass.
+    - plan/feedback/fb-1789601878740-3711ab.yaml was hand-landed by #5838 (2026-09-17) with id, ts, raw, origin and
+      status only. #12033 (2026-10-15T14:50Z) changed `status: open` to `status: new` to make it selectable; the
+      first fire came 92 minutes later.
+    - CENSUS of plan/feedback/*.yaml on origin/main: 3 of the 77 entries at status: new carry no `attachments:` key
+      (this one, fold-debt-CLAUDE-md-13862 and fold-debt-CLAUDE-md-14164). The fold-debt entries are written by
+      scripts/claude-md-budget-ratchet.mjs, a second writer that omits the key. Every other status has the key.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the open plan-file-*/run-* heads for
+    attachments, triagePrompt and readFeedbackEntry. No shard names this TypeError. W1-T4203 makes a REFUSED triage
+    commit terminal. W1-T4769 passes over a live-held claim. Neither sees a run that throws before its worker.
+    The class (a fire that throws is re-fired forever on the oldest-first queue) is filed separately as W1-T9853.
+  design: |
+    1. In src/lib/feedback.ts, normalize the parsed entry in ONE place that both `readFeedbackEntry` and `listFeedback`
+       use: an absent `attachments` reads as `[]`. A present non-array value is a malformed entry and throws a
+       FeedbackError naming the id and the field, so a corrupt file is named, not silently emptied. Nothing else in
+       the entry changes, and the file on disk is not rewritten.
+    2. No change to triagePrompt, the writers or the queue. The prompt already renders "attachments: (none)" for an
+       empty list.
+    Tests go in a new file, test/a-feedback-entry-without-attachments-reaches-triage.test.ts, with `test(` titles
+    verbatim as in the proofs below. Write a feedback yaml without the key into a temp plan/feedback/ dir (the
+    fb-1789601878740-3711ab shape: id, ts, raw, origin, status: new), read it through readFeedbackEntry and
+    listFeedback, and render triagePrompt over the read entry.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-feedback-entry-without-attachments-reaches-triage.test.ts"
+    - claim: "an entry with no attachments key reads as an empty list"
+      proof: 'grep: test("W1-T9852: a feedback entry with no attachments key reads as an empty list" in test/a-feedback-entry-without-attachments-reaches-triage.test.ts'
+    - claim: "the triage prompt renders an entry with no attachments key"
+      proof: 'grep: test("W1-T9852: the triage prompt renders an entry with no attachments key" in test/a-feedback-entry-without-attachments-reaches-triage.test.ts'
+    - claim: "a non-list attachments value is refused by name"
+      proof: 'grep: test("W1-T9852: a non-list attachments value is refused by name" in test/a-feedback-entry-without-attachments-reaches-triage.test.ts'
+  falsifier: |
+    Leave readFeedbackEntry casting unchecked, and the prompt test throws the live TypeError, "Cannot read properties
+    of undefined (reading 'length')", as all 15 fires did.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: the next auto_triage.fired for
+    fb-1789601878740-3711ab is followed by a triage.synthesized row and a verdict-bearing triage end (pr.opened,
+    triage.grill_opened or an already-decided status write), not a triage.error with this message.

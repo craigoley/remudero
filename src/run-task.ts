@@ -39945,27 +39945,25 @@ export async function daemonCommand(
   } catch (censusError) {
     log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
   }
-  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot. The tracker is seeded
-  // from the ledger this boot opened with and fed every run-child row this daemon writes since (`childLog`); it keeps counts.
-  // Read here, before adoption, so the boot's adoption pass is folded once, live.
+  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot, fed every run-child
+  // row this daemon writes since (`childLog`); it keeps counts. W1-T9816: that window and the settlements are one UNION read,
+  // because rotation prunes them from the live file. Read here, before adoption, so the boot's adoption pass is folded once.
   const bootLedgerLines = readLedgerLines(ledgerPath);
   const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
-  const childModeTracker = createRunChildModeTracker(bootLedgerLines);
+  const bootChildPolicy = readRunChildPolicy(childPolicy);
+  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
+  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
+  const childBoot = childMode
+    ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log }) : undefined;
+  const childModeTracker = childBoot?.tracker ?? createRunChildModeTracker(bootLedgerLines);
   const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
     log(step, extra);
     childModeTracker.observe(step, extra);
   };
-  const bootChildPolicy = readRunChildPolicy(childPolicy);
-  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
-  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const adoptedRunIds = new Set<string>();
-  const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["run_child.settled"], pattern: /"step":"run_child\.settled"/, refuseIncomplete: true,
-  }) : undefined;
-  if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
-  const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
+  const adoptedChildren: AdoptedRunChild[] = childBoot ? adoptRunChildren({
     stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log: childLog,
-    settledRunIds: new Set((childSettlements?.rows ?? []).flatMap((row) => typeof row.run_id === "string" ? [row.run_id] : [])),
+    settledRunIds: childBoot.settledRunIds,
   }) : [];
   for (const child of adoptedChildren) {
     adoptedRunIds.add(child.runId);
@@ -57602,7 +57600,7 @@ import {
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
-import { createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
+import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 export { hashInstallInputs, installHashMarkerPath };
 
