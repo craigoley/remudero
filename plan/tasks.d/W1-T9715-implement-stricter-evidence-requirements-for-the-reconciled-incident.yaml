@@ -7,7 +7,9 @@
   verify: auto
   risk: high
   band_meaning: blast-radius
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=c4a248d62d900edb
   attempts: 0
   files:
     - MASTER-PLAN.md
