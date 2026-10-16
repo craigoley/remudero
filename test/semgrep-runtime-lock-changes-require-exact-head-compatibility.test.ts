@@ -7,6 +7,7 @@ import {join} from 'node:path';
 import {test} from 'node:test';
 import {parse} from 'yaml';
 import {ghShim} from './helpers/gh-shim.js';
+import {gitRepo} from './helpers/git-repo.js';
 // @ts-expect-error — shared trusted-metadata companion is plain ESM.
 import {readSecurityMergeDecision,readSecurityMergeDecisionSync,publishSecurityMergeDecision} from '../src/lib/code-scanning-merge-adapter.mjs';
 // @ts-expect-error — producer is plain ESM outside tsconfig roots.
@@ -324,12 +325,11 @@ test('real isolated Python stages only digest-bound committed auditor bytes and 
  const flow=parse(readFileSync(new URL('../.github/workflows/semgrep-runtime-compatibility.yml',import.meta.url),'utf8'));
  const install=flow.jobs['runtime-compatibility'].steps.find((s:any)=>s.name==='Download original artifacts without candidate execution');
  const match=/<<'PY'\n([\s\S]*?)\nPY\n/.exec(install.run);assert.ok(match);
- const script=match[1],dir=mkdtempSync(join(tmpdir(),'rmd-runtime-inputs-')),repo=join(dir,'repo');
- t.after(()=>rmSync(dir,{recursive:true,force:true}));mkdirSync(repo);mkdirSync(join(repo,'.github','semgrep'),{recursive:true});
+ const script=match[1],dir=mkdtempSync(join(tmpdir(),'rmd-runtime-inputs-')),fixture=gitRepo({seedCommit:false,kind:'runtime-audit'}),repo=fixture.dir;
+ t.after(()=>{fixture.cleanup();rmSync(dir,{recursive:true,force:true});});mkdirSync(join(repo,'.github','semgrep'),{recursive:true});
  const invoke=(file:string,args:string[],input?:string)=>spawnSync(file,args,{cwd:repo,encoding:'utf8',input,timeout:10000,
   env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null'}});
- const git=(args:string[])=>{const r=invoke('git',args);assert.equal(r.status,0,r.stderr);};
- git(['init','--quiet']);
+ const git=(args:string[])=>fixture.git(...args);
  const auditor=join(repo,'.github','semgrep','runtime-compatibility-audit.py');
  const trusted='import json,sys\nprint(json.dumps({"fixture":"STAGED_AUDITOR_FIXTURE","noSite":sys.flags.no_site,"isolated":sys.flags.isolated}))\n';
  writeFileSync(auditor,trusted);const digest=createHash('sha256').update(trusted).digest('hex');
