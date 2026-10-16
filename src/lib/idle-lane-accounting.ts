@@ -18,6 +18,7 @@
 /** Every reason an idle lane minute can be charged to. Exactly one per minute. */
 export const IDLE_LANE_CAUSES = [
   "wip_limit",
+  "memory",
   // `pause` is a PAUSE whose nature the step did not say (no detail). W1-T8235 names the natures it hid.
   "pause",
   "operator_pause",
@@ -288,7 +289,7 @@ export const IDLE_LANE_SUMMARY_WINDOW_MS = 60 * MS_PER_MINUTE;
  */
 export function idleLaneCauseForStep(
   step: string,
-  fields?: { state?: unknown; detail?: unknown; reason?: unknown },
+  fields?: { state?: unknown; detail?: unknown; reason?: unknown; held_by?: unknown },
 ): IdleLaneCause | undefined {
   switch (step) {
     case "dispatch.new_build_held":
@@ -296,8 +297,9 @@ export function idleLaneCauseForStep(
       // reservation is UNKNOWN, not evidence of either capacity or an empty selection.
       return fields?.state === "held" ? "capacity_headroom" : "unknown";
     case "dispatch.wip_deferred":
-    case "daemon.queue_governor":
       return "wip_limit";
+    case "daemon.queue_governor":
+      return fields?.held_by === "memory" ? "memory" : "wip_limit";
     case "daemon.pause":
       return pauseCauseOf(fields?.detail);
     case "dispatch.lane_refill_held":
@@ -335,6 +337,7 @@ export function idleLaneCauseForRefillReason(reason: unknown): IdleLaneCause | u
   if (/supervised serve restoration/.test(reason)) return "restart";
   if (/^pause/.test(reason) || /fleet PAUSE hold/.test(reason)) return "operator_pause";
   if (/^no disjoint runnable task/.test(reason)) return "selection_empty";
+  if (/^governor: memory(?: |$)/.test(reason)) return "memory";
   if (/^governor: queue/.test(reason) || /^lane budget/.test(reason)) return "wip_limit";
   if (/^governor: cost/.test(reason)) return "capacity_headroom";
   if (/^governor/.test(reason)) return "governor";
