@@ -1,0 +1,320 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, renameSync, chmodSync } from "node:fs";
+import { gzipSync } from "node:zlib";
+import { hostname } from "node:os";
+import { gitRepo } from "./helpers/git-repo.js";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { fixedClock } from "../src/lib/clock.js";
+import { readPersistedInbox, triageFleetLane } from "../src/lib/fleet-lane.js";
+import { runInboxGardener, defaultInboxGardenerPorts, inboxGardenerSemanticInput, readInboxGardenerLedger, INBOX_GARDENER_SOURCE_LIMITS, type InboxGardenerPack, type InboxGardenerPorts } from "../src/lib/inbox-gardener.js";
+import { readInboxGardenerStore, inboxGardenerPath, inboxSemanticDigest, inboxProposalRevision, validInboxTerminalProof, inboxRetirementFor,
+  restoreInboxRetirement, writeInboxGardenerStore, proofDebtPopulationPermit, mechanicalAskPurpose, inboxGardenerMode, type InboxGardenerScope, type InboxTerminalProof } from "../src/lib/inbox-retirement.js";
+import { mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
+import { parseProposalRegistry, anchorFingerprint, updateProposalRegistry, type Proposal } from "../src/lib/inbox.js";
+import { buildInboxDismissalAudit } from "../src/lib/inbox-dismissal-audit.js";
+import { buildInboxAttentionCensusRoute, inboxLanes } from "../src/lib/panel-graph.js";
+import { inboxThreadId, appendThreadMessage, inboxThreadIdentity, readThread } from "../src/lib/inbox-thread.js";
+import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
+import { createService } from "../src/lib/service.js";
+import { world } from "./helpers/why-me-world.js";
+import { loadPlan } from "../src/lib/plan.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
+
+type T = Parameters<typeof world>[0];
+const TASK = "W1-T1200", ID = `proof-debt:${TASK}`;
+async function fixture(t: T, count = 1) {
+  const w = await world(t);
+  let now = Date.now();
+  const scope: InboxGardenerScope = { repository: w.repository, instance: w.instance, root: w.root };
+  const ids = Array.from({ length: count }, (_, i) => `W1-T${1200 + i}`);
+  appendFileSync(w.planPath, ids.map(id => `- id: ${id}\n  title: Repair mechanical proof\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n`).join(""));
+  const offenders = ids.map(taskId => ({ taskId, criterionIndex: 0, cause: "grep-path-absent" as const, claim: "has a proof", proof: "grep: missing in src/missing.ts" }));
+  const mergedIds = new Set(ids);
+  const sourcePermit = proofDebtPopulationPermit(loadPlan(w.planPath).tasks.filter(task => ids.includes(task.id)));
+  for (let i = 0; i < count; i++) {
+    mintProofDebtProposals(offenders, () => "plan/tasks.yaml", w.registry, { sourcePermit });
+    if (parseProposalRegistry(readFileSync(w.registry, "utf8")).length === count + 1) break;
+  }
+  w.deps.statusGithub = fakeGitHub({ findMergedByTrailer: id => mergedIds.has(id) ? { number: Number(id.split("T")[1]), url: `https://github.com/${w.repository}/pull/${id.split("T")[1]}`, state: "MERGED", headRefName: `run-${id}-123456` } : null,
+    headRefName: ref => `run-W1-T${ref.split("/").at(-1)}-123456`, prBody: ref => `Remudero-Task: W1-T${ref.split("/").at(-1)}`, changedFiles: () => ["src/fix.ts"] });
+  await w.refresh();
+  now = Date.now();
+  const githubCalls: string[][] = [];
+  const githubJson = async (args: string[]) => { githubCalls.push(args); if (args[1] === "view") return { files: [{ path: "src/fix.ts" }] };
+    const id = /W1-T\d+/.exec(args[args.indexOf("--search") + 1]!)?.[0];
+    return [{ number: Number(id?.split("T")[1]), url: `https://github.com/${w.repository}/pull/${id?.split("T")[1]}`, state: "MERGED", headRefName: `run-${id}-123456`, headRefOid: "a".repeat(40), mergeCommit: { oid: "b".repeat(40) }, body: `Remudero-Task: ${id}` }]; };
+  const ports = () => defaultInboxGardenerPorts({ stateDir: w.state, scope, planPath: w.planPath, codeSha: "c".repeat(40), clock: fixedClock(now), githubJson });
+  const run = (custom: Partial<InboxGardenerPorts> = {}, mode: "off" | "shadow" | "act" = "act") => runInboxGardener({ stateDir: w.state, scope, ports: { ...ports(), ...custom }, mode, clock: fixedClock(now) });
+  const store = () => { const s = readInboxGardenerStore(w.state, scope); assert.equal(s.state, "observed"); return s.state === "observed" ? s.store : assert.fail(); };
+  const source = () => readPersistedInbox(w.state)!;
+  const restoreServer = createService({ tokens: { read: "read", write: "shared" }, providers: [{ name: "operator", grant: () => undefined,
+    authorize(req) { return req.headers.authorization === "Bearer alice" ? { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:alice" } : undefined; } }],
+    routes: mountInstanceInboxRoutes({ instance: w.instance, repository: w.repository, stateDir: w.state, routes: [buildInboxAttentionCensusRoute({ ...w.deps, inboxFromSlowLane: true })] }) });
+  await new Promise<void>(resolve => restoreServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => restoreServer.close(() => resolve())));
+  const restore = async (input: Record<string, unknown>, token = "alice") => {
+    const res = await fetch(`http://127.0.0.1:${(restoreServer.address() as AddressInfo).port}/v1/i/core/inbox/retirement-restore`, { method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(input) });
+    return { status: res.status, body: await res.json() as any };
+  };
+  return { ...w, scope, ids, mergedIds, ports, run, store, source, githubCalls, restore, advance: () => { now += 1000; }, now: () => now };
+}
+
+test("the inbox gardener retires a proven terminal ask once and can restore it", async t => {
+  const f = await fixture(t), original = f.source().snapshotKey!;
+  const proposal = parseProposalRegistry(readFileSync(f.registry, "utf8")).find(p => p.id === ID)!;
+  assert.equal(mechanicalAskPurpose(proposal)?.producer, "proof-queue-audit-v1", "purpose came from the actual persisted producer");
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.state, "not_ready");
+  const first = await f.run(); assert.equal(first.state, "complete"); assert.equal("retired" in first && first.retired, 1);
+  const retired = f.store().events[0]!; assert.equal(retired.receipt.snapshotKey, original);
+  await f.refresh(); const published = f.source(); assert.notEqual(published.snapshotKey, original);
+  assert.equal(published.attentionCensus?.snapshotKey, published.snapshotKey);
+  assert.equal(published.classifications.find(c => c.proposalId === ID)?.state, "retired");
+  assert.equal(published.attentionCensus?.retirements[0]?.retirementId, retired.receipt.id);
+  assert.equal(parseProposalRegistry(readFileSync(f.registry, "utf8")).length, 2);
+  const thread = readThread(inboxThreadId(ID), { threadStorePath: join(f.state, "inbox-threads.jsonl") });
+  assert.equal(thread.status, "ok"); assert.equal(thread.status === "ok" && thread.messages[0]?.extra?.event?.kind, "retired");
+  const input = { repository: f.repository, instance: f.instance, proposalId: ID, threadId: inboxThreadId(ID), intentId: "restore-intent-001",
+    retirementId: retired.receipt.id, snapshotKey: original, taskId: TASK, reason: "Review this mechanical ask again" };
+  assert.equal((await f.restore(input, "shared")).status, 403);
+  const restored = await f.restore(input); assert.equal(restored.status, 200); assert.equal(restored.body.materialization, "pending_refresh");
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.state, "retired", "accepted is distinct from published");
+  const replay = await f.restore(input); assert.equal(replay.status, 200); assert.equal(replay.body.replayed, true);
+  assert.deepEqual(replay.body.receipt, restored.body.receipt); assert.equal(f.store().events.length, 2);
+  assert.equal((await f.restore({ ...input, reason: "changed payload" })).status, 409);
+  for (const patch of [{ repository: "owner/other" }, { instance: "other" }, { taskId: "W1-T216" }, { snapshotKey: "f".repeat(64) }, { retirementId: "e".repeat(64) }])
+    assert.equal((await f.restore({ ...input, ...patch })).status, 409);
+  await f.refresh(); assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.retirement?.state, "restored_for_review");
+  assert.equal(f.source().attentionCensus?.items.find(c => c.proposalId === ID)?.attention, "decision");
+  f.advance(); await f.run(); await f.run(); await f.refresh();
+  assert.equal(f.store().events.filter(e => e.receipt.kind === "retire").length, 1);
+  assert.equal(f.store().events.filter(e => e.receipt.kind === "restore").length, 1);
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.state, "not_ready");
+});
+
+test("the inbox gardener preserves a held security ask when source evidence is partial", async t => {
+  const f = await fixture(t);
+  const proposals = parseProposalRegistry(readFileSync(f.registry, "utf8"));
+  proposals.push({ id: "ruling:budget", summary: "Spend tenant budget and enable irreversible policy", evidenceAnchors: [] });
+  writeFileSync(f.registry, JSON.stringify({ proposals }));
+  appendFileSync(f.ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "old-release", step: "ratify.approved", task_id: "W1-T216", released: "verify-human" }) + "\n");
+  await f.refresh();
+  for (const source of ["plan", "registry", "github", "ledger", "threads"] as const) {
+    const pack = await f.ports().capture(); pack.coverage[source] = "partial";
+    const result = await f.run({ capture: async () => pack }); assert.equal(result.state, "source_partial");
+  }
+  const result = await f.run(); assert.equal("retired" in result && result.retired, 1, "same corpus has a live positive terminal control");
+  await f.refresh();
+  for (const id of ["verify-human:W1-T216", "ruling:budget"]) {
+    assert.notEqual(f.source().classifications.find(c => c.proposalId === id)?.state, "retired");
+    assert.equal(f.source().attentionCensus?.items.find(c => c.proposalId === id)?.attention, "decision");
+  }
+  assert.equal(f.store().events.some(e => e.receipt.scope.taskId === "W1-T216"), false);
+});
+
+test("gardener defaults are inert and shadow evidence cannot silently activate action", async t => {
+  const f = await fixture(t);
+  assert.equal(inboxGardenerMode({}), "off"); assert.equal(inboxGardenerMode({ RMD_INBOX_GARDENER_MODE: "yes" }), "off");
+  const off = await runInboxGardener({ stateDir: f.state, scope: f.scope, ports: { capture: async () => assert.fail("disabled source read"), proof: async () => assert.fail("disabled proof"), mirror: async () => assert.fail("disabled mirror") } });
+  assert.equal(off.state, "disabled"); assert.equal(readInboxGardenerStore(f.state).state, "absent");
+  await f.run({}, "shadow"); assert.equal(f.store().events.length, 0);
+  assert.equal(f.store().entries[ID]?.decision, "retire_proven_shadow");
+  await f.run(); assert.equal(f.store().events.filter(e => e.receipt.kind === "retire").length, 1);
+});
+
+test("generic parsed proposals cannot claim the mechanical or verification producer capability", async t => {
+  const f = await fixture(t);
+  const real = parseProposalRegistry(readFileSync(f.registry, "utf8")).find(p => p.id === ID)!;
+  const forged = JSON.parse(JSON.stringify({ ...real, id: "proof-debt:W1-T9999", automaticRetirement: { ...real.automaticRetirement, taskId: "W1-T9999" } }));
+  assert.throws(() => updateProposalRegistry(f.registry, all => [...all, forged]), /maintained proof-audit producer/);
+  assert.throws(() => updateProposalRegistry(f.registry, all => [...all, { id: "verify-human:W1-T9999", summary: "budget approval", evidenceAnchors: [], verificationAsk: { producer: "verify-human-judge-v1", taskId: "W1-T9999" } }]), /maintained verification producer/);
+  const restarted = defaultInboxGardenerPorts({ stateDir: f.state, scope: f.scope, planPath: f.planPath, codeSha: "c".repeat(40), githubJson: async () => [] });
+  const reread = (await restarted.capture()).candidates.find(c => c.proposal.id === ID)!;
+  assert.equal(mechanicalAskPurpose(reread.proposal)?.criteriaDigest, real.automaticRetirement?.criteriaDigest);
+  assert.equal((await f.run()).state, "complete", "durable producer purpose survives reconstruction after restart");
+  updateProposalRegistry(f.registry, all => all.map(p => p.id === ID ? { ...p, evidenceAnchors: [] } : p));
+  await f.refresh(); assert.notEqual(f.source().classifications.find(c => c.proposalId === ID)?.state, "retired", "changed criteria cannot retain terminal eligibility");
+});
+
+test("semantic input excludes own bookkeeping and reopens a residual judge only for real changed input", async t => {
+  const f = await fixture(t); let judged = 0;
+  const judge = async () => { judged++; return { decision: "needs_triage" as const, reason: "a missing referent needs triage" }; };
+  await f.run({ proof: async () => undefined, judge }); assert.equal(judged, 1);
+  const digest = f.store().entries[ID]?.digest;
+  appendFileSync(f.ledgerPath, JSON.stringify({ ts: new Date().toISOString(), run_id: "own-diagnostic", step: "inbox.gardener_pass", task_id: "INBOX", reason: "own bookkeeping" }) + "\n");
+  await f.refresh(); const changedKey = f.source().snapshotKey; f.advance();
+  await f.run({ proof: async () => undefined, judge }); await f.run({ proof: async () => undefined, judge });
+  assert.equal(judged, 1); assert.equal(f.store().entries[ID]?.digest, digest);
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.needsTriageReason?.includes("needs triage"), true);
+  updateProposalRegistry(f.registry, all => all.map(p => p.id === ID ? { ...p, summary: p.summary + " New concrete ask evidence." } : p));
+  await f.refresh(); assert.notEqual(f.source().snapshotKey, changedKey);
+  await f.run({ proof: async () => undefined, judge }); assert.equal(judged, 2);
+  await f.run({ proof: async () => undefined, judge }); assert.equal(judged, 2);
+});
+
+test("failed and in-flight residual judgment remains triage without repeated spend after restart", async t => {
+  const f = await fixture(t); let calls = 0;
+  await f.run({ proof: async () => undefined, judge: async () => { calls++; throw new Error("provider unavailable"); } });
+  assert.equal(f.store().entries[ID]?.judge, "failed");
+  await f.run({ proof: async () => undefined, judge: async () => { calls++; assert.fail("must not repeat failed attempt"); } });
+  assert.equal(calls, 1);
+  const stored = f.store(); stored.entries[ID]!.judge = "started"; writeInboxGardenerStore(f.state, stored);
+  await f.run({ proof: async () => undefined, judge: async () => { calls++; assert.fail("unknown completion is not a retry"); } });
+  await f.refresh(); assert.match(f.source().classifications.find(c => c.proposalId === ID)?.needsTriageReason ?? "", /completion unknown/);
+  assert.equal(calls, 1);
+});
+
+test("independent later outcomes preserve the original retirement anchor and restore alone is not false dismissal", async t => {
+  const f = await fixture(t); await f.run(); const original = f.store().events[0]!;
+  await f.run(); assert.equal(f.store().events.length, 1, "the retirement itself is not an independent outcome");
+  f.advance(); await f.run(); await f.run(); const events = f.store().events;
+  assert.equal(events.length, 2); assert.equal(events[1]?.receipt.kind, "outcome");
+  assert.equal(events[1]?.receipt.snapshotKey, original.receipt.snapshotKey); assert.equal(events[1]?.receipt.retirementId, original.receipt.id);
+  const input = { proposalId: ID, retirementId: original.receipt.id, snapshotKey: original.receipt.snapshotKey, taskId: TASK, reason: "Review again" };
+  await restoreInboxRetirement(f.state, f.scope, input, "operator:alice", "audit-restore-001", new Date(f.now()).toISOString());
+  const auditInput = { scope: f.scope, window: { from: new Date(f.now() - 86_400_000).toISOString(), to: new Date(f.now() + 1000).toISOString() },
+    coverage: { receipts: "observed", outcomes: "observed", plan: "observed", registry: "observed" }, controls: { heldSecurity: { taskId: "W1-T216", observed: true, passed: true }, terminalMechanical: { observed: true, passed: true } }, receipts: f.store().events.map(e => e.receipt) } as const;
+  const audit = buildInboxDismissalAudit(auditInput); assert.equal(audit.denominator.eligible, 1); assert.equal(audit.observed.restored, 1); assert.equal(audit.observed.falseDismissals, 0); assert.equal(audit.observed.terminalConfirmed, 1);
+  const wrong = { ...auditInput, receipts: [events[0]!.receipt, { ...events[1]!.receipt, snapshotKey: "f".repeat(64) }] };
+  assert.equal(buildInboxDismissalAudit(wrong).observed.unresolved, 1);
+  await f.refresh(); assert.equal(f.source().dismissalAudit?.state, "unmeasurable", "live producer does not promote partial historical coverage");
+});
+
+test("the bounded cursor covers a healthy corpus above one hundred without truncating audit eligibility", async t => {
+  const f = await fixture(t, 121);
+  const states: string[] = [];
+  for (let i = 0; i < 130; i++) { const result = await f.run(); states.push(result.state); if (result.state === "complete") break; }
+  const events = f.store().events; assert.equal(events.filter(e => e.receipt.kind === "retire").length, 121);
+  assert.equal(states.includes("pending"), true); assert.equal(states.at(-1), "complete");
+  assert.equal(new Set(events.map(e => e.receipt.id)).size, events.length);
+  await f.refresh(); const census = f.source().attentionCensus!;
+  assert.equal(census.retirementHistory.total, 121); assert.equal(census.retirementHistory.truncated, true);
+  assert.equal(census.retirementHistory.returned, census.retirements.length);
+  assert.equal(Buffer.byteLength(JSON.stringify(census.retirements)) <= 16 * 1024, true);
+  assert.equal(f.source().dismissalAudit?.denominator.eligible, 121);
+  assert.equal(f.source().dismissalAudit?.measurement.falseDismissals, null);
+  assert.equal(f.source().classifications.find(c => c.proposalId === "verify-human:W1-T216")?.state, "not_ready");
+});
+
+test("new operator input and source changes invalidate an in-flight retirement candidate", async t => {
+  const f = await fixture(t); let captured = 0;
+  const base = f.ports();
+  const result = await f.run({ capture: async () => { captured++; const pack = await base.capture(); if (captured === 2) pack.candidates.find(c => c.proposal.id === ID)!.operatorIntent = inboxSemanticDigest("new reply"); return pack; } });
+  assert.equal("retired" in result && result.retired, 0); assert.equal(f.store().events.length, 0);
+  appendThreadMessage(inboxThreadIdentity(ID), "reply", "An unanswered human message", { threadStorePath: join(f.state, "inbox-threads.jsonl") });
+  assert.equal((await f.run()).state, "source_partial", "unpublished operator input is not a qualified old source");
+  await f.refresh(); await f.run(); assert.equal(f.store().events.length, 0, "a current unanswered reply prevents automatic retirement");
+});
+
+
+test("default dependency merge evidence reopens one judgment without unrelated-main churn", async t => {
+  const f = await fixture(t);
+  appendFileSync(f.planPath, "- id: W1-T2200\n  title: Relevant dependency\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n");
+  const plan = readFileSync(f.planPath, "utf8").replace(`- id: ${TASK}\n  title: Repair mechanical proof\n  repo: core\n  depends_on: []`, `- id: ${TASK}\n  title: Repair mechanical proof\n  repo: core\n  depends_on: [W1-T2200]`);
+  writeFileSync(f.planPath, plan);
+  // A code producer mints against the current actual task facts, before any retirement exists.
+  updateProposalRegistry(f.registry, all => all.filter(p => p.id !== ID));
+  mintProofDebtProposals([{ taskId: TASK, criterionIndex: 0, cause: "grep-path-absent", claim: "missing", proof: "grep: missing in src/missing.ts" }], () => "plan/tasks.yaml", f.registry,
+    { sourcePermit: proofDebtPopulationPermit(loadPlan(f.planPath).tasks.filter(task => task.id === TASK)) });
+  await f.refresh(); f.advance(); let calls = 0;
+  const judge = async () => { calls++; return { decision: "needs_triage" as const, reason: "dependency review" }; };
+  await f.run({ proof: async () => undefined, judge }); assert.equal(calls, 1);
+  assert.deepEqual((await f.ports().capture()).candidates.find(c => c.proposal.id === ID)?.dependencyMerge, [{ id: "W1-T2200", merged: false }]);
+  f.mergedIds.add("W1-T2200"); await f.refresh();
+  assert.deepEqual((await f.ports().capture()).candidates.find(c => c.proposal.id === ID)?.dependencyMerge, [{ id: "W1-T2200", merged: true }]);
+  await f.run({ proof: async () => undefined, judge }); await f.run({ proof: async () => undefined, judge }); assert.equal(calls, 2);
+  f.deps.inboxMainSha = () => "d".repeat(40); await f.refresh();
+  await f.run({ proof: async () => undefined, judge }); assert.equal(calls, 2, "unrelated main advance is outside the semantic input");
+});
+
+test("a residual mechanical followup reaches the existing fleet gates and durable dedup", async t => {
+  const f = await fixture(t); let judgments = 0;
+  const judge = async () => { judgments++; return { decision: "mechanical_followup" as const, reason: "draft a normal proof repair" }; };
+  await f.run({ proof: async () => undefined, judge }); await f.refresh();
+  assert.equal(f.store().entries[ID]?.decision, "mechanical_followup");
+  const proposals = parseProposalRegistry(readFileSync(f.registry, "utf8")), proposal = proposals.find(p => p.id === ID)!;
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.needsTriageReason, undefined);
+  const approved: string[] = [], deps = { stateDir: f.state, ledgerPath: f.ledgerPath, mergedLastDay: () => 3, approve: (id: string) => { approved.push(id); } };
+  assert.deepEqual(triageFleetLane(deps).filed, [], "normal draft/readiness gate still holds");
+  const fragmentYaml = `- id: W1-T2300\n  title: Repair the proof with a bounded regression\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  status: queued\n  attempts: 0\n  origin: architect\n  files: [src/lib/inbox.ts]\n  acceptance:\n    - claim: bounded repair\n      proof: 'unit test: bounded repair fixture'\n`;
+  writeFileSync(join(f.state, "inbox-drafts.json"), JSON.stringify({ [ID]: { proposalId: ID, fragmentYaml,
+    stampLine: `- ${ID} (plan) — RATIFIED 2026-10-16 -> W1-T2300.`, anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors) } }));
+  await f.refresh();
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.state, "ready", JSON.stringify(f.source().classifications.find(c => c.proposalId === ID)));
+  assert.deepEqual(triageFleetLane({ ...deps, mergedLastDay: () => 0 }).filed, [], "normal throughput pace still holds");
+  assert.deepEqual(triageFleetLane(deps).filed, [ID]); assert.deepEqual(triageFleetLane(deps).filed, []);
+  await f.run({ proof: async () => undefined, judge }); assert.equal(judgments, 1);
+  assert.deepEqual(approved, [ID]); assert.equal(parseProposalRegistry(readFileSync(f.registry, "utf8")).length, proposals.length);
+});
+
+
+test("indexed latest verdicts retain ordering across live plain and gzip ledger forms", async t => {
+  const f = await fixture(t), at = f.now() - 10_000;
+  const row = (step: string, proposal: string, offset: number) => ({ ts: new Date(at + offset).toISOString(), run_id: `source-${offset}`, step, task_id: proposal, reason: "source control" });
+  writeFileSync(join(f.state, "ledger.1.ndjson.gz"), gzipSync(JSON.stringify(row("panel.proposal_declined", ID, 1)) + "\n"));
+  writeFileSync(join(f.state, "ledger.2.ndjson"), JSON.stringify(row("panel.proposal_restored", ID, 2)) + "\n");
+  appendFileSync(f.ledgerPath, JSON.stringify(row("panel.proposal_declined", "other-control", 3)) + "\n");
+  let read = readInboxGardenerLedger(f.state, f.scope, [ID, "other-control"]);
+  for (let i = 0; i < 100 && read.state !== "observed"; i++) read = readInboxGardenerLedger(f.state, f.scope, [ID, "other-control"]);
+  assert.equal(read.state, "observed"); assert.equal(read.rows.length, 3, "all three forms have a positive query control");
+  assert.equal((await f.ports().capture()).candidates.find(c => c.proposal.id === ID)?.resolvedByOperator, false, "newer restore wins over older compressed decline");
+  appendFileSync(f.ledgerPath, JSON.stringify(row("panel.proposal_declined", ID, 4)) + "\n");
+  assert.equal((await f.ports().capture()).candidates.find(c => c.proposal.id === ID)?.resolvedByOperator, true);
+  appendFileSync(f.ledgerPath, JSON.stringify(row("panel.proposal_restored", ID, 5)) + "\n");
+  assert.equal((await f.ports().capture()).candidates.find(c => c.proposal.id === ID)?.resolvedByOperator, false);
+  assert.equal(readInboxGardenerLedger(f.state, f.scope, ["never-present"]).rows.length, 0, "indexed lookup does not rescan unrelated lifetime facts");
+});
+
+test("oversized incomplete corrupt and locked default sources never become terminal evidence", async t => {
+  const f = await fixture(t), registry = readFileSync(f.registry, "utf8");
+  for (const [path, max] of [[f.registry, INBOX_GARDENER_SOURCE_LIMITS.registryBytes], [join(f.state, "inbox-threads.jsonl"), INBOX_GARDENER_SOURCE_LIMITS.threadBytes]] as const) {
+    writeFileSync(path, " ".repeat(max + 1)); const result = await f.run(); assert.equal(result.state, "failed");
+    assert.equal(readInboxGardenerStore(f.state).state, "absent");
+    if (path === f.registry) writeFileSync(path, registry); else rmSync(path);
+  }
+  writeFileSync(inboxGardenerPath(f.state), "{corrupt"); assert.equal((await f.run()).state, "source_unavailable");
+  assert.equal(readFileSync(inboxGardenerPath(f.state), "utf8"), "{corrupt"); rmSync(inboxGardenerPath(f.state));
+  const lock = inboxGardenerPath(f.state) + ".lock";
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }));
+  assert.equal((await f.run()).state, "busy"); rmSync(lock);
+  appendFileSync(f.ledgerPath, '{"step":"panel.proposal_declined"');
+  assert.equal((await f.run()).state, "source_partial");
+  appendFileSync(f.ledgerPath, "\n"); assert.equal((await f.run()).state, "source_partial", "a malformed completed row is not quietly ignored");
+  writeFileSync(f.ledgerPath, ""); assert.equal((await f.run()).state, "source_partial", "a torn-source fault survives a later checkpoint");
+  rmSync(join(f.state, "inbox-gardener-evidence"), { recursive: true, force: true });
+  assert.equal((await f.run()).state, "complete", "same corpus has a fresh positively qualified terminal control");
+});
+
+test("prepared retirement survives mirror failure once and settled restore survives source loss", async t => {
+  const f = await fixture(t); let first = true;
+  const base = f.ports();
+  const failed = await f.run({ mirror: async (event, pack) => { if (first) { first = false; throw new Error("mirror unavailable"); } await base.mirror(event, pack); } });
+  assert.equal(failed.state, "failed"); const prepared = f.store().events[0]!; assert.equal(prepared.mirrored, false);
+  await f.run(); assert.equal(f.store().events.length, 1); assert.deepEqual(f.store().events[0]?.receipt, prepared.receipt);
+  const input = { proposalId: ID, retirementId: prepared.receipt.id, snapshotKey: prepared.receipt.snapshotKey, taskId: TASK, reason: " restore verbatim " };
+  const accepted = await restoreInboxRetirement(f.state, f.scope, input, "operator:alice", "restore-recovery-1", new Date(f.now()).toISOString());
+  assert.equal("status" in accepted && accepted.status, 200);
+  rmSync(join(f.state, "inbox-classified.json"));
+  const replay = await restoreInboxRetirement(f.state, f.scope, input, "operator:alice", "restore-recovery-1", new Date(f.now() + 1000).toISOString(), () => assert.fail("settled replay must precede source admission"));
+  assert.equal("status" in replay && replay.status, 200); assert.deepEqual("body" in replay && replay.body.receipt, "body" in accepted && accepted.body.receipt);
+  const store = f.store(); store.events[1]!.receipt.operator = "operator:foreign"; writeInboxGardenerStore(f.state, store);
+  const corrupt = await restoreInboxRetirement(f.state, f.scope, input, "operator:alice", "restore-recovery-1", new Date(f.now()).toISOString());
+  assert.equal("status" in corrupt && corrupt.status, 503); assert.equal(JSON.parse(readFileSync(inboxGardenerPath(f.state), "utf8")).events[1].receipt.operator, "operator:foreign", "corrupt acknowledgement is never replaced or replayed as success");
+});
+
+test("the real committed plan-retirement proof refuses a dirty blob and accepts an exact owned blob", async t => {
+  const f = await fixture(t), git = gitRepo({ kind: "inbox-plan-proof" }); t.after(() => git.cleanup());
+  mkdirSync(join(git.dir, "plan"));
+  const path = join(git.dir, "plan", "tasks.yaml"), text = readFileSync(f.planPath, "utf8").replace(`- id: ${TASK}\n`, `- id: ${TASK}\n  retirement: retired\n`).replace('  title: Repair mechanical proof\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued', '  title: Repair mechanical proof\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  status: blocked');
+  writeFileSync(path, text); git.git("add", "plan/tasks.yaml"); git.git("commit", "-m", "fixture explicit retirement");
+  const scope = { ...f.scope, root: git.dir }, ports = defaultInboxGardenerPorts({ stateDir: f.state, scope, planPath: path, codeSha: "c".repeat(40), githubJson: async () => [] });
+  // Capture loads the real plan even though this deliberately foreign snapshot is ineligible to act.
+  await ports.capture();
+  const original = (await f.ports().capture()).candidates.find(c => c.proposal.id === ID)!;
+  const candidate = { ...original, task: { ...original.task!, retirement: "retired", status: "blocked" } };
+  const proof = await ports.proof(candidate); assert.equal(proof?.kind, "plan-retirement");
+  assert.equal(validInboxTerminalProof(proof, scope, candidate.proposal), true);
+  appendFileSync(path, "# dirty change\n"); await assert.rejects(ports.proof(candidate), /authoritative committed blob/);
+});

@@ -8,11 +8,12 @@ import {
   defaultProofDebtCadenceInput,
   type ProofDebtCadenceInputDeps,
 } from "../src/run-task.js";
-import { buildMeasurementCadenceRow, measurementCadenceMarkerPath, runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
+import { buildMeasurementCadenceRow, measurementCadenceMarkerPath, runMeasurementCadenceReport, mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
 import { resolveNameFilteredCandidates } from "../src/lib/review.js";
 import { proofQueueAudit } from "../src/lib/proof-queue-audit.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { parseProposalRegistry } from "../src/lib/inbox.js";
+import { mechanicalAskPurpose } from "../src/lib/inbox-retirement.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { Config } from "../src/lib/config.js";
 
@@ -423,7 +424,7 @@ test("a fire with a real offender mints exactly one un-approved PROPOSAL and tou
     const registry = parseProposalRegistry(readFileSync(registryPath, "utf8"));
     assert.equal(registry.length, 1);
     assert.equal(registry[0]?.id, "proof-debt:W1-T101", "W1-T3385b: keyed on the TASK, so one record is one ask");
-    assert.deepEqual(Object.keys(registry[0] ?? {}).sort(), ["evidenceAnchors", "id", "summary"].sort());
+    assert.deepEqual(Object.keys(registry[0] ?? {}).sort(), ["automaticRetirement", "evidenceAnchors", "id", "summary"].sort());
     assert.equal(registry[0]?.evidenceAnchors[0]?.path, join("plan", "tasks.d", "W1-T101-offender.yaml"));
 
     // What the audit itself REPORTS is untouched by this wiring — identical to calling the
@@ -434,4 +435,26 @@ test("a fire with a real offender mints exactly one un-approved PROPOSAL and tou
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("only the real open-unmerged proof-debt population mints restart-safe mechanical purpose", () => {
+  const root = buildFixtureRepo(), stateDir = join(root, "state"), registryPath = join(stateDir, "inbox-proposals.json");
+  mkdirSync(stateDir, { recursive: true });
+  try {
+    const proofDebt = defaultProofDebtCadenceInput(root, { readMergeEvidenceLog: FIXTURE_MERGE_EVIDENCE })!;
+    assert.ok(proofDebt.sourcePermit);
+    assert.equal(proofDebt.tasks.some(t => t.id === "W1-T103"), false, "credited task still has an unresolved criterion but is excluded before minting");
+    runMeasurementCadenceReport({ stateDir, cwd: root, escalate: true, gitLog: FIXTURE_MERGE_EVIDENCE, registryPath, proofDebt });
+    const proposals = parseProposalRegistry(readFileSync(registryPath, "utf8"));
+    assert.equal(proposals.length, 1);
+    assert.equal(mechanicalAskPurpose(proposals[0]!)?.taskId, "W1-T101", "actual default permit survives real persistence and JSON reload");
+    assert.equal(proposals.some(p => p.id === "proof-debt:W1-T103"), false);
+    const offenders = [{ taskId: "W1-T103", criterionIndex: 0, cause: "grep-path-absent" as const, claim: "missing", proof: "grep: missing in src/missing.ts" }];
+    mintProofDebtProposals(offenders, () => "plan/tasks.yaml", registryPath, { sourcePermit: proofDebt.sourcePermit });
+    assert.equal(mechanicalAskPurpose(parseProposalRegistry(readFileSync(registryPath, "utf8")).find(p => p.id === "proof-debt:W1-T103")!), undefined, "an arbitrary supplied offender cannot borrow an excluded task's permit");
+    const other = join(stateDir, "generic.json");
+    mintProofDebtProposals(offenders, () => "plan/tasks.yaml", other);
+    assert.equal(mechanicalAskPurpose(parseProposalRegistry(readFileSync(other, "utf8"))[0]!), undefined, "generic minter callers remain untyped");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -1,3 +1,4 @@
+import { stampMechanicalAsk } from "./inbox-retirement.js";
 import { reconcilePlan } from "./plan-reconcile.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
@@ -1417,7 +1418,7 @@ export function mintProofDebtProposals(
   offenders: readonly ProofQueueAuditOffender[],
   shardPathFor: (taskId: string) => string | undefined,
   registryPath: string,
-  opts?: UpdateProposalRegistryOpts,
+  opts?: UpdateProposalRegistryOpts & { sourcePermit?: object },
 ): ProofDebtMintCadenceResult {
   const candidates: { o: ProofQueueAuditOffender; shardPath: string }[] = [];
   for (const o of offenders) {
@@ -1472,13 +1473,13 @@ export function mintProofDebtProposals(
         const detail = rows
           .map((o) => `criterion ${o.criterionIndex} (${o.cause}) — "${o.claim}"`)
           .join("; ");
-        additions.push({
+        additions.push(stampMechanicalAsk({
           id,
           summary:
             `proof-debt: ${taskId} has ${rows.length} criterion(s) whose proof cannot resolve against the ` +
             `checkout (rmd proof-queue-audit): ${detail}.`,
           evidenceAnchors: anchors,
-        });
+        }, taskId, opts?.sourcePermit));
         mintedProposalIds.push(id);
       }
       return additions.length > 0 ? [...current, ...additions] : null;
@@ -1818,6 +1819,8 @@ export interface MeasurementCadenceReportOpts {
   /** proof-queue-audit's population and resolvers, bound to a real checkout by the caller.
    *  Optional: omitted skips this producer entirely. */
   proofDebt?: {
+    /** Opaque capability from the real open-and-unmerged production population. */
+    sourcePermit?: object;
     tasks: readonly Task[];
     resolveNameFilteredCandidates?: ProofQueueAuditOpts["resolveNameFilteredCandidates"];
     pathExists?: ProofQueueAuditOpts["pathExists"];
@@ -2573,7 +2576,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
       symbolFoundAt: opts.proofDebt.symbolFoundAt,
     });
     proofDebtMint = opts.escalate
-      ? mintProofDebtProposals(proofDebtReport.offenders, opts.proofDebt.shardPathFor, registryPath)
+      ? mintProofDebtProposals(proofDebtReport.offenders, opts.proofDebt.shardPathFor, registryPath, { sourcePermit: opts.proofDebt.sourcePermit })
       : {
           status: proofDebtReport.offenders.length > 0 ? "backlog" : "clear",
           mintedProposalIds: [],

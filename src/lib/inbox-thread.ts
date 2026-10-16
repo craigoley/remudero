@@ -59,7 +59,7 @@ export interface ThreadMessage {
  *  operator's (`from: "operator"`); the rest are the daemon's. */
 export type ThreadEventKind =
   | "reframed" | "declined" | "restored" | "approved" | "released"
-  | "redrafted" | "task_filed" | "released_to_fleet" | "refused";
+  | "redrafted" | "task_filed" | "released_to_fleet" | "refused" | "retired" | "retirement_outcome";
 
 export interface ThreadEvent {
   kind: ThreadEventKind;

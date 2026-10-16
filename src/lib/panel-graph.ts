@@ -1,3 +1,4 @@
+import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
 /**
  * lib/panel-graph.ts — the control panel's plan→task→PR graph and interactive plan adjustment
  * (MASTER-PLAN §7B). A thin Route layer over existing mechanism — lib/feedback.ts's inbox and
@@ -1838,6 +1839,8 @@ export interface InboxDeclinedItem extends InboxSender {
  *  without attempting an approve. A separate array from `ready`/`drafting`: presence here implies
  *  no affordance, so it never reintroduces the approval fatigue the ready-only list cured. */
 export interface InboxNotReadyItem extends InboxSender {
+  retirement?: InboxClassification["retirement"];
+  needsTriageReason?: string;
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
@@ -1997,11 +2000,17 @@ function prepareInboxPass(
   // W1-T3518: the last adoption scan's own output. Same posture as the ledger read — read
   // ONCE per pass here, re-derived every pass that recomputes.
   const adoptionLatest = readAdoptionLatest(adoptionPath);
+  const lifecycleScope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+  const lifecycle = readInboxGardenerStore(join(deps.inboxRoot, "state"), lifecycleScope && { ...lifecycleScope, root: deps.inboxRoot });
+  const lifecycleThreads = lifecycle.state === "absent" ? undefined : readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
   const fragmentMemo = inboxClassifyState(deps).fragments;
   beginFragmentPass(fragmentMemo);
 
   const classifyOne = (proposal: Proposal): InboxClassification => {
     const classification = classifyProposal(proposal, drafts[proposal.id], {
+      retirement: p => lifecycle.state !== "absent" && (!lifecycleScope || lifecycleThreads?.status !== "ok")
+        ? { unknown: "owned lifecycle or current operator thread evidence unavailable" }
+        : inboxRetirementFor(lifecycle, p, inboxOperatorIntent(lifecycleThreads?.status === "ok" ? lifecycleThreads.threads.get(inboxThreadId(p.id)) ?? [] : [])),
       plan,
       isMerged,
       boardReferents,
@@ -2108,7 +2117,7 @@ interface InboxFingerprint {
 function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan, archiveReleases?: ReadonlyMap<string, string>): InboxFingerprint {
   const stat = deps.inboxStatFile ?? statStamp;
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
-  const stamps = [registryPath, draftsPath, inflightPath, adoptionPath].map((p) => stat(p) ?? null);
+  const stamps = [registryPath, draftsPath, inflightPath, adoptionPath, inboxGardenerPath(join(deps.inboxRoot, "state")), inboxThreadStorePath(deps.inboxRoot)].map((p) => stat(p) ?? null);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
 
   const ledgerStamp = stat(deps.ledgerPath) ?? null;
@@ -2453,6 +2462,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
       allNotReady.push({
+        ...(classification.retirement ? { retirement: classification.retirement } : {}),
+        ...(classification.needsTriageReason ? { needsTriageReason: classification.needsTriageReason } : {}),
         ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), ...recommended(proposal, "notReady"), reasons: classification.reasons,
         state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
         resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
@@ -2477,7 +2488,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
   // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
   // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
-  const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+  const restoredForReview = new Set(classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId));
+  const isOperator = (item: { proposalId: string }) => restoredForReview.has(item.proposalId) || inboxOwner({ id: item.proposalId }) === "operator";
   const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)));
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
@@ -2649,8 +2661,9 @@ function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan
   for (const c of classifications) {
     const state = CLASSIFICATION_TO_THREAD_STATE[c.state];
     const proposal = proposals.find((p) => p.id === c.proposalId);
-    if (!state || !proposal || inboxOwner(proposal) !== "operator") continue;
-    items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state });
+    if (!state || !proposal || inboxOwner(proposal) !== "operator" && !c.retirement) continue;
+    items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state,
+      ...(c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
   }
   return items;
 }
@@ -2719,8 +2732,8 @@ function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHu
 }
 
 /** One slow-lane census over the same owned content the section pages will use. */
-export function materializeInboxAttentionCensus(deps: PanelGraphDeps, classified: ClassifiedInbox, stores: InboxStores, content: unknown) {
-  const threads = readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
+export function materializeInboxAttentionCensus(deps: PanelGraphDeps, classified: ClassifiedInbox, stores: InboxStores, content: unknown,
+  threads = readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) })) {
   if (threads.status !== "ok") throw new Error("Inbox attention thread evidence is unavailable");
   const evidence = classified.attentionEvidence;
   if (!evidence) throw new Error("Inbox attention classification evidence is unavailable");
@@ -2730,6 +2743,7 @@ export function materializeInboxAttentionCensus(deps: PanelGraphDeps, classified
   const registry = parseProposalRegistryResult(readFileIfExists(registryPath));
   const state = (stamp: string | undefined) => stamp === undefined || stamp.startsWith("unreadable:") ? "unavailable" as const : "observed" as const;
   return buildAttentionCensus({
+    retirementSource: (content as { retirementSource?: "observed" | "absent" | "unavailable" }).retirementSource,
     classificationContent: content,
     views: listThreadViews(operatorThreadItems(deps, undefined, classified, stores.plainMessages), threads.threads, {}),
     classifications: classified.classifications,
@@ -2842,7 +2856,7 @@ const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
 export interface ThreadListInbox {
   proposals: readonly Proposal[];
-  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state">>;
+  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement">>;
 }
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {

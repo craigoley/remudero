@@ -1953,6 +1953,7 @@ function deriveInbox(
     return p?.indeterminate === true ? (p.unavailableReason ?? "unknown") : undefined;
   };
   const ctx: ReadinessContext = {
+    retirement: p => p.automaticRetirement ? { unknown: "Source-qualified lifecycle required; use the owned Inbox census" } : undefined,
     plan,
     isMerged,
     depsUnobservable,
