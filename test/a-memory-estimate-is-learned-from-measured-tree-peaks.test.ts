@@ -138,7 +138,7 @@ function statLine(pid: number, start: string): string {
   return `${pid} (node) S 1 ${"0 ".repeat(17)}${start.replace("proc:", "")} 0 0`;
 }
 
-test("a tree's peak is the largest sum of its live members' VmHWM, and an unobserved tree records nothing", () => {
+test("a tree's peak is the largest sum of its live members' concurrent RSS, and an unobserved tree records nothing", () => {
   const hwm = new Map<number, number>([[10, 300_000], [11, 900_000], [12, 1_200_000]]);
   let rows: Array<[number, number, string]> = [[10, 1, "proc:5"], [11, 10, "proc:6"]];
   const timers: Array<() => void> = [];
@@ -150,7 +150,7 @@ test("a tree's peak is the largest sum of its live members' VmHWM, and an unobse
       if (path.endsWith("/stat")) return statLine(pid, rows.find(([p]) => p === pid)?.[2] ?? "proc:0");
       const kb = hwm.get(pid);
       if (kb === undefined) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      return `VmRSS:\t1 kB\nVmHWM:\t${kb} kB\n`;
+      return `VmRSS:\t${kb} kB\nVmHWM:\t${kb} kB\n`;
     },
     setTimer: (fn, ms) => {
       assert.equal(ms, TREE_SAMPLE_MS);
@@ -292,7 +292,7 @@ test("the real sampler measures a live process from /proc where /proc exists, an
   const sampler = createTreePeakSampler();
   sampler.track("self", process.pid);
   const peak = sampler.finish("self");
-  if (process.platform === "linux") assert.ok(peak !== undefined && peak > 0, `this test process's own VmHWM: ${peak}`);
+  if (process.platform === "linux") assert.ok(peak !== undefined && peak > 0, `this test process's sampled RSS: ${peak}`);
   else assert.equal(peak, undefined, "no /proc: never a zero peak");
   assert.equal(sampler.size(), 0);
 });
@@ -337,7 +337,7 @@ test("a sampler skips an unreadable listing or member, and a failing store or lo
     },
     readFile: (path) => {
       if (path === "/proc/20/stat") return statLine(20, "proc:3");
-      if (path === "/proc/20/status") return "VmHWM:\t 2048 kB\n";
+      if (path === "/proc/20/status") return "VmRSS:\t 2048 kB\nVmHWM:\t 2048 kB\n";
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); // pid 21 exited between listing and read
     },
     setTimer: () => undefined,

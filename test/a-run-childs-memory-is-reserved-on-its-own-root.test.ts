@@ -48,7 +48,7 @@ function fixture(t: TestContext) {
       if (!p) throw Object.assign(new Error("process exited"), { code: "ENOENT" });
       if (path.endsWith("stat")) return `${pid} (node) S ${p.parent} ${"0 ".repeat(17)}${p.start.slice(5)} 0`;
       if (path.endsWith("cmdline")) return p.argv;
-      return `VmHWM: ${p.mib * 1024} kB\n`;
+      return `VmRSS: ${p.mib * 1024} kB\nVmHWM: ${p.mib * 1024} kB\n`;
     },
     setTimer: () => ({ unref() {} }), clearTimer: () => {},
   });
@@ -165,7 +165,7 @@ test("run-child reservation uses the real process identity and sampler", async (
   assert.equal(readMemoryLedger(ledger)!.entries.length, 1);
   const samples = readPeakSamples("fix", f.store);
   if (process.platform === "linux") {
-    assert.ok(samples[0]!.peakMib > 0, "Linux must positively measure the real child's VmHWM");
+    assert.ok(samples[0]!.peakMib > 0, "Linux must positively measure the real child's sampled RSS");
   } else {
     assert.deepEqual(samples, [], "without Linux /proc the real sampler records no invented peak measurement");
   }
