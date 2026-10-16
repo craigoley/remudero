@@ -1,0 +1,74 @@
+- id: W1-T9909
+  title: "A DAEMON WHOSE BOOT FAILS RELEASES ITS WATCHERS AND EXITS — daemonCommand arms the GitHub-event wake's fs.watch, its signal handlers, the git credential socket, the read plane and the memory census before the try whose finally releases them, so a boot step that throws between them (W1-T9816's bootRunChildMode refuses an unreadable ledger union by design) leaves a live watcher that keeps the process from exiting, and the launcher never revives it; agent R1 hit a 10-minute hang in a daemonCommand test on 2026-10-16"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — what daemonCommand releases when its boot throws; which boot steps refuse, and why, is unchanged
+  band_meaning: blast-radius
+  origin: "coordinator fan-out 2026-10-16, agent R1 lead (tracker 'R1 done', LEADS (R1)); filing agent F6"
+  plan_refs: [W1-T9816, W1-T2568, W1-T5115, W1-T9087]
+  files:
+    - src/run-task.ts
+    - test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main d6f6dddf3 (src/run-task.ts `daemonCommand`; symbols, not lines):
+    - `acquireDrainLock` takes the drain lock. Then `(deps.wireSweepWake ?? wireSweepWakeToDaemon)(config.root, ...)`
+      arms an `fs.watch` on the shared state directory (src/lib/github-event-wake.ts `watchSweepWakeMarker`), and
+      `process.once("SIGINT"/"SIGTERM", onSignal)` registers the signal handlers.
+    - Next come the boot steps. `bootRunChildMode` (src/lib/run-child-mode.ts, W1-T9816, PR 12372) throws
+      `run child settlements unreadable: <files>` whenever the ledger union is incomplete under `on` or `auto`. Its
+      docstring says "An unreadable union refuses the boot", so the refusal is intended. `adoptRunChildren` and
+      `readLedgerLines` can also throw here.
+    - After those come `startDaemonGitCredentialSocket`, `startReadPlane`, `startReadPlaneTelemetry` and
+      `startDaemonMemoryCensus`, and only then the `try` whose `finally` calls `githubEventWake.close()`,
+      `removeListener` for both signals, `gitCredentialSocket?.close()`, `readPlane?.stop()`, `loopTelemetry.stop()`,
+      `stopMemoryCensus()`, `consumeStop` and `drainLock.release()`.
+    - So a throw from any boot step before that `try` skips the whole `finally`. The armed `fs.watch` handle keeps the
+      event loop alive, the process never exits, and the launcher sees a live process instead of an exit to revive.
+    OBSERVED 2026-10-16 by agent R1 (tracker LEADS (R1)): a daemonCommand test whose boot threw on an unreadable union
+    hung for 10 minutes. The handle that held it open was the githubEventWake watcher.
+    PRODUCTION, measured 2026-10-16 ~18:15Z on the Azure host: 0 `settlements unreadable` rows in the live ledger or the
+    newest archive. The live daemon booted at 17:11:32Z on e539a44a5, which lacks ddfb93168 (W1-T9816, merged
+    17:23Z). So the next boot is the first that runs the refusing union read. The defect is latent, not yet observed
+    live. When it does fire, a refusal that should cost one restart becomes a hung core with no exit for the launcher
+    to act on.
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and all 432 origin heads for a boot that throws, a watcher that
+    never closes and an unreadable union: no shard and no head owns it. W1-T9816 owns the refusal itself and is not
+    changed here.
+  design: |
+    No new constant, no new policy key, and no change to which boot steps refuse.
+    1. Each resource daemonCommand acquires before its loop is released by ONE cleanup that runs on every exit path:
+       the loop's normal return, a thrown loop, and a throw from any boot step after the drain lock is taken. That
+       covers the githubEventWake watcher, both signal listeners, the git credential socket, the read plane and its
+       telemetry, the memory census and the drain lock. The cleanup releases only what was acquired (a boot that throws
+       before the socket starts closes no socket), and a release that fails is ledgered, never thrown over the boot's
+       own error.
+    2. The boot's error still propagates. daemonCommand rejects (or returns non-zero) with the original message, so the
+       launcher sees an exit and the restart policy revives it. The refusal is never turned into a success-shaped exit.
+    3. The cleanup is shared with the existing `finally`, not a second copy of it, so a resource added later joins
+       both paths at once.
+    Tests go in test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts, titled verbatim as in the
+    proofs. Drive the real daemonCommand with `sweep.runChild.mode` read as `auto` and a state root holding one
+    unreadable ledger archive, so bootRunChildMode throws for real. Leave `wireSweepWake` on its real default so a
+    real fs.watch is armed. Assert the ABSENT signal: after the rejection, `process.getActiveResourcesInfo()` lists no
+    FSEvent watcher the test did not have before the call, both signal listener counts are back to their prior values,
+    and the drain lock file is gone. As a positive control, the same probe, taken before the boot step throws, does
+    list the watcher.
+  acceptance:
+    - claim: "a boot that throws on an unreadable ledger union leaves no fs.watch handle, no added SIGINT/SIGTERM listener and no drain lock, and its error still reaches the caller"
+      proof: 'grep: test("W1-T9909: a boot that throws on an unreadable union releases its watcher and exits" in test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts'
+    - claim: "the boot's own error propagates unchanged, never a success-shaped exit, and a failed release is ledgered beside it"
+      proof: 'grep: test("W1-T9909: the boot error propagates and a failed release is ledgered" in test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts'
+    - claim: "a normal stop still releases every resource once"
+      proof: 'grep: test("W1-T9909: a normal stop releases each resource once" in test/a-daemon-whose-boot-fails-releases-its-watchers-and-exits.test.ts'
+  falsifier: |
+    At origin/main, the unreadable archive makes bootRunChildMode throw after wireSweepWakeToDaemon armed its
+    fs.watch and before the try. The finally never runs: the FSEvent handle is still active and the SIGINT listener
+    count is one higher, so the first test fails, and an un-awaited test process does not exit. The third test passes
+    before and after; it guards against a fix that releases a resource twice or skips the normal path.

@@ -1,0 +1,91 @@
+- id: W1-T9910
+  title: "A SETTLED RUN CHILD NEVER PINS ITS ENGINE OR PLAN SNAPSHOT — a probe or run child that ends before writing status.json leaves a spec-only run directory that classifyRunDir reads as unreadable forever, and pruneEngineTrees, prunePlanSnapshots and pruneProbeRunDirs all keep what a non-terminal directory names; on 2026-10-16 50 such directories (49 probes, oldest 10-14T21:51Z) pinned all 17 non-newest engine trees (2.2 GB) and 22 plan snapshots (471 MB): the settler records the end it observed, and a boot settles the backlog the ledger proves settled"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the on-disk end state of a run directory whose child never wrote status; engine, snapshot and probe retention rules are unchanged
+  band_meaning: blast-radius
+  origin: "coordinator fan-out 2026-10-16, agent E1 lead (tracker 'LEAD (E1)': stale engine trees not pruned after W1-T9738 went live); filing agent F6"
+  plan_refs: [W1-T9738, W1-T9838, W1-T9077, W1-T9082, W1-T9085, W1-T9855]
+  files:
+    - src/lib/run-child.ts
+    - src/lib/run-child-contract.ts
+    - src/run-task.ts
+    - test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 ~18:10Z on the Azure host (read-only, ~/rmd-state2/state):
+    - engines/ holds 18 engine trees, 141-151 MB each (du 2.2 GB). The newest, 455b4d00, was built at 17:57:27Z.
+    - At 17:58:07Z `engine.pruned` removed exactly one engine, 421bbd17. So W1-T9738's prune runs, and that engine was
+      the only one nothing named.
+    - runs/ holds 68 run directories. 50 have spec.json and no status.json: 49 `probe-*` dirs (oldest
+      10-14T21:51Z, newest 10-16T16:00Z) and 1 `run-W1-T9482-1792163386396-7afb`. Their specs name 17 distinct engine
+      sourceHashes, which are all 17 engines except the newest.
+    - plan-snapshots/ holds 22 files (471 MB, ~17.6 MB each, oldest 10-14T21:51Z).
+    - The probes' own `run_child.shadow` settle rows (archive ledger.2026-10-16T17-23-25-589Z) carry
+      `"error":"status unreadable: missing: ENOENT ... runs/probe-W1-T9484-1792166353830-1279/status.json"`. So the
+      parent knew the child ended with no status, recorded it, and left the directory as it was.
+    - E1 suspected the 46 directories the boot census reads as `unreadable`. That count is now 50, and it is the cause.
+    READ at origin/main d6f6dddf3 (symbols, not lines):
+    - src/lib/run-child-contract.ts `classifyRunDir` returns `unreadable` when `readStatus` fails, and a missing
+      status.json fails.
+    - src/lib/engine-tree.ts `namedByLiveRuns` skips only `terminal` directories. For any other kind it adds the spec's
+      `engine.sourceHash` when the spec reads, so `pruneEngineTrees` keeps that engine for as long as the directory
+      exists. Its rule is "never by count or age", and it is right not to guess.
+    - src/lib/run-child.ts `prunePlanSnapshots` counts an unreadable status as non-terminal and keeps the snapshot it
+      names. `pruneProbeRunDirs` → `pruneTerminalRunDirs` removes only directories whose status reads terminal, so a
+      spec-only directory is never trimmed.
+    - The probe's settle path (`settleRow` after `runProbe`) and the run child's lost path (`awaitRunChild`,
+      `run_child.lost`) both ledger the end they observed. Neither writes it into the directory.
+    So every probe whose child dies before its first status write leaks one directory. That directory pins one engine
+    (~145 MB) and one plan snapshot (~17.6 MB) with no end. The rate is ~17 engines in ~44 h.
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and all 432 origin heads: no shard and no head owns it. Control:
+    main reads 1 shard for the combined subject pattern, and no head reads more.
+    - W1-T9738 (merged, PR 12345) prunes a dangling or worktree-linked newest engine, but it keeps any engine a
+      non-terminal directory names, which is this case.
+    - W1-T9838 (queued, src/lib/engine-tree.ts) rebuilds an unsafe present engine in the same pass. It does not
+      change which engines a run directory pins.
+    - W1-T9855 (queued) refuses a worktree with no install before its worker, which is one way a child dies before
+      its status. It narrows the inflow and does not settle what is already on disk.
+    - E1's own leads became W1-T9854 and W1-T9855. Neither covers retention.
+  design: |
+    No new constant, no age or count bound, and no change to pruneEngineTrees', prunePlanSnapshots' or
+    pruneProbeRunDirs' rules: a directory that is truly in flight keeps everything it names.
+    1. FORWARD: when the probe's settle path or the run child's lost path ends a child whose directory holds no terminal
+       status, it records that end in the directory as a terminal status, through the contract's atomic writer. The
+       state is `aborted`; the failure names the observed reason (the same text the settle row ledgers); the identity
+       is the child's pid with `startTicks: "unknown"` when its start was never read; and the engine sha comes from
+       the spec. If the contract cannot express a directory with no pid at all (the backlog in step 2), the builder
+       extends parseStatus with one explicit settled-by-parent identity form and says so in the PR. It never invents
+       a pid. classifyRunDir then reads it as `terminal`, so all three prunes release it with no change of
+       their own. A status the child did write is never overwritten.
+    2. BACKLOG: once per boot, a spec-only directory is settled the same way only when the ledger union records its
+       run id as settled: a `run_child.shadow` row for a probe, or `run_child.lost` / `run_child.settled` for a run.
+       The read goes through the bounded union reader (`readLedgerUnionRawLinesSync` with a pattern over those run
+       ids), never an unfiltered `readLedgerUnionRecordsSync`. A directory with no settle row is left as it is and
+       counted, and an unreadable union settles nothing and says so. Both cases go in one boot row naming the
+       settled, unsettled and unread counts.
+    3. A directory this process spawned and has not yet settled is never touched, whatever its files: the in-flight
+       window between writeSpec and the child's first status write stays non-terminal.
+    Tests go in test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts, titled verbatim as in the
+    proofs. Use a real state root: a published engine, a plan snapshot, and a probe whose fake child exits before
+    writing status. Then run the real pruneEngineTrees and prunePlanSnapshots, and assert the engine and snapshot are
+    GONE. Leaving them is the defect, so the assertion is on their absence. Positive control: an in-flight spec-only
+    directory still keeps its engine.
+  acceptance:
+    - claim: "a probe whose child exits before writing status leaves a terminal directory, and the next prune removes the engine and plan snapshot it named"
+      proof: 'grep: test("W1-T9910: a probe that ends with no status no longer pins its engine or plan snapshot" in test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts'
+    - claim: "a boot settles a spec-only directory only when the ledger union records its run id as settled, and reports unsettled and unread counts"
+      proof: 'grep: test("W1-T9910: a boot settles only the spec-only directories the ledger proves settled" in test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts'
+    - claim: "an in-flight spec-only directory and a child-written status are never rewritten, and still keep their engine"
+      proof: 'grep: test("W1-T9910: an in-flight directory and a child-written status are left alone" in test/a-settled-run-child-never-pins-its-engine-or-plan-snapshot.test.ts'
+  falsifier: |
+    At origin/main the probe's settle path writes nothing into the directory: classifyRunDir reads it `unreadable`,
+    namedByLiveRuns adds its spec's engine hash, and pruneEngineTrees keeps that engine, so the first test fails on
+    the engine still being present. The third test passes before and after. It guards against a fix that settles
+    by age or deletes an in-flight directory.
