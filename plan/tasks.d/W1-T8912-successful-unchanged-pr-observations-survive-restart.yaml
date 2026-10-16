@@ -12,7 +12,7 @@
   origin: operator#2026-10-12-console-flow-followups
   plan_refs: [W1-T4480, W1-T8533, W1-T8707]
   files: [src/lib/board-snapshot-cache.ts, src/lib/status.ts, test/board-snapshot-cache.test.ts, test/repository-flow.test.ts, test/repository-flow-cached-wiring.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W8684 correctly refuses a complete current zero from stale PR clocks. However the closed

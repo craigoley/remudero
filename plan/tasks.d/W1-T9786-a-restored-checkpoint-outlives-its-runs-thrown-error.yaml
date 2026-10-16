@@ -11,7 +11,7 @@
   origin: "fan-out 2026-10-15/16 investigator I3: why W1-T9047 (P1) was not dispatched for 12+ hours"
   plan_refs: [W1-T9047, W1-T8676, W1-T7837, W1-T4655, W1-T9680, W1-T9482, W1-T534]
   files: [src/run-task.ts, test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

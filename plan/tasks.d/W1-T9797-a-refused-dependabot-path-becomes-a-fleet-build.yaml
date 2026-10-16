@@ -11,7 +11,7 @@
   origin: "operator PR queue request 2026-10-16T11:25Z (review 11968, 12043, 12191, 12219, 12289; fix the root cause)"
   plan_refs: [W1-T54, W1-T2705, W1-T3707, W1-T9584, W1-T9586, W1-T2427]
   files: [src/run-task.ts, src/lib/dep-review.ts, test/a-refused-dependabot-path-becomes-a-fleet-build.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

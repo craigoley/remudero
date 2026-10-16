@@ -1,0 +1,69 @@
+- id: W1-T9901
+  title: "A PLACEMENT GARDENER MOVES MISPLACED TESTS IN SMALL RENAME-ONLY PRS AND MEASURES THE MAP — it re-runs placeTest on a cadence derived from its own measured drift, opens pure-rename PRs through the normal review and merge flow, scores the map by moves merged versus closed, and exports the src map for a later src/lib split (test restructure, letter I)"
+  repo: remudero
+  depends_on: [W1-T9879, W1-T9874]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, the placement gardener; it spans the garden registry, run-task wiring and the move tool
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter I'
+  plan_refs: [W1-T9874, W1-T9879]
+  files:
+    - src/lib/test-placement-gardener.ts
+    - src/lib/garden-registry.ts
+    - src/run-task.ts
+    - scripts/test-placement/pins.json
+    - test/gardeners/the-placement-gardener-moves-a-misplaced-test.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 7 (2026-10-16): a misplacement gardener opens small pure-rename move PRs through the normal flow and
+    measures the map's accuracy. Its map later drives the src/lib split (ruling 1).
+    MEASURED at the snapshot: 425 low-confidence and 15 no-signal placements, and 723 tests that span 3 or more
+    subsystems (plan/seeds/test-restructure-2026-10-16/taxonomy.md sections 0 and 6). Some waves will place tests wrongly, and the map
+    drifts as src grows.
+    Citations re-verified at origin/main 889966ea5 (2026-10-16). The gardens are listed in REGISTERED_GARDEN_NAMES (src/lib/garden-registry.ts) and in
+    GARDEN_NAMES and the garden switch in src/run-task.ts (~339, and the `case "hot-file"` arm).
+  design: |
+    1. Register a garden "test-placement" in REGISTERED_GARDEN_NAMES and GARDEN_NAMES. src/lib/test-placement-gardener.ts
+       exports runTestPlacementGarden.
+    2. EACH PASS:
+       - run placeTest over every test at head;
+       - a file is misplaced when its computed folder differs from its current folder;
+       - candidates are ranked by score margin over the runner-up, and pinned files are skipped.
+    3. MOVE PRS. Batches are built with W1-T9879's move machinery: pure renames, open-PR files skipped, rows re-keyed,
+       the blame list and wave log written. Each is opened READY (never draft) on a gardener branch and goes through
+       normal review and auto-merge.
+       - The first batch is one file. Batch size afterwards is the median size of the gardener's own merged move PRs,
+         derived from its record with no constant cap.
+       - Unless a closed PR was the operator's call, the next batch halves.
+    4. CADENCE. The gap between passes follows measured drift: it doubles after a pass that finds nothing and halves
+       after one that finds drift. It stays within the garden loop's existing schedule and introduces no new constant.
+    5. ACCURACY.
+       - Ledger rows test_placement.move_opened, move_merged and move_closed are written per file, with the source
+         folder, target folder and confidence band.
+       - Accuracy = merged / (merged + closed), per subsystem and per confidence band, shown on the gardener scorecard.
+       - A closed move pins the file to its current folder in scripts/test-placement/pins.json (written through the
+         same PR flow), so it is never proposed again.
+    6. EXPORT. `rmd test-place --export-src-map` writes the src module -> subsystem map with each module's test count
+       and the measured accuracy, as input for the later src/lib split.
+    New test under test/gardeners/.
+  acceptance:
+    - claim: 'a misplaced test gets a rename-only move pull request'
+      proof: 'grep: test("W1-T9901: a misplaced test gets a rename-only move pull request" in test/gardeners/the-placement-gardener-moves-a-misplaced-test.test.ts'
+    - claim: 'a closed move pins the file and is not proposed again'
+      proof: 'grep: test("W1-T9901: a closed move pins the file and is not proposed again" in test/gardeners/the-placement-gardener-moves-a-misplaced-test.test.ts'
+    - claim: 'map accuracy is merged moves over decided moves'
+      proof: 'grep: test("W1-T9901: map accuracy is merged moves over decided moves" in test/gardeners/the-placement-gardener-moves-a-misplaced-test.test.ts'
+    - claim: 'the pass interval follows the measured drift'
+      proof: 'grep: test("W1-T9901: the pass interval follows the measured drift" in test/gardeners/the-placement-gardener-moves-a-misplaced-test.test.ts'
+    - claim: 'the garden is registered'
+      proof: 'grep: test-placement in src/lib/garden-registry.ts'
+    - claim: 'run-task wires the garden'
+      proof: 'grep: runTestPlacementGarden( in src/run-task.ts'
+  falsifier: |
+    On origin/main no test-placement garden is registered and no gardener module exists, so every grep misses. Nothing
+    corrects a misplaced test or measures the map.
