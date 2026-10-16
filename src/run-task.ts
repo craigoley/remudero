@@ -1176,7 +1176,7 @@ const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./l
 };
 workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 const ciRemedyComponent = captureCiRemedyComponent(workerBoundaryStack.loadedModule, ciLogNamedSourcePaths, existsSync, join);
-import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
+import { benchmarkCohortCadence, type BenchmarkCohortCadence, type BenchmarkCohortCadenceDeps } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
@@ -13621,12 +13621,10 @@ export async function runFixRung(opts: {
     // enforces.
     const attempt = strikes + 1;
     const round: "resume" | "fresh" = attempt === 1 ? "resume" : "fresh";
-    // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet
-    // claim set the fix worker below is being sent to resolve — BEFORE
-    // `review` is reassigned to this round's freshly computed verdict, so
-    // `detectReviewFalseBlock` (after the review call, below) can tell a
-    // byte-identical re-block apart from real progress. Keyed on the SAME
-    // worker-visible unmet set the fix rung actually dispatches (W1-T166).
+    // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet claim set the fix worker below is
+    // being sent to resolve — BEFORE `review` is reassigned to this round's freshly computed verdict, so
+    // `detectReviewFalseBlock` (after the review call, below) can tell a byte-identical re-block apart from real
+    // progress. Keyed on the SAME worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
     const refutedFlake = flakeClaimsForHead(roundLedger, opts.taskId, priorHeadSha, prNumber).length > 0;
@@ -13639,6 +13637,15 @@ export async function runFixRung(opts: {
       if (resumed.kind === "refused") deps.log("fix.commit_refused", { head_sha: priorHeadSha,
         reason: resumed.detail, scope_amendment_detail: `NEEDS_SCOPE ${paths.join(",")}` });
       return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+    }
+    // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
+    const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
+    if (lastScope?.reason === "main-owned" && typeof lastScope.main_sha === "string" && Array.isArray(lastScope.paths) &&
+        Array.isArray(lastScope.changed_paths) && hostWorktreeGitResult(opts.worktreePath, ["merge-base", "--is-ancestor", lastScope.main_sha, priorHeadSha]).status === 0) {
+      const retried = await amendScope(lastScope.paths as string[], lastScope.changed_paths as string[], priorHeadSha);
+      if (retried.kind !== "refused") {
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
+      }
     }
     const priorDesign = roundLedger.find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
@@ -14419,15 +14426,26 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
       }
       let amendment: ScopeAmendmentOutcome;
-      const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
-      if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
-        amendment = { kind: "refused", reason: "main-owned",
-          detail: `main changed ${scopeMain.owned.join(", ")} since this PR's merge base; refresh against main` };
-        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
-      } else try {
+      const readWorkerChanged = (): string[] => {
         const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
-        amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
+        return changed;
+      };
+      // W1-T9807: main's touch refuses only a path main is repairing, one this ci-log round's red names (#10369).
+      const scopeMainOwned = fixMode === "ci-log" && logNamedMain.outcome === "compared"
+        ? fixAction.paths.filter((path) => logNamedMain.owned.includes(path)) : [];
+      if (scopeMainOwned.length > 0) {
+        amendment = { kind: "refused", reason: "main-owned",
+          detail: `main changed ${scopeMainOwned.join(", ")} since this PR's merge base; refresh against main` };
+        let read: { paths: string[] } | { error: string };
+        try { read = { paths: readWorkerChanged() }; } catch (error) { read = { error: String(error) }; }
+        const changed = "paths" in read ? read.paths : undefined;
+        const mainTip = hostWorktreeGitResult(opts.worktreePath, ["rev-parse", "--verify", "refs/remotes/origin/main"]);
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha,
+          pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
+          changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
+      } else try {
+        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
@@ -14450,6 +14468,17 @@ export async function runFixRung(opts: {
           throw error;
         } finally { logFixDone(landing?.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing); }
       } else logFixDone();
+      if (scopeMainOwned.length > 0 && deps.updateBranch && prNumber !== undefined) {
+        const refresh = { pr_number: prNumber, head_sha: priorHeadSha, red_checks: [...new Set((currentCiFailures ?? []).map((f) => f.name))],
+          test_files: [], matching_base_files: scopeMainOwned, method: "merge", reason: "scope-main-owned" };
+        try {
+          const updated = await deps.updateBranch(prNumber);
+          if (updated.ok) deps.log("fix.base_refreshed", refresh);
+          else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
+        } catch (error) {
+          deps.log("fix.base_refresh_failed", { ...refresh, error: String(error) });
+        }
+      }
       return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" };
     }
 
@@ -32080,30 +32109,10 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   return { checkLedgerCompaction: check, runLedgerCompaction: run };
 }
 
-interface BenchmarkCohortHookDeps {
-  config?: Config;
-  clock?: Clock;
-  intervalMs?: number;
-  run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
-}
-
-export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = {}): {
-  checkBenchmarkCohort: () => boolean;
-  runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
-} {
-  const clock = deps.clock ?? systemClock;
-  const intervalMs = deps.intervalMs ?? 30_000;
-  let lastStartedAt = Number.NEGATIVE_INFINITY;
-  return {
-    checkBenchmarkCohort: () => {
-      const current = clock.now();
-      if (current - lastStartedAt < intervalMs) return false;
-      lastStartedAt = current;
-      return true;
-    },
-    runBenchmarkCohortPass: () => (deps.run ?? ((stateDir) => runBenchmarkCohortPass(stateDir, { maxSources: 4 })))
-      (dirname(ledgerPathFor(deps.config ?? loadConfig()))),
-  };
+export function buildBenchmarkCohortDaemonHooks(
+  deps: Omit<BenchmarkCohortCadenceDeps, "stateDir"> & { config?: Config } = {},
+): BenchmarkCohortCadence {
+  return benchmarkCohortCadence({ ...deps, stateDir: () => dirname(ledgerPathFor(deps.config ?? loadConfig())) });
 }
 
 /** The live ledger is bounded independently of its rotations, so this reads the recent fire
