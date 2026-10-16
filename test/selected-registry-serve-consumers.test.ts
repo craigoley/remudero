@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, mock } from "node:test";
-import { buildOnboardingReadinessRoute } from "../src/lib/serve.js";
+import { buildOnboardingReadinessRoute, buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -81,6 +81,34 @@ test("selected readiness missing source stays unknown beside a healthy legacy re
   assert.equal(row.selected_state, "unknown");
   assert.equal(row.reason, "missing");
   assert.equal(row.publication_permission, "not-granted");
+});
+
+test("selected serve composition forwards one shadow context to the real registry readiness and dashboard routes", async (t) => {
+  const f = fixture(t), ledgerPath = join(f.root, "ledger.ndjson"), planPath = join(f.root, "tasks.yaml");
+  writeFileSync(f.legacy, selectedText("core"));
+  writeFileSync(ledgerPath, ""); writeFileSync(planPath, "[]\n");
+  const controller = new AbortController(); t.after(() => controller.abort());
+  const deps = {
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath, github: {} },
+    panelGraph: { root: f.root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: {}, ratify: { approve() {}, reframe() {} } },
+    issues: { close: () => assert.fail("source qualification must never close an issue") },
+    ledgerPath, fleetControlRoot: f.root, questionsRoot: f.root,
+    tokens: { read: "r", write: "w" }, githubAppRefresh: { start: () => ({ armed: false }) }, log: () => {},
+    registry: { repoRegistryPath: f.legacy }, onboardingReadiness: { gateway }, instances: { registryPath: f.legacy },
+    selectedRegistryObservation: { ...f.options, input: { signal: controller.signal } },
+  } as unknown as ServeDeps;
+  const routes = buildServeRoutes(deps);
+  for (const path of ["/v1/registry", "/v1/onboarding/readiness", "/v1/repos/summary"]) {
+    const route = routes.find(route => route.path === path); assert.ok(route, path);
+    let raw = "", code = 0;
+    await route.handler({ url: path + "?repo=owner/repo" } as never,
+      { writeHead: (n: number) => { code = n; }, end: (text: string) => { raw += text; } } as never, { params: {} });
+    assert.equal(code, 200, raw);
+    assert.ok(!raw.includes("selected-material-sentinel"));
+  }
+  for (let n = 0; n < 100 && f.rows.filter(row => row.step === STEP).length < 3; n++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(f.rows.filter(row => row.step === STEP).map(row => row.fields.action).sort(), ["repo-dashboard", "serve-readiness", "serve-registry"]);
+  assert.ok(f.rows.every(row => row.fields.publication_permission === "not-granted"));
 });
 
 test("selected readiness absent opt-in preserves legacy checks without a selected read or receipt", async (t) => {
