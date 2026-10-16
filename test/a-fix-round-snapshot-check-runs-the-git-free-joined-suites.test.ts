@@ -15,10 +15,15 @@ const SCRIPT = "scripts/citation-anchor-census.mjs";
 const SHARD = "plan/tasks.d/W1-T9000-fixture.yaml";
 const SHARD_COUNT = 901; // the census's real-repo test refuses a corpus of 900 shards or fewer
 const HYGIENE = "./test/setup/tmp-hygiene.ts";
-/** Spelled by concatenation on purpose: this file runs the declared git-free suites under a git-less PATH (a different
- *  question from the census-admission run), so it must not read as a second spawner of the admitted census suites to the
- *  single-spawner scan in the-gate-admission-population-is-checked-from-one-scan. */
-const NODE_TEST_FLAG = `--${"test"}`;
+/** A throwaway suite whose only act is spawning git: the positive control for the ENOENT detector. It is written to a
+ *  temp dir rather than borrowing a real repo suite, so this file never runs an admitted census suite itself (that run
+ *  belongs to fast-gate-admits-the-census-class alone). */
+const GIT_SPAWNING_CONTROL = [
+  'import { test } from "node:test";',
+  'import { execFileSync } from "node:child_process";',
+  'test("spawns git", () => { execFileSync("git", ["--version"]); });',
+  "",
+].join("\n");
 /** How a spawn of an absent git reads in a suite's own output. */
 const GIT_ENOENT = /spawn(?:Sync)? git ENOENT|ENOENT[^\n]*\bgit\b|\bgit\b[^\n]*ENOENT/;
 
@@ -112,15 +117,19 @@ test("W1-T9484: every suite declared gitFree runs with git absent from PATH", ()
   assert.ok(!declared.includes("test/the-affected-suite-reach-ratchet.test.ts"), "the reach ratchet is read from the snapshot, not declared");
 
   const absent = makeGitAbsentBin();
+  const controlDir = mkdtempSync(join(tmpdir(), "rmd-gitfree-control-"));
   try {
     // Positive controls: git really is gone from this PATH, and the detector reads a real git-less failure.
     const probe = spawnSync("git", ["--version"], { env: { PATH: absent.bin }, encoding: "utf8" });
     assert.equal((probe.error as NodeJS.ErrnoException | undefined)?.code, "ENOENT");
     assert.equal(spawnSync("sh", ["-c", "exit 0"], { env: { PATH: absent.bin } }).status, 0, "other tools stay reachable");
     const run = (files: string[]) => spawnSync(process.execPath,
-      [NODE_TEST_FLAG, "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE, ...files],
+      ["--test", "--test-reporter=tap", "--import", "tsx", "--import", HYGIENE, ...files],
       { cwd: ROOT, env: cleanEnv({ PATH: absent.bin }), encoding: "utf8", timeout: 300_000, maxBuffer: 64 * 1024 * 1024 });
-    const control = run(["test/bound-kind-declared.test.ts"]);
+    const controlFile = join(controlDir, "spawns-git.test.mjs");
+    writeFileSync(controlFile, GIT_SPAWNING_CONTROL);
+    const control = run([controlFile]);
+    assert.notEqual(control.status, 0, "the git-spawning control fails without git");
     assert.match(`${control.stdout}${control.stderr}`, GIT_ENOENT, "a suite that spawns git reads as ENOENT here");
 
     const result = run(declared);
@@ -130,5 +139,6 @@ test("W1-T9484: every suite declared gitFree runs with git absent from PATH", ()
     assert.doesNotMatch(text, GIT_ENOENT, "a gitFree suite spawned git");
   } finally {
     absent.cleanup();
+    rmSync(controlDir, { recursive: true, force: true });
   }
 });
