@@ -52471,7 +52471,6 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   clock?: Clock;
 };
 
-// W1-T8827: first commit, else earliest ledger row, else unknown; never 0.
 function lifetimeShardAge(
   taskId: string,
   root: string,
