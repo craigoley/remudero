@@ -369,6 +369,11 @@
     "dateNow": 0,
     "newDate": 1
   },
+  "src/lib/tick-read-worker.ts": {
+    "legacy": 1,
+    "dateNow": 0,
+    "newDate": 2
+  },
   "src/lib/time-window.ts": {
     "legacy": 0,
     "dateNow": 0,
@@ -410,9 +415,9 @@
     "newDate": 1
   },
   "src/run-task.ts": {
-    "legacy": 23,
-    "dateNow": 54,
-    "newDate": 41
+    "legacy": 22,
+    "dateNow": 51,
+    "newDate": 38
   },
   "src/spike.ts": {
     "legacy": 0,
