@@ -1633,6 +1633,8 @@ import {
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
   reconcileDependabotTitle,
+  depReviewRequiredSet,
+  type DepReviewRequired,
   overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
@@ -23999,6 +24001,13 @@ export interface DepReviewDeps {
   root?: string;
   /** W1-T9664: the daemon's landing state root. Given, a proposal is STAGED for the async landing sweep, not landed inline. */
   landingStateRoot?: string;
+  requiredChecks?: (branch: string) => Promise<DepReviewRequired>; // W1-T9929: an injected `gh` without it holds on every red
+}
+
+export async function readDepReviewRequiredChecks(
+  owner: string, repo: string, branch: string, root: string, readText: (args: string[]) => Promise<string> = ghTextAsync,
+): Promise<DepReviewRequired> {
+  return depReviewRequiredSet(await readRequiredStatusCheckContextsAsync(owner, repo, branch, readText), readCiGateRequiredChecks(root));
 }
 
 /** W1-T9664: the real proposal capture. Staged, a record the queue refused throws, so the caller keeps the bot PR open. */
@@ -24095,7 +24104,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
+    "number,url,title,body,headRefOid,headRefName,baseRefName,author,statusCheckRollup,commits",
   ])) as {
     number: number;
     url: string;
@@ -24103,6 +24112,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     body: string;
     headRefOid: string;
     headRefName?: string;
+    baseRefName?: string;
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
     commits?: DependabotHeadCommit[];
@@ -24156,12 +24166,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
 
   let selectedChecks = dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []);
+  const readRequired = deps.requiredChecks ?? (deps.gh === undefined ? (b: string) => readDepReviewRequiredChecks(owner, repo, b, proposalRoot) : undefined);
+  const required: DepReviewRequired = readRequired ? await readRequired(view.baseRefName ?? "main") : { kind: "all-checks", fallback: "required-reader-not-injected" };
   const input = {
     author: { login: view.author?.login ?? "" },
     title: view.title ?? "",
     body: view.body ?? "",
     diff,
     checks: selectedChecks,
+    required,
   };
   let result = decideDepReview(input);
   if (readChecks !== undefined && (result.decision === "arm" || result.decision === "hold")) {
@@ -24174,11 +24187,12 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
   }
   if (result.decision === "arm") {
-    const selectedState = checksStateFromRollup(selectedChecks, undefined);
+    const selectedState = checksStateFromRollup(selectedChecks, required.kind === "required" ? required.names : undefined);
     if (selectedState !== "green") result = { ...result, decision: "hold",
       reason: `selected check evidence is ${selectedState}; no success or arm without current green evidence` };
   }
-  log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
+  log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid, advisory_red: result.advisoryRed ?? [],
+    judged_against: required.kind, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
   try {
@@ -24342,7 +24356,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       repo,
       sha: view.headRefOid,
       state: "success",
-      description: `remudero-review: PASS — ${result.pinOnly ? "pin-only action SHA refresh" : `${result.semverLevel} dependency bump`}, confined + gates green`,
+      description: `remudero-review: PASS — ${result.pinOnly ? "pin-only action SHA refresh" : `${result.semverLevel} dependency bump`}, confined + gates green${
+        result.advisoryRed?.length ? `; advisory red: ${result.advisoryRed.join(", ")}` : ""}`,
       taskId,
       evidence: "no_evidence",
       ledgerPath,
