@@ -5,6 +5,7 @@ import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { sameHost } from "./host-identity.js";
 
 // Why: the four CodeQL rounds this helper closed — docs/forensics/fs-race-safe.md#module-header.
 /**
@@ -365,7 +366,7 @@ export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): bo
   // was never asked. A container restart replaces the host id, not necessarily the holder.
   if (held.host !== undefined) {
     const myHost = (opts.hostname ?? hostname)();
-    if (held.host !== myHost) {
+    if (!sameHost(held.host, myHost)) {
       const inContainer = (opts.inContainer ?? defaultInContainer)();
       return inContainer && looksLikeContainerId(held.host);
     }

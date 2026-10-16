@@ -96,6 +96,7 @@ import { OPENWEIGHT_API_KEY_ENV } from "./worker-provider.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 import { readInflightLock } from "./inflight-lock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { sameHost } from "./host-identity.js";
 import { loadPlan, type Plan } from "./plan.js";
 import { buildDigest, buildMarkerAwareDigest, sendDigest, sendMarkerAwareDigest } from "./digest.js";
 import { createLastSeenStore, hashToken, lastSeenPath } from "./last-seen.js";
@@ -460,7 +461,7 @@ export function judgeInflightLocks(inflightDir: string, probes: InflightLockProb
     const info = readInflightLock(inflightDir, taskId);
     if (!info) continue;
     const run: LiveInflightRun = { taskId, runId: info.run_id, pid: info.pid };
-    if (info.host === myHost) {
+    if (sameHost(info.host, myHost)) {
       if (isPidAlive(info.pid)) live.push(run);
       continue;
     }
