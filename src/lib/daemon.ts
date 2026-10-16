@@ -94,8 +94,11 @@ import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } fr
 // alongside the type-only ones above: sweep.ts imports nothing from this module, so this closes
 // no cycle either, same as the value import just below.
 import {
+  detectStaleBody,
   trackStaleReviewerSkipRecurrence,
   renderHeldReviewQueueBlocker,
+  type StaleBodyFinding,
+  type StaleBodyPrView,
   type StaleReviewerRecurrenceAction,
   type StaleReviewerRecurrenceState,
   type StaleReviewerSkipObservation,
@@ -823,6 +826,26 @@ export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly strin
   return requestedForSha === undefined ? undefined : { codeSha: requestedForSha, streak: 1, restartRequested: true };
 }
 
+/** W1-T9124 — which of a completed pass's open PRs had their body edited with no new head since their last
+ *  delivered verdict. Reads the ledger through the SAME `DaemonDeps.readLedgerLines` seam; a torn line is skipped,
+ *  as {@link priorStaleReviewerRecurrenceState} does. Empty when the pass reported no PR views. */
+export function staleBodyFindingsForTick(
+  views: readonly StaleBodyPrView[] | undefined,
+  readLedgerLines: (() => readonly string[]) | undefined,
+): StaleBodyFinding[] {
+  if (!views || views.length === 0 || !readLedgerLines) return [];
+  const rows: Array<Record<string, unknown>> = [];
+  for (const raw of readLedgerLines()) {
+    try {
+      rows.push(JSON.parse(raw) as Record<string, unknown>);
+    } catch (e) {
+      // torn/malformed line: skipped so one bad row cannot blind the detector to the rest of the ledger
+      void e;
+    }
+  }
+  return detectStaleBody(views, rows);
+}
+
 /** W1-T5476 — the terminal verdicts `postReviewStatusGuarded` withheld for stale reviewer code at or after
  *  `sinceMs`, read through `DaemonDeps.readLedgerLines`: review subprocesses write the refusals, so the ledger
  *  is the only place this process sees them. A torn line is counted, and a failed read is its own outcome.
@@ -1203,6 +1226,9 @@ function isPendingFreshness(read: DaemonFreshness | Promise<DaemonFreshness> | u
  *  case and changes nothing: every existing caller that returns `void` still satisfies this type. */
 export interface SweepCycleOutcome {
   reviewerCodeStale?: { oldSha: string; newSha: string };
+  /** W1-T9124 — the review-input identity of each open PR THIS pass read, so the tick can ask
+   *  {@link staleBodyFindingsForTick} which of them were edited without a push. Absent changes nothing. */
+  reviewInputViews?: readonly StaleBodyPrView[];
   /** W1-T4002 — the bounded set of CURRENT plan-only filing receipts THIS pass's full sweep
    *  positively proved (sweep.ts's `planOnlyRunBranchReceipts`, built from the SAME `OpenPrView[]`
    *  the sweep already read — no second GitHub call). Consulted by the tick's OWN dispatch-options
@@ -3808,6 +3834,7 @@ export async function runDaemon(
     log(HANDOFF_RECEIPT_STEP, { task_id: taskId, branch: receipt.branch, head_sha: receipt.headSha, carried: true });
   }
   let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
+  const staleBodyReported = new Set<string>();
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
   const laneDeliveryParks = priorLaneDeliveryParks(bootLedgerLines);
@@ -5603,6 +5630,17 @@ export async function runDaemon(
           log("daemon.escalation.failed", { task: "daemon", error: String((e as Error)?.message ?? e) });
         }
       }
+    }
+    // W1-T9124: a body edited with no push leaves the head-keyed status on a stale verdict; the sweep queues the
+    // re-review, and the daemon makes any still-unjudged input visible once per head+digest.
+    for (const stale of staleBodyFindingsForTick(latestSweepOutcome?.reviewInputViews, deps.readLedgerLines)) {
+      const staleKey = `${stale.prUrl}@${stale.headSha}@${stale.currentDigest}`;
+      if (staleBodyReported.has(staleKey)) continue;
+      staleBodyReported.add(staleKey);
+      log("review.stale_body_pending", {
+        pr_number: stale.prNumber, head_sha: stale.headSha, review_input_digest: stale.currentDigest,
+        reviewed_input_digest: stale.reviewedDigest, queued: stale.queued,
+      });
     }
     const sweepCycleOutcome = latestSweepOutcome;
     const tickStaleReviewerAction = staleReviewerAction;
