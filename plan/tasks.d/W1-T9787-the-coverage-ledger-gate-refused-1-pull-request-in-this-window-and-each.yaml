@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,13 @@
     - claim: "the lane that trips the coverage-ledger gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:12108:coverage-ledger in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:12108:coverage-ledger. The coverage-ledger gate went red on #12108 and was repaired; the repair touched test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts, test/helpers/native-gh-and-jq.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "Declared files are only learnings/ci.yaml, which exists at the base; the remedy is a learnings entry, not secrets, auth, deploy, merge policy or deletion."
+      - "Acceptance is a single grep proof that can be checked mechanically, so the result is verifiable."
+      - "The ci-learning family has a strong track record (28 merged, 1 declined, Beta mean 0.94), and the PR still goes through CI and review."
+    judged_at: "2026-10-16T15:58:15.078Z"
+    pin: "2c896b106f96faadbdfd3e81109ce4c0c86072871a237e2ed0b29297a6360a5d"
