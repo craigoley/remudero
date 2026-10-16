@@ -1,6 +1,7 @@
 /** Private measurements: unavailable is never zero; task runs own retry cost. */
 import { createHash } from "node:crypto";
 import { fixedClock } from "./clock.js";
+import type { WorkspaceUsageEvidence } from "./workspace-usage.js";
 
 export type CanaryBilling = "api" | "subscription";
 /** One scheduled case across arms. Retention turns and retries stay inside one run. */
@@ -35,6 +36,8 @@ export interface CanaryAttempt {
   billing: CanaryBilling;
   servedModel: string | null;
   terminal: "complete" | "error" | "timeout";
+  /** Optional private producer evidence; absent means unavailable, including historical trials. */
+  workspaceUsage?: WorkspaceUsageEvidence;
 }
 export interface CanaryRun {
   id: string;

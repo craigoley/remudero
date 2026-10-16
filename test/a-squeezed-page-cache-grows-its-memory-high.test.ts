@@ -105,7 +105,7 @@ test("the tuner never sets memory.high below the policy value", () => {
 });
 
 /** A host with one console container on a systemd-driver cgroup tree, and fake docker/sudo/systemctl. */
-function host(): { root: string; env: NodeJS.ProcessEnv; cg: string; calls: string } {
+function host(container = CONSOLE): { root: string; env: NodeJS.ProcessEnv; cg: string; calls: string } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}memory-high-tuner-`));
   const id = "c0ffee".padEnd(64, "0");
   const cg = join(root, "cg", "system.slice", `docker-${id}.scope`);
@@ -124,7 +124,7 @@ function host(): { root: string; env: NodeJS.ProcessEnv; cg: string; calls: stri
     writeFileSync(join(root, "bin", name), `#!/usr/bin/env bash\nprintf '%s\\n' "${name} $*" >> '${calls}'\n${body}\n`);
     chmodSync(join(root, "bin", name), 0o755);
   };
-  fake("docker", `case "$1" in inspect) echo ${id} ;; ps) echo "${CONSOLE} ${id}" ;; esac`);
+  fake("docker", `case "$1" in inspect) echo ${id} ;; ps) echo "${container} ${id}" ;; esac`);
   fake("systemctl", `[ "$1" = set-property ] && [ "$2" = --runtime ] && printf '%s\\n' "\${4#MemoryHigh=}" > '${join(root, "cg", "system.slice")}'/"$3"/memory.high`);
   return {
     root,
@@ -140,6 +140,34 @@ function host(): { root: string; env: NodeJS.ProcessEnv; cg: string; calls: stri
     },
   };
 }
+
+test("serve tuning honors its canonical hard-capped policy instead of the build ceiling on larger hosts", () => {
+  const container = "remudero-serve";
+  for (const totalMiB of [Math.floor(HOST_KB / 1024), 32768]) {
+    const h = host(container);
+    try {
+      const policyMiB = totalMiB === 32768 ? 7296 : 5632;
+      writeFileSync(join(h.root, "meminfo"), `MemTotal: ${totalMiB * 1024} kB\nMemAvailable: 9216000 kB\n`);
+      writeFileSync(join(h.cg, "memory.max"), `${7680 * MIB}\n`);
+      writeFileSync(join(h.cg, "memory.high"), `${policyMiB * MIB}\n`);
+      const then = Math.floor(Date.now() / 1000) - 300;
+      const id = "c0ffee".padEnd(64, "0");
+      writeFileSync(join(h.root, "cfg", "state", `memory-high-sample-${container}.txt`),
+        `v1 ${then} ${id} 1124 25000 5000 30 0\n`);
+      const run = spawnSync("bash", [TUNER, "--container", container, "--state-dir", join(h.root, "cfg")],
+        { encoding: "utf8", env: h.env });
+      assert.equal(run.status, 0, run.stderr);
+      assert.match(run.stdout, new RegExp(`hold at ${policyMiB} MiB \\(policy ${policyMiB}\\)`));
+      assert.equal(readFileSync(join(h.cg, "memory.high"), "utf8").trim(), String(policyMiB * MIB));
+      assert.equal(readFileSync(join(h.cg, "memory.max"), "utf8").trim(), String(7680 * MIB), "the hard limit is unchanged");
+      assert.doesNotMatch(readFileSync(h.calls, "utf8"), /systemctl/);
+      assert.equal(existsSync(join(h.root, "cfg", "state", `memory-high-tuned-${container}.json`)), false);
+      assert.equal(existsSync(join(h.root, "cfg", "state", "ledger.ndjson")), false, "a hold must not claim an adjustment");
+    } finally {
+      rmSync(h.root, { recursive: true, force: true });
+    }
+  }
+});
 
 test("a tick writes the grown memory.high through the container's systemd scope, records it, and ledgers the step", () => {
   const h = host();

@@ -480,6 +480,7 @@ import {
   type IntakeRungDecision,
   type IntakeRungRunResult,
   type LightPassScope,
+  lightPassFixAdmitted,
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
@@ -1140,6 +1141,8 @@ import {
   type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./lib/verify-human-judge.js";
+import { withWhyMeJudgmentInput } from "./lib/inbox-why-me.js";
+import { readPersistedInbox } from "./lib/fleet-lane.js";
 import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
@@ -1487,6 +1490,8 @@ import {
   verifyBundlePin,
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learnings.js";
+import { doctrineCitationFactsAt } from "./lib/doctrine-citation-facts.js";
+import type { DoctrineCitationFacts } from "./lib/doctrine-citations.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
@@ -1632,6 +1637,11 @@ import {
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
+  reconcileDependabotStaleEvent,
+  dependabotStaleEventVerdict,
+  buildDepReviewStaleEventEscalation,
+  reconcileDependabotTitle,
+  overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -1758,6 +1768,7 @@ import {
   checksStateFromRollup,
   checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
+  supersededRedsNowPassing,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDayUnpricedRows,
@@ -1901,6 +1912,7 @@ import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -2897,7 +2909,7 @@ export function buildSweepEffects(
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, {}, pushFixRound, prior),
+      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
@@ -3083,6 +3095,7 @@ export function handedOffHeadRiskJudge(
   });
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
+import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
@@ -3201,6 +3214,7 @@ import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
+import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -3247,6 +3261,7 @@ import {
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { withTouchedDeclarations } from "./lib/advance-declarations.js";
+import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
@@ -7884,8 +7899,12 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
   const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
+  // W1-T9092: an advance is material only when it touches the import closure of the entry this process started from.
+  const closureGit: ClosureGit = deps.git ? async (args) => deps.git!(args) : daemonClosureGit(repoDir);
+  const entry = daemonProcessEntry(repoDir);
   const read = (): Promise<DaemonFreshness> =>
-    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit)).then(daemonFreshnessFromService);
+    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit))
+      .then((svc) => withDaemonClosure(svc, (sha) => daemonProcessClosure(closureGit, sha, entry))).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
@@ -11146,6 +11165,8 @@ export async function runFixRebase(
     return { rebased: false, reason: decision.reason };
   }
 
+  // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+  io.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: target.number, forcedBy: "fix-rebase", nowMs: systemClock.now() }));
   const result = await io.updateBranch(target.number);
   if (!result.ok) {
     const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
@@ -12741,6 +12762,9 @@ export async function runFixRung(opts: {
             ...(refreshMainSha === undefined ? {} : { main_sha: refreshMainSha }), checks: refreshChecks, test_files: refreshTestFiles }, clearance));
         }
         if (decision.refresh && clearance?.refresh !== false) {
+          // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+          deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber, headSha: review.headSha, forcedBy: "fix-base-refresh",
+            nowMs: systemClock.now() }));
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             const reason =
@@ -12986,6 +13010,7 @@ export async function runFixRung(opts: {
     // check arm (`runSweep`, sweep.ts) already use: never fall through to a strike, never log
     // `fix.dispatch` (the one ledger step a strike is counted from) — ledger the reason and stand
     // down, exactly as those sites do.
+    if (noReviewYet && currentCiFailures !== undefined) currentCiFailures = dropDerivativeAggregateCiFailure(currentCiFailures);
     if (currentMergeConflict === undefined && noReviewYet && currentCiFailures !== undefined && currentCiFailures.length === 0) {
       const reason =
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
@@ -19126,12 +19151,13 @@ export async function pushFixRound(
 }
 
 /**
- * W1-T4797: the pre-push DIFF-COVERAGE precheck's answer, as three DISTINCT values — never collapsed.
+ * W1-T4797: the pre-push DIFF-COVERAGE precheck's answers — never collapsed.
  * `uncovered` refuses the round before any push, carrying CI's own uncovered-lines text; `covered`
  * pushes as today; `unavailable` (timeout, spawn failure, unreadable lcov, a selector that cannot
- * scope) ALSO pushes: a precheck that cannot look must never block.
+ * scope) ALSO pushes: a precheck that cannot look must never block; consumer repos return `not-applicable`.
  */
 export type CoveragePrecheck =
+  | { outcome: "not-applicable"; repo: string; reason: string }
   | { outcome: "covered"; reason: string; suites: number }
   | { outcome: "uncovered"; text: string; suites: number }
   | { outcome: "unavailable"; reason: string };
@@ -19141,6 +19167,7 @@ export type CoverageRunResult = { status: number | null; output: string; timedOu
 
 /** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
 export type CoveragePrecheckPorts = {
+  repo?: string;
   changedFiles?: (wt: string) => string[] | Promise<string[]>;
   select?: (wt: string, changed: string[]) => AffectedSelection | Promise<AffectedSelection>;
   manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
@@ -19260,6 +19287,9 @@ function coverageRefusalText(output: string): string {
  * bound is `unavailable`, not `uncovered`.
  */
 export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): Promise<CoveragePrecheck> {
+  if (ports.repo !== undefined && !fixCensusAppliesToRepo(ports.repo, () => {})) {
+    return { outcome: "not-applicable", repo: ports.repo, reason: `core's diff-coverage selector does not apply to ${ports.repo}` };
+  }
   const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
   let changed: string[];
   try {
@@ -19314,7 +19344,8 @@ export function coveragePushRefusal(
     site,
     outcome: result.outcome,
     reason: result.outcome === "uncovered" ? "diff-coverage would refuse this head" : result.reason,
-    ...(result.outcome === "unavailable" ? {} : { suites: result.suites }),
+    ...(result.outcome === "covered" || result.outcome === "uncovered" ? { suites: result.suites } : {}),
+    ...(result.outcome === "not-applicable" ? { repo: result.repo } : {}),
     ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
   });
   if (result.outcome !== "uncovered") return undefined;
@@ -21438,7 +21469,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
+      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await gitPushRunBranchAsync(worktreePath);
@@ -21452,7 +21483,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
           ...(refusalLabel === "coverage-refused"
-            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push.repair") }
+            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push.repair") }
             : {}),
         });
         if (rung.outcome === "refused") {
@@ -21791,7 +21822,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
+          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, { repo: task.repo }, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           escalationIssues: ghIssueGatewayAsync(owner, task.repo),
@@ -24036,6 +24067,12 @@ export function defaultNodePinSyncIo(
 export interface DepReviewPrMutations {
   comment(prUrl: string, body: string): void;
   close(prUrl: string, opts: { comment: string; deleteBranch: false }): void;
+  /** W1-T9828: the REST title PATCH under the daemon's own gh identity, so `pull_request.edited` fires. */
+  retitle?(prUrl: string, title: string): Promise<void>;
+}
+
+export async function defaultDepReviewRetitle(prUrl: string, title: string): Promise<void> {
+  await ghTextAsync(prMetadataRestArgs(prUrl, { title }));
 }
 
 function depReviewMigrationFeedbackId(submissionKey: string): string {
@@ -24057,6 +24094,7 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
     close(prUrl, opts) {
       ghExec(["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
     },
+    retitle: defaultDepReviewRetitle,
   };
 }
 
@@ -24071,7 +24109,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits,mergeStateStatus,autoMergeRequest",
   ])) as {
     number: number;
     url: string;
@@ -24082,6 +24120,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
     commits?: DependabotHeadCommit[];
+    mergeStateStatus?: string;
+    autoMergeRequest?: unknown;
   };
   const config = deps.config ?? loadConfig();
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
@@ -24103,8 +24143,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
   const proposalRoot = deps.root ?? repoRoot;
   const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
+  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
+  const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
 
-  if (isDependabotAuthor({ login: view.author?.login ?? "" })) {
+  if (dependabot) {
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
@@ -24117,6 +24159,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     if (sync.kind === "refused") {
       log("dep-review.node_pin_refused", { pr_url: view.url, head_sha: view.headRefOid, reason: sync.reason, detail: sync.detail });
+    }
+    const retitle = deps.prMutations?.retitle ?? defaultDepReviewRetitle;
+    const titled = await reconcileDependabotTitle({
+      statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, title: view.title ?? "", body: view.body ?? "",
+      retitle: (title) => retitle(view.url, title), log,
+    });
+    if (titled === "retitled" || titled === "failed") {
+      console.log(`### rmd dep-review PR #${view.number} — title over header-max-length, retitle ${titled}; holding for the re-run`);
+      return 1;
     }
   }
 
@@ -24146,7 +24197,6 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
-  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   try {
     reconcileDepReviewHold({
       statePath: holdStatePath,
@@ -24201,7 +24251,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     try {
       const ownRedFlag = flagValue(rest, "--dependabot-own-red");
-      const ownRed = reconcileDependabotOwnRed({
+      // W1-T9828: a commitlint red on a title still over header-max-length is the title's, never a fleet build.
+      const titleRed = dependabot && overHeaderLimit(view.title ?? "") && result.redChecks.includes("commitlint");
+      const ownRed = titleRed ? "none" : reconcileDependabotOwnRed({
         statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
         headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
         capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
@@ -24297,6 +24349,22 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 0;
   }
   if (result.decision === "arm") {
+    const raw = view.statusCheckRollup ?? [];
+    const stale = dependabotStaleEventVerdict({
+      mergeStateStatus: view.mergeStateStatus, autoMergeArmed: view.autoMergeRequest != null,
+      reviewPosted: raw.some((c) => (c.context ?? c.name) === REVIEW_CONTEXT && String(c.state ?? c.conclusion ?? "").toUpperCase() === "SUCCESS"),
+      supersededReds: supersededRedsNowPassing(raw),
+    });
+    if (stale.kind === "stale-event") { // W1-T9913: one fresh event for a superseded red, never a re-post.
+      const outcome = reconcileDependabotStaleEvent({
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, checks: stale.checks, nowMs: clock.now(), log,
+        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body),
+        escalate: () => escalate(buildDepReviewStaleEventEscalation({ prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+          headSha: view.headRefOid, checks: stale.checks }), { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      });
+      console.log(`dependabot stale-event block ${outcome} (${stale.checks.join(", ")}): ${view.url}`);
+      return 1;
+    }
     // W1-T228: guarded post — decideDepReview never executes a proof, so
     // this attempt's evidence is always "no_evidence"; the guard still
     // refuses it if a STRONGER (executed) verdict is already posted for this
@@ -30021,6 +30089,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
+  let doctrineCitations: DoctrineCitationFacts | undefined;
   let releasedIdsForAdmission = new Set<string>();
   if (scope && !offline) {
     try {
@@ -30138,6 +30207,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         }
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
+      // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
+      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      opts.doctrineCitations = doctrineCitations;
       opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
@@ -32382,7 +32454,7 @@ export async function defaultVerifyHumanCadenceResult(
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const result = await verifyHumanCadence({
-      shards: parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited),
+      shards: withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME }),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
       judge: shadowedVerifyHumanJudge({
@@ -36038,7 +36110,7 @@ export function memoryGovernorGateFor(
     const once = () => checkMemoryGovernor(
       readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy), policy, readContainer?.(), ownWorkLive,
     );
-    const result = reclaimBeforeHold(once(), once, reclaim);
+    const result = buildYieldsToRepair(reclaimBeforeHold(once(), once, reclaim), ownWorkLive); // W1-T9706: a fitting build yields to a waiting repair.
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
@@ -49077,7 +49149,9 @@ export function buildSweepLightHook(
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
-      const fixRungAllowed = !reviewOnly && fixRungAllowedBesideInFlight(
+      // W1-T9808: after a restart latched, a fix that would outlast the drain's time left closes the fix rung.
+      const fixAdmitted = lightPassFixAdmitted(scope);
+      const fixRungAllowed = fixAdmitted && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       );
@@ -49124,9 +49198,10 @@ export function buildSweepLightHook(
             runId,
             log,
             reviewerCodeRecovery,
+            restartAdmission: scope?.admit,
             // W1-T8086: own-red and conflict repairs use per-claim capacity on ordinary passes;
             // review-only still stands them down.
-            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, !reviewOnly),
+            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
             // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.
@@ -52829,7 +52904,7 @@ export async function verifyHumanSweepCommand(
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited);
+  const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
   const priorVerdicts = priorVerifyHumanVerdicts(rows);
 
   if (dryRun) {

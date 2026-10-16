@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-function host(t: TestContext, instance = "core") {
+function host(t: TestContext, instance = "core", legacy = false) {
   const root = mkdtempSync(join(tmpdir(), "rmd-watchdog-unchanged-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const state = join(root, instance);
@@ -14,6 +14,17 @@ function host(t: TestContext, instance = "core") {
   const launcher = join(root, "relaunch.sh");
   const snapshot = join(state, "state", "watchdog-tick-snapshot");
   const ledger = join(state, "state", "ledger.ndjson");
+  const registry = join(root, "instances.yaml");
+  writeFileSync(registry, "instances:\n" + ["core", "console", "site"].map(name => [
+    `  ${name}:`, "    repo: remudero", `    state_dir: ${state}`,
+    `    container_name: daemon-${name}`, "    service_user: fixture",
+    "    image: example.invalid/remudero:fixture", "    max_old_space_mb: 8192",
+    `    service_name: rmd-${name}-fleet.service`, `    watchdog_service_name: rmd-${name}-watchdog.service`,
+    `    watchdog_timer_name: rmd-${name}-watchdog.timer`, `    launcher_path: ${launcher}`,
+    `    revival_log: ${root}/revivals`, "    gh_app_id: 1234", "    gh_app_installation_id: 5678",
+    "    gh_app_private_key_path: /home/node/.claude/fixture.pem", `    claude_dir: ${root}/claude`,
+    `    codex_dir: ${root}/codex`, `    container_config_dir: ${root}/config`,
+  ].join("\n")).join("\n") + "\n");
   for (const dir of [bin, join(state, "state"), join(state, "daemon-install", ".git"),
     join(state, "daemon-install", "deploy"), join(state, "remudero", ".git"),
     join(state, "remudero", "bin"), join(state, "remudero", "src")]) mkdirSync(dir, { recursive: true });
@@ -69,11 +80,12 @@ fi`);
     'echo "units $*" >> "$FIXTURE/calls"');
   const env = {
     ...process.env, FIXTURE: root, PATH: `${bin}:${process.env.PATH ?? ""}`,
+    RMD_INSTANCE_REGISTRY: registry,
     RMD_STATE_DIR: state, RMD_UNIT_DIR: join(root, "units"), RMD_BIN_DIR: join(root, "installed-bin"),
     RMD_LAUNCHER_PATH: launcher, RMD_REVIVAL_LOG: join(root, "revivals"),
     RMD_NODE_MAX_OLD_SPACE_MB: "8192", RMD_DAEMON_CONTAINER: `daemon-${instance}`,
   };
-  const rendered = spawnSync("bash", ["deploy/install-host-units.sh", "--install"], { env, encoding: "utf8" });
+  const rendered = spawnSync("bash", ["deploy/install-host-units.sh", "--install", ...(legacy ? [] : ["--instance", instance])], { env, encoding: "utf8" });
   assert.equal(rendered.status, 0, rendered.stderr);
   let ledgerTime = Math.floor(Date.now() / 1000) - 3600;
   const advance = () => { ledgerTime++; utimesSync(ledger, ledgerTime, ledgerTime); };
@@ -85,13 +97,68 @@ fi`);
   };
   const installEdgeHeal = () => executable(join(state, "daemon-install", "deploy", "edge-heal.sh"),
     'echo "edge-heal state=$RMD_STATE_DIR" >> "$FIXTURE/calls"; exit "$(cat "$FIXTURE/edge-exit")"');
+  const installTuner = () => {
+    put("tuner-exit", "0");
+    executable(join(state, "daemon-install", "deploy", "memory-high-tuner.sh"),
+      'echo "tuner $*" >> "$FIXTURE/calls"; exit "$(cat "$FIXTURE/tuner-exit")"');
+  };
   const statMtime = () => {
     const result = spawnSync(join(bin, "stat"), ["-c", "%Y", ledger], { env, encoding: "utf8" });
     assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
     return Number(result.stdout.trim());
   };
-  return { state, snapshot, ledger, put, advance, tick, installEdgeHeal, statMtime };
+  return { state, snapshot, ledger, put, advance, tick, installEdgeHeal, installTuner, statMtime };
 }
+
+test("the core watchdog tunes serve on full and unchanged ticks through the existing controller", t => {
+  for (const legacy of [false, true]) {
+    const h = host(t, "core", legacy);
+    h.installTuner();
+    h.advance();
+    const first = h.tick();
+    fullTick(first);
+    const expected = [`tuner --container daemon-core --state-dir ${h.state}`,
+      `tuner --container remudero-serve --state-dir ${h.state}`];
+    assert.deepEqual(first.filter(line => line.startsWith("tuner ")), expected);
+    h.advance();
+    const unchanged = h.tick();
+    assert.deepEqual(unchanged.filter(line => line.startsWith("tuner ")), expected);
+    assert.equal(unchanged.some(line => line.startsWith("rmd ")), false, "unchanged ticks do no model or daemon CLI work");
+  }
+});
+
+test("satellite watchdogs tune only their own daemon and never compete for serve", t => {
+  for (const instance of ["console", "site"]) {
+    const h = host(t, instance);
+    h.installTuner();
+    h.advance();
+    fullTick(h.tick());
+    h.advance();
+    assert.deepEqual(h.tick().filter(line => line.startsWith("tuner ")),
+      [`tuner --container daemon-${instance} --state-dir ${h.state}`]);
+  }
+});
+
+test("boot and operator STOP suppress both daemon and serve tuning", t => {
+  const h = host(t);
+  h.installTuner();
+  assert.deepEqual(h.tick(["--boot"]).filter(line => line.startsWith("tuner ")), []);
+  writeFileSync(join(h.state, "state", "STOP"), "operator stop\n");
+  assert.deepEqual(h.tick(), []);
+});
+
+test("a failed daemon tuning request cannot skip serve tuning or the remaining watchdog tick", t => {
+  const h = host(t);
+  h.installTuner();
+  h.put("tuner-exit", "7");
+  h.advance();
+  const calls = h.tick();
+  assert.deepEqual(calls.filter(line => line.startsWith("tuner ")), [
+    `tuner --container daemon-core --state-dir ${h.state}`,
+    `tuner --container remudero-serve --state-dir ${h.state}`,
+  ]);
+  fullTick(calls);
+});
 
 function fullTick(calls: string[]) {
   assert.ok(calls.includes("git remudero status --porcelain --untracked-files=all"), calls.join("\n"));

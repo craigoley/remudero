@@ -1,11 +1,11 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createHash } from "node:crypto";
+import { classificationSnapshotKey } from "./read-page.js";
 
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { declinedReasonInLedger, deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
+import { ledgerProposalVerdicts, deriveTaskReferent, parseProposalRegistry, recordRowThreadEvents, THREAD_EVENT_STEPS, type Proposal } from "./inbox.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { InboxClassification } from "./inbox.js";
@@ -93,6 +93,8 @@ export type AttentionSourceState = "observed" | "partial" | "unavailable";
 export type AttentionJudgment = VerifyHumanRuling | { state?: undefined; decision: string; reason: string };
 
 export interface AttentionCensusInput {
+  /** The completed producer's lane-visible content and owned source; never read-time clocks. */
+  classificationContent?: unknown;
   dismissalAudit?: InboxDismissalAudit;
   views: ThreadSummaryView[];
   classifications: InboxClassification[];
@@ -191,9 +193,11 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
   const result = { scope: "core" as const, state, countSemantics: "observed_snapshot_not_verified" as const,
     sources: input.sources, counts, decisionReadiness, verifiedCounts, kinds, items,
     ...(input.dismissalAudit ? { dismissalAudit: input.dismissalAudit } : {}), ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
-  const snapshotKey = createHash("sha256").update(JSON.stringify(result)).digest("hex");
+  const snapshotKey = classificationSnapshotKey(input.classificationContent ?? null, result);
   return { ...result, snapshotKey };
 }
+
+export type AttentionCensus = ReturnType<typeof buildAttentionCensus>;
 
 const ACTIONS_BY_STATE: Record<InboxThreadItem["state"], InboxThreadAction[]> = {
   ready: ["approve", "decline", "edit"],
@@ -518,13 +522,14 @@ export function registryThreadItems(stateDir: string, ledgerPath: string): Inbox
   const proposals = parseProposalRegistry(existsSync(`${stateDir}/inbox-proposals.json`) ? readFileSync(`${stateDir}/inbox-proposals.json`, "utf8") : undefined);
   const plainStore = readPlainStore(plainStorePath(stateDir));
   const lines = readLedgerLines(ledgerPath);
+  const verdicts = ledgerProposalVerdicts(lines);
   return proposals
     .filter((p) => inboxOwner(p) === "operator")
     .map((p) => ({
       proposalId: p.id,
       summary: p.summary,
       plain: plainInboxMessage(p, plainStore),
-      state: declinedReasonInLedger(lines, p.id) !== undefined ? ("declined" as const) : ("ready" as const),
+      state: verdicts.isDeclined(p.id) !== undefined ? ("declined" as const) : ("ready" as const),
     }));
 }
 

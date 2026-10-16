@@ -1,7 +1,7 @@
 - id: W1-T9805
   title: "A MERGED SCOPE AMENDMENT COSTS A WHOLE EXTRA CI CYCLE — once the amendment lands, requestScopeAmendment only asks GitHub to update the branch and the round stands down 'awaiting scope amendment branch update', so CI re-runs on a red the round has already diagnosed before any fix is attempted: #12289's branch update at 11:42:58Z (c7fc5e6) bought a wait of about 35 minutes with no fix"
   repo: remudero
-  depends_on: [W1-T9802, W1-T9804]  # W1-T9802: same flow (the release of an amendment-waiting round); W1-T9804: both edit requestScopeAmendment
+  depends_on: [W1-T9802]  # W1-T9802: same flow (the release of an amendment-waiting round). W1-T9804 dropped 2026-10-16: retired by operator ruling, superseded by W1-T9806, which shares no file with this task; W1-T9851 orders itself after this one (both edit runFixRung)
   type: implement
   verify: auto
   principles: {tdd: strict}

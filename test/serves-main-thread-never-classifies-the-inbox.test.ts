@@ -187,7 +187,7 @@ test("a legacy attention snapshot waits for the slow lane instead of doing reque
   const { deps, passes } = freshGeneration(laneDeps);
   const read = await get(t, buildInboxAttentionCensusRoute(deps), "/v1/inbox/attention-census?qualified=1");
   assert.equal(read.status, 503);
-  assert.equal(read.body.error, "attention_evidence_pending");
+  assert.equal(read.body.error, "inbox_not_ready", "changed persisted evidence invalidates the content-bound snapshot");
   assert.equal(read.body.counts, undefined);
   assert.equal(passes(), 0);
 });
@@ -222,7 +222,7 @@ test("malformed persisted attention evidence never becomes an empty or successfu
     const { deps, passes } = freshGeneration(laneDeps);
     const read = await get(t, buildInboxAttentionCensusRoute(deps), "/v1/inbox/attention-census?qualified=1");
     assert.equal(read.status, 503);
-    assert.equal(read.body.error, "attention_evidence_pending");
+    assert.equal(read.body.error, "inbox_not_ready", "changed persisted evidence invalidates the content-bound snapshot");
     assert.equal(read.body.counts, undefined);
     assert.equal(passes(), 0);
   }
@@ -278,7 +278,9 @@ test("the inbox view's legacy side reads the same snapshot as the slow lane's bo
   assert.equal((paired.legacy?.paired?.items as ShadowPairedRead | undefined)?.asOf, first.generatedAt, "legacy read the snapshot the body was built from");
   assert.deepEqual(compare(paired).diffs, [], "one snapshot, two computations over it: nothing differs");
   const late = inboxLegacyView(deps, fixedClock(Date.parse("2026-10-05T13:00:00.000Z"))).compute(new URLSearchParams({ section: "needsYou" }));
-  assert.ok(!("error" in late) && late.sources[0]?.state === "stale", "a snapshot past its budget is labelled stale, as of its own generatedAt");
+  assert.ok("error" in late, "a maintained snapshot past its budget cannot serve a body or 304");
+  assert.equal(late.status, 503);
+  assert.equal(late.error, "inbox_snapshot_stale");
 
   // A new proposal, and the first one moving lane.
   writeProposals(registry, ["ruling:a", "ruling:b"]);

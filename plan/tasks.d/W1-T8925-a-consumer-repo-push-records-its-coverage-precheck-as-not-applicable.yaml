@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: consumer-repo audit after W1-T8918/W1-T8920 (operator: go with all of your recommendations)"
   plan_refs: [W1-T8918, W1-T8920, W1-T5074, W1-T7744]
   files: [src/run-task.ts, test/a-consumer-repo-push-records-its-coverage-precheck-as-not-applicable.test.ts]
-  status: queued
+  status: merged
   priority: 1 # operator-2026-10-13: the push coverage gate is silently a no-op for every consumer-repo push and ledgers it as covered
   attempts: 0
   rationale: |

@@ -1,0 +1,73 @@
+- id: W1-T9927
+  title: "A RED MAIN IS ATTRIBUTED BY RUNNING ITS FAILING TESTS LOCALLY AT THE UNATTRIBUTED COMMITS — the repair lane's only attribution is a full CI run per cancelled commit (30+ minutes each, sequential), so a red main waits an hour or more for a fix, or, when no probe can run, gets one named only as the first completed red; the failing test files are already known from the ci-shard log, and the sweep already owns a local runner that runs them at any commit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how the main repair lane attributes a red across cancelled commits; what it does once a culprit is named is unchanged
+  band_meaning: blast-radius
+  origin: "operator directive 2026-10-16 ('stuck PRs like this should never happen ... fix all root causes'); root-cause agent for the red main of 6841dac49 (#12389)"
+  plan_refs: [W1-T7760, W1-T9665, W1-T8396]
+  files:
+    - src/lib/main-health-rung.ts
+    - src/run-task.ts
+    - test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ at origin/main 32dc6614f (symbols, not lines):
+    - src/lib/main-health-rung.ts `locateOffender` (W1-T7760): when main's first completed red follows commits whose own
+      push runs were cancelled (the span), the lane names nothing until CI has run on those commits, one
+      `rmd-attribution/<sha>` ref and one ci.yml workflow_dispatch each, newest first or at split points, through
+      `restMainProbes`. `chooseProbeConcurrency` runs one probe at a time while any CI job waits for a runner.
+    - Each probe is a full CI run. `medianCiRunMs` over main's history puts that at about 30 minutes, so a five-commit
+      span (today's: 9156fd658, d6f6dddf3, c73ab052d, f34685418, 6841dac49) costs 2-3 sequential runs, an hour or
+      more of red main before any fix is dispatched.
+    - Until the 204 fix PR (run-unfiled-1792177849672, filed beside this task) lands, every dispatch failed: the October ledger has
+      3 `main.repair.probe_dispatch_failed` rows (2026-10-16 15:13Z, 15:15Z and 18:48Z), 0 `main.repair.bisecting`
+      rows, and 2 `rmd-attribution/*` refs left on origin. That PR also makes a red with no runnable probe fix
+      forward against the first completed red (`first-red-unattributed`), with its revert withheld. That keeps the
+      red repaired. It does not attribute it.
+    - The failing test files are already in hand: `fixRequestFor` takes them from `baseReproductionFiles(failures)`, read
+      from the ci-shard log (today: test/a-retired-index-line-keeps-its-frozen-bullet.test.ts).
+    - src/run-task.ts `buildBaseReproductionProbe` (W1-T5528, W1-T8396) already runs named test files at ANY commit in a
+      detached worktree of the managed checkout, with node_modules linked and installs refused. Its outcomes are
+      `fails`/`passes`/`absent`/`unrunnable`, cached per (sha, file) in the ledger and serialized through
+      `baseReproductionQueue`. The sweep uses it to verify a base-red claim. The repair lane never does.
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and the 16 open PR heads for local attribution, a local test
+    bisect or a repair-lane reproduce seam: none.
+  design: |
+    No new constant, no new policy key, and no retry cap: every bound below is a reading.
+    1. `MainRepairLane` gains an optional `reproduceAt(sha, testFiles)` returning the base probe's per-file outcomes.
+       `mainRepairLaneFor` (src/run-task.ts) wires it to `buildBaseReproductionProbe` over the target's managed
+       checkout, so it shares the sweep's queue, its ledger cache and its host memory budget.
+    2. `locateOffender`: when the span is non-empty and `baseReproductionFiles(ctx.failures)` names test files, the
+       planned commits are probed LOCALLY before any CI probe. A local probe starts without being awaited (the rung never
+       blocks on it). It is written to a `main.repair.bisecting` row with `method: local-test` and ref
+       `local-test/<sha>`, and it concludes in a `main.repair.probe_concluded` row with `method: local-test`, the files
+       and their outcomes. Its verdict: any file `fails` → red; every file `passes` or `absent` (the test did not exist
+       there, so this red could not) → green; anything else → inconclusive.
+    3. Cancelled commits are exactly the span; a local probe needs no CI run, so cancellation does not touch it.
+    4. A `local-test/` probe the ledger shows in flight that this process is not running (a restart) is dropped from
+       in-flight and planned again. It is never left in flight forever.
+    5. An inconclusive local verdict hands that commit to the CI probe; with no CI probe runnable either, the
+       `first-red-unattributed` fix-forward applies. A commit is never re-run locally by rote.
+    6. A culprit proven by local verdicts is located as `bisected-first-red`: `probe_runs` cite the local evidence
+       (sha, verdict, files), and `proveCulprit` accepts it only when the culprit fails and its first parent passes the SAME
+       files that this repair's red names.
+    Tests go in test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts, titled verbatim as in the
+    proofs, driving the real rung with the W1-T7760 fake world and a fake `reproduceAt`.
+  acceptance:
+    - claim: "a red whose failing test files are known is bisected by running them locally at the cancelled commits, and the first commit where they fail is located with no CI probe dispatched"
+      proof: 'grep: test("a red main is attributed by running its failing tests locally at the cancelled commits" in test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts'
+    - claim: "a local probe never blocks the rung, and one the ledger shows in flight but no process runs is planned again"
+      proof: 'grep: test("a local probe runs off the rung and one lost to a restart is planned again" in test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts'
+    - claim: "an inconclusive local verdict hands the commit to a CI probe, and a culprit proven locally is reverted only when its parent passes the same files"
+      proof: 'grep: test("an inconclusive local probe falls to CI and a local proof names its files" in test/a-red-main-is-attributed-by-its-failing-tests-run-locally.test.ts'
+  falsifier: |
+    At origin/main the lane has no local seam. A red with a two-commit cancelled span dispatches a CI probe on its
+    first pass and names nothing until that run concludes, so the first test's assertion that `main.repair.located`
+    names the failing commit after one local pass with no `/dispatches` request fails.

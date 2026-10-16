@@ -566,9 +566,10 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
       if ((err && /** @type {{code?: string}} */ (err).code) === "ENOENT") continue;
       throw err;
     }
-    const bare = withoutRelativePathLiterals(content);
+    // A suite walking its own roots names them as bare segments as often as an imported walker does:
+    // `["plan", "docs"].map((d) => join(REPO_ROOT, d))` went unselected for #12389 and turned main red.
     const walksAnArea =
-      (enumeratesPopulation(content) && [...areas].some((a) => bare.includes(a))) ||
+      (enumeratesPopulation(content) && namesAreaLoosely(content, areas)) ||
       importedWalkerWalksArea(content, testDir, root, areas);
     const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
     if (walksAnArea || readsAChangedFile) out.push(rel);
