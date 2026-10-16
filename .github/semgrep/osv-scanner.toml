@@ -1,0 +1,29 @@
+# osv-scanner configuration for Scan's private Semgrep lock (requirements.txt beside this file).
+#
+# osv-scanner reads the osv-scanner.toml in each lockfile's OWN directory and does not walk up, so
+# the repo-root file never applies to this lock, and an entry here never reaches package-lock.json.
+# Same rules as the root file: an entry SUPPRESSES a real advisory, so it states what was checked,
+# when, and what retires it.
+
+[[IgnoredVulns]]
+id = "GHSA-84m7-p3x7-pcfv"
+# MCP Python SDK (CVE-2026-59951): a Streamable HTTP *server* in stateful mode never reclaims
+# session state, so a client that can reach the endpoint grows server memory without bound.
+# Present as mcp 1.29.0 in requirements.txt; fixed in 1.30.0.
+#
+# NOT UPGRADABLE FROM HERE. semgrep 1.180.0, and every release through 1.181.0 (latest on PyPI,
+# checked 2026-10-16), declares `mcp==1.29.0` exactly. #12295 took 1.30.0 and Scan's `pip check`
+# refused the closure; #12305 reverted it. mcp moves only when Semgrep moves.
+#
+# NOT REACHABLE, checked 2026-10-16:
+#   1. NO SERVER. The advisory needs a served Streamable HTTP endpoint (FastMCP,
+#      StreamableHTTPSessionManager). .github/workflows/semgrep.yml installs this lock into a
+#      throwaway venv under RUNNER_TEMP and runs only `semgrep scan` against the checkout; it
+#      never runs `semgrep mcp` or serves anything, and nothing outside that job installs it.
+#   2. NO OTHER CONSUMER. The repo tracks no Python; the Node side's MCP code is
+#      @modelcontextprotocol/sdk, a different package with its own advisories.
+#
+# EXPIRES with the pin: when a Semgrep release accepts mcp>=1.30.0, take that Semgrep, move mcp to
+# 1.30.0+, and delete this entry. test/semgrep-native-install.test.ts fails while this entry
+# outlives the mcp 1.29.0 pin, so the bump PR cannot keep it.
+reason = "mcp StreamableHTTP server session accumulation; unreachable here (Scan runs only `semgrep scan` in a throwaway CI venv and never serves MCP). Not upgradable: every semgrep through 1.181.0 pins mcp==1.29.0 exactly. Delete when a Semgrep release allows mcp>=1.30.0 (enforced by test/semgrep-native-install.test.ts)."
