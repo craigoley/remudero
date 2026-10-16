@@ -9,6 +9,8 @@ import { gitRepo } from "./helpers/git-repo.js";
 import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 // @ts-expect-error Plain repository CLI exports are exercised through their real implementation.
 import { coverageArtifactDigest, guardCoverageLease, releaseCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
+// @ts-expect-error Plain repository CLI exports supply the real CI coverage scope.
+import { extractCoverageFlags, readCiYaml } from "../scripts/diff-coverage-local.mjs";
 
 test("coverage artifact hashing reads the opened regular file and refuses empty linked or replaced evidence", (t) => {
   const { dir } = ownedFixtureDir(t, "batch-artifact"), file = join(dir, "lcov.info");
@@ -134,7 +136,13 @@ test("real serial coverage batches conserve positive line hits and dispose only 
   repo.git("add", "."); repo.git("commit", "-m", "test: coverage fixture");
   const f = lease(ownedFixtureDir(t, "batch-native-lease").dir);
   const lcov = join(repo.dir, "coverage/lcov.info");
+  // Keep the native fixture on CI's source population. Node 22's test wrappers have
+  // reporter-specific anonymous ranges; CI already excludes test/** from coverage.
+  const coverageScope = extractCoverageFlags(readCiYaml()).filter((flag: string) =>
+    flag.startsWith("--test-coverage-exclude=") || flag.startsWith("--test-coverage-include="));
+  assert.ok(coverageScope.includes("--test-coverage-exclude=test/**"));
   const result = await runCoverageBatches({ cwd: repo.dir, flags: ["--enable-source-maps", "--experimental-test-coverage", "--test",
+    ...coverageScope,
     "--test-reporter=tap", "--test-reporter-destination=stderr", "--test-reporter=lcov", "--test-reporter-destination=coverage/lcov.info"],
     files: ["test/0.test.mjs", "test/1.test.mjs"], batchSize: 1, lcov, base: "HEAD" }, { acquire: async () => f.slot, log() {} });
   assert.equal(result.status, 0, readFileSync(result.receiptPath, "utf8"));
@@ -147,6 +155,7 @@ test("real serial coverage batches conserve positive line hits and dispose only 
   }
   const text = readFileSync(lcov, "utf8");
   assert.match(text, /SF:subject\.mjs\n/); assert.match(text, /DA:1,[1-9]/);
+  assert.doesNotMatch(text, /^SF:test\//m, "the fixture uses the real CI coverage exclusion");
 });
 
 test("coverage batches refuse ghost inputs and retain an actual failing batch without starting the next", async (t) => {
