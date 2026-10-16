@@ -23,7 +23,9 @@
  * The daemon is one more such tail: its growth back to its peak (VmHWM - VmRSS) splits into a TYPICAL part, its median
  * rss+swap over the last hour less its latest sample, and the rest, which competes with the trees' tails for the one
  * allowance. Too few samples: its whole growth is typical. The HOST check applies the same rule across every live tree
- * and every measured daemon: all typical parts, plus the one largest tail.
+ * and every measured daemon: all typical parts, plus the one largest tail. An unseen start carries its class median
+ * too (W1-T9762), and a live tree's typical part and tail are scaled by its class's measured survival at its age: the
+ * share of the class's trees that peaked later than that (host-memory-learning.ts `survivalAt`).
  * The samples are the daemon's own rolling footprint (daemon-footprint.ts), kept across ledger rotations and daemon
  * restarts; the live ledger's tail, which a rotation cuts and a restart's new pid filters, is read only when it holds
  * more of the last hour than the footprint does (before the daemon has written one).
@@ -79,7 +81,7 @@ import {
   type ReviewDemandReading,
   type YieldDecision,
 } from "./host-memory-priority.js";
-import { classEstimate, classTypical, readPeakSamples, type PeakSample } from "./host-memory-learning.js";
+import { classEstimate, classSurvival, classTypical, readPeakSamples, type PeakSample, type Survival } from "./host-memory-learning.js";
 import {
   JOINT_MODEL, calibrationReport, installCalibrationSink, jointMemoryClaim, kernelMemoryObservation,
   publishMemoryForecast, readCalibrationState, type JointEstimate, type MemoryForecast,
@@ -272,6 +274,8 @@ export interface ShadowEntryInput {
   occupancyReleased?: boolean;
   /** The class's learned median peak, at most `estimateMib`. Absent: the estimate, so the whole claim is typical. */
   typicalMib?: number;
+  /** W1-T9762: the class's measured survival at `ageMs`, which scales its remaining claim. Absent: not decayed. */
+  survival?: Survival;
 }
 
 export interface ShadowInputs {
@@ -361,6 +365,13 @@ export interface ShadowClaim {
   /** In this container: its claim counts against the container ceiling. */
   own: boolean;
   released: boolean;
+  /** W1-T9762: its typical growth after decay; its tail, (remaining p90 - typical) times the same factor, competes for
+   *  the one allowance. */
+  chargedMib: number;
+  /** The survival factor its remaining claim was scaled by, or null and why it was not decayed. */
+  decay: { factor: number | null; basis: string };
+  /** Since its reservation opened; 0 for the start, null when the ledger did not say. */
+  ageMs: number | null;
 }
 
 export interface ShadowVerdict {
@@ -376,6 +387,8 @@ export interface ShadowVerdict {
     unrealizedMib: number;
     /** What the host check counts: every tree's typical growth plus the ONE tail allowance (a tree's or a daemon's). */
     hostClaimMib: number;
+    /** W1-T9762: the same claim were no live tree decayed by its class's measured time to peak, for comparison only. */
+    hostClaimUndecayedMib: number;
     hostTypicalMib: number;
     hostTailMib: number;
     /** The sum of this container's trees' remaining p90 claims: every tree at its p90 at once. */
@@ -458,12 +471,16 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let tailOwn = 0;
   let typicalAll = 0;
   let tailAll = 0;
+  let typicalUndecayed = 0;
+  let tailUndecayed = 0;
   const claims: ShadowClaim[] = [];
-  /** One tree's claim: its remaining growth to the p90 (`share`), and how much of that is typical. */
-  const claim = (estimateMib: number, typicalMib: number | undefined, resident: number, released: boolean) => {
-    if (released) return { share: 0, typical: 0 };
+  /** One tree's claim: its remaining growth to the p90 (`share`), how much of that is typical, and both scaled by its
+   *  class's survival at its age (`factor`). */
+  const claim = (estimateMib: number, typicalMib: number | undefined, resident: number, released: boolean, factor = 1) => {
+    if (released) return { share: 0, typical: 0, charged: 0, chargedTail: 0 };
     const share = Math.max(0, estimateMib - resident);
-    return { share, typical: Math.min(share, Math.max(0, Math.min(typicalMib ?? estimateMib, estimateMib) - resident)) };
+    const typical = Math.min(share, Math.max(0, Math.min(typicalMib ?? estimateMib, estimateMib) - resident));
+    return { share, typical, charged: typical * factor, chargedTail: (share - typical) * factor };
   };
   for (const entry of inputs.entries) {
     let resident = 0;
@@ -474,21 +491,25 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     }
     // A released occupancy's tree can only shrink: its resident memory is already measured, so it claims nothing more.
     const released = entry.occupancyReleased === true;
-    const { share, typical } = claim(entry.estimateMib, entry.typicalMib, resident, released);
+    const decay = decayOf(entry.survival, released, entry.ageMs);
+    const { share, typical, charged, chargedTail } = claim(entry.estimateMib, entry.typicalMib, resident, released, decay.factor ?? 1);
     unrealized += share;
-    typicalAll += typical;
-    tailAll = Math.max(tailAll, share - typical);
+    typicalAll += charged;
+    tailAll = Math.max(tailAll, chargedTail);
+    typicalUndecayed += typical;
+    tailUndecayed = Math.max(tailUndecayed, share - typical);
     const own = entry.status === "owned";
     if (own) {
       unrealizedOwn += share;
       residentOwn += resident;
-      typicalOwn += typical;
-      tailOwn = Math.max(tailOwn, share - typical);
+      typicalOwn += charged;
+      tailOwn = Math.max(tailOwn, chargedTail);
     }
     if (claims.length < CLAIMS_CAP) {
       claims.push({ workerClass: entry.workerClass, estimateMib: entry.estimateMib,
         typicalMib: Math.min(entry.typicalMib ?? entry.estimateMib, entry.estimateMib),
-        residentMib: "unread" in entry.resident ? null : entry.resident.mib, own, released });
+        residentMib: "unread" in entry.resident ? null : entry.resident.mib, own, released,
+        chargedMib: charged, decay, ageMs: entry.ageMs ?? null });
     }
     if (entry.estimateSource.kind === "default-unmeasured" && !released) widen("unmeasured-estimate", margin, entry.id);
     if (entry.status === "uncertain") widen("uncertain-entry", margin, entry.id);
@@ -502,13 +523,16 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     unrealized += own.share;
     typicalAll += own.typical;
     tailAll = Math.max(tailAll, own.share - own.typical);
+    typicalUndecayed += own.typical;
+    tailUndecayed = Math.max(tailUndecayed, own.share - own.typical);
     unrealizedOwn += own.share;
     typicalOwn += own.typical;
     tailOwn = Math.max(tailOwn, own.share - own.typical);
     if (claims.length < CLAIMS_CAP) {
       claims.push({ workerClass: inputs.start.workerClass, estimateMib: inputs.start.estimateMib,
         typicalMib: Math.min(inputs.start.typicalMib ?? inputs.start.estimateMib, inputs.start.estimateMib),
-        residentMib: 0, own: true, released: false });
+        residentMib: 0, own: true, released: false, chargedMib: own.typical,
+        decay: { factor: null, basis: "the start: not yet running" }, ageMs: 0 });
     }
     widen("start-unrecorded", 0, inputs.start.reservationId ?? "no reservation id");
   }
@@ -538,6 +562,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   const containerClaim = inputs.jointClaim ? inputs.jointClaim.ownMib + ownDaemonTail : typicalOwn + containerTail;
   const hostTail = Math.max(tailAll, daemonTail);
   const hostClaim = inputs.jointClaim ? inputs.jointClaim.hostMib + daemonTail : typicalAll + hostTail;
+  const hostClaimUndecayed = inputs.jointClaim ? hostClaim : typicalUndecayed + Math.max(tailUndecayed, daemonTail);
 
   const scenario = inputs.serve.scenario;
   const coldStartReserve = scenario === "serve-cold-start" ? policy.serveColdStartReserveMib : 0;
@@ -615,6 +640,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       memAvailableMib: memAvailable,
       unrealizedMib: unrealized,
       hostClaimMib: hostClaim,
+      hostClaimUndecayedMib: hostClaimUndecayed,
       hostTypicalMib: inputs.jointClaim ? inputs.jointClaim.hostMib : typicalAll,
       hostTailMib: inputs.jointClaim ? daemonTail : hostTail,
       unrealizedOwnContainerMib: unrealizedOwn,
@@ -651,6 +677,14 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       unreservedContainerShare: unreserved === null || !containerCurrent ? null : unreserved / containerCurrent,
     },
   };
+}
+
+/** W1-T9762: the survival factor a live tree's remaining claim is scaled by, or why it is not decayed. */
+function decayOf(survival: Survival | undefined, released: boolean, ageMs: number | undefined): ShadowClaim["decay"] {
+  if (released) return { factor: null, basis: "released: it claims nothing" };
+  if (survival === undefined) return { factor: null, basis: "not decayed: no time-to-peak reading" };
+  if ("unmeasured" in survival) return { factor: null, basis: `not decayed: ${survival.unmeasured}` };
+  return { factor: survival.factor, basis: `survival at ${Math.round((ageMs ?? 0) / 1000)}s over ${survival.samples} time-to-peak sample(s)` };
 }
 
 /** A crossing is tied to the stall a verdict reads only within the kernel's longest short PSI window (avg60): an older
@@ -886,6 +920,8 @@ export interface ShadowMemoryPorts {
   estimate: (workerClass: WorkerClass) => number;
   /** A class's learned TYPICAL (median) peak (host-memory-learning.ts). */
   typical: (workerClass: WorkerClass) => number;
+  /** W1-T9762: a class's measured survival at a live tree's age (host-memory-learning.ts). Absent: nothing decays. */
+  survival?: (workerClass: WorkerClass, ageMs: number) => Survival;
   /** Writes the instance's pressure store (its prior swap-in sample and its swap-in history). */
   writeFile: (path: string, content: string) => void;
 }
@@ -969,6 +1005,7 @@ export function defaultShadowMemoryPorts(): ShadowMemoryPorts {
     listStateDir: (dir) => readdirSync(dir),
     estimate: (workerClass) => classEstimate(workerClass).estimateMib,
     typical: (workerClass) => classTypical(workerClass).estimateMib,
+    survival: (workerClass, ageMs) => classSurvival(workerClass, ageMs),
     calibrationSamples: storeDir => storeDir ? WORKER_CLASSES.flatMap(workerClass => readPeakSamples(workerClass, {
       location: () => ({ dir: storeDir }),
     })) : [],
@@ -1444,7 +1481,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     const median = typicalOf(ports, workerClass);
     return median === undefined ? {} : { typicalMib: Math.min(median, estimateMib) };
   };
-  const entries: ShadowEntryInput[] = recorded.map((entry, i) => ({
+  const entries: ShadowEntryInput[] = recorded.map((entry, i): ShadowEntryInput => ({
     id: entry.id,
     owner: entry.owner,
     workerClass: entry.workerClass,
@@ -1456,6 +1493,8 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     ageMs: entry.ageMs,
     ...(entry.occupancyReleased ? { occupancyReleased: true } : {}),
     ...(entry.estimateSource.kind === "measured" ? typical(entry.workerClass, entry.estimateMib) : {}),
+    ...(entry.estimateSource.kind === "measured" && !entry.occupancyReleased
+      ? { survival: survivalOf(ports, entry.workerClass, entry.ageMs) } : {}),
   }));
   const instance = instanceOf(ports, start.root);
   const tail = readTailRows(ports, start.root);
@@ -1473,11 +1512,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     container,
     ledger: { state: ledger.state, ...(ledger.reading?.dir ? { dir: ledger.reading.dir } : {}), ...(ledger.reason ? { reason: ledger.reason } : {}) },
     entries,
-    start: {
-      ...(start.reservationId ? { reservationId: start.reservationId } : {}),
-      workerClass: start.workerClass,
-      estimateMib: start.estimateMib ?? estimateOf(ports, start.workerClass),
-    },
+    start: startOf(start, ports, typical),
     daemonGrowth: [own, ...others],
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
@@ -1537,6 +1572,28 @@ function instanceOf(ports: ShadowMemoryPorts, root: string): string {
   } catch (error) {
     void error; // An unreadable mount table: the root's own name, as the ledger itself falls back.
     return root.split("/").filter(Boolean).at(-1) ?? root;
+  }
+}
+
+/** W1-T9762: the start carries its class typical too, so an unseen start's p90 - median competes for the one tail
+ *  rather than counting whole. An unmeasured class's median is its prior, the estimate, so it stays whole. */
+function startOf(
+  start: ShadowStart, ports: ShadowMemoryPorts, typical: (workerClass: WorkerClass, estimateMib: number) => { typicalMib?: number },
+): ShadowInputs["start"] {
+  const estimateMib = start.estimateMib ?? estimateOf(ports, start.workerClass);
+  return {
+    ...(start.reservationId ? { reservationId: start.reservationId } : {}),
+    workerClass: start.workerClass, estimateMib, ...typical(start.workerClass, estimateMib),
+  };
+}
+
+/** The class's survival at a live tree's age, or why it is unmeasured: an unreadable store decays nothing. */
+function survivalOf(ports: ShadowMemoryPorts, workerClass: WorkerClass, ageMs: number): Survival {
+  if (!ports.survival) return { unmeasured: "no time-to-peak reader" };
+  try {
+    return ports.survival(workerClass, ageMs);
+  } catch (error) {
+    return { unmeasured: `time-to-peak store unreadable: ${reasonOf(error)}` };
   }
 }
 
