@@ -1246,7 +1246,7 @@ test("a run escalated to another model mid-run shows the model its worker now as
   const [body] = view.materialize(ctxOf(clock, [core]));
   assert.ok(body);
   const shown = body.data.board.tasks.find((x) => x.taskId === "W1-T1");
-  assert.deepEqual(shown?.worker, { requestedModel: "opus" }, JSON.stringify(shown));
+  assert.deepEqual(shown?.worker, { runId: "W1-T1-1", role: "recon", provider: "claude", requestedModel: "opus" }, JSON.stringify(shown));
   const diffs = compareNow(view, core, body, T0 + 210_000);
   assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
   // Negative control: a body still showing the run's first model where legacy's rows say it moved stays real.

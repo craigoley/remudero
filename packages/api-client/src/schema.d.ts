@@ -153,6 +153,8 @@ export interface components {
       workerStateSince?: string;
       /** Bounded worker observability. It names the active role/provider/model and the current or last tool, but never carries prompts, tool arguments, or tool output. */
       workerTelemetry?: {
+        /** Proven by this task's current run start, never inferred from task id or another event. */
+        runId?: string;
         role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
         provider?: string;
         requestedModel?: string;
@@ -697,6 +699,8 @@ export interface components {
     };
     /** GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole body carries it (`needsYou` an object of four lanes, every other section one page of an array), plus `counts` and, for a list section, `page`. */
     InboxSectionResult: {
+      /** Completed maintained classification shared by sections, pages and the attention census; absent from older unqualified bodies. */
+      snapshotKey?: string;
       planSource?: PlanSource;
       ready?: (InboxReadyItem)[];
       drafting?: (InboxDraftingItem)[];
@@ -3774,7 +3778,7 @@ export interface components {
       total: number;
       next?: string;
     };
-    /** GET /v1/views/inbox?section=<s>[&cursor=<n>] (docs/views.md, src/lib/inbox-view.ts): one page of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a read answers from memory. Every page carries every lane's counts. Dark until state/read-model/switches.json sets `inbox` to `serve`. */
+    /** GET /v1/views/inbox?section=<s>[&cursor=<opaque>] (docs/views.md, src/lib/inbox-view.ts): one page of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a read answers from memory. Every page carries every lane's counts. Dark until state/read-model/switches.json sets `inbox` to `serve`. */
     InboxView: {
       view: "inbox";
       version: 1;
@@ -3784,6 +3788,8 @@ export interface components {
       /** `inbox-store:core`: when the slow lane last classified. */
       sources: (ViewSource)[];
       data: {
+        /** One completed classification, reused by every section, continuation and attention census. */
+        snapshotKey?: string;
         section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet" | "archived" | "snoozed";
         items: (InboxViewItem)[];
         counts: InboxCounts;
@@ -4070,16 +4076,7 @@ export interface components {
         /** Blocked PRs and merge holds, most urgent tone first. */
         actions: (NowAction)[];
         recent: {
-          entries: ({
-            ts: string;
-            /** A RecentActivityEntry verb; a consumer renders an unknown one. */
-            verb: string;
-            taskId: string;
-            title: string;
-            detail?: string;
-            costUsd?: number;
-            prUrl?: string;
-          })[];
+          entries: (RecentActivityEntry)[];
           /** Exact merges today (UTC), one per task and pull request, over full history. */
           mergedToday: {
             count: number;
@@ -4250,7 +4247,13 @@ export interface components {
         unverified?: true;
         openedAt?: string;
       };
+      /** Stable current-dispatch identity; event timing and tool activity stay on recent entries. */
       worker?: {
+        /** Proven by this instance task's current run start; absent when no dispatch identity is evidenced. */
+        runId?: string;
+        role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+        provider?: string;
+        /** Only an explicit receipt from this run, never an assignment or requested model. */
         servedModel?: string;
         requestedModel?: string;
       };
@@ -4703,6 +4706,8 @@ export interface components {
     };
     /** GET /v1/inbox's body (src/lib/panel-graph.ts's `buildInboxRoute`). Deferred, ratified and retired proposals are never returned. The four top-level lanes hold every owner's items; `needsYou` and `fleet` split them by who must act. `declined`, `needsYou` and `fleet` are optional ONLY because the console cache's cold fallback body (serve.ts's `fallbackBodyForCachedRead`) carries just `ready`, `drafting` and `notReady`; every handler-computed body carries all six. */
     InboxResult: {
+      /** Completed maintained classification shared by sections, pages and the attention census; absent from older unqualified bodies. */
+      snapshotKey?: string;
       planSource?: PlanSource;
       ready: (InboxReadyItem)[];
       drafting: (InboxDraftingItem)[];
@@ -5066,6 +5071,12 @@ export interface components {
       ok: boolean;
       proposalId: string;
       restored: boolean;
+    };
+    InboxSnapshotRefusal: {
+      error: "invalid_cursor" | "inbox_snapshot_changed" | "inbox_snapshot_pending" | "inbox_snapshot_stale" | "plan_source_unavailable";
+      detail: string;
+      restartRequired?: true;
+      snapshotKey?: string;
     };
     /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`, `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet), `plan_source_unavailable` (W1-T5639: serve has not read the plan, so nothing is derived from a placeholder). */
     InboxRefusal: {
@@ -6609,6 +6620,8 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+          "409": InboxSnapshotRefusal;
+          "503": InboxSnapshotRefusal;
         };
     };
   };
@@ -6915,6 +6928,7 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "409": InboxSnapshotRefusal;
           "503": InboxRefusal;
         };
     };

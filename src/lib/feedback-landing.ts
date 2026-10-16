@@ -638,9 +638,9 @@ function ciLearningShardRelDir(checkoutRoot: string): string {
   return relative(checkoutRoot, join(resolveRepoLayout(checkoutRoot).planDir, "tasks.d"));
 }
 
-function ciLearningLandingKind(checkoutRoot: string, opts: LandFeedbackOpts, git: GitExec): LandingKind {
+function* ciLearningLandingKindSteps(checkoutRoot: string, opts: LandFeedbackOpts, net: LandingNet): Generator<LandingAsk, LandingKind, AskReply> {
   const identity = {
-    ...driveLanding(landingIdentitySteps("ci-learning", opts, landingNet(git, opts.gh ?? defaultGh())), syncPreflightOf(checkoutRoot, opts)),
+    ...(yield* landingIdentitySteps("ci-learning", opts, net)),
     ownedDir: ciLearningShardRelDir(checkoutRoot),
   };
   return {
@@ -1555,7 +1555,7 @@ export interface LandContentInput {
  */
 function landContent(
   root: string,
-  kind: LandingKind,
+  kind: LandingKindSource,
   inputs: LandContentInput[],
   opts: LandFeedbackOpts,
 ): LandFeedbackResult {
@@ -1568,20 +1568,23 @@ export interface LandFeedbackAsyncOpts extends Omit<LandFeedbackOpts, "planPrPre
   ghAsync?: GhExecAsync;
 }
 
-async function landContentAsync(root: string, kind: LandingKind, inputs: LandContentInput[], opts: LandFeedbackAsyncOpts): Promise<LandFeedbackResult> {
+async function landContentAsync(root: string, kind: LandingKindSource, inputs: LandContentInput[], opts: LandFeedbackAsyncOpts): Promise<LandFeedbackResult> {
   const { planPrPreflight, ...landOpts } = opts;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
   return driveLandingAsync(landContentSteps(root, kind, inputs, { ...landOpts, ...asyncSeamsOf(root, landOpts) }), preflight);
 }
 
+type LandingKindSource = LandingKind | ((net: LandingNet) => Generator<LandingAsk, LandingKind, AskReply>);
+
 function* landContentSteps(
   root: string,
-  kind: LandingKind,
+  kindSource: LandingKindSource,
   inputs: LandContentInput[],
   opts: LandFeedbackOpts & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
 ): LandingSteps {
   const git = opts.git ?? defaultGit(root);
   const net = landingNet(git, opts.gh ?? defaultGh(), opts);
+  const kind = typeof kindSource === "function" ? yield* kindSource(net) : kindSource;
   let scratchDir: string | undefined;
 
   try {
@@ -1684,11 +1687,11 @@ export function landPlanReconcileShardsAsync(
   inputs: readonly LandContentInput[],
   opts: LandFeedbackAsyncOpts = {},
 ): Promise<LandFeedbackResult> {
-  return landContentAsync(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+  return landContentAsync(root, (net) => planReconcileLandingKindSteps(root, opts, net), [...inputs], opts);
 }
 
 export function landPlanReconcileShards(root: string, inputs: readonly LandContentInput[], opts: LandFeedbackOpts = {}): LandFeedbackResult {
-  return landContent(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+  return landContent(root, (net) => planReconcileLandingKindSteps(root, opts, net), [...inputs], opts);
 }
 
 export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
@@ -1713,8 +1716,12 @@ export function planReconcileLanding(
   };
 }
 
-function planReconcileLandingKind(root: string, opts: Omit<LandFeedbackOpts, "planPrPreflight">): LandingKind {
-  return landingKind(
+function planReconcileLandingKindSteps(
+  root: string,
+  opts: Omit<LandFeedbackOpts, "planPrPreflight">,
+  net: LandingNet,
+): Generator<LandingAsk, LandingKind, AskReply> {
+  return landingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
@@ -1722,7 +1729,7 @@ function planReconcileLandingKind(root: string, opts: Omit<LandFeedbackOpts, "pl
     },
     root,
     opts,
-    opts.git ?? defaultGit(root),
+    net,
   );
 }
 
@@ -2018,23 +2025,28 @@ function ciLearningOriginsOf(output: string): Set<string> {
   return origins;
 }
 
-function acknowledgeMergedCiLearningShards(stateRoot: string, shardRelDir: string, git: GitExec, mainOrigins: Set<string>): void {
+/** W1-T9755: drop queued shards main holds, by origin or bytes, in two driver-awaited asks; a failed read keeps all. */
+function* acknowledgeMergedCiLearningShardsSteps(
+  stateRoot: string,
+  shardRelDir: string,
+  net: LandingNet,
+  mainOrigins: Set<string>,
+): Generator<LandingAsk, void, AskReply> {
+  const byBytes: string[] = [];
   for (const relPath of ciLearningPendingRelPaths(stateRoot, shardRelDir)) {
-    try {
-      const queuedPath = ciLearningPendingAbsPath(stateRoot, relPath);
-      const queued = readFileSync(queuedPath, "utf8");
-      const parsed = ciLearningOriginRead(queued, `pending-ci-learning:${relPath}`);
-      if (parsed.ok && parsed.origin && mainOrigins.has(parsed.origin)) {
-        unlinkSync(queuedPath);
-        continue;
-      }
-      const remoteSha = git(["rev-parse", `origin/main:${relPath}`]).trim();
-      const localSha = git(["hash-object", queuedPath]).trim();
-      if (remoteSha === localSha) unlinkSync(ciLearningPendingAbsPath(stateRoot, relPath));
-    } catch {
-      // The queue is durable by default: remove only when fetched origin/main proves the same blob.
-    }
+    const queuedPath = ciLearningPendingAbsPath(stateRoot, relPath);
+    const parsed = ciLearningOriginRead(readFileSync(queuedPath, "utf8"), `pending-ci-learning:${relPath}`);
+    if (parsed.ok && parsed.origin && mainOrigins.has(parsed.origin)) unlinkSync(queuedPath);
+    else byBytes.push(relPath);
   }
+  if (byBytes.length === 0) return;
+  const onMain = lsTreeBlobs(yield* net.git(["ls-tree", "-z", "origin/main", "--", ...byBytes]));
+  const listed = byBytes.filter((relPath) => onMain.has(relPath));
+  if (listed.length === 0) return;
+  const local = (yield* net.git(["hash-object", "--", ...listed.map((relPath) => ciLearningPendingAbsPath(stateRoot, relPath))])).trim().split("\n");
+  listed.forEach((relPath, at) => {
+    if (local[at]?.trim() === onMain.get(relPath)) unlinkSync(ciLearningPendingAbsPath(stateRoot, relPath));
+  });
 }
 
 export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
@@ -2100,7 +2112,7 @@ function* ciLearningLandingSteps(
 ): PreflightSteps<CiLearningFilingResult> {
   const git = deps.git ?? defaultGit(checkoutRoot);
   const net = landingNet(git, deps.gh ?? defaultGh(), deps);
-  const kind = ciLearningLandingKind(checkoutRoot, deps, git);
+  const kind = yield* ciLearningLandingKindSteps(checkoutRoot, deps, net);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
   const held = new Set([...deps.planOrigins, ...ciLearningPendingOrigins(deps.stateRoot, checkoutRoot)]);
   const skipped: string[] = [];
@@ -2110,7 +2122,7 @@ function* ciLearningLandingSteps(
   try {
     yield* net.git(["fetch", "origin", "--quiet"]);
     mainOrigins = yield* ciLearningMainOriginsSteps(shardRelDir, net);
-    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git, mainOrigins);
+    yield* acknowledgeMergedCiLearningShardsSteps(deps.stateRoot, shardRelDir, net, mainOrigins);
   } catch {
     // Fetch/ack failure must not discard staged bytes or prevent a new durable staging write.
   }
@@ -2148,7 +2160,7 @@ function* ciLearningLandingSteps(
 
   const landing = yield* landContentSteps(checkoutRoot, kind, inputs, deps);
   try {
-    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git, yield* ciLearningMainOriginsSteps(shardRelDir, net));
+    yield* acknowledgeMergedCiLearningShardsSteps(deps.stateRoot, shardRelDir, net, yield* ciLearningMainOriginsSteps(shardRelDir, net));
   } catch {
     // Best-effort acknowledgement only; pending bytes remain retryable.
   }

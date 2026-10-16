@@ -1,0 +1,100 @@
+- id: W1-T9913
+  title: "AN ARMED DEPENDABOT HEAD BLOCKED BY A STALE EVENT STAYS BLOCKED FOREVER — dep-review decided arm and auto-merge armed, but GitHub still counts a required check's FAILURE from a run whose event predates the head's current title, the sweep dedups the terminal arm at that head, and no lane gives the PR a fresh event; ask Dependabot to recreate it once per head"
+  repo: remudero
+  depends_on: []  # W1-T9828 (in flight, #12398) retitles the recreated head, which carries Dependabot's over-long title again; this code does not import it
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a Dependabot head the lane already armed, still blocked only by a superseded red, gets ONE fresh event; no gate, check list or arm verdict changes
+  band_meaning: span
+  origin: "operator ruling 2026-10-16 ~18:00Z (Craig): build the automation, then recreate #11968, so Dependabot PRs flow end to end with no hand help"
+  plan_refs: [W1-T54, W1-T100, W1-T9748, W1-T8620, W1-T9584, W1-T9586, W1-T9689, W1-T9798, W1-T9828]
+  files:
+    - src/lib/dep-review.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/an-armed-dependabot-head-blocked-by-a-stale-event-is-recreated.test.ts
+    - test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts
+  status: queued
+  priority: 1  # every Dependabot PR whose title or body changed after its checks ran, #11968 today, waits for a human
+  attempts: 0
+  rationale: |
+    READ 2026-10-16 (session brief, and one gated read at 18:10Z):
+    - #11968 at head f102d2d75: dep-review decided `arm` at 14:33Z and `automerge.armed` succeeded, but the PR stayed
+      BLOCKED by commitlint run 38722031946 / job 116378672852 and ci-gate run 38722031956 / job 116387265196, both
+      FAILURE from 10-15 10:41-11:03Z (old title). Their check suites (104930364206, 104930364246) differ from the
+      passing runs' suites (105032690199, 105032687419), and GitHub kept counting the stale FAILURE. A plain re-run
+      replays the original event payload. The sweep's dep-review dedup then stood down on every pass: "dependency
+      review already reached a TERMINAL outcome at this head".
+    - `@dependabot rebase` at 16:38Z produced head 676bed09 at about 16:44Z, and dependabot[bot] renamed the title back
+      to its 162-character original at 16:44:30Z (issues/11968/events). Read at 18:10Z: armed, BLOCKED, commitlint
+      FAILURE (run 38934326485, started 16:44:39Z), ci-gate FAILURE (run 38934327039, ci.yml, 17:06:23Z). So a refresh
+      brings Dependabot's over-long title back, and W1-T9828 must retitle the new head before the verdict.
+    - WHY NOTHING ACTS TODAY. In src/lib/sweep.ts, `runSweep`'s `case "dep-review"` sets
+      `alreadyDone = prior.depReviewed.has(pr@head)`. `priorActionsFromLedger` adds every non-hold dep-review outcome
+      to that set, so after `arm` the lane is never invoked again at that head. The `dep-review` row in
+      DISPOSITION_RULES (`when: pr.isDependabot === true`) outranks `mergeable`, so W1-T8620's stale-check re-run
+      (`actOnMergeRefusal`, armed-idle only) never reaches a Dependabot PR. W1-T9584's `reconcileDependabotRefresh`
+      acts only on a `hold` whose red is main's. W1-T9689/W1-T9798 select the latest attempt, so the lane reads the
+      head green, which is correct for the verdict but blind to GitHub's block.
+    - A NEW HEAD ALREADY RE-EARNS: depReviewed is keyed `pr@head` (W1-T514), so a recreated head is reviewed again.
+      This task pins that with a test rather than changing it.
+    - SWEEP: plan/tasks.d on origin/main for dep-review/Dependabot shards naming terminal dedup, recreate, stale or
+      fresh events (W1-T1110, W1-T2427, W1-T3244, W1-T3707, W1-T9584, W1-T9797, W1-T9818, W1-T9828). None covers an
+      armed-and-blocked head. W1-T9818 (queued) changes only the hold escalation's timing, in the same files. No open
+      run- or plan-file head carries this remedy (432 heads listed at 18:09Z, none for W1-T9797/9798/9586/9689/9828
+      except this session's run-W1-T9828).
+    - SHARED FILES, NOT A SHARED SURFACE: W1-T100 (route blocked_ci to the ci-log fix path) and W1-T9748 (trace how
+      declared files reach staging) also declare src/lib/sweep.ts and src/run-task.ts. Neither touches the dep-review
+      disposition, its dedup or `depReviewCommand`'s arm branch, which are this task's only edits there.
+  design: |
+    No LLM and no new fixed bound. Each step is once per head, and "act on the second sighting" is the W1-T9586
+    pass-one-records, pass-two-acts precedent.
+    1. PURE VERDICT in src/lib/dep-review.ts: `dependabotStaleEventVerdict(input)`. Its input is structural:
+       mergeStateStatus, autoMergeArmed, whether remudero-review is SUCCESS at the head, and the names of required
+       checks that carry a superseded red (from sweep's `classifyRollupSupersession` over the RAW rollup: a FAILURE whose
+       newest same-name run passed). It returns `{ kind: "stale-event", checks }` only when the head is armed and
+       BLOCKED, remudero-review is posted, and at least one superseded red remains. Otherwise it returns `{ kind: "none" }`.
+    2. THE EFFECT, `reconcileDependabotStaleEvent` (src/lib/dep-review.ts), on the hold-state file the refresh and
+       own-red records already use:
+       a. first sighting at a head: record `staleEvent: { headSha, firstSeenMs }`, ledger `dep-review.stale_event.observed`;
+       b. second sighting at the same head: write-ahead a `refreshes` record (command `@dependabot recreate`, cause
+          `stale-event`, delivered false), comment it, mark it delivered, and ledger `dep-review.stale_event.recreate_requested`
+          with pr_number, head_sha and the stale checks. A thrown comment ledgers `dep-review.stale_event.failed` and is
+          retried next pass, because the record is undelivered;
+       c. when a DELIVERED stale-event recreate already exists for an EARLIER head of this PR, do not recreate again.
+          Escalate once per head through the existing `buildDepReviewArmUnreachableEscalation` and `escalate()` (its
+          (taskId, PR, headSha, cause) dedup bounds it), and ledger `dep-review.stale_event.escalated`.
+       Own-red's `survived-refresh` basis ignores `stale-event` records: a fresh event is not a base-red refresh.
+    3. WIRING in `depReviewCommand` (src/run-task.ts):
+       - add `mergeStateStatus,autoMergeRequest` to the `gh pr view --json` fields;
+       - inside `if (result.decision === "arm")`, before the guarded post, compute the verdict from the raw
+         `view.statusCheckRollup` and the selected checks;
+       - on `stale-event`, run step 2, print the outcome and return 1, posting and arming nothing.
+       The `DepReviewPrMutations.comment` seam carries the command, so tests stay offline.
+    4. THE SWEEP, in src/lib/sweep.ts, through a small exported pure helper `depReviewDedupStandsAside(pr)`: the
+       terminal dep-review dedup does not apply while `pr.autoMergeArmed === true && pr.mergeableState === "blocked"`.
+       The lane runs again at that head and sees step 1. `depReviewed` stays `pr@head`-keyed, so the recreated head
+       re-earns its review, gets W1-T9828's retitle on its first pass, and re-arms through the ordinary verdict.
+    5. Unchanged: ci-gate's REQUIRED/ADVISORY lists, pr-title-lint.yml, commitlint.config.mjs, `decideDepReview`,
+       W1-T8620's armed-idle path for fleet PRs, and the hold, refresh, own-red and refused-path effects.
+    6. Tests. Pure tests go in the new file, which must not import src/run-task.ts (the-affected-suite-reach-ratchet
+       holds direct importers flat). Command-level tests go in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts.
+       The proofs below name the `test(` titles verbatim.
+  acceptance:
+    - claim: "an armed head GitHub still blocks, with remudero-review posted and a required check red only in a superseded run, is a stale-event block; a latest red, an unarmed head or an unposted review is not"
+      proof: 'grep: test("W1-T9913: a superseded red under an armed, blocked head is a stale-event block" in test/an-armed-dependabot-head-blocked-by-a-stale-event-is-recreated.test.ts'
+    - claim: "a stale-event block asks Dependabot to recreate once per head, on its second sighting, write-ahead and ledgered"
+      proof: 'grep: test("W1-T9913: a stale-event block asks Dependabot to recreate once per head, on its second sighting" in test/an-armed-dependabot-head-blocked-by-a-stale-event-is-recreated.test.ts'
+    - claim: "a stale-event block on a head that a recreate already produced escalates once instead of recreating again"
+      proof: 'grep: test("W1-T9913: a stale-event block after a delivered recreate escalates instead of recreating again" in test/an-armed-dependabot-head-blocked-by-a-stale-event-is-recreated.test.ts'
+    - claim: "the terminal dep-review dedup stands aside for an armed head GitHub still blocks, and a new head re-earns its review"
+      proof: 'grep: test("W1-T9913: the terminal dep-review dedup stands aside for an armed blocked head and a new head re-earns it" in test/an-armed-dependabot-head-blocked-by-a-stale-event-is-recreated.test.ts'
+    - claim: "the dep-review command posts no review and arms nothing on a stale-event block, and comments @dependabot recreate through its mutation seam"
+      proof: 'grep: test("W1-T9913: the dep-review command recreates an armed head blocked by a stale event instead of re-posting" in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts'
+  falsifier: |
+    At origin/main, `dependabotStaleEventVerdict`, `reconcileDependabotStaleEvent` and `depReviewDedupStandsAside` do not
+    exist, so the new file fails to import. On the #11968-shaped fixture (armed, BLOCKED, remudero-review SUCCESS,
+    commitlint and ci-gate each FAILURE in an older run and SUCCESS in a newer one), `depReviewCommand` decides `arm`,
+    calls the guarded post again and comments nothing, and the sweep's dedup stands down at that head.

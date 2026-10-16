@@ -13,7 +13,7 @@
   files:
     - src/lib/read-plane.ts
     - test/the-sync-spawn-meter-names-its-caller-without-source-maps.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

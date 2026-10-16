@@ -1161,7 +1161,7 @@ const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./l
 };
 workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 const ciRemedyComponent = captureCiRemedyComponent(workerBoundaryStack.loadedModule, ciLogNamedSourcePaths, existsSync, join);
-import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
+import { benchmarkCohortCadence, type BenchmarkCohortCadence, type BenchmarkCohortCadenceDeps } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
@@ -1604,6 +1604,8 @@ import {
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
+  reconcileDependabotTitle,
+  overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -1845,6 +1847,7 @@ import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -2836,7 +2839,7 @@ export function buildSweepEffects(
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, {}, pushFixRound, prior),
+      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
@@ -11024,6 +11027,8 @@ export async function runFixRebase(
     return { rebased: false, reason: decision.reason };
   }
 
+  // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+  io.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: target.number, forcedBy: "fix-rebase", nowMs: systemClock.now() }));
   const result = await io.updateBranch(target.number);
   if (!result.ok) {
     const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
@@ -12619,6 +12624,9 @@ export async function runFixRung(opts: {
             ...(refreshMainSha === undefined ? {} : { main_sha: refreshMainSha }), checks: refreshChecks, test_files: refreshTestFiles }, clearance));
         }
         if (decision.refresh && clearance?.refresh !== false) {
+          // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+          deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber, headSha: review.headSha, forcedBy: "fix-base-refresh",
+            nowMs: systemClock.now() }));
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             const reason =
@@ -13507,12 +13515,10 @@ export async function runFixRung(opts: {
     // enforces.
     const attempt = strikes + 1;
     const round: "resume" | "fresh" = attempt === 1 ? "resume" : "fresh";
-    // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet
-    // claim set the fix worker below is being sent to resolve — BEFORE
-    // `review` is reassigned to this round's freshly computed verdict, so
-    // `detectReviewFalseBlock` (after the review call, below) can tell a
-    // byte-identical re-block apart from real progress. Keyed on the SAME
-    // worker-visible unmet set the fix rung actually dispatches (W1-T166).
+    // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet claim set the fix worker below is
+    // being sent to resolve — BEFORE `review` is reassigned to this round's freshly computed verdict, so
+    // `detectReviewFalseBlock` (after the review call, below) can tell a byte-identical re-block apart from real
+    // progress. Keyed on the SAME worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
     const refutedFlake = flakeClaimsForHead(roundLedger, opts.taskId, priorHeadSha, prNumber).length > 0;
@@ -13525,6 +13531,15 @@ export async function runFixRung(opts: {
       if (resumed.kind === "refused") deps.log("fix.commit_refused", { head_sha: priorHeadSha,
         reason: resumed.detail, scope_amendment_detail: `NEEDS_SCOPE ${paths.join(",")}` });
       return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+    }
+    // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
+    const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
+    if (lastScope?.reason === "main-owned" && typeof lastScope.main_sha === "string" && Array.isArray(lastScope.paths) &&
+        Array.isArray(lastScope.changed_paths) && hostWorktreeGitResult(opts.worktreePath, ["merge-base", "--is-ancestor", lastScope.main_sha, priorHeadSha]).status === 0) {
+      const retried = await amendScope(lastScope.paths as string[], lastScope.changed_paths as string[], priorHeadSha);
+      if (retried.kind !== "refused") {
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
+      }
     }
     const priorDesign = roundLedger.find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
@@ -14305,15 +14320,26 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
       }
       let amendment: ScopeAmendmentOutcome;
-      const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
-      if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
-        amendment = { kind: "refused", reason: "main-owned",
-          detail: `main changed ${scopeMain.owned.join(", ")} since this PR's merge base; refresh against main` };
-        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
-      } else try {
+      const readWorkerChanged = (): string[] => {
         const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
-        amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
+        return changed;
+      };
+      // W1-T9807: main's touch refuses only a path main is repairing, one this ci-log round's red names (#10369).
+      const scopeMainOwned = fixMode === "ci-log" && logNamedMain.outcome === "compared"
+        ? fixAction.paths.filter((path) => logNamedMain.owned.includes(path)) : [];
+      if (scopeMainOwned.length > 0) {
+        amendment = { kind: "refused", reason: "main-owned",
+          detail: `main changed ${scopeMainOwned.join(", ")} since this PR's merge base; refresh against main` };
+        let read: { paths: string[] } | { error: string };
+        try { read = { paths: readWorkerChanged() }; } catch (error) { read = { error: String(error) }; }
+        const changed = "paths" in read ? read.paths : undefined;
+        const mainTip = hostWorktreeGitResult(opts.worktreePath, ["rev-parse", "--verify", "refs/remotes/origin/main"]);
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha,
+          pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
+          changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
+      } else try {
+        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
@@ -14336,6 +14362,17 @@ export async function runFixRung(opts: {
           throw error;
         } finally { logFixDone(landing?.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing); }
       } else logFixDone();
+      if (scopeMainOwned.length > 0 && deps.updateBranch && prNumber !== undefined) {
+        const refresh = { pr_number: prNumber, head_sha: priorHeadSha, red_checks: [...new Set((currentCiFailures ?? []).map((f) => f.name))],
+          test_files: [], matching_base_files: scopeMainOwned, method: "merge", reason: "scope-main-owned" };
+        try {
+          const updated = await deps.updateBranch(prNumber);
+          if (updated.ok) deps.log("fix.base_refreshed", refresh);
+          else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
+        } catch (error) {
+          deps.log("fix.base_refresh_failed", { ...refresh, error: String(error) });
+        }
+      }
       return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" };
     }
 
@@ -17277,34 +17314,6 @@ export function refreshManagedCheckout(
   return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
 }
 
-/**
- * W1-T9077: once the store holds the bundle for the managed checkout's revision, cut its engine tree (a detached worktree a
- * run child that outlives the daemon runs from), ledger how far the newest current engine lags main, and remove the engine
- * trees no run names. Off the loop, never rejects: a failure is ledgered and the previous engine stays the newest.
- */
-export async function buildEngineAfterStore(
-  repoDir: string,
-  stateRoot: string,
-  storeRoot: string,
-  stored: StoreBuildResult,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-  /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
-  seams: Partial<Pick<EngineBuildOptions, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
-): Promise<void> {
-  if (stored.kind !== "built" && stored.kind !== "present") return;
-  try {
-    const git = seams.git ?? ((dir: string, args: readonly string[]) => hostWorktreeGitAsync(dir, args));
-    const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
-    const { isCurrent, ...buildSeams } = seams;
-    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...buildSeams });
-    if (built.kind === "failed") return;
-    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git, ...(isCurrent ? { isCurrent } : {}) });
-    await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });
-  } catch (error) {
-    log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
-  }
-}
-
 /** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
 async function refreshHeldManagedCheckout(
   repoDir: string,
@@ -19001,12 +19010,13 @@ export async function pushFixRound(
 }
 
 /**
- * W1-T4797: the pre-push DIFF-COVERAGE precheck's answer, as three DISTINCT values — never collapsed.
+ * W1-T4797: the pre-push DIFF-COVERAGE precheck's answers — never collapsed.
  * `uncovered` refuses the round before any push, carrying CI's own uncovered-lines text; `covered`
  * pushes as today; `unavailable` (timeout, spawn failure, unreadable lcov, a selector that cannot
- * scope) ALSO pushes: a precheck that cannot look must never block.
+ * scope) ALSO pushes: a precheck that cannot look must never block; consumer repos return `not-applicable`.
  */
 export type CoveragePrecheck =
+  | { outcome: "not-applicable"; repo: string; reason: string }
   | { outcome: "covered"; reason: string; suites: number }
   | { outcome: "uncovered"; text: string; suites: number }
   | { outcome: "unavailable"; reason: string };
@@ -19016,6 +19026,7 @@ export type CoverageRunResult = { status: number | null; output: string; timedOu
 
 /** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
 export type CoveragePrecheckPorts = {
+  repo?: string;
   changedFiles?: (wt: string) => string[] | Promise<string[]>;
   select?: (wt: string, changed: string[]) => AffectedSelection | Promise<AffectedSelection>;
   manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
@@ -19135,6 +19146,9 @@ function coverageRefusalText(output: string): string {
  * bound is `unavailable`, not `uncovered`.
  */
 export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): Promise<CoveragePrecheck> {
+  if (ports.repo !== undefined && !fixCensusAppliesToRepo(ports.repo, () => {})) {
+    return { outcome: "not-applicable", repo: ports.repo, reason: `core's diff-coverage selector does not apply to ${ports.repo}` };
+  }
   const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
   let changed: string[];
   try {
@@ -19189,7 +19203,8 @@ export function coveragePushRefusal(
     site,
     outcome: result.outcome,
     reason: result.outcome === "uncovered" ? "diff-coverage would refuse this head" : result.reason,
-    ...(result.outcome === "unavailable" ? {} : { suites: result.suites }),
+    ...(result.outcome === "covered" || result.outcome === "uncovered" ? { suites: result.suites } : {}),
+    ...(result.outcome === "not-applicable" ? { repo: result.repo } : {}),
     ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
   });
   if (result.outcome !== "uncovered") return undefined;
@@ -21313,7 +21328,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
+      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await gitPushRunBranchAsync(worktreePath);
@@ -21327,7 +21342,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
           ...(refusalLabel === "coverage-refused"
-            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push.repair") }
+            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push.repair") }
             : {}),
         });
         if (rung.outcome === "refused") {
@@ -21666,7 +21681,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
+          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, { repo: task.repo }, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           escalationIssues: ghIssueGatewayAsync(owner, task.repo),
@@ -23911,6 +23926,12 @@ export function defaultNodePinSyncIo(
 export interface DepReviewPrMutations {
   comment(prUrl: string, body: string): void;
   close(prUrl: string, opts: { comment: string; deleteBranch: false }): void;
+  /** W1-T9828: the REST title PATCH under the daemon's own gh identity, so `pull_request.edited` fires. */
+  retitle?(prUrl: string, title: string): Promise<void>;
+}
+
+export async function defaultDepReviewRetitle(prUrl: string, title: string): Promise<void> {
+  await ghTextAsync(prMetadataRestArgs(prUrl, { title }));
 }
 
 function depReviewMigrationFeedbackId(submissionKey: string): string {
@@ -23932,6 +23953,7 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
     close(prUrl, opts) {
       ghExec(["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
     },
+    retitle: defaultDepReviewRetitle,
   };
 }
 
@@ -23978,8 +24000,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
   const proposalRoot = deps.root ?? repoRoot;
   const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
+  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
+  const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
 
-  if (isDependabotAuthor({ login: view.author?.login ?? "" })) {
+  if (dependabot) {
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
@@ -23992,6 +24016,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     if (sync.kind === "refused") {
       log("dep-review.node_pin_refused", { pr_url: view.url, head_sha: view.headRefOid, reason: sync.reason, detail: sync.detail });
+    }
+    const retitle = deps.prMutations?.retitle ?? defaultDepReviewRetitle;
+    const titled = await reconcileDependabotTitle({
+      statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, title: view.title ?? "", body: view.body ?? "",
+      retitle: (title) => retitle(view.url, title), log,
+    });
+    if (titled === "retitled" || titled === "failed") {
+      console.log(`### rmd dep-review PR #${view.number} — title over header-max-length, retitle ${titled}; holding for the re-run`);
+      return 1;
     }
   }
 
@@ -24021,7 +24054,6 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
-  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   try {
     reconcileDepReviewHold({
       statePath: holdStatePath,
@@ -24076,7 +24108,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     try {
       const ownRedFlag = flagValue(rest, "--dependabot-own-red");
-      const ownRed = reconcileDependabotOwnRed({
+      // W1-T9828: a commitlint red on a title still over header-max-length is the title's, never a fleet build.
+      const titleRed = dependabot && overHeaderLimit(view.title ?? "") && result.redChecks.includes("commitlint");
+      const ownRed = titleRed ? "none" : reconcileDependabotOwnRed({
         statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
         headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
         capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
@@ -31968,30 +32002,10 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   return { checkLedgerCompaction: check, runLedgerCompaction: run };
 }
 
-interface BenchmarkCohortHookDeps {
-  config?: Config;
-  clock?: Clock;
-  intervalMs?: number;
-  run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
-}
-
-export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = {}): {
-  checkBenchmarkCohort: () => boolean;
-  runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
-} {
-  const clock = deps.clock ?? systemClock;
-  const intervalMs = deps.intervalMs ?? 30_000;
-  let lastStartedAt = Number.NEGATIVE_INFINITY;
-  return {
-    checkBenchmarkCohort: () => {
-      const current = clock.now();
-      if (current - lastStartedAt < intervalMs) return false;
-      lastStartedAt = current;
-      return true;
-    },
-    runBenchmarkCohortPass: () => (deps.run ?? ((stateDir) => runBenchmarkCohortPass(stateDir, { maxSources: 4 })))
-      (dirname(ledgerPathFor(deps.config ?? loadConfig()))),
-  };
+export function buildBenchmarkCohortDaemonHooks(
+  deps: Omit<BenchmarkCohortCadenceDeps, "stateDir"> & { config?: Config } = {},
+): BenchmarkCohortCadence {
+  return benchmarkCohortCadence({ ...deps, stateDir: () => dirname(ledgerPathFor(deps.config ?? loadConfig())) });
 }
 
 /** The live ledger is bounded independently of its rotations, so this reads the recent fire
@@ -39489,27 +39503,25 @@ export async function daemonCommand(
   } catch (censusError) {
     log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
   }
-  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot. The tracker is seeded
-  // from the ledger this boot opened with and fed every run-child row this daemon writes since (`childLog`); it keeps counts.
-  // Read here, before adoption, so the boot's adoption pass is folded once, live.
+  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot, fed every run-child
+  // row this daemon writes since (`childLog`); it keeps counts. W1-T9816: that window and the settlements are one UNION read,
+  // because rotation prunes them from the live file. Read here, before adoption, so the boot's adoption pass is folded once.
   const bootLedgerLines = readLedgerLines(ledgerPath);
   const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
-  const childModeTracker = createRunChildModeTracker(bootLedgerLines);
+  const bootChildPolicy = readRunChildPolicy(childPolicy);
+  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
+  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
+  const childBoot = childMode
+    ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log }) : undefined;
+  const childModeTracker = childBoot?.tracker ?? createRunChildModeTracker(bootLedgerLines);
   const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
     log(step, extra);
     childModeTracker.observe(step, extra);
   };
-  const bootChildPolicy = readRunChildPolicy(childPolicy);
-  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
-  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const adoptedRunIds = new Set<string>();
-  const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["run_child.settled"], pattern: /"step":"run_child\.settled"/, refuseIncomplete: true,
-  }) : undefined;
-  if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
-  const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
+  const adoptedChildren: AdoptedRunChild[] = childBoot ? adoptRunChildren({
     stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log: childLog,
-    settledRunIds: new Set((childSettlements?.rows ?? []).flatMap((row) => typeof row.run_id === "string" ? [row.run_id] : [])),
+    settledRunIds: childBoot.settledRunIds,
   }) : [];
   for (const child of adoptedChildren) {
     adoptedRunIds.add(child.runId);
@@ -54465,14 +54477,16 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
-import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
+import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
+// W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
+import { buildEngineAfterStore } from "./lib/engine-tree.js";
+export { buildEngineAfterStore };
 import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
-import { createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
+import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildCreditCandidates, buildEscalationReconcileCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, startTickReadWorker, tickReadWorkerUrl, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };

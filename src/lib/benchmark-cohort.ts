@@ -2,7 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { systemClock } from "./clock.js";
+import { isMainThread, parentPort, SHARE_ENV, workerData, type Worker } from "node:worker_threads";
+import { startWorker } from "./child-entry-argv.js";
+import { systemClock, type Clock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import { joinVerifiedTaskOutcomes, type BenchmarkVerifiedOutcome, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { deriveModelDrift, MODEL_DRIFT_VERSION, unavailableModelDrift, type ModelDriftReport,
@@ -983,6 +985,92 @@ export async function runBenchmarkCohortPass(
     snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
 }
 
+export const BENCHMARK_COHORT_MIN_INTERVAL_MS = 900_000; // W1-T8876: one pass re-parses a 37 MB checkpoint
+const BENCHMARK_COHORT_DAEMON_MAX_SOURCES = 4;
+
+export interface BenchmarkCohortCadenceDeps {
+  stateDir: () => string;
+  clock?: Clock;
+  intervalMs?: number;
+  run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
+}
+
+export interface BenchmarkCohortCadence {
+  checkBenchmarkCohort: () => boolean;
+  runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
+}
+
+function benchmarkCohortInputs(stateDir: string): string | undefined {
+  try {
+    const live = statSync(ledgerLivePath(stateDir), { throwIfNoEntry: false });
+    const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).length;
+    return JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir, BENCHMARK_COHORT_DAEMON_MAX_SOURCES,
+      live ? [live.ino, live.size] : null, rotations]);
+  } catch { /* an unreadable state directory matches no finished inputs, so the pass runs and reports it */
+    return undefined;
+  }
+}
+
+/** W1-T8876: a pass runs only when its inputs changed since the last finished pass, at most once per floor.
+ * A partial or failed pass records no inputs, so its unfinished work is retried at the next floor. */
+export function benchmarkCohortCadence(deps: BenchmarkCohortCadenceDeps): BenchmarkCohortCadence {
+  const clock = deps.clock ?? systemClock;
+  const intervalMs = deps.intervalMs ?? BENCHMARK_COHORT_MIN_INTERVAL_MS;
+  const run = deps.run ?? benchmarkCohortDaemonPass;
+  let lastStartedAt = Number.NEGATIVE_INFINITY;
+  let finishedInputs: string | undefined;
+  return {
+    checkBenchmarkCohort: () => {
+      const current = clock.now();
+      if (current - lastStartedAt < intervalMs) return false;
+      if (finishedInputs !== undefined && benchmarkCohortInputs(deps.stateDir()) === finishedInputs) return false;
+      lastStartedAt = current;
+      return true;
+    },
+    runBenchmarkCohortPass: async () => {
+      const stateDir = deps.stateDir();
+      const inputs = benchmarkCohortInputs(stateDir);
+      finishedInputs = undefined;
+      const result = await run(stateDir);
+      if (result.pendingSources === 0) finishedInputs = inputs;
+      return result;
+    },
+  };
+}
+
+const BENCHMARK_COHORT_WORKER_KIND = "benchmark-cohort-pass-v1" as const;
+type CohortWorkerData = { kind: typeof BENCHMARK_COHORT_WORKER_KIND; stateDir: string;
+  opts: { maxSources?: number; nowIso?: string } };
+type CohortWorkerReply = { ok: true; result: BenchmarkCohortPassResult } | { ok: false; error: string };
+
+/** W1-T9845: the daemon's pass runs in a one-shot worker. The checkpoint's read, parse, stringify and write, and
+ * the GC of its parsed graph, belong to the worker's isolate; the daemon thread only waits for one message. */
+export function runBenchmarkCohortPassOffLoop(
+  stateDir: string, opts: CohortWorkerData["opts"] = {},
+  start: (data: CohortWorkerData) => Worker = (data) => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }),
+): Promise<BenchmarkCohortPassResult> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (finish: () => void): void => { if (!settled) { settled = true; finish(); } };
+    let worker: Worker;
+    try {
+      worker = start({ kind: BENCHMARK_COHORT_WORKER_KIND, stateDir, opts });
+    } catch (error) {
+      reject(new Error(`benchmark-cohort-worker-start-failed: ${String((error as Error)?.message ?? error)}`));
+      return;
+    }
+    worker.once("message", (reply: CohortWorkerReply) => settle(() => reply.ok ? resolve(reply.result)
+      : reject(new Error(`benchmark-cohort-worker-failed: ${reply.error}`))));
+    worker.once("error", (error) => settle(() => reject(new Error(`benchmark-cohort-worker-error: ${error.message}`))));
+    // An exit with no message is a pass that never reported, never a success.
+    worker.once("exit", (code) => settle(() => reject(new Error(`benchmark-cohort-worker-exited-before-reporting: ${code}`))));
+  });
+}
+
+/** W1-T9845: the pass the daemon hook runs by default, off the daemon loop. */
+export const benchmarkCohortDaemonPass = (stateDir: string): Promise<BenchmarkCohortPassResult> =>
+  runBenchmarkCohortPassOffLoop(stateDir, { maxSources: BENCHMARK_COHORT_DAEMON_MAX_SOURCES });
+
 /** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */
 export async function runBenchmarkCohortIdlePass(
   stateDir: string, run: typeof runBenchmarkCohortPass = runBenchmarkCohortPass,
@@ -1048,6 +1136,14 @@ export async function runBenchmarkVerifiedOverlayPass(
       reason: "snapshot-unavailable", error_class: errorClass }));
     return 1;
   }
+}
+
+if (!isMainThread && parentPort && (workerData as Partial<CohortWorkerData> | null)?.kind === BENCHMARK_COHORT_WORKER_KIND) {
+  const port = parentPort;
+  const data = workerData as CohortWorkerData;
+  void runBenchmarkCohortPass(data.stateDir, data.opts).then(
+    (result) => port.postMessage({ ok: true, result } satisfies CohortWorkerReply),
+    (error: unknown) => port.postMessage({ ok: false, error: String((error as Error)?.message ?? error) } satisfies CohortWorkerReply));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
