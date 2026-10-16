@@ -29,3 +29,11 @@ helpers, or use `ownedFixtureDir(scope, kind)`. Register asynchronous child/writ
 failed closure or changed identity keeps the path, fails the hook and survives the exit backstop.
 Use `retain(reason)` for required failure evidence. Caller-supplied shared directories keep their
 original owner. Existing process-exit cleanup remains the fallback for unmigrated fixtures.
+
+For local source-mapped coverage, `npm run diff-coverage:local -- --batch-size N <tests...>`
+uses serial judged batches and the existing pinned compact/raw-range merger. Choose N from the
+admitted workload profile; it changes no hosted gate. Every selected file must exist and be tracked.
+Closed successful raw scratch is disposed after compaction; failed/raw-requested inputs and per-batch
+TAP, LCOV, input hashes and terminal receipts remain available. Resource output labels path-block
+accounting, phase-only samples, partial inventories and unknown cleanup. The1GiB signal is an
+investigation warning, never permission to delete an active tree or relax a disk floor.

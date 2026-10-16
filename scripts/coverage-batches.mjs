@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { acquireTestSlotAsync, lowPriorityCommand, TEST_SLOT_LEASE_MS, testSlotProcessFacts } from '../src/lib/test-slot.ts';
 import { prepareJudgedRun, judgedNodeTestArgs, judgeRun, testFilesInArgv } from './pure-test-pool.mjs';
 import { extractCoverageFlags, readCiYaml, withLcovDestination } from './diff-coverage-local.mjs';
 import { gitOrThrow } from './lib/git.mjs';
 import { isMainModule } from './lib/argv.mjs';
+import { assessWorkspaceDiskBudget, sampleWorkspaceUsage, workspaceUsageEvidence } from '../src/lib/workspace-usage.ts';
 
 const hash = (text) => createHash('sha256').update(text).digest('hex');
-const MERGER = new URL('./coverage-merge-ratchet.mjs', import.meta.url).pathname;
-const GATE = new URL('./diff-coverage.mjs', import.meta.url).pathname;
+const MERGER = fileURLToPath(new URL('./coverage-merge-ratchet.mjs', import.meta.url));
+const GATE = fileURLToPath(new URL('./diff-coverage.mjs', import.meta.url));
 
 /** Await actual child close, including its stdio. Forward only this runner's signals and retain
  * the original outcome; an interrupted child which reports zero cannot qualify a batch. */
@@ -55,7 +57,9 @@ export function guardCoverageLease(slot) {
       const st = fstatSync(fd);
       if (!st.isFile() || st.size > 65536 || st.dev !== pin.dev || st.ino !== pin.ino || st.uid !== pin.uid ||
           (process.getuid && st.uid !== process.getuid())) throw new Error('slot physical identity changed');
-      const held = JSON.parse(readFileSync(fd, 'utf8'));
+      const bytes = Buffer.alloc(65537), count = readSync(fd, bytes, 0, bytes.length, 0);
+      if (count === bytes.length) throw new Error('slot record exceeds byte bound');
+      const held = JSON.parse(bytes.subarray(0, count).toString('utf8'));
       if (Object.hasOwn(held, 'releaseRequestedAt') || held.pid !== claim.pid || held.ownerNonce !== claim.nonce ||
           held.processStart !== claim.start || held.concurrency !== claim.concurrency ||
           testSlotProcessFacts(held.pid)?.start !== held.processStart) throw new Error('slot authority lost');
@@ -82,7 +86,7 @@ function batchFlags(flags, dir, lcov) {
 /** Serial batches reuse the pinned raw-range merger. Only a closed, fully judged batch may
  * compact and dispose its raw scratch; all manifests, per-batch LCOV and failures remain. */
 export async function runCoverageBatches({ cwd = process.cwd(), flags, files, batchSize, lcov, keepRaw = false,
-  base = 'origin/main' }, { run = runCoverageCommand, acquire = acquireTestSlotAsync, log = console.error } = {}) {
+  base = 'origin/main', diskProfile }, { run = runCoverageCommand, acquire = acquireTestSlotAsync, log = console.error } = {}) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error('batch size must be a positive integer');
   const root = realpathSync(cwd);
   const selected = [...new Set(files.flatMap((file) => {
@@ -101,9 +105,14 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
   mkdirSync(dirname(lcov), { recursive: true });
   const output = mkdtempSync(join(dirname(lcov), 'rmd-local-batches-'));
   const receiptPath = join(output, 'execution.json');
+  const samples = [sampleWorkspaceUsage(root)];
   const receipt = { version: 1, head, selected, batchSize, state: 'not-run', batches: [],
     inputs: selected.map((file) => ({ file, sha256: hash(readFileSync(resolve(root, file))) })) };
-  const save = () => writeFileSync(receiptPath, JSON.stringify(receipt, null, 2) + '\n');
+  const save = () => {
+    receipt.resources = workspaceUsageEvidence(samples);
+    writeFileSync(receiptPath + '.part', JSON.stringify(receipt, null, 2) + '\n');
+    renameSync(receiptPath + '.part', receiptPath);
+  };
   save(); log(`coverage-batches: receipt ${receiptPath}`);
   const slot = await acquire('coverage:local-batches', { slots: 1, waitBoundMs: 0 });
   let heartbeat, monitor, lost, released = false;
@@ -123,6 +132,11 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
     const compact = [], lineLcov = [];
     for (let offset = 0; offset < selected.length; offset += batchSize) {
       slot.refresh(); check();
+      const disk = sampleWorkspaceUsage(root); samples.push(disk);
+      if (diskProfile && assessWorkspaceDiskBudget(disk.hostFreeBytes, diskProfile) !== 'admitted') {
+        receipt.state = 'not-run-disk-capacity'; receipt.reason = 'next batch cannot satisfy the supplied unchanged disk profile';
+        save(); return { status: 75, receiptPath };
+      }
       const batch = selected.slice(offset, offset + batchSize), dir = join(output, String(receipt.batches.length));
       mkdirSync(dir);
       const raw = mkdtempSync(join(tmpdir(), 'rmd-diff-coverage-raw-'));
@@ -141,6 +155,7 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
       if (compressed.status !== 0 || compressed.interrupted) throw new Error('coverage batch compaction failed');
       Object.assign(record, { state: 'complete', lcov: batchLcov, lcovSha256: hash(readFileSync(batchLcov)), compact: packed });
       if (!keepRaw) { rmSync(raw, { recursive: true, force: true }); record.rawDisposed = true; }
+      samples.push(sampleWorkspaceUsage(root));
       compact.push(packed); lineLcov.push('--line-lcov', batchLcov); save();
     }
     const merged = await phase(['--expose-internals', MERGER, '--output', lcov, ...lineLcov, ...compact], { cwd: root, env });

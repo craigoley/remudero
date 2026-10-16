@@ -67,6 +67,13 @@ test("coverage batches refuse ghost inputs and retain an actual failing batch wi
     "--test-reporter=lcov", "--test-reporter-destination=coverage/lcov.info", "--experimental-test-coverage"],
     files: ["test/fail.test.mjs", "test/later.test.mjs"], batchSize: 1, lcov: join(repo.dir, "coverage/lcov.info"), base: "HEAD" };
   await assert.rejects(runCoverageBatches({ ...opts, files: ["test/ghost.test.mjs"] }), /ENOENT/);
+  const blocked = await runCoverageBatches({ ...opts,
+    diskProfile: { minimumFreeBytes: Number.MAX_SAFE_INTEGER, reservedBytes: 0, estimatedPeakBytes: 1 } },
+  { acquire: async () => f.slot, log() {} });
+  assert.equal(blocked.status, 75);
+  const blockedReceipt = JSON.parse(readFileSync(blocked.receiptPath, "utf8"));
+  assert.equal(blockedReceipt.state, "not-run-disk-capacity"); assert.equal(blockedReceipt.batches.length, 0);
+  f.write();
   const result = await runCoverageBatches(opts, { acquire: async () => f.slot, log() {} });
   assert.notEqual(result.status, 0);
   const receipt = JSON.parse(readFileSync(result.receiptPath, "utf8"));
