@@ -14,7 +14,7 @@
     - src/run-task.ts
     - test/a-review-is-judged-against-main-at-its-start.test.ts
     - test/a-fresh-tree-review-keeps-the-sweeps-review-options.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: every fresh-tree review held by memory admission is withheld and re-run in a loop
   attempts: 0
   rationale: |

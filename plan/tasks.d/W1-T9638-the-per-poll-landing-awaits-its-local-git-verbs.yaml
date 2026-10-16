@@ -14,7 +14,7 @@
     - src/lib/feedback-landing.ts
     - test/the-per-poll-landing-awaits-its-local-git-verbs.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: stuck PRs and stalls must not happen; a held loop starves every timer-bounded daemon read
   attempts: 0
   rationale: |

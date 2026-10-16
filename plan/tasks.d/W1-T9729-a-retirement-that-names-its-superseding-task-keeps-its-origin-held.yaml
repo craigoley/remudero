@@ -17,7 +17,7 @@
     - src/lib/flow-gardener.ts
     - src/lib/gate-gardener.ts
     - test/a-retirement-that-names-its-superseding-task-keeps-its-origin-held.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: every operator retirement of a machine record on a still-live origin is undone by the next gardener pass
   attempts: 0
   rationale: |
