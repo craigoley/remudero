@@ -1,0 +1,79 @@
+- id: W1-T9797
+  title: "A DEPENDABOT BUMP OUTSIDE THE ALLOWLIST IS A SILENT TERMINAL REFUSE — dep-review refused #12191's .github/semgrep/requirements.txt, printed one line, filed nothing, and the sweep deduped that refuse for 12 h; a Dependabot-authored path refuse now files the W1-T9586 owned-build proposal"
+  repo: remudero
+  depends_on: [W1-T9586, W1-T2705, W1-T3707]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # Rule 19: one concern, the refuse arm's remedy; no allowlist, gate or arm change
+  band_meaning: span
+  origin: "operator PR queue request 2026-10-16T11:25Z (review 11968, 12043, 12191, 12219, 12289; fix the root cause)"
+  plan_refs: [W1-T54, W1-T2705, W1-T3707, W1-T9584, W1-T9586, W1-T2427]
+  files: [src/run-task.ts, src/lib/dep-review.ts, test/a-refused-dependabot-path-becomes-a-fleet-build.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger union 2026-10-15T23:52Z to 2026-10-16T11:29Z. Dependabot PR 12191
+    (mcp 1.29.0 to 1.30.0 in /.github/semgrep, head 1da14b29f) got exactly one
+    dep-review.decided row: refuse, "diff touches file(s) outside the manifest/lockfile
+    allowlist: .github/semgrep/requirements.txt". After that, every sweep.disposed row for the
+    head says "dependency review already reached a TERMINAL outcome at this head". The only
+    other remedy was the generic stage-stall MANUAL issue 12212 ("DIAGNOSIS: unknown
+    signature"), which names no cause and no repair. mcp 1.29.0 carries GHSA-84m7-p3x7-pcfv,
+    so a security fix sat for 12 h.
+    WHY A REFUSE IS SILENT. depReviewCommand's refuse arm does three things: it prints "no
+    remudero-review posted (refused)", returns 2, and the sweep's priorActionsFromLedger
+    dedups every outcome except hold. No proposal, comment, close or escalation follows.
+    W1-T9586 already turns a held own-red minor/patch head into ONE owned-build proposal,
+    and its text names this exact case: "a companion edit cannot ride the Dependabot branch
+    (dep-review refuses any file outside the manifest allowlist)". But decideDepReview checks
+    the path before the gates. So a Dependabot head whose OWN diff leaves the allowlist
+    never reaches hold or that proposal.
+    THE BUMP NEEDS AN OWNED BRANCH, NOT A WIDER ALLOWLIST. Reproduced at 1da14b29f, where
+    test/semgrep-native-install.test.ts reports "# fail 2". The lock dialect admits one
+    reviewed artifact per package, but Dependabot wrote two hashes. The test also pins mcp
+    at 1.29.0. head-identity-gate refuses the same path (isDependencyDeclarationPath). Any
+    repair touches test/, and the bot branch cannot carry that. Hand repair: PR 12295.
+    Admitting the path would still leave the companion red, and would weaken the W1-T3707
+    shared predicate.
+    SWEEP: no open PR head or plan shard on origin/main covers a refused Dependabot path.
+    Checked 2026-10-16: 414 run- heads; the only dep-review.ts change is merged W1-T9689.
+  design: |
+    1. In depReviewCommand's refuse arm, act only when all four of these hold: the author
+       is Dependabot, offendingFiles is non-empty, headCarriesForeignCommit(view.commits) is
+       false, and parseDependabotBumpFacts yields bumps. In that case,
+       file ONE owned-build proposal through the existing W1-T9586 capture: captureProposal, the
+       own-red-proposals.json registry, and fold-by-bump-target. Use a new basis,
+       "outside-allowlist", whose text names the offending paths and says the owned
+       branch must land the same version moves plus any companion edits. Reuse
+       depReviewOwnRedSubmissionKey, so a later own-red proposal for the same target folds
+       into this one rather than filing twice. Do not post a Dependabot command, do not
+       close, and do not post a status. Dependabot closes its own PR once main carries the
+       version. Ledger dep-review.refused_path.feedback_captured, .folded and
+       .capture_failed, each with pr_number, head_sha and offending_files.
+    2. Every other refuse stays exactly as it is, but the ledger names which one it was:
+       dep-review.refused_path.not_proposed with reason non-dependabot-author,
+       foreign-commit or unkeyed. A non-Dependabot author or a foreign commit is never
+       proposed, because the path limb is what keeps the lane safe (W1-T3707).
+    3. A refuse is terminal only when it is settled: a proposal was captured or folded at
+       this head, or the refuse is not proposable. On a capture failure, append a further
+       dep-review.decided row with decision hold, review_decision refuse and the error as
+       its reason. The hold-reconcile failure path already writes this row shape. The
+       sweep's existing depReview effect reads that last decided row, so the next pass
+       re-runs, and sweep.ts does not change. No new poll loop, cap or timer.
+    OUT OF SCOPE: widening MANIFEST_PATTERNS or the declaration predicate; changing
+    head-identity-gate, the hold age backstop or the W1-T9689 selected-check reader;
+    closing or editing Dependabot PRs; any live effect in tests.
+  acceptance:
+    - claim: "a Dependabot head whose own diff leaves the allowlist files one owned-build proposal naming the offending path, posts no command or close, and a second pass files nothing new"
+      proof: 'grep: test("W1-T9797 a refused dependabot path files one owned-build proposal" in test/a-refused-dependabot-path-becomes-a-fleet-build.test.ts'
+    - claim: "a failed capture leaves the refuse unsettled so the next sweep pass re-runs it, while a non-Dependabot author and a foreign commit stay plain refuses with a named reason and no capture"
+      proof: 'grep: test("W1-T9797 an unsettled or unproposable refuse is never a silent terminal dedup" in test/a-refused-dependabot-path-becomes-a-fleet-build.test.ts'
+  falsifier: |
+    Restore origin/main's refuse arm, which prints and returns 2. The 12191-shaped fixture
+    (mcp 1.29.0 to 1.30.0 in /.github/semgrep, diff on .github/semgrep/requirements.txt) then
+    captures nothing, and the first criterion fails. If the effect returns "refuse" after a
+    failed capture, the sweep's next pass dedups and the second criterion fails. The
+    non-Dependabot and foreign-commit controls must still capture nothing.
