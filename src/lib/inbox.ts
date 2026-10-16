@@ -2142,7 +2142,7 @@ function draftCreatedPaths(task: import("./plan.js").Task): Set<string> {
 }
 
 function draftMissingPathViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
-  const slug = kebabSlug(task.title, SHARD_SLUG_MAX_LEN).replace(/-+$/, "");
+  const slug = draftShardSlug(task.title);
   const creates = draftCreatedPaths(task);
   const missing = missingDeclaredPaths(task, { pathExists: facts.moduleExists, pathExistsAtBase: facts.pathExistsAtBase },
     (path) => path === `test/${slug}.test.ts` || creates.has(path));
@@ -2166,6 +2166,21 @@ function draftCallSiteAbsentViolations(task: import("./plan.js").Task, facts: Dr
       message: `${task.id}: call-site proof ${JSON.stringify(criterion.proof)} names ${JSON.stringify(path)}, which ${created ? "is declared on a CREATES: line" : "the tree does not hold"}; a new file is never the caller. Name an existing src file that already calls the symbol, or drop the claim — never invent a caller file or add one to files:` });
   }
   return out;
+}
+
+/** W1-T9327: the stem `plan/tasks.d/<id>-<stem>.yaml` carries for a task titled `title`, or "" for a title that
+ *  slugs to nothing. The shard writer and every draft lint read this ONE derivation, so a draft is sized under the slug
+ *  its approve will mint. The cap is the SHARD convention's; the trailing-hyphen trim is this writer's own, since `slug`
+ *  strips edges BEFORE slicing and a cut can land on a separator. */
+export function draftShardSlug(title: string): string {
+  return kebabSlug((title ?? "").replace(/^["']|["']$/g, ""), SHARD_SLUG_MAX_LEN).replace(/-+$/, "");
+}
+
+/** W1-T9327: `opts` with the task's minted shard slug as `duplicateSlug`, as the push preflight sizes the written shard.
+ *  A task with no title keeps the unknown-slug behaviour, as the writer files it under its id alone. */
+function draftSizingOptions(opts: LintOpts, task: import("./plan.js").Task): LintOpts {
+  const slug = draftShardSlug(task.title);
+  return task.title?.trim() && slug ? { ...opts, duplicateSlug: slug } : opts;
 }
 
 /** W1-T9039: every floor lints a drafted task as the push floor lints a task its diff adds. */
@@ -2216,7 +2231,7 @@ export function lintDraftedFragment(
   for (const task of tasks) {
     violations.push(...draftMissingPathViolations(task, { moduleExists: pathExists, readGrepProofFile, pathExistsAtBase }));
     violations.push(...draftCallSiteAbsentViolations(task, { moduleExists: pathExists, readGrepProofFile, pathExistsAtBase }));
-    violations.push(...filingBlockers(lintTask(task, opts).violations, undefined, true));
+    violations.push(...filingBlockers(lintTask(task, draftSizingOptions(opts, task)).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, pathExists));
     violations.push(...draftAbsenceProofViolations(task));
     for (const path of task.files ?? []) {
@@ -3808,7 +3823,7 @@ export function ratificationShardFiles(
     const title = /^\s+title:\s*(.*)$/m.exec(block)?.[1] ?? "";
     // The cap is the SHARD convention's, not the docket's; the trailing-hyphen trim is this writer's own, since
     // `slug` strips edges BEFORE slicing and a cut can land on a separator.
-    const stem = kebabSlug(title.replace(/^["']|["']$/g, ""), SHARD_SLUG_MAX_LEN).replace(/-+$/, "");
+    const stem = draftShardSlug(title);
     files.push({ relPath: `plan/tasks.d/${id}${stem ? `-${stem}` : ""}.yaml`, contents: `${block.replace(/\s*$/, "")}\n` });
   }
   return { ok: true, files };
@@ -3875,7 +3890,7 @@ export function relintRatificationFragment(fragmentYaml: string, proposalId: str
   const violations: DraftLintViolation[] = [];
   try {
     for (const task of parseTasksFromYaml(repaired.fragmentYaml, `approve ${proposalId}`)) {
-      violations.push(...filingBlockers(lintTask(task, draftFilingLintOptions(facts)).violations, undefined, true));
+      violations.push(...filingBlockers(lintTask(task, draftSizingOptions(draftFilingLintOptions(facts), task)).violations, undefined, true));
     }
   } catch (error) {
     return { ok: false, reason: `draft-parse: ${String((error as Error)?.message ?? error)}` };
@@ -3932,7 +3947,7 @@ function repairRatificationFragment(draftYaml: string, proposalId: string):
       const endOfLine = fragmentYaml.indexOf("\n", risk.range[1]);
       const insertAt = endOfLine < 0 ? fragmentYaml.length : endOfLine + 1;
       edits.push({ start: insertAt, end: insertAt, text: `${endOfLine < 0 ? "\n" : ""}  band_meaning: span\n` });
-    } else if (filingBlockers(lintTask(task).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
+    } else if (filingBlockers(lintTask(task, draftSizingOptions({}, task)).violations, undefined, true).some((v) => v.check === "sizing" && task.risk !== "high")) {
       if (isScalar(risk) && risk.range) {
         edits.push({ start: risk.range[0], end: risk.range[1], text: "high" });
         if (isScalar(band) && band.range) {
