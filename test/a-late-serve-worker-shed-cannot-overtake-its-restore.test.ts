@@ -32,7 +32,7 @@ test("a late worker shed finishes before its already-requested restore", async (
   c.send({ type: M.restore_workers, reason: "still_short" });
   await turn();
   assert.deepEqual(events, ["shed-start"], "restore cannot overtake a shed whose acknowledgement timed out upstream");
-  assert.deepEqual(c.replies, [], "neither action has completed yet");
+  assert.equal(c.replies.length, 0, "neither action has completed yet");
   finish();
   await turn();
   assert.deepEqual(events, ["shed-start", "shed-end", "restore"]);
@@ -69,7 +69,7 @@ test("a restore failure does not prevent a later worker shed or turn an unknown 
   }, () => 100);
   c.send({ type: "not-a-worker-lifecycle-command" });
   await turn();
-  assert.deepEqual(c.replies, []);
+  assert.equal(c.replies.length, 0);
   c.send({ type: M.restore_workers });
   c.send({ type: M.shed_workers });
   await turn();
