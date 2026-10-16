@@ -12,8 +12,9 @@ import { buildDecisionSummaryPrompt, validateDecisionSummary } from "../src/lib/
 import { backfillPlainMessages, plainSourceFingerprint, plainStorePath, plainTemplate, writePlainMessage, type PlainInboxMessage, type PlainOption } from "../src/lib/inbox-plain.js";
 import { inboxThreadId, readThread } from "../src/lib/inbox-thread.js";
 import { writePersistedInbox, type PersistedInboxContent } from "../src/lib/fleet-lane.js";
-import { buildPanelGraphRoutes, inboxLanes, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { buildPanelGraphRoutes, inboxLanes, inboxThreadStorePath, materializeInboxAttentionCensus, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { createService } from "../src/lib/service.js";
+import { loadPlan } from "../src/lib/plan.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SPEC, violations } from "./helpers/openapi-strict.js";
 
@@ -341,8 +342,10 @@ test("W1-T8826: HTTP inbox options use existing write routes and refresh when th
     ledgerRows: [], mergedTaskIds: [], projectionIndeterminate: false, complete: true,
     stores: { fleetDecisions: {}, plainMessages: { [ID]: stored(options) } },
   };
-  const persist = () => writePersistedInbox(stateDir, content, Date.now());
-  persist();
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan/tasks.yaml"), "[]\n");
+  writeFileSync(join(stateDir, "ledger.ndjson"), "");
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: content.proposals }));
   const deps: PanelGraphDeps = {
     root, inboxRoot: root, planPath: join(root, "plan", "tasks.yaml"), ledgerPath: join(stateDir, "ledger.ndjson"),
     inboxFromSlowLane: true,
@@ -350,6 +353,17 @@ test("W1-T8826: HTTP inbox options use existing write routes and refresh when th
     statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
     ratify: { approve: () => assert.fail("a read token cannot approve"), reframe: () => assert.fail("a read token cannot reframe") },
   };
+  const persist = () => {
+    const inputs = { ...content, snapshotScope: { root } };
+    const census = materializeInboxAttentionCensus(deps, {
+      plan: loadPlan(deps.planPath), registryPath: join(stateDir, "inbox-proposals.json"),
+      proposals: content.proposals, classifications: content.classifications,
+      ledgerLines: Object.assign([], { torn: 0, present: true }), projection: new Map(),
+      attentionEvidence: { archiveLedger: "partial", releases: [], judges: [] },
+    }, content.stores!, inputs);
+    return writePersistedInbox(stateDir, { ...inputs, snapshotKey: census.snapshotKey, attentionCensus: census }, Date.now());
+  };
+  const initial = persist();
   const routes = buildPanelGraphRoutes(deps);
   const server = createService({ tokens: { read: "option-reader", write: "option-writer" }, routes });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -397,7 +411,8 @@ test("W1-T8826: HTTP inbox options use existing write routes and refresh when th
   const audit = readFileSync(deps.ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.ok(audit.some((row) => row.step === "inbox.thread_replied" && row.thread_id === inboxThreadId(ID)));
   content.classifications[0]!.state = "declined";
-  persist();
+  const changed = persist();
+  assert.notEqual(changed.snapshotKey, initial.snapshotKey, "the changed lane is published under its new classification key");
   const declined = await get();
   assert.equal(declined.ready.length, 0);
   assert.equal(declined.declined[0]!.plain.options[0]!.action, undefined);

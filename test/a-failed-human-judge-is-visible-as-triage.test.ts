@@ -9,6 +9,7 @@ import { buildAttentionCensus, type AttentionCensusInput, type ThreadSummaryView
 import { classifyAllProposalsSliced, buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { persistedInboxPath, readPersistedInbox, writePersistedInbox } from "../src/lib/fleet-lane.js";
 import { createService } from "../src/lib/service.js";
+import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 
 function view(id: string): ThreadSummaryView {
@@ -94,9 +95,7 @@ test("current failed and stale judgements survive both panel readers and persist
   const classified = await classifyAllProposalsSliced(deps);
   assert.equal(classified.attentionEvidence?.judges.find(([id]) => id === "W1-T216")?.[1].state, "unclassified");
   assert.equal(classified.attentionEvidence?.judges.find(([id]) => id === "W1-T218")?.[1].state, "unclassified");
-  writePersistedInbox(stateDir, { proposals: classified.proposals, classifications: classified.classifications,
-    ledgerRows: classified.ledgerLines, mergedTaskIds: [], projectionIndeterminate: false,
-    attentionEvidence: classified.attentionEvidence, complete: true }, Date.now());
+  await refreshInboxClassification(deps, {});
   assert.equal(readPersistedInbox(stateDir)?.attentionEvidence?.judges.length, 3);
   const census = async (routeDeps: PanelGraphDeps) => {
     const server = createService({ tokens: { read: "triage-read", write: "triage-write" }, routes: buildPanelGraphRoutes(routeDeps) });

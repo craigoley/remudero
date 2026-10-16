@@ -65,13 +65,23 @@ export interface ShadowReadingSpec {
   fields?: readonly string[];
 }
 
+export interface ViewRequestFailure {
+  error: string;
+  status?: number;
+  detail?: string;
+  restartRequired?: true;
+  snapshotKey?: string;
+}
+
 export interface ViewDefinition<T = unknown> {
   name: string;
   version: number;
   /** Per data path, the reading (or each reading) it is copied from ({@link ShadowReadingSpec}): the shadow pairs the two reads by it. */
   shadowReadings?: Readonly<Record<string, ShadowReadingSpec | readonly ShadowReadingSpec[]>>;
   /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
-  compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
+  compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | ViewRequestFailure;
+  /** A maintained page may reject a cursor before a held body or its ETag can answer. Memory only. */
+  validateRequest?: (params: URLSearchParams, source?: ViewBodySource) => ViewRequestFailure | undefined;
   /** Per data path, the source (or every source) its value is computed from wholly: the shadow pairs the two sides' reads of each (view-shadow.ts). */
   shadowSources?: Readonly<Record<string, string | readonly string[]>>;
 }
@@ -91,7 +101,7 @@ export function renderView<T>(
   view: ViewDefinition<T>,
   clock: Clock = systemClock,
   params: URLSearchParams = new URLSearchParams(),
-): { body: ViewBody<T>; etag: string } | { error: string } {
+): { body: ViewBody<T>; etag: string } | ViewRequestFailure {
   const computed = view.compute(params);
   if ("error" in computed) return computed;
   const { data, sources } = computed;
@@ -295,13 +305,20 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       let mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
       const shadow = opts.shadow;
       if (shadowSampled(opts.readModel?.switches().views[name]) && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
+      const fallback = legacy.get(name);
+      const refused = fallback?.validateRequest?.(params, mode === "serve" ? opts.readModel : undefined);
+      if (refused) {
+        const { status = 400, ...body } = refused;
+        res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(body));
+        return;
+      }
       const key = viewKey(params);
       let entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
       const required = opts.readModel?.qualificationGeneration?.(name);
       const qualificationRefused = mode === "serve" && opts.readModel?.switches().views[name] === "auto" && required !== undefined && entry?.qualificationGeneration !== required
         ? `no matched body for current generation ${required}` : undefined;
       if (qualificationRefused !== undefined) { mode = "shadow"; entry = undefined; }
-      const fallback = legacy.get(name);
       const answer = (served: ViewBodyEntry | undefined): void => {
         const rendered = served && opts.readModel ? judged(opts.readModel, served) : fallback ? renderView(fallback, clock, params) : undefined;
         if (rendered === undefined) {
@@ -310,8 +327,9 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
           return;
         }
         if ("error" in rendered) {
-          res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ error: "invalid_request", detail: rendered.error }));
+          res.writeHead(rendered.status ?? 400, { "content-type": "application/json; charset=utf-8" });
+          const { status: _status, ...failure } = rendered;
+          res.end(JSON.stringify(rendered.status === undefined ? { error: "invalid_request", detail: rendered.error } : failure));
           return;
         }
         const { body, etag } = rendered;

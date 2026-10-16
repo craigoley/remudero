@@ -1,0 +1,365 @@
+import assert from "node:assert/strict";
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { test } from "node:test";
+import { fixedClock } from "../src/lib/clock.js";
+import { persistedInboxPath, readPersistedInbox } from "../src/lib/fleet-lane.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, refreshInboxClassification, type InboxRefresh } from "../src/lib/inbox-view.js";
+import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
+import { buildInboxAttentionCensusRoute, buildInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { boundConsoleReadRoute, type ServeDeps } from "../src/lib/serve.js";
+import { createService } from "../src/lib/service.js";
+import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
+import { makeTempDir } from "../src/lib/tmp.js";
+import { buildReadModelViewRoutes, renderView, type ViewBodyEntry, type ViewBodySource } from "../src/lib/views.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
+
+type Ctx = { after(fn: () => void | Promise<void>): void };
+function world(t: Ctx, count = 80) {
+  const root = makeTempDir("classification-pages");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(root, "plan"));
+  const registry = join(root, "state", "inbox-proposals.json");
+  const planPath = join(root, "plan", "tasks.yaml");
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  writeFileSync(planPath, "[]\n"); writeFileSync(ledgerPath, "");
+  const proposals = Array.from({ length: count }, (_, i) => ({ id: `ruling:p${i}`, summary: `${"source detail ".repeat(90)}${i}`, evidenceAnchors: [] }));
+  const write = () => writeFileSync(registry, JSON.stringify({ proposals }));
+  write();
+  const deps: PanelGraphDeps = { root, inboxRoot: root, planPath, ledgerPath,
+    github: { prView: () => null }, statusGithub: fakeGitHub(), inboxMainSha: () => "a".repeat(40),
+    inboxGrepAnchor: () => true, ratify: { approve: () => undefined, reframe: () => undefined },
+    inboxAuditScope: { instance: "core", repository: "owner/core" } };
+  const at = Date.now() - 1000;
+  const refresh = () => refreshInboxClassification(deps, {}, fixedClock(at));
+  return { root, deps, at, registry, proposals, write, refresh };
+}
+async function served(t: Ctx, w: ReturnType<typeof world>, initial: InboxRefresh,
+  options: { deps?: Partial<PanelGraphDeps>; mode?: "serve" | "off"; boundInbox?: boolean; emptyNative?: boolean } = {}) {
+  let reads = 0;
+  const deps: PanelGraphDeps = { ...w.deps, inboxFromSlowLane: true,
+    inboxMainSha: () => { throw new Error("request classified"); },
+    readPlanSnapshot: () => { reads++; throw new Error("request loaded a mutable plan"); }, ...options.deps };
+  const entries = new Map<string, ViewBodyEntry>();
+  const put = (r: InboxRefresh, retain = false) => {
+    if (!retain) entries.clear();
+    for (const b of r.bodies) {
+      const rendered = renderView({ name: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, compute: () => b }, fixedClock(w.at));
+      assert.ok(!("error" in rendered));
+      entries.set(b.key, { view: INBOX_VIEW_NAME, key: b.key, version: INBOX_VIEW_VERSION, generation: 1, ...rendered });
+    }
+  };
+  put(initial);
+  if (options.emptyNative) entries.clear();
+  const handle = { body: (_name: string, key = "") => entries.get(key), judge: (sources: unknown) => sources,
+    switches: () => ({ views: { inbox: options.mode ?? "serve" } }) } as unknown as ViewBodySource;
+  const originalInbox = buildInboxRoute(deps);
+  const inbox = options.boundInbox === false ? originalInbox : boundConsoleReadRoute(originalInbox, { fleetControlRoot: w.root } as ServeDeps, 1000, { setTimer: () => undefined, clock: fixedClock(w.at) });
+  const census = buildInboxAttentionCensusRoute(deps);
+  const native = buildReadModelViewRoutes({ legacy: [inboxLegacyView(deps, fixedClock(w.at))], readModel: handle, readModelViews: [INBOX_VIEW_NAME], clock: fixedClock(w.at) });
+  const routes = [inbox, census, ...native, ...mountInstanceInboxRoutes({ instance: "core", repository: "owner/core", stateDir: join(w.root, "state"), routes: [inbox, census] })];
+  const server = createService({ tokens: { read: "read", write: "write" }, routes });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async (path: string, etag?: string) => {
+    const res = await fetch(base + path, { headers: { authorization: "Bearer read", ...(etag ? { "if-none-match": etag } : {}) } });
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) as Record<string, any> : {}, etag: res.headers.get("etag"), bytes: Buffer.byteLength(text) };
+  };
+  return { get, put, reads: () => reads, entries };
+}
+
+test("equal-count inbox pages cannot mix classification snapshots", async (t) => {
+  const w = world(t), before = await w.refresh(), s = await served(t, w, before);
+  const first = await s.get("/v1/inbox?section=notReady&limit=2");
+  assert.match(first.body.snapshotKey, /^[a-f0-9]{64}$/);
+  const cursor = first.body.page.nextCursor as string;
+  const oldLegacy = await s.get(`/v1/inbox?section=notReady&limit=2&cursor=${encodeURIComponent(cursor)}`);
+  assert.equal(oldLegacy.status, 200);
+  assert.equal((await s.get(`/v1/inbox?section=notReady&limit=2&cursor=${encodeURIComponent(cursor)}`, oldLegacy.etag!)).status, 304);
+  assert.ok(cursor);
+  const firstNative = await s.get("/v1/views/inbox?section=notReady");
+  const nextNative = `/v1/views/inbox?section=notReady&cursor=${encodeURIComponent(firstNative.body.data.page.next)}`;
+  const oldPage = await s.get(nextNative);
+  assert.equal(oldPage.status, 200);
+  w.proposals[0]!.summary = `changed text with identical membership and counts ${w.proposals[0]!.summary}`; w.write();
+  const after = await w.refresh();
+  assert.deepEqual(after.bodies[0]!.data.counts, before.bodies[0]!.data.counts);
+  s.put(after, true); // Old continuation is still resident during the batch replacement.
+  const freshFirst = await s.get("/v1/inbox?section=notReady&limit=2", first.etag!);
+  assert.equal(freshFirst.status, 200, "a new classification cannot reuse the old first-page ETag");
+  assert.notEqual(freshFirst.body.snapshotKey, first.body.snapshotKey);
+  const changed = await s.get(`/v1/inbox?section=notReady&limit=2&cursor=${encodeURIComponent(cursor)}`, oldLegacy.etag!);
+  assert.equal(changed.status, 409);
+  assert.equal(changed.body.error, "inbox_snapshot_changed");
+  assert.equal(changed.body.restartRequired, true);
+  const changedNative = await s.get(nextNative, oldPage.etag!);
+  assert.equal(changedNative.status, 409, "a held old page and matching If-None-Match cannot bypass the current snapshot guard");
+  assert.equal(changedNative.body.error, "inbox_snapshot_changed");
+  assert.notEqual(changedNative.body.snapshotKey, first.body.snapshotKey);
+  assert.equal(s.reads(), 0);
+});
+
+test("all inbox sections retain one classification key without reader-triggered work", async (t) => {
+  const w = world(t), refreshed = await w.refresh(), s = await served(t, w, refreshed);
+  const census = await s.get("/v1/inbox/attention-census");
+  assert.equal(census.status, 200);
+  assert.match(census.body.snapshotKey, /^[a-f0-9]{64}$/);
+  const key = census.body.snapshotKey;
+  assert.equal(census.body.state, "partial", "retained history cannot certify complete coverage");
+  assert.equal(census.body.verifiedCounts.decision, 0);
+  let largestWirePage = 0;
+  for (const b of refreshed.bodies) {
+    assert.equal((b.data as unknown as Record<string, unknown>).snapshotKey, key);
+    const page = await s.get(`/v1/views/inbox?${b.key}`);
+    assert.equal(page.status, 200);
+    assert.equal(page.body.data.snapshotKey, key);
+    assert.ok(page.bytes <= 64 * 1024);
+    largestWirePage = Math.max(largestWirePage, page.bytes);
+    assert.equal((await s.get(`/v1/views/inbox?${b.key}`, page.etag!)).status, 304);
+  }
+  assert.ok(largestWirePage >= 52 * 1024, `near-ceiling page control: ${largestWirePage} bytes`);
+  t.diagnostic(`largest complete native page: ${largestWirePage} bytes`);
+  for (const section of ["needsYou", "ready", "drafting", "notReady", "declined", "fleet", "archived", "snoozed"]) {
+    const page = await s.get(`/v1/inbox?section=${section}`);
+    assert.equal(page.status, 200);
+    assert.equal(page.body.snapshotKey, key);
+  }
+  const owned = await s.get("/v1/i/core/inbox?section=notReady&limit=2");
+  assert.equal(owned.body.snapshotKey, key); assert.equal(owned.body.repository, "owner/core");
+  const persisted = readPersistedInbox(join(w.root, "state")) as unknown as Record<string, any>;
+  assert.equal(persisted.snapshotKey, key);
+  assert.equal(persisted.attentionCensus.snapshotKey, key);
+  const diskBefore = readFileSync(persistedInboxPath(join(w.root, "state")), "utf8");
+  writeFileSync(w.deps.planPath, "invalid mutable plan after classification");
+  writeFileSync(join(w.root, "state", "inbox-threads.jsonl"), "malformed after completed classification\n");
+  assert.equal((await s.get("/v1/inbox/attention-census")).body.snapshotKey, key);
+  assert.equal((await s.get("/v1/inbox?section=notReady")).body.snapshotKey, key);
+  assert.equal(readFileSync(persistedInboxPath(join(w.root, "state")), "utf8"), diskBefore);
+  const restarted = await served(t, w, refreshed);
+  assert.equal((await restarted.get("/v1/inbox/attention-census")).body.snapshotKey, key);
+  assert.equal(s.reads(), 0); assert.equal(restarted.reads(), 0);
+});
+
+test("classification cursors refuse another section, scope, version and malformed continuation", async (t) => {
+  const w = world(t, 4), r = await w.refresh(), s = await served(t, w, r);
+  const first = await s.get("/v1/inbox?section=notReady&limit=1");
+  const cursor = first.body.page.nextCursor as string;
+  for (const path of ["/v1/inbox?section=fleet&limit=1", "/v1/views/inbox?section=fleet"]) {
+    const other = await s.get(`${path}&cursor=${encodeURIComponent(cursor)}`);
+    assert.equal(other.status, 409); assert.equal(other.body.restartRequired, true);
+  }
+  const tokens: Array<[string, number]> = [["!!", 400], ["a".repeat(1025), 400], ["1", 409],
+    [Buffer.from("not JSON").toString("base64url"), 400],
+    [Buffer.from(JSON.stringify(["old-item", 1])).toString("base64url"), 409],
+    [Buffer.from(JSON.stringify(["inbox-page-v2", first.body.snapshotKey, "notReady", 1])).toString("base64url"), 400],
+    [Buffer.from(JSON.stringify(["inbox-page-v1", first.body.snapshotKey, "notReady", -1])).toString("base64url"), 400]];
+  for (const [bad, status] of tokens) {
+    for (const path of ["/v1/inbox?section=notReady&limit=1", "/v1/views/inbox?section=notReady"]) {
+      const rejected = await s.get(`${path}&cursor=${encodeURIComponent(bad)}`);
+      assert.equal(rejected.status, status, `${path}: ${bad.slice(0, 80)}`);
+      assert.equal(rejected.body.counts, undefined);
+    }
+  }
+  const foreign = world(t, 4);
+  foreign.deps.inboxAuditScope = { instance: "site", repository: "owner/site" };
+  const source = await served(t, foreign, await foreign.refresh());
+  assert.equal((await source.get(`/v1/inbox?section=notReady&limit=1&cursor=${encodeURIComponent(cursor)}`)).status, 409);
+  assert.equal((await s.get(`/v1/i/core/inbox?repository=owner/foreign&section=notReady&cursor=${encodeURIComponent(cursor)}`)).status, 409);
+});
+
+test("old malformed and stale materializations retain explicit unknown outcomes", async (t) => {
+  const w = world(t, 1), r = await w.refresh(), s = await served(t, w, r);
+  const path = persistedInboxPath(join(w.root, "state"));
+  const original = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
+  for (const bad of [
+    { ...original, snapshotKey: undefined, attentionCensus: undefined },
+    { ...original, snapshotKey: undefined, attentionCensus: undefined, attentionEvidence: undefined },
+    { ...original, snapshotKey: "invalid" },
+    { ...original, proposals: original.proposals.map((proposal: Record<string, unknown>) => ({ ...proposal, summary: "content changed under its old key" })) },
+    { ...original, attentionCensus: { ...original.attentionCensus, counts: null } },
+    { ...original, attentionCensus: { ...original.attentionCensus, snapshotKey: "f".repeat(64) } },
+    { ...original, generatedAt: new Date(w.at - 86_400_000).toISOString() },
+    { ...original, generatedAt: new Date(Date.now() + 86_400_000).toISOString() },
+  ]) {
+    writeFileSync(path, JSON.stringify(bad));
+    for (const endpoint of ["/v1/inbox?section=notReady", "/v1/inbox/attention-census"]) {
+      const rejected = await s.get(endpoint);
+      assert.equal(rejected.status, 503);
+      assert.equal(rejected.body.counts, undefined);
+    }
+  }
+  const head = s.entries.get("section=notReady")!;
+  head.body = { ...head.body, data: { ...(head.body.data as object), snapshotKey: undefined } };
+  const unknown = await s.get("/v1/views/inbox?section=notReady", head.etag);
+  assert.equal(unknown.status, 503, "an old committed page cannot become a qualified 304");
+  assert.equal(unknown.body.error, "inbox_snapshot_pending");
+  assert.equal(s.reads(), 0);
+});
+
+test("unchanged classification restamps keep stable keys and ETags including measured empty sections", async (t) => {
+  const w = world(t, 0);
+  const memo = {};
+  const a = await refreshInboxClassification(w.deps, memo, fixedClock(w.at));
+  const b = await refreshInboxClassification(w.deps, memo, fixedClock(w.at + 86_400_000));
+  assert.equal(b.changed, false); assert.equal(b.written, true);
+  assert.notEqual(a.generatedAt, b.generatedAt);
+  assert.deepEqual(a.bodies.map(body => body.data), b.bodies.map(body => body.data));
+  for (const body of a.bodies) {
+    const newer = b.bodies.find(other => other.key === body.key)!;
+    const before = renderView({ name: "inbox", version: 1, compute: () => body }, fixedClock(w.at));
+    const after = renderView({ name: "inbox", version: 1, compute: () => newer }, fixedClock(w.at + 86_400_000));
+    assert.ok(!("error" in before) && !("error" in after));
+    assert.equal(after.etag, before.etag);
+    assert.equal(body.data.items.length, 0); assert.equal(body.data.page.total, 0);
+    assert.equal(body.data.page.next, undefined);
+  }
+});
+
+test("native source qualification refuses missing future stale and unavailable receipts before 304", async (t) => {
+  const w = world(t, 80), s = await served(t, w, await w.refresh());
+  const head = s.entries.get("section=notReady")!;
+  const before = head.body;
+  const variants = [[], [{ name: "inbox-store:core", asOf: null, state: "fresh" as const }],
+    [{ name: "inbox-store:core", asOf: new Date(w.at + 86_400_000).toISOString(), state: "fresh" as const }],
+    [{ name: "inbox-store:core", asOf: new Date(w.at - 86_400_000).toISOString(), state: "fresh" as const }],
+    [{ name: "inbox-store:core", asOf: new Date(w.at).toISOString(), state: "unavailable" as const }],
+    [...before.sources, { name: "github:owner/core", asOf: new Date(w.at).toISOString(), state: "unavailable" as const }]];
+  for (const sources of variants) {
+    head.body = { ...before, sources };
+    const refused = await s.get("/v1/views/inbox?section=notReady", head.etag);
+    assert.equal(refused.status, 503, JSON.stringify(sources));
+    assert.equal(refused.body.data, undefined);
+    assert.equal(refused.body.error, "inbox_snapshot_stale");
+  }
+  head.body = before;
+  const next = (before.data as { page: { next: string } }).page.next;
+  const key = `cursor=${encodeURIComponent(next)}&section=notReady`;
+  const old = s.entries.get(key)!;
+  assert.ok(old);
+  old.body = { ...old.body, data: { ...(old.body.data as object), snapshotKey: "f".repeat(64) } };
+  assert.equal((await s.get(`/v1/views/inbox?${key}`, old.etag)).status, 503, "a continuation's own identity is checked too");
+});
+
+test("an oversized maintained page cannot replace the last completed classification", async (t) => {
+  const w = world(t, 1);
+  await w.refresh();
+  const path = persistedInboxPath(join(w.root, "state")), before = readFileSync(path, "utf8");
+  w.proposals[0]!.summary = "oversized ".repeat(10_000); w.write();
+  await assert.rejects(w.refresh(), /payload budget/);
+  assert.equal(readFileSync(path, "utf8"), before, "page validation precedes atomic publication of the new classification");
+});
+
+test("a cached legacy inbox cannot return 304 after plan evidence becomes unavailable or stale", async (t) => {
+  const w = world(t, 2);
+  let planSource: PlanSourceOutcome | undefined;
+  const s = await served(t, w, await w.refresh(), { deps: { readPlanSource: () => planSource } });
+  const first = await s.get("/v1/inbox?section=notReady");
+  assert.equal(first.status, 200);
+  assert.equal((await s.get("/v1/inbox?section=notReady", first.etag!)).status, 304);
+  const failure = { reason: "the current plan read failed", failedAt: new Date(w.at).toISOString() };
+  for (const source of [
+    { state: "unavailable" as const, generation: 0, failure },
+    { state: "stale" as const, generation: 1, identity: "last-read", observedAt: new Date(w.at).toISOString(), failure },
+  ]) {
+    planSource = source;
+    const refused = await s.get("/v1/inbox?section=notReady", first.etag!);
+    assert.equal(refused.status, 503);
+    assert.equal(refused.body.error, source.state === "unavailable" ? "plan_source_unavailable" : "inbox_snapshot_stale");
+    assert.equal(refused.body.counts, undefined);
+    assert.equal(refused.body.planSource.state, source.state);
+    const census = await s.get("/v1/inbox/attention-census");
+    assert.equal(census.status, 503);
+    assert.equal(census.body.error, source.state === "unavailable" ? "plan_source_unavailable" : "attention_snapshot_stale");
+    assert.equal(census.body.counts, undefined);
+  }
+  planSource = undefined;
+  assert.equal((await s.get("/v1/inbox?section=notReady", first.etag!)).status, 304);
+  assert.equal(s.reads(), 0);
+});
+
+test("a classification replaced between qualification and page read explicitly restarts the cursor", async (t) => {
+  const w = world(t, 4), before = await w.refresh();
+  const path = persistedInboxPath(join(w.root, "state")), oldDisk = readFileSync(path, "utf8");
+  const ordinary = await served(t, w, before);
+  const first = await ordinary.get("/v1/inbox?section=notReady&limit=1");
+  const cursor = first.body.page.nextCursor as string;
+  w.proposals[0]!.summary += " changed after qualification"; w.write();
+  const after = await w.refresh(), newDisk = readFileSync(path, "utf8");
+  const oldUnqualified = JSON.stringify({ ...JSON.parse(oldDisk), snapshotKey: undefined, attentionCensus: undefined });
+  for (const [replacement, status, error] of [[newDisk, 409, "inbox_snapshot_changed"], [oldUnqualified, 503, "inbox_snapshot_pending"]] as const) {
+    writeFileSync(path, oldDisk);
+    let reads = 0;
+    const raced = await served(t, w, after, { boundInbox: false, deps: { inboxStatFile: () => {
+      reads++;
+      if (reads === 2) writeFileSync(path, replacement);
+      return String(reads);
+    } } });
+    const refused = await raced.get(`/v1/inbox?section=notReady&limit=1&cursor=${encodeURIComponent(cursor)}`);
+    assert.equal(reads, 2, "the real file changes only between the qualifier and the page reader");
+    assert.equal(refused.status, status);
+    assert.equal(refused.body.error, error);
+    if (status === 409) {
+      assert.equal(refused.body.restartRequired, true);
+      assert.notEqual(refused.body.snapshotKey, first.body.snapshotKey);
+    }
+    assert.equal(refused.body.counts, undefined);
+  }
+});
+
+test("the native legacy fallback preserves typed cursor failures over HTTP", async (t) => {
+  const w = world(t, 4), s = await served(t, w, await w.refresh(), { mode: "off" });
+  const first = await s.get("/v1/views/inbox?section=notReady");
+  assert.equal(first.status, 200, "off mode uses the real maintained legacy view definition");
+  for (const [cursor, status, error] of [["1", 409, "inbox_snapshot_changed"], ["!!", 400, "invalid_cursor"]] as const) {
+    const refused = await s.get(`/v1/views/inbox?section=notReady&cursor=${encodeURIComponent(cursor)}`, first.etag!);
+    assert.equal(refused.status, status);
+    assert.equal(refused.body.error, error);
+    assert.equal(refused.body.status, undefined, "the internal HTTP status is not serialized into the failure body");
+    assert.equal(refused.body.data, undefined);
+  }
+  assert.equal(s.reads(), 0);
+});
+
+test("off and cold native fallbacks qualify maintained sources before a body or 304", async (t) => {
+  for (const mode of ["off", "serve"] as const) {
+    const w = world(t, 2);
+    let planSource: PlanSourceOutcome | undefined;
+    const s = await served(t, w, await w.refresh(), { mode, emptyNative: true, deps: { readPlanSource: () => planSource } });
+    const endpoint = "/v1/views/inbox?section=notReady";
+    const first = await s.get(endpoint);
+    assert.equal(first.status, 200);
+    assert.equal((await s.get(endpoint, first.etag!)).status, 304, "a fresh cold fallback still reuses its ETag");
+    const path = persistedInboxPath(join(w.root, "state"));
+    const original = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    for (const generatedAt of [new Date(w.at + 86_400_000).toISOString(), new Date(w.at - 86_400_000).toISOString(), "not a time"]) {
+      writeFileSync(path, JSON.stringify({ ...original, generatedAt }));
+      const refused = await s.get(endpoint, first.etag!);
+      assert.equal(refused.status, 503, `${mode}: ${generatedAt}`);
+      assert.equal(refused.body.error, generatedAt === "not a time" ? "inbox_snapshot_pending" : "inbox_snapshot_stale");
+      assert.equal(refused.body.data, undefined);
+    }
+    writeFileSync(path, JSON.stringify(original));
+    const failure = { reason: "the current plan read failed", failedAt: new Date(w.at).toISOString() };
+    for (const source of [
+      { state: "unavailable" as const, generation: 0, failure },
+      { state: "stale" as const, generation: 1, identity: "last-read", observedAt: new Date(w.at).toISOString(), failure },
+    ]) {
+      planSource = source;
+      const refused = await s.get(endpoint, first.etag!);
+      assert.equal(refused.status, 503, mode);
+      assert.equal(refused.body.error, source.state === "unavailable" ? "plan_source_unavailable" : "inbox_snapshot_stale");
+      assert.equal(refused.body.data, undefined);
+    }
+    planSource = undefined;
+    unlinkSync(path);
+    const pending = await s.get(endpoint, first.etag!);
+    assert.equal(pending.status, 503);
+    assert.equal(pending.body.error, "inbox_snapshot_pending");
+    assert.equal(pending.body.data, undefined);
+    assert.equal(s.reads(), 0);
+  }
+});
