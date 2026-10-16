@@ -30,9 +30,10 @@ const unknown = (reason: string, digest?: string): Evidence => ({ selected_state
 const LIMIT = 32;
 
 function capture(options: SelectedRegistryConsumerOptions | undefined): Captured {
+  if (options === undefined) return { kind: "off" };
   let record: RegistryObservationSink | undefined;
   try {
-    const settings = options?.settings;
+    const settings = options.settings;
     if (settings?.mode !== "shadow") return { kind: "off" };
     record = options.record;
     const { cliPath, envPath, configuredPath, contractVersion, requiredCapabilities, expectedDigest,
