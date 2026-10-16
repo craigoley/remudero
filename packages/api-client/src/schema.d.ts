@@ -3108,6 +3108,85 @@ export interface components {
       repairedPrs: number | null;
       repairRounds: number | null;
     };
+    /** Bounded source-owned observations. Initial-head quality includes unknown and open PRs; recovery ends at verified required-head check completion. Missing daily samples are gaps. Cash subtotals, modeled prices and tokens have separate coverage; no invoice or ROI claim. */
+    RepositoryQuality: {
+      observedAt: string | null;
+      reason: "missing_history" | "invalid_history" | "history_over_budget" | "write_failed" | null | null;
+      retentionDays: 90;
+      inventoryDays: 31;
+      backlog: ({
+        date: string;
+        sampledAt: string | null;
+        generation: string | null;
+        coveredFrom: string | null;
+        coveredThrough: string | null;
+        distinctPrs: number | null;
+        oldestMs: number | null;
+        missingCreatedAt: number | null;
+        reasons: {
+          awaiting_review: number;
+          required_red: number;
+          conflict: number;
+          blocked: number;
+          unknown: number;
+        } | null;
+      })[];
+      windows: ({
+        days: 7 | 30;
+        from: string;
+        through: string;
+        firstPass: {
+          cohort: number;
+          eligible: number;
+          passing: number;
+          unknown: number;
+          denominator: "observed publications and open or discovered PRs; includes unknowns";
+          states: {
+            SUCCESS: number;
+            FAILURE: number;
+            PENDING: number;
+            CANCELLED: number;
+            SKIPPED: number;
+            NEUTRAL: number;
+            MISSING: number;
+            EXPIRED: number;
+            UNKNOWN: number;
+          };
+        };
+        repairLatency: {
+          unit: "ms";
+          samples: number;
+          censored: number;
+          p50Ms: number | null;
+          p90Ms: number | null;
+          evidenceTruncated: boolean;
+          episodes: ({
+            pr: number;
+            failingHead: string;
+            currentHead: string;
+            round: string | null;
+            failedAt: string;
+            recoveredAt: string | null;
+          })[];
+        };
+        efficiency: {
+          deliveredPrs: number;
+          linkedPrs: number;
+          priced: number;
+          unpriced: number;
+          unlinked: number;
+          unlinkedPrs: number;
+          coverage: "observed" | "partial" | "unknown";
+          pricedSubtotalUsd: number | null;
+          modeledSubtotalUsd: number | null;
+          tokens: number | null;
+          totalUsd: null;
+          operatorEffortMs: null;
+          cohort: "observed delivered PRs by merge time; retained exact run and task producer joins";
+          costBasis: "producer estimates; not invoices or causal ROI";
+        };
+      })[];
+    };
     /** Optional cached repository-flow-v1. PR events use GitHub clocks and native structured delivery credit, never worker verdicts. Repair counts are observed retained receipts, not verified historical absence or proof of recovery. Null is unknown, not zero. Source observation clocks are independent of materialization; absent on older producers. */
     RepositoryFlow: {
       version: "repository-flow-v1";
@@ -3116,6 +3195,7 @@ export interface components {
       state: "reported" | "partial" | "not_collected";
       reason: "missing_source" | "invalid_source" | "over_budget" | null | null;
       materializedAt: string;
+      quality?: RepositoryQuality;
       sources: {
         openObservedAt: string | null;
         closedObservedAt: string | null;
@@ -3136,10 +3216,10 @@ export interface components {
       };
       gaps: (string)[];
       notCollected: {
-        firstPass: "initial-head and required-check policy evidence not collected";
-        repairLatency: "required-current-head recovery evidence not collected";
-        backlog: "historical daily backlog observations not collected";
-        efficiency: "delivered-work price and token attribution evidence not collected";
+        firstPass: "initial-head and required-check policy evidence not collected" | null | null;
+        repairLatency: "required-current-head recovery evidence not collected" | null | null;
+        backlog: "historical daily backlog observations not collected" | null | null;
+        efficiency: "delivered-work price and token attribution evidence not collected" | null | null;
       };
       windows: ({
         days: 7 | 30;

@@ -1,4 +1,5 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
+import { recordRepositoryFlowHistory, type FlowSnapshot, type FlowHistoryUpdate } from "./repository-flow-history.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
@@ -76,7 +77,7 @@ import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
   securityArmRefusalAtHead, securityHoldReason,
 } from "./pr-blocker.js";
-import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
@@ -2687,6 +2688,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const latest = dedupeRollupByLatestAttempt(rollupFromRest(runs.check_runs, statuses.statuses,
           workflowListing === undefined ? undefined : workflowListing?.workflow_runs ?? []));
         const required = new Set([...protection.contexts, ...(protection.checks ?? []).map(c => c.context), REVIEW_CONTEXT]);
+        const at = fixedClock(nowMsImpl()).iso();
+        const requiredEntries = latest.filter(c => required.has(c.name ?? c.context ?? ""));
+        const snapshot: FlowSnapshot = { pr: fresh.number, head: fresh.head.sha, at,
+          generation: `arm:${fresh.head.sha}:${at}`, complete: requiredEntries.every(c => c.startedAt !== undefined) &&
+            runs.total_count === runs.check_runs.length && statuses.total_count === statuses.statuses.length,
+          policy: { id: createHash("sha256").update(JSON.stringify([fresh.base.ref, protection, [...REQUIRED_CHECK_OK].sort()])).digest("hex"),
+            required: [...required], accepted: [...REQUIRED_CHECK_OK] as FlowSnapshot["policy"]["accepted"] },
+          checks: requiredEntries.filter(c => c.startedAt !== undefined).map(c => {
+            const raw = (c.state ?? c.conclusion ?? c.status ?? "UNKNOWN").toUpperCase();
+            const state = raw === "QUEUED" || raw === "IN_PROGRESS" || raw === "EXPECTED" ? "PENDING"
+              : raw === "STALE" ? "EXPIRED" : ["ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(raw) ? "FAILURE" : raw;
+            return { name: (c.name ?? c.context)!, state: state as FlowSnapshot["checks"][number]["state"],
+              attempt: c.checkRunId ?? 0, startedAt: c.startedAt!, completedAt: c.completedAt ?? null };
+          }), round: null };
+        const retained = recordRepositoryFlowHistory(dirname(ledgerPath), `${owner}/${repo}`, { snapshots: [snapshot] });
+        if (!retained.ok) log("sweep.repository_flow_unavailable", { reason: retained.reason });
         const checksGreen = [...required].every(name => latest.some(c => (c.name ?? c.context) === name &&
           REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())));
         return {
@@ -15255,6 +15272,29 @@ export async function runSweep(
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
   const log = deps.log ?? (() => {});
+  // The installed gateway maps its first REST page without filtering. A full page cannot prove
+  // a complete inventory; light passes and unknown source clocks must never create daily zeros.
+  if (!deps.dryRun && deps.repairAdmissionSurface !== "light" && deps.snapshotPublishedAtMs !== undefined &&
+      Number.isFinite(deps.snapshotPublishedAtMs) && deps.snapshotPublishedAtMs <= now &&
+      deps.readerAgreement?.owner && deps.readerAgreement.repo && openPrs.length < 100) {
+    const repository = `${deps.readerAgreement.owner}/${deps.readerAgreement.repo}`;
+    const at = fixedClock(deps.snapshotPublishedAtMs).iso();
+    const inventory: NonNullable<FlowHistoryUpdate["inventories"]>[number] = {
+      at, generation: `sweep:${at}`, complete: deps.snapshotPublishedAtMs <= now,
+      prs: openPrs.map(pr => {
+        const reasons: NonNullable<FlowHistoryUpdate["inventories"]>[number]["prs"][number]["reasons"] = [];
+        if (pr.reviewState !== "success") reasons.push("awaiting_review");
+        if (pr.checksState === "red") reasons.push("required_red");
+        if (pr.mergeState === "dirty" || pr.mergeableState === "dirty") reasons.push("conflict");
+        if (pr.mergeableState === "blocked") reasons.push("blocked");
+        if (!reasons.length && (pr.checksState !== "green" || pr.mergeableState === undefined)) reasons.push("unknown");
+        return { pr: pr.prNumber, head: pr.headSha, createdAt: pr.createdAt ?? null, reasons };
+      }) };
+    if (openPrs.every(pr => pr.prUrl === `https://github.com/${repository}/pull/${pr.prNumber}`)) {
+      const retained = recordRepositoryFlowHistory(dirname(deps.ledgerPath), repository, { inventories: [inventory] });
+      if (!retained.ok) log("sweep.repository_flow_unavailable", { reason: retained.reason });
+    }
+  }
   const mergeBaseKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const judgmentPool = sweepJudgmentPool(deps);
   const mergeBases = strikeLadderMergeBases.get(deps.ledgerPath) ?? new Map<string, string>();

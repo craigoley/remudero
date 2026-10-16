@@ -1,14 +1,17 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { writeAtomic, type WriteAtomicIo } from "./fs-race-safe.js";
+import { withDrainLock } from "./drain-lock.js";
+import { fixedClock } from "./clock.js";
 
 const DAY = 86400000;
 /** BACKSTOP: refuse excess evidence rather than silently truncating a cohort or identity set. */
 export const FLOW_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
 /** BACKSTOP: checkpoint identity populations are bounded independently of serialized bytes. */
-const MAX_IDENTITIES = 8192;
+export const FLOW_HISTORY_MAX_IDENTITIES = 8192;
+const MAX_IDENTITIES = FLOW_HISTORY_MAX_IDENTITIES;
 /** PRIMARY CONTROL: daily inventory retention covers the public thirty-day graph. */
 const INVENTORY_DAYS = 31;
 /** PRIMARY CONTROL: retain joins beyond graph windows so earlier costs can join later deliveries. */
@@ -29,14 +32,15 @@ const snapshotSchema = z.strictObject({ pr, head, at: stamp, generation: small, 
 const inventorySchema = z.strictObject({ at: stamp, generation: small, complete: z.boolean(),
   prs: z.array(z.strictObject({ pr, head, createdAt: stamp.nullable(), reasons: z.array(z.enum(reasons)).max(5) })).max(MAX_IDENTITIES) });
 const costSchema = z.strictObject({ identity: small, at: stamp, run: small.nullable(), task: small.nullable(),
-  cash: amount, modeled: amount, tokens: amount });
+  cash: amount, modeled: amount, tokens: amount, pr: pr.optional(), round: small.optional() });
+const roundSchema = z.strictObject({ pr, head, round: small, at: stamp });
 const historySchema = z.strictObject({ version: z.literal(1), repository: z.string().max(240).regex(/^[\w.-]+\/[\w.-]+$/),
   observedAt: stamp, publications: z.array(publicationSchema).max(MAX_IDENTITIES),
   snapshots: z.array(snapshotSchema).max(MAX_IDENTITIES), inventories: z.array(inventorySchema).max(INVENTORY_DAYS),
-  costs: z.array(costSchema).max(MAX_IDENTITIES) });
+  costs: z.array(costSchema).max(MAX_IDENTITIES), rounds: z.array(roundSchema).max(MAX_IDENTITIES).optional() });
 export type FlowHistory = z.infer<typeof historySchema>;
 export type FlowSnapshot = FlowHistory["snapshots"][number];
-export type FlowHistoryUpdate = Partial<Pick<FlowHistory, "publications" | "snapshots" | "inventories" | "costs">>;
+export type FlowHistoryUpdate = Partial<Pick<FlowHistory, "publications" | "snapshots" | "inventories" | "costs" | "rounds">>;
 type HistoryReason = "missing_history" | "invalid_history" | "history_over_budget" | "write_failed";
 type HistoryRead = { ok: true; history: FlowHistory } | { ok: false; reason: HistoryReason };
 
@@ -56,6 +60,7 @@ export const repositoryQualitySchema = z.strictObject({ observedAt: stamp.nullab
       episodes: z.array(z.strictObject({ pr, failingHead: head, currentHead: head, round: small.nullable(),
         failedAt: stamp, recoveredAt: stamp.nullable() })).max(64), evidenceTruncated: z.boolean() }),
     efficiency: z.strictObject({ deliveredPrs: count, linkedPrs: count, priced: count, unpriced: count, unlinked: count,
+      unlinkedPrs: count, coverage: z.enum(["observed", "partial", "unknown"]),
       pricedSubtotalUsd: amount, modeledSubtotalUsd: amount, tokens: amount, totalUsd: z.null(), operatorEffortMs: z.null(),
       cohort: z.literal("observed delivered PRs by merge time; retained exact run and task producer joins"),
       costBasis: z.literal("producer estimates; not invoices or causal ROI") }) })).length(2) });
@@ -68,9 +73,20 @@ export function flowHistoryPath(stateDir: string, repository: string): string {
 export function readRepositoryFlowHistory(stateDir: string, repository: string): HistoryRead {
   try {
     const path = flowHistoryPath(stateDir, repository);
-    if (statSync(path).size > FLOW_HISTORY_MAX_BYTES) return { ok: false, reason: "history_over_budget" };
-    const parsed = historySchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
-    if (!parsed.success || parsed.data.repository !== repository) return { ok: false, reason: "invalid_history" };
+    const fd = openSync(path, "r");
+    let raw: string;
+    try {
+      if (fstatSync(fd).size > FLOW_HISTORY_MAX_BYTES) return { ok: false, reason: "history_over_budget" };
+      const buffer = Buffer.alloc(FLOW_HISTORY_MAX_BYTES + 1);
+      let bytes = 0, n: number;
+      while (bytes < buffer.length && (n = readSync(fd, buffer, bytes, buffer.length - bytes, null)) > 0) bytes += n;
+      if (bytes > FLOW_HISTORY_MAX_BYTES) return { ok: false, reason: "history_over_budget" };
+      raw = buffer.subarray(0, bytes).toString("utf8");
+    } finally { closeSync(fd); }
+    const parsed = historySchema.safeParse(JSON.parse(raw));
+    if (!parsed.success || parsed.data.repository !== repository ||
+        [...parsed.data.publications, ...parsed.data.snapshots, ...parsed.data.inventories, ...parsed.data.costs, ...parsed.data.rounds ?? []]
+          .some(row => row.at > parsed.data.observedAt)) return { ok: false, reason: "invalid_history" };
     return { ok: true, history: parsed.data };
   } catch (error) {
     return { ok: false, reason: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing_history" : "invalid_history" };
@@ -80,6 +96,21 @@ export function readRepositoryFlowHistory(stateDir: string, repository: string):
 /** Only observation owners write. A failed stage leaves the last durable checkpoint intact. */
 export function recordRepositoryFlowHistory(stateDir: string, repository: string, update: FlowHistoryUpdate,
   options: { io?: WriteAtomicIo } = {}): { ok: true } | { ok: false; reason: HistoryReason } {
+  try {
+    return withDrainLock(`${flowHistoryPath(stateDir, repository)}.lock`, () => writeHistory(stateDir, repository, update, options));
+  } catch (error) {
+    // Contention or an unavailable directory must not erase another observation owner's checkpoint.
+    return { ok: false, reason: "write_failed" };
+  }
+}
+
+function writeHistory(stateDir: string, repository: string, update: FlowHistoryUpdate,
+  options: { io?: WriteAtomicIo }): { ok: true } | { ok: false; reason: HistoryReason } {
+  if (Object.values(update).some(rows => rows.length > MAX_IDENTITIES)) return { ok: false, reason: "history_over_budget" };
+  const validUpdate = historySchema.pick({ publications: true, snapshots: true, inventories: true, costs: true, rounds: true })
+    .extend({ inventories: z.array(inventorySchema).max(MAX_IDENTITIES) }).partial().safeParse(update);
+  if (!validUpdate.success || update.inventories?.some(row => new Set(row.prs.map(p => p.pr)).size !== row.prs.length))
+    return { ok: false, reason: "invalid_history" };
   const previous = readRepositoryFlowHistory(stateDir, repository);
   if (!previous.ok && previous.reason !== "missing_history") return previous;
   const times = Object.values(update).flatMap(rows => rows.map(row => row.at));
@@ -93,23 +124,26 @@ export function recordRepositoryFlowHistory(stateDir: string, repository: string
     [...new Map(rows.filter(row => Date.parse(row.at) >= cutoff).map(row => [key(row), row])).values()];
   const inventories = new Map<string, FlowHistory["inventories"][number]>();
   for (const row of [...old.inventories, ...update.inventories ?? []].sort((a, b) => a.at.localeCompare(b.at))) {
-    if (row.complete && Date.parse(row.at) >= Date.parse(observedAt) - INVENTORY_DAYS * DAY) inventories.set(row.at.slice(0, 10), row);
+    const date = row.at.slice(0, 10);
+    if (row.complete && Date.parse(row.at) >= Date.parse(observedAt) - INVENTORY_DAYS * DAY && inventories.get(date)?.at !== row.at)
+      inventories.set(date, row);
   }
   const next: FlowHistory = { version: 1, repository, observedAt,
     publications: unique([...old.publications, ...update.publications ?? []], row => JSON.stringify(row)),
     snapshots: unique([...old.snapshots, ...update.snapshots ?? []], row => JSON.stringify(row)),
     inventories: [...inventories.values()].slice(-INVENTORY_DAYS),
-    costs: unique([...old.costs, ...update.costs ?? []], row => row.identity) };
-  if ([next.publications, next.snapshots, next.costs].some(rows => rows.length > MAX_IDENTITIES) ||
+    costs: unique([...old.costs, ...update.costs ?? []], row => row.identity),
+    rounds: unique([...old.rounds ?? [], ...update.rounds ?? []], row => JSON.stringify([row.pr, row.head, row.round])) };
+  if ([next.publications, next.snapshots, next.costs, next.rounds!].some(rows => rows.length > MAX_IDENTITIES) ||
       Buffer.byteLength(JSON.stringify(next)) > FLOW_HISTORY_MAX_BYTES) return { ok: false, reason: "history_over_budget" };
   if (!historySchema.safeParse(next).success || next.inventories.some(row => new Set(row.prs.map(p => p.pr)).size !== row.prs.length))
     return { ok: false, reason: "invalid_history" };
   try {
+    if (previous.ok && JSON.stringify(previous.history) === JSON.stringify(next)) return { ok: true };
     writeAtomic(flowHistoryPath(stateDir, repository), JSON.stringify(next) + "\n", options);
     return { ok: true };
   } catch (error) {
     // The caller receives a named writer failure; the previous checkpoint remains readable.
-    void error;
     return { ok: false, reason: "write_failed" };
   }
 }
@@ -119,11 +153,13 @@ function requiredSnapshot(snapshot: FlowSnapshot) {
   if (!snapshot.complete || !policy.required.length || !policy.accepted.length ||
       new Set(policy.required).size !== policy.required.length) return undefined;
   const checks = policy.required.map(name => snapshot.checks.filter(check => check.name === name)
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.attempt - a.attempt)[0]);
-  if (checks.some(check => check && (check.startedAt > snapshot.at ||
-      check.completedAt !== null && (check.completedAt < check.startedAt || check.completedAt > snapshot.at)))) return undefined;
+    .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt) || b.attempt - a.attempt)[0]);
+  if (checks.some(check => check && (Date.parse(check.startedAt) > Date.parse(snapshot.at) ||
+      check.completedAt !== null && (Date.parse(check.completedAt) < Date.parse(check.startedAt) ||
+        Date.parse(check.completedAt) > Date.parse(snapshot.at))))) return undefined;
   const outcomes = checks.map(check => check?.state ?? "MISSING");
-  const green = outcomes.every(state => policy.accepted.includes(state)) && checks.every(check => check?.completedAt !== null && check !== undefined);
+  const green = outcomes.every(state => ["SUCCESS", "SKIPPED", "NEUTRAL"].includes(state) && policy.accepted.includes(state)) &&
+    checks.every(check => check?.completedAt !== null && check !== undefined);
   const failed = outcomes.some(state => state === "FAILURE");
   return { checks, outcomes, green, failed };
 }
@@ -138,7 +174,7 @@ export function foldRepositoryFlowHistory(history: FlowHistory | undefined, thro
   const result: RepositoryQuality = { observedAt: h?.observedAt ?? null, reason: reason ?? (h ? null : "missing_history"),
     retentionDays: EVIDENCE_DAYS, inventoryDays: INVENTORY_DAYS, backlog: [], windows: [] };
   for (let i = 29; i >= 0; i--) {
-    const start = day - i * DAY, date = new Date(start).toISOString().slice(0, 10);
+    const start = day - i * DAY, date = fixedClock(start).iso().slice(0, 10);
     const sample = h?.inventories.filter(s => s.complete && s.at.slice(0, 10) === date && Date.parse(s.at) <= now)
       .sort((a, b) => b.at.localeCompare(a.at))[0];
     const reasonsCount = { awaiting_review: 0, required_red: 0, conflict: 0, blocked: 0, unknown: 0 };
@@ -155,17 +191,18 @@ export function foldRepositoryFlowHistory(history: FlowHistory | undefined, thro
       oldestMs: ages.length ? Math.max(...ages) : null, missingCreatedAt: sample ? missing : null });
   }
   for (const days of [7, 30] as const) {
-    const from = new Date(day - (days - 1) * DAY).toISOString();
+    const from = fixedClock(day - (days - 1) * DAY).iso();
     const inWindow = (at: string) => at >= from && at <= through;
     const pubs = h?.publications ?? [], snapshots = h?.snapshots ?? [];
     const cohort = new Set([...pubs.filter(p => inWindow(p.at)).map(p => p.pr),
       ...snapshots.filter(p => inWindow(p.at)).map(p => p.pr),
+      ...delivered.filter(p => inWindow(p.at)).map(p => p.pr),
       ...h?.inventories.filter(s => inWindow(s.at)).flatMap(s => s.prs.map(p => p.pr)) ?? []]);
     const firstPass: RepositoryQuality["windows"][number]["firstPass"] = { cohort: cohort.size, eligible: 0, passing: 0, unknown: 0,
       states: { SUCCESS: 0, FAILURE: 0, PENDING: 0, CANCELLED: 0, SKIPPED: 0, NEUTRAL: 0, MISSING: 0, EXPIRED: 0, UNKNOWN: 0 },
       denominator: "observed publications and open or discovered PRs; includes unknowns" };
     for (const number of cohort) {
-      const publications = pubs.filter(p => p.pr === number);
+      const publications = pubs.filter(p => p.pr === number && p.at <= through).sort((a, b) => a.at.localeCompare(b.at));
       const publication = publications[0];
       const initial = publication && snapshots.filter(s => s.pr === number && s.head === publication.head && s.at >= publication.at && s.at <= through);
       const latest = initial && [...initial].sort((a, b) => b.at.localeCompare(a.at))[0];
@@ -173,15 +210,22 @@ export function foldRepositoryFlowHistory(history: FlowHistory | undefined, thro
       if (!publication || new Set(publications.map(p => p.head)).size !== 1 || !latest || !verified ||
           new Set(initial!.map(s => JSON.stringify(s.policy))).size !== 1) { firstPass.unknown++; continue; }
       firstPass.eligible++;
-      firstPass.passing += Number(verified.green);
-      for (const state of new Set(verified.outcomes)) firstPass.states[state]++;
+      const adverse = initial!.map(requiredSnapshot).filter(s => s && s.outcomes.some(state =>
+        ["FAILURE", "CANCELLED", "EXPIRED"].includes(state)));
+      firstPass.passing += Number(verified.green && adverse.length === 0);
+      for (const state of new Set([...verified.outcomes, ...adverse.flatMap(s => s!.outcomes)])) firstPass.states[state]++;
     }
     const episodes: RepositoryQuality["windows"][number]["repairLatency"]["episodes"] = [];
     const open = new Map<number, typeof episodes[number]>();
     for (const s of [...snapshots].filter(s => s.at <= through).sort((a, b) => a.at.localeCompare(b.at))) {
       const verified = requiredSnapshot(s);
       const existing = open.get(s.pr);
-      if (existing) existing.currentHead = s.head;
+      if (existing) {
+        existing.currentHead = s.head;
+        const round = h?.rounds?.filter(r => r.pr === s.pr && r.head === existing.failingHead &&
+          r.at >= existing.failedAt && r.at <= s.at).sort((a, b) => b.at.localeCompare(a.at))[0];
+        if (round) existing.round = round.round;
+      }
       if (!verified) continue;
       if (verified.failed && !existing) {
         const episode = { pr: s.pr, failingHead: s.head, currentHead: s.head, round: s.round, failedAt: s.at, recoveredAt: null as string | null };
@@ -189,7 +233,7 @@ export function foldRepositoryFlowHistory(history: FlowHistory | undefined, thro
       } else if (existing && verified.green) {
         const completedAt = verified.checks.map(c => c!.completedAt!).sort().at(-1)!;
         if (completedAt >= existing.failedAt) {
-          existing.recoveredAt = completedAt; existing.round = s.round; open.delete(s.pr);
+          existing.recoveredAt = completedAt; existing.round = s.round ?? existing.round; open.delete(s.pr);
         }
       }
     }
@@ -198,9 +242,12 @@ export function foldRepositoryFlowHistory(history: FlowHistory | undefined, thro
     const deliveredPrs = new Set(delivered.filter(p => inWindow(p.at)).map(p => p.pr));
     const linked = new Set<number>();
     let priced = 0, unpriced = 0, unlinked = 0, usd = 0, modeled = 0, models = 0, tokens = 0, tokenRows = 0;
-    for (const c of h?.costs ?? []) {
+    for (const c of h?.costs.filter(c => c.at <= through) ?? []) {
+      const runPrs = new Set(pubs.filter(p => c.run !== null && p.run === c.run).map(p => p.pr));
       const joins = new Set(pubs.filter(p => c.run !== null && c.task !== null && p.run === c.run && p.task === c.task).map(p => p.pr));
-      const number = joins.size === 1 ? [...joins][0] : undefined;
+      const receiptPr = c.pr !== undefined && c.round !== undefined && h?.rounds?.some(r => r.pr === c.pr && r.round === c.round)
+        ? c.pr : undefined;
+      const number = receiptPr ?? (runPrs.size === 1 && joins.size === 1 ? [...joins][0] : undefined);
       if (number === undefined) { if (inWindow(c.at)) unlinked++; continue; }
       if (!deliveredPrs.has(number)) continue;
       linked.add(number);
@@ -212,6 +259,8 @@ export function foldRepositoryFlowHistory(history: FlowHistory | undefined, thro
       repairLatency: { unit: "ms", samples: durations.length, censored: selected.length - durations.length,
         p50Ms: percentile(durations, .5), p90Ms: percentile(durations, .9), episodes: selected.slice(-64), evidenceTruncated: selected.length > 64 },
       efficiency: { deliveredPrs: deliveredPrs.size, linkedPrs: linked.size, priced, unpriced, unlinked,
+        unlinkedPrs: deliveredPrs.size - linked.size,
+        coverage: !h ? "unknown" : reason !== null || unpriced > 0 || unlinked > 0 || linked.size < deliveredPrs.size ? "partial" : "observed",
         pricedSubtotalUsd: priced ? usd : null, modeledSubtotalUsd: models ? modeled : null, tokens: tokenRows ? tokens : null,
         totalUsd: null, operatorEffortMs: null, cohort: "observed delivered PRs by merge time; retained exact run and task producer joins",
         costBasis: "producer estimates; not invoices or causal ROI" } });

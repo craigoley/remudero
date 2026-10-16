@@ -10,7 +10,7 @@ import { ANALYTICS_REFRESH_INTERVAL_MS, ANALYTICS_REFRESH_TIMEOUT_MS } from "./a
 import { projectRepairCostContext } from "./repair-cost-evidence.js";
 import { spendAmountUsd, spendRoleOf } from "./spend-rows.js";
 import { foldRepositoryFlowHistory, readRepositoryFlowHistory, recordRepositoryFlowHistory,
-  repositoryQualitySchema, type FlowHistoryUpdate } from "./repository-flow-history.js";
+  repositoryQualitySchema, FLOW_HISTORY_MAX_IDENTITIES, type FlowHistoryUpdate } from "./repository-flow-history.js";
 
 export const REPOSITORY_FLOW_VERSION = "repository-flow-v1";
 /** BACKSTOP: optional graph evidence leaves room for existing Analytics in the same response. */
@@ -124,23 +124,34 @@ export function publicRepositoryFlow(value: unknown, repository: string, materia
 export async function captureRepositoryFlow(root: string, stateDir: string, repository: string | undefined,
   clock: Clock = systemClock): Promise<RepositoryFlow | undefined> {
   if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || repository.length > 240) return undefined;
-  const update: FlowHistoryUpdate = { publications: [], costs: [], inventories: [] };
+  const update: FlowHistoryUpdate = { publications: [], costs: [], inventories: [], rounds: [] };
   const qualityEvidence: QualityCollection = { overflow: false, delivered: [] };
   const result = await captureBaseFlow(root, stateDir, repository, clock, update, qualityEvidence);
-  const written = qualityEvidence.overflow ? { ok: false as const, reason: "history_over_budget" as const }
-    : recordRepositoryFlowHistory(stateDir, repository, update);
+  if (qualityEvidence.overflow) { update.costs = []; update.publications = []; }
+  const { costs, ...observations } = update;
+  let written = recordRepositoryFlowHistory(stateDir, repository, observations);
+  if (written.ok) written = recordRepositoryFlowHistory(stateDir, repository, { costs: costs ?? [] });
   const retained = readRepositoryFlowHistory(stateDir, repository);
   result.quality = foldRepositoryFlowHistory(retained.ok ? retained.history : undefined, clock.iso(),
     qualityEvidence.delivered,
-    !written.ok ? written.reason : !retained.ok ? retained.reason : null);
+    !written.ok ? written.reason : !retained.ok ? retained.reason : qualityEvidence.overflow ? "history_over_budget" : null);
   const window = result.quality.windows[1]!;
   if (window.firstPass.eligible) result.notCollected.firstPass = null;
   if (window.repairLatency.samples || window.repairLatency.censored) result.notCollected.repairLatency = null;
   if (result.quality.backlog.some(b => b.sampledAt !== null)) result.notCollected.backlog = null;
   if (window.efficiency.linkedPrs) result.notCollected.efficiency = null;
   if (Buffer.byteLength(JSON.stringify(result)) > REPOSITORY_FLOW_MAX_BYTES) {
-    delete result.quality;
-    result.gaps.push("quality projection over budget; base flow retained");
+    for (const window of result.quality.windows) {
+      window.repairLatency.evidenceTruncated ||= window.repairLatency.episodes.length > 0;
+      window.repairLatency.episodes = [];
+    }
+    if (Buffer.byteLength(JSON.stringify(result)) > REPOSITORY_FLOW_MAX_BYTES) {
+      for (const window of result.windows) {
+        window.evidenceTruncated ||= window.evidence.length > 0;
+        window.evidence = [];
+      }
+    }
+    result.gaps.push("quality evidence over budget; independent graph aggregates retained");
   }
   return publicRepositoryFlow(result, repository, clock.iso());
 }
@@ -203,6 +214,7 @@ async function captureBaseFlow(root: string, stateDir: string, repository: strin
   const fingerprints = new Set<string>();
   const qualityFingerprints = new Set<string>();
   const publicationScopes = new Map<string, Set<string>>();
+  const unscopedCosts = new Map<string, string | null>();
   const repairs = new Map<string, Repair>();
   const stream = openLedgerUnion(stateDir, { since: fixedClock(now - 90 * DAY_MS).iso(), dedupe: false,
     onUnreadArchive: () => { complete = false; }, onUnreadLive: () => { complete = false; },
@@ -215,14 +227,14 @@ async function captureBaseFlow(root: string, stateDir: string, repository: strin
       if (!qualityEvidence.overflow && (row.step === "pr.opened" || spendRoleOf(row) === "produced")) {
         const fingerprint = fingerprintLedgerLine(raw);
         if (!qualityFingerprints.has(fingerprint)) {
-          if (qualityFingerprints.size >= 8192) { qualityEvidence.overflow = true; return; }
+          if (qualityFingerprints.size >= FLOW_HISTORY_MAX_IDENTITIES) { qualityEvidence.overflow = true; return; }
           qualityFingerprints.add(fingerprint);
           const small = (v: unknown): string | null => typeof v === "string" && v.length > 0 && v.length <= 160 ? v : null;
           const run = small(row.run_id), task = small(row.task_id);
           if (row.step === "pr.opened") {
             const match = typeof row.pr_url === "string" && /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/([1-9][0-9]*)$/.exec(row.pr_url);
             if (match && run) {
-              const scopes = publicationScopes.get(run) ?? new Set<string>(); scopes.add(match[1]!); publicationScopes.set(run, scopes);
+              const scopes = publicationScopes.get(run) ?? new Set<string>(); scopes.add(row.pr_url as string); publicationScopes.set(run, scopes);
             }
             if (match && match[1] === repository && Number.isSafeInteger(Number(match[2])) && typeof row.head_sha === "string" &&
                 /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.head_sha) && row.adopted !== true && row.joined !== true)
@@ -230,14 +242,20 @@ async function captureBaseFlow(root: string, stateDir: string, repository: strin
           } else {
             const scope = row.repository ?? row.repo;
             const scoped = (scope === undefined || scope === repository) && row.scope !== "host" && row.scope !== "fleet";
+            if (!scoped) return;
             const price = spendAmountUsd(row);
             const validAmount = (v: unknown): number | null => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
             const usage = row.tokens as Record<string, unknown> | undefined;
             const tokenValues = usage && [usage.input, usage.output, usage.cacheRead, usage.cacheCreation];
-            update.costs!.push({ identity: fingerprint, at: fixedClock(at).iso(), run: scoped ? run : null, task,
+            const receipt = projectRepairCostContext(row);
+            const exactRepair = receipt.repo === repository && receipt.number !== null && small(receipt.roundId) !== null && receipt.assignmentObserved;
+            if (scope === undefined && !exactRepair) unscopedCosts.set(fingerprint, run);
+            update.costs!.push({ identity: fingerprint, at: fixedClock(at).iso(), run, task,
               cash: row.provider === "cash" || row.billing_mode === "api" && row.provider !== "codex" ? validAmount(price) : null,
               modeled: validAmount(row.notional_cost_usd),
-              tokens: tokenValues && tokenValues.every(v => validAmount(v) !== null) ? validAmount(tokenValues.reduce<number>((sum, v) => sum + (v as number), 0)) : null });
+              tokens: row.token_usage_state !== "partial" && row.token_usage_state !== "unavailable" && tokenValues && tokenValues.every(v => validAmount(v) !== null)
+                ? validAmount(tokenValues.reduce<number>((sum, v) => sum + (v as number), 0)) : null,
+              ...(exactRepair ? { pr: receipt.number!, round: receipt.roundId! } : {}) });
           }
         }
       }
@@ -284,7 +302,11 @@ async function captureBaseFlow(root: string, stateDir: string, repository: strin
     gaps.add("ledger collection failed; repair totals are unavailable");
   }
   result.sources.ledgerObservedAt = live ? clock.iso() : null;
-  for (const cost of update.costs!) if (cost.run && (publicationScopes.get(cost.run)?.size ?? 0) > 1) cost.run = null;
+  update.rounds = [...repairs.values()].slice(0, FLOW_HISTORY_MAX_IDENTITIES).map(r => ({ pr: r.pr, head: r.head, round: r.round, at: fixedClock(r.at).iso() }));
+  if (repairs.size > FLOW_HISTORY_MAX_IDENTITIES) qualityEvidence.overflow = true;
+  update.costs = update.costs!.filter(cost => !unscopedCosts.has(cost.identity) ||
+    [...publicationScopes.get(unscopedCosts.get(cost.identity) ?? "") ?? []].some(url => url.startsWith(`https://github.com/${repository}/pull/`)));
+  for (const cost of update.costs) if (cost.run && ((publicationScopes.get(cost.run)?.size ?? 0) > 1 || /^(?:DAEMON|SWEEP)-/.test(cost.run))) cost.run = null;
   result.sources.ledgerCorpus = live && complete ? "observed" : live || earliest !== undefined ? "partial" : "unavailable";
   result.sources.earliestLedgerAt = earliest === undefined ? null : fixedClock(earliest).iso();
   result.sources.latestLedgerAt = latest === undefined ? null : fixedClock(latest).iso();

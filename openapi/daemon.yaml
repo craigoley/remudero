@@ -7858,6 +7858,126 @@ components:
         repairedPrs: {type: [integer, "null"], minimum: 0}
         repairRounds: {type: [integer, "null"], minimum: 0}
 
+    RepositoryQuality:
+      description: >
+        Bounded source-owned observations. Initial-head quality includes unknown and open PRs;
+        recovery ends at verified required-head check completion. Missing daily samples are gaps.
+        Cash subtotals, modeled prices and tokens have separate coverage; no invoice or ROI claim.
+      type: object
+      additionalProperties: false
+      required: [observedAt, reason, retentionDays, inventoryDays, backlog, windows]
+      properties:
+        observedAt: {type: [string, "null"], format: date-time}
+        reason: {type: [string, "null"], enum: [missing_history, invalid_history, history_over_budget, write_failed, null]}
+        retentionDays: {type: integer, enum: [90]}
+        inventoryDays: {type: integer, enum: [31]}
+        backlog:
+          type: array
+          maxItems: 30
+          items:
+            type: object
+            additionalProperties: false
+            required: [date, sampledAt, generation, coveredFrom, coveredThrough, distinctPrs, reasons, oldestMs, missingCreatedAt]
+            properties:
+              date: {type: string}
+              sampledAt: {type: [string, "null"], format: date-time}
+              generation: {type: [string, "null"], maxLength: 160}
+              coveredFrom: {type: [string, "null"], format: date-time}
+              coveredThrough: {type: [string, "null"], format: date-time}
+              distinctPrs: {type: [integer, "null"], minimum: 0}
+              oldestMs: {type: [number, "null"], minimum: 0}
+              missingCreatedAt: {type: [integer, "null"], minimum: 0}
+              reasons:
+                type: [object, "null"]
+                additionalProperties: false
+                required: [awaiting_review, required_red, conflict, blocked, unknown]
+                properties:
+                  awaiting_review: {type: integer, minimum: 0}
+                  required_red: {type: integer, minimum: 0}
+                  conflict: {type: integer, minimum: 0}
+                  blocked: {type: integer, minimum: 0}
+                  unknown: {type: integer, minimum: 0}
+        windows:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: object
+            additionalProperties: false
+            required: [days, from, through, firstPass, repairLatency, efficiency]
+            properties:
+              days: {type: integer, enum: [7, 30]}
+              from: {type: string, format: date-time}
+              through: {type: string, format: date-time}
+              firstPass:
+                type: object
+                additionalProperties: false
+                required: [cohort, eligible, passing, unknown, states, denominator]
+                properties:
+                  cohort: {type: integer, minimum: 0}
+                  eligible: {type: integer, minimum: 0}
+                  passing: {type: integer, minimum: 0}
+                  unknown: {type: integer, minimum: 0}
+                  denominator: {type: string, enum: ["observed publications and open or discovered PRs; includes unknowns"]}
+                  states:
+                    type: object
+                    additionalProperties: false
+                    required: [SUCCESS, FAILURE, PENDING, CANCELLED, SKIPPED, NEUTRAL, MISSING, EXPIRED, UNKNOWN]
+                    properties:
+                      SUCCESS: {type: integer, minimum: 0}
+                      FAILURE: {type: integer, minimum: 0}
+                      PENDING: {type: integer, minimum: 0}
+                      CANCELLED: {type: integer, minimum: 0}
+                      SKIPPED: {type: integer, minimum: 0}
+                      NEUTRAL: {type: integer, minimum: 0}
+                      MISSING: {type: integer, minimum: 0}
+                      EXPIRED: {type: integer, minimum: 0}
+                      UNKNOWN: {type: integer, minimum: 0}
+              repairLatency:
+                type: object
+                additionalProperties: false
+                required: [unit, samples, censored, p50Ms, p90Ms, episodes, evidenceTruncated]
+                properties:
+                  unit: {type: string, enum: [ms]}
+                  samples: {type: integer, minimum: 0}
+                  censored: {type: integer, minimum: 0}
+                  p50Ms: {type: [number, "null"], minimum: 0}
+                  p90Ms: {type: [number, "null"], minimum: 0}
+                  evidenceTruncated: {type: boolean}
+                  episodes:
+                    type: array
+                    maxItems: 64
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [pr, failingHead, currentHead, round, failedAt, recoveredAt]
+                      properties:
+                        pr: {type: integer, minimum: 1}
+                        failingHead: {type: string, pattern: '^(?:[a-f0-9]{40}|[a-f0-9]{64})$'}
+                        currentHead: {type: string, pattern: '^(?:[a-f0-9]{40}|[a-f0-9]{64})$'}
+                        round: {type: [string, "null"], maxLength: 160}
+                        failedAt: {type: string, format: date-time}
+                        recoveredAt: {type: [string, "null"], format: date-time}
+              efficiency:
+                type: object
+                additionalProperties: false
+                required: [deliveredPrs, linkedPrs, priced, unpriced, unlinked, unlinkedPrs, coverage, pricedSubtotalUsd, modeledSubtotalUsd, tokens, totalUsd, operatorEffortMs, cohort, costBasis]
+                properties:
+                  deliveredPrs: {type: integer, minimum: 0}
+                  linkedPrs: {type: integer, minimum: 0}
+                  priced: {type: integer, minimum: 0}
+                  unpriced: {type: integer, minimum: 0}
+                  unlinked: {type: integer, minimum: 0}
+                  unlinkedPrs: {type: integer, minimum: 0}
+                  coverage: {type: string, enum: [observed, partial, unknown]}
+                  pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
+                  modeledSubtotalUsd: {type: [number, "null"], minimum: 0}
+                  tokens: {type: [number, "null"], minimum: 0}
+                  totalUsd: {type: "null"}
+                  operatorEffortMs: {type: "null"}
+                  cohort: {type: string, enum: ["observed delivered PRs by merge time; retained exact run and task producer joins"]}
+                  costBasis: {type: string, enum: ["producer estimates; not invoices or causal ROI"]}
+
     RepositoryFlow:
       description: >
         Optional cached repository-flow-v1. PR events use GitHub clocks and native structured
@@ -7874,6 +7994,7 @@ components:
         state: {type: string, enum: [reported, partial, not_collected]}
         reason: {type: [string, "null"], enum: [missing_source, invalid_source, over_budget, null]}
         materializedAt: {type: string, format: date-time}
+        quality: {$ref: "#/components/schemas/RepositoryQuality"}
         sources:
           type: object
           additionalProperties: false
@@ -7904,10 +8025,10 @@ components:
           additionalProperties: false
           required: [firstPass, repairLatency, backlog, efficiency]
           properties:
-            firstPass: {type: string, enum: [initial-head and required-check policy evidence not collected]}
-            repairLatency: {type: string, enum: [required-current-head recovery evidence not collected]}
-            backlog: {type: string, enum: [historical daily backlog observations not collected]}
-            efficiency: {type: string, enum: [delivered-work price and token attribution evidence not collected]}
+            firstPass: {type: [string, "null"], enum: [initial-head and required-check policy evidence not collected, null]}
+            repairLatency: {type: [string, "null"], enum: [required-current-head recovery evidence not collected, null]}
+            backlog: {type: [string, "null"], enum: [historical daily backlog observations not collected, null]}
+            efficiency: {type: [string, "null"], enum: [delivered-work price and token attribution evidence not collected, null]}
         windows:
           type: array
           minItems: 2
