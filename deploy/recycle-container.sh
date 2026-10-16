@@ -1826,6 +1826,30 @@ epoch_of_started_at() {
   return 0
 }
 
+oldest_inflight_age_s() {
+  local max=0 f started_at started_epoch age now_epoch wpid wage wlane wargs
+  now_epoch="$(date -u +%s 2>/dev/null || true)"
+  [ -n "${now_epoch}" ] || return 0
+  if [ -d "${INFLIGHT_DIR}" ]; then
+    for f in "${INFLIGHT_DIR}"/*.lock; do
+      [ -e "${f}" ] || continue
+      started_at="$(lock_started_at_field "${f}")"
+      [ -n "${started_at}" ] || continue
+      started_epoch="$(epoch_of_started_at "${started_at}")"
+      [ -n "${started_epoch}" ] || continue
+      age=$((now_epoch - started_epoch))
+      if [ "${age}" -gt "${max}" ] 2>/dev/null; then max="${age}"; fi
+    done
+  fi
+  while read -r wpid wage wlane wargs; do
+    [ -n "${wpid:-}" ] || continue
+    if [ "${wage}" -gt "${max}" ] 2>/dev/null; then max="${wage}"; fi
+  done <<WORKERS
+${worker_snapshot}
+WORKERS
+  printf '%s' "${max}"
+}
+
 # W1-T8138: THE REFUSAL NAMES ITS BLOCKERS, machine-readably. One `recycle-blockers-json:` line on stderr,
 # a JSON array: each lock as {"kind":"lock","task_id","run_id","age_s"} and each busy lane-less worker as
 # {"kind":"worker","pid","age_s","worker_kind"} (review | retro | fix-rung | unknown). The supervisor
@@ -1877,30 +1901,6 @@ drain_blockers_json() {
 ${worker_snapshot}
 WORKERS
   printf '[%s]' "${out}"
-}
-
-oldest_inflight_age_s() {
-  local max=0 f started_at started_epoch age now_epoch wpid wage wlane wargs
-  now_epoch="$(date -u +%s 2>/dev/null || true)"
-  [ -n "${now_epoch}" ] || return 0
-  if [ -d "${INFLIGHT_DIR}" ]; then
-    for f in "${INFLIGHT_DIR}"/*.lock; do
-      [ -e "${f}" ] || continue
-      started_at="$(lock_started_at_field "${f}")"
-      [ -n "${started_at}" ] || continue
-      started_epoch="$(epoch_of_started_at "${started_at}")"
-      [ -n "${started_epoch}" ] || continue
-      age=$((now_epoch - started_epoch))
-      if [ "${age}" -gt "${max}" ] 2>/dev/null; then max="${age}"; fi
-    done
-  fi
-  while read -r wpid wage wlane wargs; do
-    [ -n "${wpid:-}" ] || continue
-    if [ "${wage}" -gt "${max}" ] 2>/dev/null; then max="${wage}"; fi
-  done <<WORKERS
-${worker_snapshot}
-WORKERS
-  printf '%s' "${max}"
 }
 
 # ── THE FROZEN-DAEMON PROOF IS RE-EVALUATED ON THE DRAIN WAIT'S POLLS, NOT ONCE AT ITS START ──────
