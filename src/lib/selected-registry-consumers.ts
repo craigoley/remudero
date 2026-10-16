@@ -24,7 +24,10 @@ type Evidence = { selected_state: "ready" | "absent" | "retired" | "unknown"; re
   selection_source?: SelectedRegistryBinding["source"]; contract_version?: number; capabilities?: readonly string[] };
 type Bound = { kind: "ready"; binding: SelectedRegistryBinding } | { kind: "unknown"; reason: string };
 type Captured = { kind: "off" } | { kind: "unknown"; record?: RegistryObservationSink }
-  | { kind: "selected"; input: RegistrySelectionInput; io: RegistryFileIO; name?: string; record?: RegistryObservationSink };
+  | { kind: "selected"; input: RegistrySelectionInput; io: RegistryFileIO; name?: string; record?: RegistryObservationSink; transferable: boolean };
+export type SelectedRegistryIntent = { readonly kind: "unknown"; readonly version: 1 }
+  | { readonly kind: "shadow"; readonly version: 1; readonly input: Omit<RegistrySelectionInput, "signal">; readonly instanceName?: string };
+const unavailableIntent = (): SelectedRegistryIntent => Object.freeze({ kind: "unknown", version: 1 });
 const unknown = (reason: string, digest?: string): Evidence => ({ selected_state: "unknown", reason,
   ...(digest === undefined ? {} : { binding_digest: digest }) });
 const LIMIT = 32;
@@ -38,12 +41,13 @@ function capture(options: SelectedRegistryConsumerOptions | undefined): Captured
     record = options.record;
     const { cliPath, envPath, configuredPath, contractVersion, requiredCapabilities, expectedDigest,
       maxBytes, timeoutMs, signal } = options.input ?? {};
-    const io = options.io ?? registryFileIO, lstat = io.lstat.bind(io), open = io.open.bind(io);
+    const providedIO = options.io;
+    const io = providedIO ?? registryFileIO, lstat = io.lstat.bind(io), open = io.open.bind(io);
     const ports: RegistryFileIO = Object.freeze({ lstat, open: async (path: string) => {
       const handle = await open(path);
       return Object.freeze({ stat: handle.stat.bind(handle), read: handle.read.bind(handle), close: handle.close.bind(handle) });
     } });
-    return { kind: "selected", record, name: settings.instanceName,
+    return { kind: "selected", record, name: settings.instanceName, transferable: providedIO === undefined && signal === undefined,
       input: Object.freeze({ cliPath, envPath,
         configuredPath: configuredPath === undefined ? settings.registryPath : configuredPath,
         contractVersion: contractVersion ?? settings.contractVersion,
@@ -56,11 +60,47 @@ function capture(options: SelectedRegistryConsumerOptions | undefined): Captured
   }
 }
 
+/** Data for trusted projector/view threads only, never a public body or untrusted worker argument. */
+export function copySelectedRegistryIntent(value: SelectedRegistryIntent | undefined): SelectedRegistryIntent | undefined {
+  if (value === undefined) return undefined;
+  try {
+    if (value.version !== 1 || value.kind !== "shadow" || !value.input || typeof value.input !== "object") return unavailableIntent();
+    const { cliPath, envPath, configuredPath, expectedDigest, contractVersion, requiredCapabilities, maxBytes, timeoutMs } = value.input;
+    const instanceName = value.instanceName;
+    if ([cliPath, envPath, configuredPath, expectedDigest, instanceName].some(v => v !== undefined && typeof v !== "string")
+      || [contractVersion, maxBytes, timeoutMs].some(v => v !== undefined && typeof v !== "number")
+      || (requiredCapabilities !== undefined && (!Array.isArray(requiredCapabilities) || requiredCapabilities.some(v => typeof v !== "string")))) return unavailableIntent();
+    return Object.freeze({ kind: "shadow", version: 1, instanceName, input: Object.freeze({ cliPath, envPath, configuredPath,
+      expectedDigest, contractVersion, maxBytes, timeoutMs,
+      ...(requiredCapabilities === undefined ? {} : { requiredCapabilities: Object.freeze([...requiredCapabilities]) }) }) });
+  } catch {
+    // Malformed/unreadable transport cannot establish identity; never serialize its exception or substitute a real port.
+    return unavailableIntent();
+  }
+}
+
+export function captureSelectedRegistryIntent(options: SelectedRegistryConsumerOptions | undefined): SelectedRegistryIntent | undefined {
+  const captured = capture(options);
+  if (captured.kind === "off") return undefined;
+  if (captured.kind !== "selected" || !captured.transferable) return unavailableIntent();
+  const { signal: _signal, ...input } = captured.input;
+  return copySelectedRegistryIntent({ kind: "shadow", version: 1, input, instanceName: captured.name });
+}
+
+export function selectedRegistryObserverFromIntent(intent: SelectedRegistryIntent | undefined, record: RegistryObservationSink): SelectedRegistryObserver | undefined {
+  const copied = copySelectedRegistryIntent(intent);
+  if (copied === undefined) return undefined;
+  if (copied.kind === "unknown") return consumerObserver({ kind: "unknown", record }, readSelectedInstanceRegistry, "transport_unavailable");
+  return createSelectedRegistryObserver({ settings: { mode: "shadow", instanceName: copied.instanceName }, input: copied.input, record });
+}
+
 function targetSnapshot(target: RegistryConsumerTarget, name: string | undefined): {
   fields: Readonly<Record<string, string>>; repository?: string; instanceName?: string; reason?: string;
 } {
   try {
-    const repository = target.repository, instanceName = target.instanceName ?? name;
+    const repository = target.repository, selectedName = target.instanceName;
+    const instanceName = Object.hasOwn(target, "instanceName") ? selectedName : selectedName ?? name;
+    if (Object.hasOwn(target, "instanceName") && instanceName === undefined && repository === undefined) return { fields: {}, reason: "target_unavailable" };
     if (repository !== undefined && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return { fields: {}, reason: "invalid_repository" };
     if (instanceName !== undefined && !/^[A-Za-z0-9_-]+$/.test(instanceName)) return { fields: {}, reason: "invalid_instance" };
     return { repository: repository?.toLowerCase(), instanceName,
@@ -75,7 +115,10 @@ function targetSnapshot(target: RegistryConsumerTarget, name: string | undefined
 /** Bounded SHADOW observations, independent of the result, exception and timing of the legacy effect. */
 export function createSelectedRegistryObserver(options: SelectedRegistryConsumerOptions | undefined,
   reader: RegistryConsumerRead = readSelectedInstanceRegistry): SelectedRegistryObserver | undefined {
-  const captured = capture(options);
+  return consumerObserver(capture(options), reader);
+}
+
+function consumerObserver(captured: Captured, reader: RegistryConsumerRead, unavailableReason = "input_unreadable"): SelectedRegistryObserver | undefined {
   if (captured.kind === "off") return undefined;
   const controller = new AbortController();
   let signal = controller.signal, invalidCancellation = false;
@@ -97,7 +140,7 @@ export function createSelectedRegistryObserver(options: SelectedRegistryConsumer
   };
   const read = async (): Promise<Bound> => {
     if (invalidCancellation) return { kind: "unknown", reason: "invalid_cancellation" };
-    if (captured.kind !== "selected") return { kind: "unknown", reason: "input_unreadable" };
+    if (captured.kind !== "selected") return { kind: "unknown", reason: unavailableReason };
     try {
       const result = await reader({ ...captured.input, signal }, captured.io);
       if (result.kind !== "ready") return { kind: "unknown", reason: result.kind === "legacy" ? "selection_missing" : result.reason };

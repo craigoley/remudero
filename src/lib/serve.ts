@@ -2953,7 +2953,9 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes(served),
+    ...buildReadModelViewRoutes(served).map(route => route.path !== "/v1/views/repositories" || selectedRegistryObserver === undefined ? route : { ...route,
+      handler: (req, res, context) => observeSelectedRegistry(selectedRegistryObserver, "repositories-view",
+        { instanceName: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository }, () => route.handler(req, res, context)) }),
     ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),
@@ -3308,6 +3310,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
+    selectedRegistryObservation: deps.selectedRegistryObservation,
     registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
     ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
   const staleExit = gateStaleCodeExit({
