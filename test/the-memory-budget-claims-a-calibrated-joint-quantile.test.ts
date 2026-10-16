@@ -12,7 +12,11 @@ import {
   type CalibrationIo, type CalibrationState, type MemoryForecast,
 } from "../src/lib/host-memory-calibration.js";
 import { createDaemonFootprint, daemonFootprintPath } from "../src/lib/daemon-footprint.js";
-import { gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy, residentsOf, type HostMemoryBudgetPolicy, type ShadowMemoryPorts } from "../src/lib/host-memory-shadow.js";
+import {
+  CONTAINER_PRESSURE_FILE, SHADOW_STEP, gatherShadowInputs, installShadowMemorySink, loadHostMemoryBudgetPolicy,
+  parseHostMemoryBudgetPolicy, recordShadowMemoryVerdict, residentsOf, resetShadowMemoryStateForTests,
+  type HostMemoryBudgetPolicy, type ShadowMemoryPorts,
+} from "../src/lib/host-memory-shadow.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-15T00:00:00Z");
@@ -231,6 +235,87 @@ test("W1-T8879: default filesystem receipts, bad populations and publisher failu
     });
     assert.deepEqual(footprint.record({ at: NOW, bytes: 12, pid: 1 }), { persisted: true, reason: "calibration:collector refused" });
   } finally { repo.cleanup(); }
+});
+
+test("W1-T8879: the policy parser accepts a bounded jointQuantile and maxBacktestMissRate and refuses the rest", () => {
+  const doc = parseYaml(readFileSync(new URL("../plan/policy.yaml", import.meta.url), "utf8"));
+  const block = (extra: Record<string, unknown>): Record<string, unknown> => ({ ...doc.sweep.hostMemoryBudget, ...extra });
+  const row = (value: unknown, origin = "proposal") => ({ origin, value });
+  const parsed = parseHostMemoryBudgetPolicy(block({ jointQuantile: row(0.9), maxBacktestMissRate: row(0.1) }));
+  assert.equal(parsed.jointQuantile, 0.9);
+  assert.equal(parsed.maxBacktestMissRate, 0.1);
+  assert.equal(parseHostMemoryBudgetPolicy(block({ maxBacktestMissRate: row(0) })).maxBacktestMissRate, 0, "zero is a valid miss-rate ceiling");
+  assert.throws(() => parseHostMemoryBudgetPolicy(block({ jointQuantile: row(0.4) })), /invalid jointQuantile/);
+  assert.throws(() => parseHostMemoryBudgetPolicy(block({ jointQuantile: row(1) })), /invalid jointQuantile/);
+  assert.throws(() => parseHostMemoryBudgetPolicy(block({ maxBacktestMissRate: row(-0.1) })), /invalid maxBacktestMissRate/);
+  assert.throws(() => parseHostMemoryBudgetPolicy(block({ maxBacktestMissRate: row("0.1") })), /invalid maxBacktestMissRate/);
+  assert.throws(() => parseHostMemoryBudgetPolicy(block({ jointQuantile: row(0.9, "operator") })), /origin/);
+});
+
+test("W1-T8879: a failed forecast publication whose error marker also cannot be written still rethrows the publication error", () => {
+  const writes: string[] = [];
+  const io: CalibrationIo = {
+    read: () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); },
+    write: path => { writes.push(path); throw new Error("store unavailable"); },
+    publish: () => { throw new Error("publish refused"); },
+    list: () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); },
+    remove: () => undefined,
+  };
+  assert.throws(() => publishMemoryForecast("/fixture", forecast(), io), /publish refused/,
+    "the marker failure is swallowed; the original publication failure is what surfaces");
+  assert.equal(writes.length, 1, "the marker write was attempted exactly once");
+  assert.match(writes[0]!, /^\/fixture\//);
+});
+
+test("W1-T8879: a recorded shadow verdict publishes its charge-compared forecast from the sampled observation", () => {
+  resetShadowMemoryStateForTests();
+  const MIB = 1024 * 1024, root = "/joint-forecast-fixture";
+  const policy: HostMemoryBudgetPolicy = { mode: "shadow", jointQuantile: 0.9, hostReserveMib: 2048, containerReserveMib: 1024,
+    swapInPagesPerSecMax: 256, psiSomeAvg10Max: 10, psiFullAvg10Max: 2, serveColdStartReserveMib: 7680,
+    uncertaintyMarginMib: 256, daemonGrowthUnmeasuredMib: 1024, daemonGrowthMinSamples: 6, staleReadingMs: 600_000 };
+  const files: Record<string, string> = {
+    "/proc/meminfo": "MemAvailable: 16000000 kB\n", "/proc/vmstat": "pswpin 100\n",
+    "/proc/pressure/memory": "some avg10=0 avg60=0\nfull avg10=0 avg60=0\n",
+    "/sys/fs/cgroup/memory.current": `${8000 * MIB}\n`, "/sys/fs/cgroup/memory.max": `${9000 * MIB}\n`,
+    "/sys/fs/cgroup/memory.high": `${8379 * MIB}\n`, "/sys/fs/cgroup/memory.stat": "inactive_file 0\npswpin 100\n",
+    "/sys/fs/cgroup/memory.events": "high 1\n", "/sys/fs/cgroup/memory.pressure": "some avg10=0 avg60=0\nfull avg10=0 avg60=0\n",
+    [`${root}/state/${CONTAINER_PRESSURE_FILE}`]: JSON.stringify({ prior: { at: NOW - 20_000, pswpin: 100, high: 1 }, swap: [[NOW - 60_000, 20, 0]], container: [] }),
+  };
+  const rows: Array<Record<string, unknown>> = [];
+  const published: Array<{ stateDir: string; forecast: MemoryForecast }> = [];
+  const ports: Partial<ShadowMemoryPorts> = {
+    clock: fixedClock(NOW), policy: () => policy,
+    readFile: path => { if (!(path in files)) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" }); return files[path]!; },
+    readTail: () => "",
+    readLedger: () => ({ state: "present", scope: "host", dir: "/ledger", entries: [], reservedMib: 0,
+      counts: { live: 0, uncertain: 0, incompleteWalk: 0, localScope: 0, unreadable: 0 } }),
+    write: (_path, row) => void rows.push(row as unknown as Record<string, unknown>),
+    writeFile: (path, content) => { files[path] = content; },
+    stderr: () => undefined, instance: () => "fixture", daemonPid: () => undefined, listStateDir: () => [],
+    estimate: () => 1024, typical: () => 1024,
+    readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
+    readHostServe: () => ({ state: "unknown", cause: "local-only", basis: "fixture" }),
+    calibrationObservation: at => ({ at, mib: 500, peakMib: 600, generation: "gen-7" }),
+    publishCalibration: (stateDir, f) => void published.push({ stateDir, forecast: f }),
+  };
+  const outcome = recordShadowMemoryVerdict({ root, workerClass: "review", reservationId: "res-1" }, ports);
+  assert.equal(outcome.kind, "recorded");
+  const numbers = rows.filter(r => r.step === SHADOW_STEP).at(-1)!.numbers as Record<string, number | null>;
+  assert.equal(published.length, 1);
+  assert.equal(published[0]!.stateDir, `${root}/state`);
+  const f = published[0]!.forecast;
+  const projected = numbers.containerProjectedMib!;
+  assert.equal(typeof projected, "number");
+  assert.equal(f.projectedMib, 500 + projected - (numbers.containerWorkingSetMib ?? numbers.containerCurrentMib ?? 0),
+    "the sampled charge plus the projected growth, compared charge to charge");
+  assert.equal(f.id, "res-1");
+  assert.equal(f.at, NOW);
+  assert.equal(f.generation, "gen-7");
+  assert.equal(f.initialMib, 500);
+  assert.equal(f.quantile, 0.9);
+  assert.equal(f.basis, "cgroup-current-mib");
+  assert.equal(f.model, "legacy-one-tail-fallback", "no joint evidence is available, so the forecast names the fallback");
+  assert.notEqual(f.model, "unavailable");
 });
 
 test("W1-T8879: paired legacy peaks keep existing admission estimates on their original basis", () => {
