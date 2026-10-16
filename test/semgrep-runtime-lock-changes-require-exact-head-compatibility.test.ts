@@ -89,7 +89,7 @@ test('workflow-source metadata mapping can issue only its fixed read-only query 
 });
 
 test('runtime lock changes require trusted workflow bytes and exact-head run/job closure in both merge effectors',async()=>{
- const f=fixture(),sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
+ const f=fixture(),sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
  assert.deepEqual(sync,asyncResult);
  assert.deepEqual(sync.decision,{state:'safe',mergeAllowed:true,reason:'trusted-exact-head-security-and-runtime-compatible'});
  assert.equal(f.reads.filter(p=>p.includes('/actions/runs/')).length,2);
@@ -172,7 +172,7 @@ test('artifact audit policy unit success is required in the trusted exact-head j
  const f=fixture(),steps=f.job.steps.filter((s:any)=>s.name===auditUnitStep);
  assert.equal(steps.length,1);
  assert.equal(steps[0].status,'completed');assert.equal(steps[0].conclusion,'success');
- const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
  assert.deepEqual(sync,asyncResult);
  assert.deepEqual(sync.decision,{state:'safe',mergeAllowed:true,reason:'trusted-exact-head-security-and-runtime-compatible'});
 });
@@ -196,7 +196,7 @@ const auditUnitMutations:[string,(f:ReturnType<typeof fixture>,step:any)=>void][
 ];
 for(const [label,mutate] of auditUnitMutations)test('artifact audit policy unit metadata refuses '+label+' despite a green job',async()=>{
  const f=fixture(),step=f.job.steps.find((s:any)=>s.name===auditUnitStep);mutate(f,step);
- const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
  assert.deepEqual(sync,asyncResult);
  assert.deepEqual(sync.decision,{state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
 });
@@ -204,7 +204,7 @@ for(const [label,mutate] of auditUnitMutations)test('artifact audit policy unit 
 test('a successful audit policy check outside the trusted runtime job cannot replace the mandatory unit step',async()=>{
  const f=fixture();f.job.steps=f.job.steps.filter((s:any)=>s.name!==auditUnitStep);
  f.checks.push({...f.runtime,id:23,name:auditUnitStep});
- const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
  assert.deepEqual(sync,asyncResult);
  assert.deepEqual(sync.decision,{state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
 });
