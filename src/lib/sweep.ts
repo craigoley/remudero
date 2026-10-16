@@ -1,4 +1,6 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
+import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
+import type { RegistryFileIO } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
@@ -1491,6 +1493,7 @@ export type PlanScopedFixRoundInput = {
 };
 
 export interface BuildSweepEffectsDeps {
+  selectedModeFileIO?: RegistryFileIO;
   contributorAdmissionImpl?: AdmissionObserver;
   /** W1-T7096: the daemon and CLI entrypoints ask the production LLM progress judge; a caller that
    *  sets nothing (a fixture) keeps the former fixed bound as an explicit stand-in. */
@@ -2279,6 +2282,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     });
   };
   const say = (msg: string) => console.error(`### rmd sweep — ${msg}`);
+  const selectedModeQualification = createSelectedModeQualification(config.selectedRegistryMode, `${owner}/${repo}`,
+    { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, deps.selectedModeFileIO);
   // Defaults to the LIVE `plan/policy.yaml` flag (`loadDefaultPolicy`, the same memoized-per-
   // process reader every other W1-T253 consumer site uses) so production wiring picks up an
   // operator's edit with no code change; a test overrides `armSessionPrsOverride` directly to
@@ -2303,7 +2308,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // reviewed plan PR GitHub reads `blocked` reaches the direct merge a local review would make.
   const sweepArmImpl: (prUrl: string, taskId: string | undefined, checksGreenReviewed: boolean) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = (prUrl, taskId, checksGreenReviewed) => {
     const prNumber = prNumberFromRef(prUrl);
-    const armDeps = realArmDepsAsync(() => config);
+    const armDeps = realArmDepsAsync(() => config, selectedModeQualification);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs),
       { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl),
         ...(checksGreenReviewed ? { checksGreenReviewed: true as const } : {}) });
@@ -2570,7 +2575,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
-    arm: async (pr, mode) => {
+    arm: async (pr, mode) => observeSelectedMode(selectedModeQualification, "sweep-arm", async () => {
       if (config.contributorAdmission !== undefined || deps.contributorAdmissionImpl !== undefined) await observePr(pr, "auto-merge");
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
@@ -2582,7 +2587,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
       const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
-        ...realArmDepsAsync(() => config),
+        ...realArmDepsAsync(() => config, selectedModeQualification),
         ledgerLines: () => armLedgerLinesForPr(readLedgerLines(ledgerPath), pr.prUrl), // ledger-read-intent: live
         headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
           const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
@@ -2596,7 +2601,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
         mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha);
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification);
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -2648,7 +2653,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // W1-T8620: a refused direct merge hands GitHub's refusal text to the armed-idle branch.
       if (folded === "direct-merge-failed" && attemptError !== undefined) return { outcome: folded, error: attemptError };
       return typeof folded === "object" ? { ...folded, error: attemptError } : folded;
-    },
+    }, pr.prUrl),
 
     // W1-T1000002 — THE CONVERGING WITHDRAWAL: sweep.ts calls this ONLY when an operator hold
     // stands over a PR GitHub already reports armed (`disarmAutoMerge(` — the grep proof that

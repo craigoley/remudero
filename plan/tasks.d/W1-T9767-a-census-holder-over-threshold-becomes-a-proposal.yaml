@@ -1,0 +1,51 @@
+- id: W1-T9767
+  title: "A MEMORY CENSUS HOLDER OVER THE FILING THRESHOLD BECOMES A PROPOSED TASK THROUGH THE GARDEN, NOT A HAND FILING — W1-T9647's census.json already writes a proposed_task stub for each holder at or above the threshold (2 of 11 in the 2026-10-15 run), and today a person reads it and files by hand"
+  repo: remudero
+  depends_on: [W1-T9647]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, routing census proposals into the existing proposal path; nothing is minted without operator review
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9647 memory census (PR 12231), item Z5; W1-T9647 design step 5 names it as a follow-up'
+  plan_refs: [W1-T9647, W1-T9284, W1-T9703]
+  files:
+    - scripts/daemon-heap-census.mts
+    - src/lib/memory-census-proposals.ts
+    - src/run-task.ts
+    - test/a-memory-holder-over-threshold-becomes-a-proposal.test.ts
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    OBSERVED offline by the W1-T9647 build (PR 12231), census 27d1f36d8d59 on 2026-10-15 over a synthetic production-scale corpus (369 rotations x 8,900 rows, 18,000 live rows, 12,000 closed PRs, 600 issues; plan at 4,112 tasks); evidence logs-8864/9647-census/census-27d1f36d8.{json,md}. Live set 867 MiB, filing threshold 43.4 MiB (min of 5% of the live set and 50 MiB). The per-step shares are INFERRED.
+    OBSERVED, census-27d1f36d8.json: `holders[]` entries at or above `threshold_bytes` carry `proposed_task {subject,
+    evidence, files, holder, acceptance}`; in this run the source-map cache (134.7 MiB) and the tsx module graph (91.4
+    MiB) did. Both were filed or matched by hand on 2026-10-15/16 (W1-T9720; W1-T9091/W1-T9117/W1-T9722).
+    W1-T9647's design step 5 makes "every holder at or above CENSUS_FILING_SHARE becomes its own filed task" the rule
+    and leaves automatic filing as a follow-up proposal. The garden/backlog path already turns findings into proposals
+    that the operator reviews (backlog gardener, rmd approve).
+  design: |
+    1. A reader (src/lib/memory-census-proposals.ts) takes a census JSON and yields one proposal per over-threshold
+       holder, deduplicated by holder name against open proposals, queued and merged tasks that name the same holder
+       (plan_refs or a `daemon.memory holder` line), so a holder already owned is not proposed again.
+    2. Proposals go through the existing garden/backlog proposal path (a draft for operator review, `rmd approve`),
+       never minted directly. The census script writes its JSON where that path reads it; a CLI verb or garden hook
+       (named by the builder) submits it.
+    3. Each proposal's acceptance is the census stub's: the holder's daemon.memory bytes p50 one generation after the
+       fix's boot_head_sha falls below the generation before.
+    4. Whether the hook runs on a schedule, and the threshold itself, stay OPERATOR DECISIONS (W1-T9647's
+       CENSUS_FILING_SHARE).
+    Tests go in test/a-memory-holder-over-threshold-becomes-a-proposal.test.ts, titled verbatim as in the proofs.
+  acceptance:
+    - claim: "an over-threshold holder becomes one proposal for operator review and an under-threshold holder none"
+      proof: 'grep: test("W1-T9767: an over-threshold holder becomes one reviewed proposal" in test/a-memory-holder-over-threshold-becomes-a-proposal.test.ts'
+    - claim: "a holder already named by a queued or merged task is not proposed again"
+      proof: 'grep: test("W1-T9767: a holder a task already owns is not proposed again" in test/a-memory-holder-over-threshold-becomes-a-proposal.test.ts'
+    - claim: "the CLI submits a census file's proposals through the proposal path"
+      proof: 'grep: memoryCensusProposals( in src/run-task.ts'
+  falsifier: |
+    On origin/main no reader exists, so the first test fails. Feed the census JSON from logs-8864/9647-census with a
+    plan whose W1-T9720 shard names the source-map-cache holder: without the dedup the holder is proposed again and
+    the second test fails.
