@@ -1627,6 +1627,7 @@ import {
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
   decideDepReview,
+  readSelectedDepReviewChecks,
   isDependabotAuthor,
   syncNodePinForImageBump,
   type NodePinSyncIo,
@@ -23920,6 +23921,8 @@ export interface DepReviewDeps {
   contributorAdmission?: AdmissionObserver;
   clock?: Clock;
   gh?: (args: string[]) => unknown;
+  /** Exact-head checks read over the bounded async transport. A legacy injected `gh` opts out unless this port is supplied. */
+  selectedChecksRead?: GhApiFetcher;
   prDiff?: (prUrl: string) => string;
   config?: Config;
   postStatus?: typeof postReviewStatusGuarded;
@@ -24028,7 +24031,8 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
 async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const view = (deps.gh ?? ghJson)([
+  const readChecks = deps.selectedChecksRead ?? (deps.gh === undefined ? (args: string[]) => ghJsonAsync(args) : undefined);
+  const view = structuredClone(await (deps.gh ?? ghJsonAsync)([
     "pr",
     "view",
     prArg,
@@ -24036,7 +24040,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     slug,
     "--json",
     "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
-  ]) as {
+  ])) as {
     number: number;
     url: string;
     title: string;
@@ -24084,13 +24088,29 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
   }
 
-  const result = decideDepReview({
+  let selectedChecks = dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []);
+  const input = {
     author: { login: view.author?.login ?? "" },
     title: view.title ?? "",
     body: view.body ?? "",
     diff,
-    checks: view.statusCheckRollup ?? [],
-  });
+    checks: selectedChecks,
+  };
+  let result = decideDepReview(input);
+  if (readChecks !== undefined && (result.decision === "arm" || result.decision === "hold")) {
+    const observed = await readSelectedDepReviewChecks(owner, repo,
+      { number: view.number, url: view.url, headSha: view.headRefOid, body: view.body ?? "" }, readChecks);
+    if (observed.kind === "unknown") result = { ...result, decision: "hold", reason: `selected check evidence unknown: ${observed.reason}` };
+    else {
+      selectedChecks = dedupeRollupByLatestAttempt(observed.checks);
+      result = decideDepReview({ ...input, checks: selectedChecks });
+    }
+  }
+  if (result.decision === "arm") {
+    const selectedState = checksStateFromRollup(selectedChecks, undefined);
+    if (selectedState !== "green") result = { ...result, decision: "hold",
+      reason: `selected check evidence is ${selectedState}; no success or arm without current green evidence` };
+  }
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
