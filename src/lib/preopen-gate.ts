@@ -25,6 +25,7 @@ import { delimiter, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CHILD_ENTRY_SPAWNED_STEP, childEntryArgv, childEntrySpawnedRow } from "./child-entry-argv.js";
+import { runPushGate, type PushGateOutcome } from "./git-push.js";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
@@ -42,9 +43,19 @@ export const PREOPEN_GATE_BACKSTOP_MS = 15 * 60_000;
 /** W1-T9619: how a gate ran — inside the sandbox, or not at all because no sandbox could be built. */
 export type GateContainmentMode = "sandboxed" | "unmeasured";
 
+/** W1-T9602: what the harness push gate, asked after the fast gate, came to. */
+export interface PreopenPushGate {
+  outcome: PushGateOutcome["kind"];
+  /** Wall time of the push gate alone; the result's own `durationMs` stays the fast gate's. */
+  durationMs: number;
+  reused?: boolean;
+  reason?: string;
+  key?: { tree: string; head: string; base: string; recipe: string };
+}
+
 export type PreopenGateResult =
-  | { kind: "pass"; durationMs: number; containment?: GateContainmentMode }
-  | { kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode }
+  | { kind: "pass"; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate }
+  | { kind: "fail"; failedSteps: string[]; durationMs: number; containment?: GateContainmentMode; pushGate?: PreopenPushGate }
   | { kind: "unmeasured"; reason: string; durationMs: number; deadlineEnforcedBy?: GateDeadlineEnforcer; containment?: GateContainmentMode };
 
 /**
@@ -76,6 +87,8 @@ export interface PreopenGateOptions {
   log?: GateLog;
   /** W1-T9619: the default runner's sandbox; default {@link defaultGateContainment}. */
   contain?: GateContain;
+  /** W1-T9602: the harness push gate asked after the fast gate; default the push leaf's own {@link runPushGate}. */
+  runPushGate?: (cwd: string) => Promise<PushGateOutcome>;
 }
 
 export type GateLog = (step: string, extra?: Record<string, unknown>) => void;
@@ -369,7 +382,28 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   const now = () => clock.now();
   const startedAt = now();
   const run = await (deps.runGate ?? ((cwd) => defaultRunGate(cwd, undefined, deps.log, {}, { contain: deps.contain, readFile: deps.readFile })))(worktreePath);
-  const durationMs = now() - startedAt;
+  const fast = classifyGateRun(run, now() - startedAt);
+  if (fast.kind === "unmeasured") return fast;
+  // W1-T9602: the same harness push gate the push leaf runs, asked now on the clean committed tree. A pass is
+  // recorded and the push of that identical tree reuses it; a refusal joins the steps handed back, as push-gate.
+  const pushStarted = now();
+  const asked = await (deps.runPushGate ?? ((cwd) => runPushGate(cwd)))(worktreePath);
+  const pushGate: PreopenPushGate = {
+    outcome: asked.kind,
+    durationMs: now() - pushStarted,
+    ...(asked.kind === "pass" ? { reused: asked.reused } : asked.kind === "skipped" ? { reason: asked.reason } : {}),
+    ...(asked.key ? { key: asked.key } : {}),
+  };
+  if (asked.kind !== "refused") return { ...fast, pushGate };
+  const failedSteps = [...(fast.kind === "fail" ? fast.failedSteps : []), `${PUSH_GATE_STEP_NAME}: ${asked.detail}`];
+  return { kind: "fail", failedSteps, durationMs: fast.durationMs, ...(fast.containment ? { containment: fast.containment } : {}), pushGate };
+}
+
+/** The failing step a push-gate refusal is handed back under, with the hook's own words after it. */
+export const PUSH_GATE_STEP_NAME = "push-gate";
+
+/** Pass and fail are the child's exit status (0 and 1) as the harness observed it; anything else is unmeasured. */
+function classifyGateRun(run: GateRun, durationMs: number): PreopenGateResult {
   const containment = run.containment ? { containment: run.containment } : {};
   if (run.error !== undefined) {
     return { kind: "unmeasured", reason: run.error, durationMs, ...(run.deadlineEnforcedBy ? { deadlineEnforcedBy: run.deadlineEnforcedBy } : {}), ...containment };
@@ -381,9 +415,24 @@ export async function runPreopenGate(worktreePath: string, deps: PreopenGateOpti
   return { kind: "fail", failedSteps: read.failedSteps.length > 0 ? read.failedSteps : [GATE_FAILED_NO_STEP_NAMED], durationMs, ...containment };
 }
 
-/** W1-T9619: what `implement.preopen_gate` records about how the gate ran: the launcher, the containment and the allowlist's name. */
+/**
+ * W1-T9619: what `implement.preopen_gate` records about how the gate ran: the launcher, the containment and the
+ * allowlist's name. W1-T9602: and the early push gate's outcome with the tree, head, base and recipe it keyed, so
+ * the reuse rate is read from the ledger.
+ */
 export function preopenGateLedgerFields(result: PreopenGateResult): Record<string, unknown> {
-  return result.containment === undefined ? {} : { launcher: "harness", containment: result.containment, env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME };
+  const containment = result.containment === undefined ? {} : { launcher: "harness", containment: result.containment, env_allowlist: PREOPEN_GATE_ENV_ALLOWLIST_NAME };
+  const push = "pushGate" in result && result.pushGate ? result.pushGate : undefined;
+  return {
+    ...containment,
+    ...(push ? {
+      push_gate: push.outcome,
+      push_gate_ms: push.durationMs,
+      ...(push.reused === undefined ? {} : { push_gate_reused: push.reused }),
+      ...(push.reason === undefined ? {} : { push_gate_reason: push.reason }),
+      ...(push.key ?? {}),
+    } : {}),
+  };
 }
 
 /** The continuation prompt that hands a worker the fast-gate steps its tree fails. */

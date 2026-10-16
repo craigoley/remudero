@@ -630,6 +630,7 @@ import {
   type RestRollupEntry,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
+import { codeqlAlertsReadDue } from "./lib/pr-blocker.js";
 import {
   buildMainHealthRung,
   mainCeilingLogReducer,
@@ -1180,7 +1181,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1882,6 +1883,9 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import {
+  createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
+} from "./lib/daemon-memory-census.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
@@ -2228,9 +2232,13 @@ export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling"
   ];
 }
 
-export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode"> {
+/** W1-T9727 — a fresh-tree review child is handed no start reading, so it takes its own (see {@link reviewCommand}). */
+export const JUDGE_AT_OWN_START_FLAG = "--judge-at-own-start";
+
+export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart"> {
   const mode = flagValue(rest, "--execution-mode");
   return {
+    ...(rest.includes(JUDGE_AT_OWN_START_FLAG) ? { judgeAtOwnStart: true } : {}),
     ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
     ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
   };
@@ -2251,6 +2259,17 @@ export function reviewerFreshnessForPublication(
 ): () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness> {
   if (atStart === undefined || atStart.status === "unreadable") return justInTime;
   return () => atStart;
+}
+
+/** W1-T9727 — a review's own start reading; a throw is an unreadable reading, so the just-in-time read decides. */
+export async function ownStartFreshness(
+  read: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+): Promise<ReviewerCodeFreshness> {
+  try {
+    return await read();
+  } catch (e) {
+    return { status: "unreadable", reason: `own start reading threw: ${String((e as Error)?.message ?? e)}` };
+  }
 }
 
 export function buildReviewerCodeFreshnessGate(
@@ -2292,7 +2311,8 @@ export function buildReviewerCodeFreshnessGate(
           // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
-          return reviewFromFreshTree(prArg, [...rest, ...reviewOptionFlags(reviewDeps)], freshness, (why) => { failure = why; }).then((code) => {
+          const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
+          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }).then((code) => {
             if (code !== undefined) {
               const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
               log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ...why });
@@ -22971,9 +22991,10 @@ interface ReviewCommandDeps {
   /** W1-T4933: brings an explicit target's managed checkout install in line with its lockfile before proofs run; default {@link stagedInstall}. */
   refreshSubjectInstall?: (repoDir: string) => void;
   /** The freshness gate's reading taken immediately before this review began; see
-   *  {@link reviewerFreshnessForPublication}. Absent (operator CLI, fresh-tree child) keeps the
-   *  just-in-time read. */
+   *  {@link reviewerFreshnessForPublication}. Absent, the operator CLI keeps the just-in-time read. */
   reviewStartFreshness?: ReviewerCodeFreshness;
+  /** W1-T9727: set by `--judge-at-own-start` (the fresh-tree child): with no handed reading, take one at start. */
+  judgeAtOwnStart?: boolean;
 }
 
 type ReviewSubjectFailureReason =
@@ -23630,14 +23651,17 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // coverage of a latency window unique to this manual/sweep-dispatched path. A throw (e.g. a
   // transient lifecycle-read failure) degrades the SAME way `runReview`'s own call site does —
   // best-effort legibility, never a reason this command fails to review the PR at all.
-  // The gate's start reading could not prove freshness: say so, then fall back to the JIT read.
-  if (deps.reviewStartFreshness?.status === "unreadable") {
+  // W1-T9727: a fresh-tree child reads at its own start, before a memory-admission wait lets main move past it.
+  const startFreshness = deps.reviewStartFreshness ??
+    (deps.judgeAtOwnStart === true ? await ownStartFreshness(reviewerCodeFreshnessDep) : undefined);
+  // The start reading could not prove freshness: say so, then fall back to the JIT read.
+  if (startFreshness?.status === "unreadable") {
     log("review.reviewer_freshness_unreadable_at_start", {
       pr_url: view.url, head_sha: view.headRefOid, review_input_digest: inputDigest,
-      reason: deps.reviewStartFreshness.reason,
+      reason: startFreshness.reason,
     });
   }
-  const publicationFreshness = reviewerFreshnessForPublication(deps.reviewStartFreshness, reviewerCodeFreshnessDep);
+  const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
   try {
     await postReviewPendingDep({
       owner,
@@ -37558,16 +37582,17 @@ export function createDaemonGatewayFactory(
 function memoiseBoardSnapshotByRepo(
   root: string,
   log: (event: string, extra?: Record<string, unknown>) => void,
-): (owner: string, repo: string) => BoardSnapshotCache {
+): ((owner: string, repo: string) => BoardSnapshotCache) & { built: () => Iterable<BoardSnapshotCache> } {
   const cache = new Map<string, BoardSnapshotCache>();
-  return (owner, repo) => {
+  // W1-T9647: `built` lets the daemon's memory row size the closed-PR rows each cache keeps.
+  return Object.assign((owner: string, repo: string) => {
     const key = `${owner}/${repo}`;
     const hit = cache.get(key);
     if (hit) return hit;
     const built = createBoardSnapshotCache(root, owner, repo, { log });
     cache.set(key, built);
     return built;
-  };
+  }, { built: () => cache.values() });
 }
 
 /**
@@ -39599,7 +39624,10 @@ export async function daemonCommand(
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
   // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSyncAsync(reportPlanQuarantine));
+  // W1-T9647: every plan this daemon holds — boot, active, the tick read's and each lane's sync — is one copy on the
+  // `daemon.memory` row; a reload sharing task objects with the plan before it is counted once.
+  const daemonPlanCopies = createPlanCopyBook({ refs: () => [plan, activePlanRef.current, tickReadGeneration?.facts.plan] });
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(quarantiningPlanSyncAsync(reportPlanQuarantine), daemonPlanCopies.observe));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
@@ -40156,13 +40184,28 @@ export async function daemonCommand(
   // W1-T8401: before a container-short hold the daemon reclaims its own slack (one tightest-factor collection, paced
   // by its footprint's own variance) and ledgers what it freed and the heap ceiling it would derive, in shadow.
   const daemonMemoryGovernor = createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy });
+  const daemonLiveSet = createLiveSetKeeper();
   const slackReclaimer = createDaemonSlackReclaimer({
     policy: memoryPolicyRead.policy,
     inForcePercent: () => daemonMemoryGovernor.inForcePercent?.() ?? memoryPolicyRead.policy.heapGrowingPercent,
     footprintBytes: () => daemonFootprint.samples().map((sample) => sample.bytes),
-    log: (record) => log("daemon.slack_reclaim", { ...record }),
+    log: (record) => log("daemon.slack_reclaim", { ...daemonLiveSet.keep(record) }),
   });
   installDaemonSlackReclaimer(slackReclaimer);
+  // W1-T9647: what holds the heap, on its own unref'd timer; `unattributed_live_bytes` is read against the reclaimer's
+  // last measured live set above. Cheap counters and sliced walks only: no snapshot, no forced collection.
+  const stopMemoryCensus = startDaemonMemoryCensus({
+    holders: daemonHolderSource({
+      planCopies: daemonPlanCopies,
+      sizedMemos: { terminalUnionScans: terminalUnionScans.size, mergeLogEvidenceByRoot: mergeLogEvidenceByRoot.size,
+        dispatchFilingCache: dispatchFilingCache.size, baseReproductionHostCache: baseReproductionHostCache.size },
+      boardSnapshots: boardSnapshotFor.built,
+      tickRead: () => tickReadGeneration?.facts,
+      ledgerMemos: ledgerMemoHolders,
+      sourceMapsEnabled: () => process.sourceMapsEnabled,
+    }),
+    log, liveSet: daemonLiveSet.read, bootHeadSha: daemonLoadedCodeSha,
+  });
   log("daemon.heap_ceiling_shadow", { basis: "boot", ...slackReclaimer.derivedCeiling() });
   try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
@@ -40191,6 +40234,7 @@ export async function daemonCommand(
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
         onPlanReload: (fresh) => {
           activePlanRef.current = fresh;
+          daemonPlanCopies.observe(fresh);
         },
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
@@ -40841,6 +40885,7 @@ export async function daemonCommand(
     await readPlane?.stop();
     if (!deps.checkPause && !deps.runDaemon) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
     loopTelemetry.stop();
+    stopMemoryCensus();
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
     githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
@@ -44034,7 +44079,8 @@ function* openPrViewSteps(
   // `raw` list, so a healthy sweep pays nothing extra. "main" is this repo's one merge target,
   // the same literal `ghPrCreateFillCommand`'s own `--base` argv already hardcodes.
   const dirtyPrs = raw.filter((p) => mergeStates.get(p.number) === "dirty").map((p) => ({ number: p.number, headRefOid: p.headRefOid }));
-  const mergeConflicts = yield* hydrateMergeConflictEvidenceSteps(owner, repo, "main", dirtyPrs, fetch);
+  const mergeConflictGaps = new Map<number, string>();
+  const mergeConflicts = yield* hydrateMergeConflictEvidenceSteps(owner, repo, "main", dirtyPrs, fetch, undefined, mergeConflictGaps);
 
     // WORKFLOW RUNS (W1-T2340 — the producer `OpenPrView.workflowRuns` has lacked since it was
     // declared): a THIRD bounded follow-up fetch, scoped the same way the conflict-evidence one
@@ -44133,11 +44179,13 @@ function* openPrViewSteps(
 
   // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
   // already holds a terminal code-scanning ruling for that head (a false positive, or a fix dispatched).
+  // W1-T9731: so does a head whose newest arm the security policy refused on a new high alert.
   const codeqlHeadAlerts = yield* hydrateCodeqlHeadAlertsSteps(
     owner,
     repo,
     raw
-      .filter((pr) => pr.isDraft !== true && codeqlCheckFailed(pr.statusCheckRollup) &&
+      .filter((pr) => pr.isDraft !== true &&
+        codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup)) &&
         !codeScanningHeadSettled(ledger, pr.number, pr.headRefOid))
       .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
     fetch,
@@ -44427,6 +44475,7 @@ function* openPrViewSteps(
       // value every PR has always carried — see lib/sweep.ts's DISPOSITION_RULES for how the
       // policy-gated `conflicted` row and the `blocked-ambiguous` row beneath it each read this.
       mergeConflict: mergeConflicts.get(pr.number),
+      mergeConflictGap: mergeConflictGaps.get(pr.number),
       // W1-T3920: the normalized mergeState intentionally maps raw `blocked` to `clean`; retain
       // both raw fields so the stale-blocked refresh predicate is reachable in the real gateway.
       mergeable: mergeStateObservations.get(pr.number)?.mergeable,

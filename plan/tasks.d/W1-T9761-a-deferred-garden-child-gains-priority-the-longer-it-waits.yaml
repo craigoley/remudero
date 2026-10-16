@@ -1,0 +1,103 @@
+- id: W1-T9761
+  title: "A DEFERRED GARDEN CHILD GAINS PRIORITY THE LONGER IT WAITS, SO IT EVENTUALLY RUNS — on 2026-10-15 02:00-22:01Z garden enforcement wrote 5,984 memory_budget.enforce_defer rows against 90 admits (98.5% deferred), because a deferred start's wait restarts at zero on every pass: awaitMemoryAdmission drops its waiter when it returns, so rankDemand never ages a garden"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — whether a garden child deferred for memory ever gains enough priority to start; the verdict arithmetic, the policy modes and the other classes are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 (22:10Z enforce decision read and 23:35Z 'keep watching, keep going'): file garden aged priority at priority 1; standing rulings: no hard fixed thresholds, enforcement stays on, never raise core memory.max"
+  plan_refs: [W1-T7094, W1-T7095, W1-T9706, W1-T9679, W1-T8472, W1-T9711, W1-T9762]
+  files:
+    - src/lib/host-memory-admission.ts
+    - src/lib/garden-registry.ts
+    - test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-15: gardens starved for 20 h under enforcement (ci-friction #11716 missed its retry)
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 02:00-22:01Z (core ledger, read-only; ~/Remudero-notes/flow-remeasure-2026-10-14/RESULTS.md,
+    "Enforce decision read"; ~/Remudero-notes/session-watch-list.md 21:10Z and 22:10Z):
+    - Garden enforcement (#11735, live since 10-14) wrote 5,984 memory_budget.enforce_defer rows against 90 admits:
+      98.5% of garden starts were deferred.
+    - Most-deferred gardens: gate 674, backlog 665, config 624, hot-file 572, selector-shadow 551, machine-judge 521,
+      export 518, test 511. 19:17-20:20Z alone: 198 defers (selector-shadow 36, config 35, gate 34, hot-file 29,
+      backlog 29).
+    - Reasons: swap-in, psi and unrealized-reservations, with about 5 GB MemAvailable.
+    - The ci-friction gardener's due pass (~20:44Z) was deferred, so the #11716 retry never ran.
+    READ at origin/main c793012cb (symbols, not lines):
+    - src/lib/garden-registry.ts childGardenPassSpawn calls awaitMemoryAdmission({workerClass: "garden", ...,
+      onShortfall: "defer"}). On "deferred" it resolves {kind: "deferred"}; runPass's settle() records no pacing, so the
+      garden stays due and asks again at its next timer tick.
+    - src/lib/host-memory-admission.ts awaitMemoryAdmission builds a fresh Waiter with waitingSinceMs = this call's
+      clock.now(), pushes it on the in-process `waiting` list, and on a shortfall with onShortfall "defer" writes
+      ENFORCE_DEFER_STEP and returns at once. Its `finally` removes the waiter. So each re-ask starts at age 0, and
+      rankDemand / priorityScore (src/lib/host-memory-priority.ts, classWeight.garden 0.5 times the aging factor)
+      never sees a deferred garden's accumulated wait.
+    - The module doc promises "an older build eventually outranks a newer review and nothing starves". That holds only
+      for "wait" callers. A "defer" caller has no memory of its own deferrals and no rung that ever admits it while
+      reserved work runs elsewhere (the nothing-to-wait-for tier needs every reservation gone).
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main for enforce_defer, deferral, aged and garden starvation,
+    and the plan/ and memory-file diffs of the 237 origin heads updated since 2026-10-11.
+    - W1-T9706 (queued) gives a BUILD start an aged priority against a waiting repair. It does not touch the garden
+      admission.
+    - W1-T9679 (merged, #12110) is the fix controller's arithmetic.
+    - W1-T8472 (merged) gates the container projection on prior pressure.
+    - W1-T9711 (queued) records what a garden child cost, not when it may start. It also edits garden-registry.ts.
+    - W1-T9762 fixes the unrealized-reservations over-charge that tips most of these verdicts. Fixing the charge lowers the
+      deferral rate but cannot by itself promise a deferred garden ever starts. This task adds that guarantee.
+  design: |
+    One aged rung. It adds no new constant, interval, count or byte threshold (operator ruling). Enforcement stays on for
+    gardens and for every other class.
+    1. DEFERRAL STREAK. host-memory-admission.ts keeps, per instance and per deferred caller key (the request's runId,
+       `garden-<name>`), when its current deferral streak began and how many deferrals it holds. A "defer" caller's waiter
+       is ranked with waitingSinceMs set to that streak start, not to this call. An admission, or a pass that no longer
+       asks, clears the streak. A daemon restart does not reset the wait: the streak start is seeded from when the garden
+       was last due, its last completed pass (the gardener-runtime.json entry's lastCompletedAt) plus its cadence.
+    2. CADENCE, MEASURED. The wait a garden may age through is its OWN measured pass cadence: the median gap between its
+       completed passes, as startGardenOffLoop observes them in settle(). With fewer than two measured gaps, the garden's
+       scheduled interval stands in (gardenSchedule(name).intervalFor(intervalMs), never below its minIntervalMs), and the
+       row says so. childGardenPassSpawn hands awaitMemoryAdmission that cadence and its basis with the request.
+    3. AGED RUNG. On a shortfall, a "defer" caller whose streak wait is at least its cadence is admitted on a new tier
+       "aged" instead of being deferred, when:
+       (a) it ranks first by rankDemand with its streak age among the streaks open in this process;
+       (b) no other aged garden child from this process is still running. One aged child at a time, so the next verdict
+           counts the first child's reservation; and
+       (c) the verdict's reasons do not include "memory-available" (measured headroom less the daemons' typical growth
+           already below the reserve) or a SIGHTED container ceiling (containerSighted). Those mean the memory is short
+           now, not only projected short, so the garden stays deferred and keeps aging.
+       swap-in, psi, unrealized-reservations, uncertainty and an unsighted container projection do not block the aged
+       rung. They are the projected or transient reasons behind 10-15's 98.5%, and the garden child is already niced,
+       idle-IO and heap-capped (GARDEN_CHILD_HEAP_LIMIT_MB).
+    4. ROWS. An aged admission writes ENFORCE_ADMIT_STEP with tier "aged", waited_ms (the streak wait, not this call's),
+       deferrals (the streak count), cadence_ms, cadence_basis, the reasons it overrode, and the numbers. Every
+       ENFORCE_DEFER_STEP row gains deferred_since, deferrals, cadence_ms and why the aged rung did not fire (younger than
+       its cadence | outranked | aged child running | memory-available | container sighted). The next re-measure can then
+       count aged admissions and their waits.
+    5. BOUNDARIES. No change to evaluateShadowMemory's arithmetic, to plan/policy.yaml hostMemoryBudget modes, to the
+       "wait" callers (builds, fixes, reviews), or to the garden timers and pacing.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Fixture: an enforced garden policy, a
+    verdict short for unrealized-reservations and psi with 5,000 MiB MemAvailable and one live build reservation, and
+    an injected clock.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts"
+    - claim: "a garden deferred for at least its measured pass cadence is admitted on the aged rung while a build still runs"
+      proof: 'grep: test("W1-T9761: a garden deferred for its own pass cadence is admitted on the aged rung" in test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts'
+    - claim: "a garden deferred for less than its cadence is still deferred, and the defer row names its streak"
+      proof: 'grep: test("W1-T9761: a garden younger than its cadence is still deferred and the row names its streak" in test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts'
+    - claim: "a daemon restart does not reset a garden's deferral wait"
+      proof: 'grep: test("W1-T9761: a restart does not reset the wait of a deferred garden" in test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts'
+    - claim: "while one aged garden child runs, a second starved garden stays deferred"
+      proof: 'grep: test("W1-T9761: only one aged garden child runs at a time" in test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts'
+    - claim: "a measured headroom below the reserve still defers an aged garden"
+      proof: 'grep: test("W1-T9761: measured headroom below the reserve still defers an aged garden" in test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts'
+    - claim: "the aged admission row names its wait, cadence and basis"
+      proof: 'grep: tier: "aged" in src/lib/host-memory-admission.ts'
+  falsifier: |
+    At origin/main, awaitMemoryAdmission with onShortfall "defer", called once per cadence over five cadences against a
+    verdict short for unrealized-reservations and psi while a build reservation runs, returns "deferred" every time and
+    never writes an enforce_admit row. So the second test fails. Drop the streak seed from lastCompletedAt and the
+    restart test fails.
