@@ -1630,6 +1630,8 @@ import {
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
+  reconcileDependabotTitle,
+  overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -3195,6 +3197,7 @@ import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
+import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -24041,6 +24044,12 @@ export function defaultNodePinSyncIo(
 export interface DepReviewPrMutations {
   comment(prUrl: string, body: string): void;
   close(prUrl: string, opts: { comment: string; deleteBranch: false }): void;
+  /** W1-T9828: the REST title PATCH under the daemon's own gh identity, so `pull_request.edited` fires. */
+  retitle?(prUrl: string, title: string): Promise<void>;
+}
+
+export async function defaultDepReviewRetitle(prUrl: string, title: string): Promise<void> {
+  await ghTextAsync(prMetadataRestArgs(prUrl, { title }));
 }
 
 function depReviewMigrationFeedbackId(submissionKey: string): string {
@@ -24062,6 +24071,7 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
     close(prUrl, opts) {
       ghExec(["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
     },
+    retitle: defaultDepReviewRetitle,
   };
 }
 
@@ -24108,8 +24118,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
   const proposalRoot = deps.root ?? repoRoot;
   const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
+  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
+  const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
 
-  if (isDependabotAuthor({ login: view.author?.login ?? "" })) {
+  if (dependabot) {
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
@@ -24122,6 +24134,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     if (sync.kind === "refused") {
       log("dep-review.node_pin_refused", { pr_url: view.url, head_sha: view.headRefOid, reason: sync.reason, detail: sync.detail });
+    }
+    const retitle = deps.prMutations?.retitle ?? defaultDepReviewRetitle;
+    const titled = await reconcileDependabotTitle({
+      statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, title: view.title ?? "", body: view.body ?? "",
+      retitle: (title) => retitle(view.url, title), log,
+    });
+    if (titled === "retitled" || titled === "failed") {
+      console.log(`### rmd dep-review PR #${view.number} — title over header-max-length, retitle ${titled}; holding for the re-run`);
+      return 1;
     }
   }
 
@@ -24151,7 +24172,6 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
-  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   try {
     reconcileDepReviewHold({
       statePath: holdStatePath,
@@ -24206,7 +24226,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     try {
       const ownRedFlag = flagValue(rest, "--dependabot-own-red");
-      const ownRed = reconcileDependabotOwnRed({
+      // W1-T9828: a commitlint red on a title still over header-max-length is the title's, never a fleet build.
+      const titleRed = dependabot && overHeaderLimit(view.title ?? "") && result.redChecks.includes("commitlint");
+      const ownRed = titleRed ? "none" : reconcileDependabotOwnRed({
         statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
         headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
         capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
@@ -36060,7 +36082,7 @@ export function memoryGovernorGateFor(
     const once = () => checkMemoryGovernor(
       readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy), policy, readContainer?.(), ownWorkLive,
     );
-    const result = reclaimBeforeHold(once(), once, reclaim);
+    const result = buildYieldsToRepair(reclaimBeforeHold(once(), once, reclaim), ownWorkLive); // W1-T9706: a fitting build yields to a waiting repair.
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;

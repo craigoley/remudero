@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { AsyncIssueGateway } from "../src/lib/escalate.js";
+import { ghJsonAsync, type GhAsyncExecutor } from "../src/lib/github-transport.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import {
   buildMainHealthRung,
@@ -473,18 +474,68 @@ test("W1-T7760: probe concurrency, price and strategy are readings, never consta
   assert.deepEqual(proven, { state: "proven", offendingSha: span[1]!, parentSha: span[2]! });
 });
 
-test("W1-T7760: a probe that cannot be dispatched leaves the red unlocated, never named",
+test("W1-T7760: a red whose probes cannot be dispatched is still repaired, named only as the first completed red",
   inScratchDir(async (ledgerPath) => {
+    // 2026-10-16: every probe dispatch failed, the red was filed unlocated, and nothing repaired main for 30+ minutes.
     const w = world(2);
+    const [c1, c2] = w.cancelled as [string, string];
     w.refuseDispatch = true;
     const lane = fakeLane();
-    await rig(w, lane, ledgerPath).observe();
-    assert.equal(lane.fixes.length, 0);
-    assert.equal(rowsOf(ledgerPath, "main.repair.located").length, 0);
-    const [unlocated] = rowsOf(ledgerPath, "main.repair.unlocated");
-    assert.match(String(unlocated?.reason), /no probe could be dispatched/);
+    lane.openFixPr = async (request) => {
+      lane.fixes.push(request);
+      return undefined;
+    };
+    const daemon = rig(w, lane, ledgerPath);
+    await daemon.observe();
+    await flush();
+    assert.equal(lane.fixes.length, 1, "the red is repaired although no probe ran");
+    assert.equal(lane.fixes[0]!.offendingSha, RED, "named only as the first completed red, never a cancelled commit");
+    assert.match(lane.fixes[0]!.reason, /could not be attributed \(no CI probe could run\)/);
+    assert.equal(rowsOf(ledgerPath, "main.repair.unlocated").length, 0);
+    const [located] = rowsOf(ledgerPath, "main.repair.located");
+    assert.equal(located?.method, "first-red-unattributed");
+    assert.deepEqual(located?.unattributed_span, [c2, c1]);
+    assert.match(String((located?.attribution_refused as string[])[0]), /HTTP 422/);
+
+    // Its attempt ends with no PR: the revert is weighed, and withheld, because nothing proves RED the culprit.
+    await daemon.observe();
+    await flush();
+    const [withheld] = rowsOf(ledgerPath, "main.repair.revert_withheld");
+    assert.equal(withheld?.offending_sha, RED);
+    assert.match(String(withheld?.reason), /first parent `[0-9a-f]{40}` has no completed run/);
+    assert.equal(rowsOf(ledgerPath, "main.repair.revert_opened").length, 0);
   }),
 );
+
+test("W1-T7760: a probe GitHub answers with 204 No Content is dispatched and released, through the real gh transport", async () => {
+  const probeSha = sha("c1");
+  const calls: string[][] = [];
+  const noContent = (async (_file: string, args: readonly string[]) => {
+    calls.push([...args]);
+    if (args.includes(`${REPO_PATH}/git/refs`)) return { stdout: JSON.stringify({ ref: `refs/heads/rmd-attribution/${probeSha}` }), stderr: "" };
+    if (args.includes(`${REPO_PATH}/actions/workflows/ci.yml/dispatches`) || args.includes("DELETE")) return { stdout: "", stderr: "" };
+    throw new Error(`unrouted gh call: ${args.join(" ")}`);
+  }) as GhAsyncExecutor;
+  const probes = restMainProbes(OWNER, REPO, (args) => ghJsonAsync(args, noContent));
+  const handle = await probes.dispatch(probeSha);
+  assert.deepEqual(handle, { sha: probeSha, ref: `rmd-attribution/${probeSha}` });
+  await probes.release(handle);
+  assert.ok(calls.some((args) => args.includes(`${REPO_PATH}/actions/workflows/ci.yml/dispatches`)), "the workflow was dispatched");
+  assert.ok(calls.some((args) => args.includes(`${REPO_PATH}/git/refs/heads/rmd-attribution/${probeSha}`)), "the ref was released");
+
+  // CONTROL: the transport itself still calls an empty body unreadable (only these no-content writes accept it),
+  // and a write GitHub refuses still throws.
+  await assert.rejects(async () => {
+    await ghJsonAsync(["api", "--method", "DELETE", `${REPO_PATH}/git/refs/heads/x`], noContent);
+  }, /response body was unreadable/);
+  const refused = (async (_file: string, args: readonly string[]) => {
+    if (args.includes(`${REPO_PATH}/git/refs`)) return { stdout: "{}", stderr: "" };
+    throw new Error("HTTP 422 Workflow does not have 'workflow_dispatch' trigger");
+  }) as GhAsyncExecutor;
+  await assert.rejects(async () => {
+    await restMainProbes(OWNER, REPO, (args) => ghJsonAsync(args, refused)).dispatch(probeSha);
+  }, /HTTP 422/);
+});
 
 test("W1-T7760: the located writer refuses a sha with no completed red run", () => {
   const cancelled = sha("c1");
