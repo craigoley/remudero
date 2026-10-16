@@ -51445,7 +51445,7 @@ export function buildInboxDraftSpawnArgs(args: {
     ...(registryRecord && args.proposalId ? { draftRouting: {
       lane: "inbox-draft",
       proposalId: args.proposalId,
-      log: args.draftRoutingLog,
+      log: registryRecord,
       readStats: args.draftRoutingReadStats,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), args.proposal, args.currentPlanText);

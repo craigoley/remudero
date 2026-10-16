@@ -836,7 +836,9 @@ function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome
 export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
   { ok: true; summary: RepoDashboardResult; shadow?: Record<string, RepoShadowFacts>; fileReads: RepoSummaryFileReads } | { ok: false; reason: string } {
   return observeSelectedRegistrySync(deps.selectedRegistryObserver, "repo-dashboard",
-    { instanceName: deps.ownInstance, repository: deps.instanceRepository && `${deps.instanceRepository.owner}/${deps.instanceRepository.repo}` }, () => {
+    { get instanceName() { return deps.ownInstance; }, get repository() {
+      const repo = deps.instanceRepository; return repo && `${repo.owner}/${repo.repo}`;
+    } }, () => {
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
   const replay = deps.fileReads;
   let text: string | undefined;
@@ -921,7 +923,9 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
     return resolveIdentities(deps, parseRegistryRepos(text));
   };
   const project = (onlyOwn: boolean): Promise<RepoDashboardResult> => observeSelectedRegistry(selectedRegistryObserver, "repo-dashboard",
-    { instanceName: deps.ownInstance, repository: deps.instanceRepository && `${deps.instanceRepository.owner}/${deps.instanceRepository.repo}` }, async () => {
+    { get instanceName() { return deps.ownInstance; }, get repository() {
+      const repo = deps.instanceRepository; return repo && `${repo.owner}/${repo.repo}`;
+    } }, async () => {
     const resolved = await resolve();
     const measured = resolved.identities.length > 0 && deps.ledgerPath !== undefined ? await measure(resolved.identities, deps.ledgerPath) : undefined;
     if (measured && !measured.outcome.ok) throw new RepoTelemetryUnavailableError(measured.outcome.reason);

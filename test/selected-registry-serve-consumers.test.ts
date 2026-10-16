@@ -275,6 +275,14 @@ test("selected direct synchronous dashboard observes actual identity without cha
   assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
 });
 
+test("absent selected dashboard context adds no reads of legacy identity accessors", (t) => {
+  const f = fixture(t); let reads = 0;
+  const result = repoSummarySync({ root: f.root, get instanceRepository() { reads++; return { owner: "owner", repo: "repo" }; } }, 12345);
+  assert.equal(result.ok, true);
+  assert.equal(reads, 5, "the unchanged legacy resolve/projection pass reads this accessor five times, not eight");
+  assert.deepEqual(f.rows, []);
+});
+
 
 test("selected trusted-worker intent snapshots data without carrying ports or granting authority", async (t) => {
   const f = fixture(t), capturePort = Reflect.get(registryConsumers, "captureSelectedRegistryIntent");
