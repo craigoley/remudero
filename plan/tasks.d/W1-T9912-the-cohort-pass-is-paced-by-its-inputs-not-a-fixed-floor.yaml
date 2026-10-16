@@ -1,0 +1,72 @@
+- id: W1-T9912
+  title: "THE BENCHMARK COHORT PASS IS PACED BY ITS INPUTS, NOT A FIXED 15-MINUTE FLOOR — W1-T8876's benchmarkCohortCadence gates on inputs that include the live ledger's size, which changes on every ledger write, so 'only when inputs changed' never holds a pass back and BENCHMARK_COHORT_MIN_INTERVAL_MS = 900000 alone sets the rate (passes at 17:24, 17:40, 17:57Z on 2026-10-16, ~90 a day, 88-117 s each); a daemon pass is due when a sealed source or the config changed or rows are leaving the live file, and a failed pass waits its own measured cost"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — when the daemon's cohort pass is due; what a pass computes and writes is unchanged
+  band_meaning: span
+  origin: "coordinator fan-out 2026-10-15 brief B21 follow-up named in W1-T9845's design ('its fixed 900000 floor could become pacing measured from input change and pass cost'); operator ruling: no hard thresholds; filing agent F6"
+  plan_refs: [W1-T8876, W1-T9845, W1-T9911]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - test/the-cohort-pass-is-paced-by-its-inputs-not-a-fixed-floor.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main d6f6dddf3 (src/lib/benchmark-cohort.ts; symbols, not lines):
+    - `BENCHMARK_COHORT_MIN_INTERVAL_MS = 900_000` is a fixed floor. `benchmarkCohortCadence.checkBenchmarkCohort`
+      refuses a pass inside it, then refuses one whose `benchmarkCohortInputs` equal the last finished pass's.
+    - `benchmarkCohortInputs` is `[version, stateDir, maxSources, live ? [live.ino, live.size] : null,
+      rotations]`. The live ledger grows on every row the daemon writes, so the inputs always differ after 15
+      minutes. The inputs test never holds a pass back, and the floor alone sets the rate.
+    - The only readers of the daemon-kept checkpoint are `runBenchmarkCohortPass` callers: benchmark-aa's
+      in-process pass and runBenchmarkCohortIdlePass. Each folds the live tail itself, so a daemon pass run only
+      for tail growth buys freshness that no reader consumes.
+    MEASURED 2026-10-16 on the Azure host's core ledger, after the daemon booted at 17:11:32Z with W1-T8876 and
+    W1-T9845 live:
+    - `benchmark_cohort.detached` at 17:24:25, 17:40:21 and 17:57:34Z (gaps 15.9 and 17.2 min, the floor plus
+      check granularity).
+    - Each `benchmark_cohort.ran` followed 88-117 s later, with 1-2 sources scanned, `pending_sources: 0` and
+      78-123 KB of tail.
+    - That is ~90 passes a day, each reading and rewriting the 37.77 MB checkpoint.
+    - Before the pacing went live, the 12:58Z and 15:37Z archives hold 143 and 85 passes in ~2.8 h and ~2.5 h.
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and all 432 origin heads for BENCHMARK_COHORT_MIN_INTERVAL_MS
+    and cohort pacing: main reads 1 shard, W1-T9845, which names this as a follow-up and does not file it. No head
+    reads more. W1-T9911 (filed beside this) owns what a pass writes. The two are independent, and both touch
+    src/lib/benchmark-cohort.ts, so the second to merge takes main first.
+  design: |
+    Operator ruling: no hard thresholds. Delete BENCHMARK_COHORT_MIN_INTERVAL_MS and add no other interval constant.
+    1. A daemon pass is due when one of these inputs changed since the last finished pass:
+       - the set of sealed sources (rotation names, sizes and mtimes);
+       - the cohort config digest (version, maxSources);
+       - the live file's identity, when rows are leaving it: its inode changed, or its size fell below what the
+         last pass folded (compaction or rotation), so rows the checkpoint has not folded may be on their way out.
+       Live-tail growth alone does not make a pass due. Readers fold the tail themselves.
+    2. A partial pass (`pendingSources > 0`) is due again at the next check, so a backlog drains at the pass's own
+       speed with no floor.
+    3. A failed pass (run_failed) is retried only after a wait equal to that pass's own measured duration, and the
+       wait doubles while failures repeat. So a failing pass can never take most of the wall time, and the bound
+       comes from its own cost, not a constant. A success resets the wait.
+    4. The first check after a boot is due, so a boot always folds what changed while it was down.
+    5. Each `benchmark_cohort.ran` row carries `due_because`, naming which input changed, and `pass_ms`. A skipped
+       check still writes no row and touches no file, as W1-T8876 requires.
+    6. The single-flight guard (`detachedActionInFlight("benchmark-cohort")`) is unchanged.
+    Tests go in test/the-cohort-pass-is-paced-by-its-inputs-not-a-fixed-floor.test.ts, titled verbatim as in the
+    proofs. Use an injected clock and a real state directory. Advance the clock 2 hours while appending live rows
+    only, and assert ZERO passes ran. At base the same scenario runs 8, which is the falsifier.
+  acceptance:
+    - claim: "live-tail growth alone over two hours runs no daemon pass, while a new sealed rotation makes the next check due"
+      proof: 'grep: test("W1-T9912: live growth alone never makes a cohort pass due" in test/the-cohort-pass-is-paced-by-its-inputs-not-a-fixed-floor.test.ts'
+    - claim: "a live file whose inode changes or whose size falls makes the next check due"
+      proof: 'grep: test("W1-T9912: rows leaving the live file make the next pass due" in test/the-cohort-pass-is-paced-by-its-inputs-not-a-fixed-floor.test.ts'
+    - claim: "a failed pass retries after its own measured duration, doubling while it keeps failing, and a success resets it"
+      proof: 'grep: test("W1-T9912: a failed pass waits its own measured cost before retrying" in test/the-cohort-pass-is-paced-by-its-inputs-not-a-fixed-floor.test.ts'
+    - claim: "the cadence takes no interval constant: benchmark-cohort.ts exports no BENCHMARK_COHORT_MIN_INTERVAL_MS and the cadence deps carry no intervalMs"
+      proof: 'grep: test("W1-T9912: the cohort cadence has no fixed interval" in test/the-cohort-pass-is-paced-by-its-inputs-not-a-fixed-floor.test.ts'
+  falsifier: |
+    At origin/main the cadence over a fixture whose live file grows every minute runs a pass every 900 s, 8 in two
+    hours, because the live size is part of the inputs. The first test asserts zero and fails.

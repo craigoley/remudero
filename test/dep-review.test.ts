@@ -41,6 +41,8 @@ import { ghShim } from "./helpers/gh-shim.js";
 // changes only the third component; the "npm-minor-and-patch" GROUP name covers both
 // minor and patch update-types, it does not mean every bump in it is minor).
 const PR80_TITLE = "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm-minor-and-patch group";
+// W1-T9828: the recorded title is 105 characters, so a command pass retitles it first; check-selection tests drive the fitted one.
+const PR80_FITTED_TITLE = "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210";
 const PR80_BODY = `Bumps the npm-minor-and-patch group with 1 update: [@anthropic-ai/claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-typescript).
 
 Updates \`@anthropic-ai/claude-agent-sdk\` from 0.3.209 to 0.3.210
@@ -715,7 +717,7 @@ test("W1-T9689 dep review selects current attempts without reviving superseded r
     ] },
   ];
   for (const row of cases) await t.test(row.label, async () => {
-    const r = await driveMigrationDepReview({ title: PR80_TITLE, body: PR80_BODY, diff: PR80_DIFF, checks: row.checks });
+    const r = await driveMigrationDepReview({ title: PR80_FITTED_TITLE, body: PR80_BODY, diff: PR80_DIFF, checks: row.checks });
     try {
       assert.equal(r.code, 0, "the actual command must not revive a superseded red");
       assert.equal(r.armCalls.length, 1); assert.equal(r.statusPosts[0]?.state, "success");
@@ -737,7 +739,7 @@ test("W1-T9689 dep review holds current red pending and unread evidence", async 
     { label: "lane-owned status exclusion", checks: [...GREEN_CHECKS, { context: "remudero-review", state: "FAILURE" }], code: 0 },
     { label: "real green control", checks: GREEN_CHECKS, code: 0 },
   ]) await t.test(item.label, async () => {
-    const r = await driveMigrationDepReview({ title: PR80_TITLE, body: PR80_BODY, diff: PR80_DIFF, checks: item.checks });
+    const r = await driveMigrationDepReview({ title: PR80_FITTED_TITLE, body: PR80_BODY, diff: PR80_DIFF, checks: item.checks });
     try {
       assert.equal(r.code, item.code);
       assert.equal(r.statusPosts.length, item.code === 0 ? 1 : 0);
@@ -783,7 +785,7 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
   for (const row of cases) await t.test(row.label, async () => {
     const tmp = mkdtempSync(join(tmpdir(), "rmd-dep-current-")), ledgerPath = join(tmp, "state", "ledger.ndjson");
     const shim = ghShim([
-      { when: "pr view", stdout: JSON.stringify({ number: 3654, url, title: PR80_TITLE, body: PR80_BODY, headRefOid: sha,
+      { when: "pr view", stdout: JSON.stringify({ number: 3654, url, title: PR80_FITTED_TITLE, body: PR80_BODY, headRefOid: sha,
         author: DEPENDABOT_GRAPHQL_AUTHOR, statusCheckRollup: GREEN_CHECKS }) },
       { when: "/pulls/3654", stdout: JSON.stringify(pull) },
       { when: "/check-runs", delaySeconds: 0.15, stdout: row.stdout ?? JSON.stringify(row.checks ?? runs), exit: row.exit },

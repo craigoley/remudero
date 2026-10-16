@@ -2176,6 +2176,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     reason: "scheduled recovery drill with issue delivery and a multi-minute fixture exercise, deliberately outside the bounded pre-push surface",
   },
   {
+    workflow: "semgrep-runtime-compatibility.yml",
+    job: "runtime-compatibility",
+    mirrored: false,
+    reason: "hash-locked CPython 3.12 Linux installation on the exact GitHub PR head; a local substitute cannot certify that hosted runtime or run identity",
+  },
+  {
     workflow: "semgrep.yml",
     job: "semgrep",
     mirrored: false,

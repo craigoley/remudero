@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { defaultNodePinSyncIo, depReviewCommand, type DepReviewDeps } from "../src/run-task.js";
+import { defaultDepReviewPrMutations, defaultNodePinSyncIo, depReviewCommand, type DepReviewDeps } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -169,4 +170,91 @@ test("W1-T6258: scratch-directory removal still succeeds when git worktree remov
   }));
   assert.ok(scratch, "the scratch path was captured from the actual git worktree-add command");
   assert.equal(existsSync(scratch!), false, "the finally block removes scratch files even when git worktree remove fails");
+});
+
+// W1-T9828: the title retitle rides the same pre-verdict block as the node-pin sync.
+const LONG_TITLE = "chore(deps): bump google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml from 2.6.0 to 2.7.0 " +
+  "in the actions-minor-and-patch group across 1 directory";
+const LONG_BODY = "Updates `google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml` from 2.6.0 to 2.7.0";
+
+function titleFixture(t: { after(fn: () => void): void }, title: string, body: string, write?: () => void) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-dep-retitle-cmd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const view = { title };
+  const retitles: Array<{ url: string; title: string }> = [];
+  const statuses: string[] = [];
+  let captures = 0;
+  const deps: DepReviewDeps = {
+    config: { root, ledger: ledgerPath } as never,
+    clock: clockFromMillisFn(() => 1_000),
+    gh: () => ({
+      number: 11968, url: "https://github.com/craigoley/remudero/pull/11968", title: view.title, body,
+      headRefOid: "f".repeat(40), headRefName: "dependabot/github_actions/actions-minor-and-patch-0123",
+      author: { login: "app/dependabot" },
+      statusCheckRollup: [{ name: "commitlint", conclusion: "FAILURE" }, { name: "ci-gate", conclusion: "FAILURE" }],
+    }),
+    prDiff: () => "diff --git a/.github/workflows/scan.yml b/.github/workflows/scan.yml\n",
+    postStatus: (async (args) => { statuses.push(args.state); return { posted: true }; }) as DepReviewDeps["postStatus"],
+    arm: () => "armed",
+    nodePin: { readAtHead: () => undefined, commitAndPush: () => "c".repeat(40) },
+    prMutations: {
+      comment: () => undefined, close: () => undefined,
+      retitle: async (url, next) => { write?.(); retitles.push({ url, title: next }); view.title = next; },
+    },
+    captureMigrationFeedback: (args) => { captures += 1; return { id: args.id } as never; },
+  };
+  return {
+    retitles, statuses,
+    get captures() { return captures; },
+    run: () => depReviewCommand("11968", ["--repo", "remudero", "--dependabot-own-red", "main-passes"], { ...deps }),
+    ledger: () => readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>),
+  };
+}
+
+test("W1-T9828: the dep-review command retitles before any verdict and files no own-red build", async (t) => {
+  const f = titleFixture(t, LONG_TITLE, LONG_BODY);
+  assert.equal(await f.run(), 1, "the retitle pass holds");
+  const fitted = "chore(deps): bump google/osv-scanner-action/…/osv-scanner-reusable.yml from 2.6.0 to 2.7.0";
+  assert.deepEqual(f.retitles, [{ url: "https://github.com/craigoley/remudero/pull/11968", title: fitted }]);
+  const rows = f.ledger().filter((r) => r.step === "dep-review.retitled");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].old_title, LONG_TITLE);
+  assert.equal(rows[0].new_title, fitted);
+  assert.equal(f.ledger().some((r) => r.step === "dep-review.decided"), false, "the retitle returns before any verdict");
+  assert.deepEqual(f.statuses, [], "no review is posted");
+  assert.equal(f.captures, 0, "no own-red proposal");
+
+  await f.run();
+  assert.equal(f.retitles.length, 1, "a fitting title is not written");
+  assert.equal(f.ledger().some((r) => r.step === "dep-review.decided"), true, "the fitted head is judged as usual");
+});
+
+test("W1-T9828: an unfittable title red is held without an own-red build, and a failed write holds", async (t) => {
+  const unfittable = `chore(deps): bump @scope/${"a".repeat(80)} from 1.2.3 to 1.2.4 in /`;
+  const f = titleFixture(t, unfittable, "");
+  await f.run();
+  await f.run();
+  assert.deepEqual(f.retitles, []);
+  assert.equal(f.ledger().filter((r) => r.step === "dep-review.retitle_refused").length, 1);
+  assert.equal(f.ledger().filter((r) => r.step === "dep-review.decided").length, 2, "the existing hold still runs");
+  assert.equal(f.ledger().some((r) => String(r.step).startsWith("dep-review.own_red")), false, "a title red files no own-red build");
+  assert.equal(f.captures, 0);
+
+  const failing = titleFixture(t, LONG_TITLE, LONG_BODY, () => { throw new Error("HTTP 502"); });
+  assert.equal(await failing.run(), 1);
+  assert.equal(failing.ledger().filter((r) => r.step === "dep-review.retitle_failed").length, 1);
+  assert.equal(failing.ledger().some((r) => r.step === "dep-review.decided"), false);
+});
+
+test("W1-T9828: the default title write is a REST PATCH of the pull request", async () => {
+  const shim = ghShim([], { kind: "dep-review-retitle" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  try {
+    await defaultDepReviewPrMutations("craigoley", "remudero").retitle!("https://github.com/craigoley/remudero/pull/11968", "chore(deps): bump x from 1.0.0 to 1.0.1");
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  assert.deepEqual(shim.calls(), ["api -X PATCH repos/craigoley/remudero/pulls/11968 -f title=chore(deps): bump x from 1.0.0 to 1.0.1"]);
 });

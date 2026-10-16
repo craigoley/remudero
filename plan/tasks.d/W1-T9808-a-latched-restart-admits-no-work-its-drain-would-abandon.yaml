@@ -16,7 +16,7 @@
     - src/run-task.ts
     - test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts
   status: queued
-  priority: 2  # every abandoned admission is a fix round or review redone after the boot, plus the drain time it held; it self-heals, so not P1
+  priority: 1  # amended 2026-10-16 from 2: V1 measured the 16:30Z drain at 40.5 min latched with 55 idle lane-min, and 5 reviews admitted after the latch were redone by the next boot (see AMENDED in rationale)
   attempts: 0
   rationale: |
     Leads 5 and 6 are one task: both are an admission made after the restart latched that the drain cannot finish, and
@@ -59,6 +59,18 @@
     OVERLAP (lint duplicate-surface): W1-T100 routes blocked_ci to the ci-log fix path, W1-T147 is the overnight
     chaos drill and W1-T9748 traces declared files to the staging step. They share daemon.ts, sweep.ts or
     run-task.ts as broad files only; none reads the restart latch at an admission.
+    AMENDED 2026-10-16 (priority 2 to 1), from verification agent V1 (~/Remudero-notes/flow-verify-2026-10-16/RESULTS.txt),
+    core ledger, boot 2 (587b0e8d9, which already carried W1-T8172):
+      - `daemon.restart_latch_cost` at 17:10:52Z: latched_at 16:30:23Z, waited_ms 2429631 (40.5 min),
+        idle_lane_ms 3295580 (55 lane-min), refills_under_latch 7, yields_asked 9.
+      - Its 9 holdouts: 7 `yielded_latch_refill_past_restart` (W1-T9067, W1-T9626, W1-T8945, W1-T9124, W1-T9628,
+        W1-T8959, W1-T9097), 1 `yielded_no_history`, 1 `yielded_on_cost`. Those are the 9 `freshness_yield` verdicts
+        of 16:30:27Z..17:10:50Z, every one inside this drain. The 7 are BUILD refills that W1-T9069 admits under a
+        latch; this task's predicate covers reviews and fix dispatches, so those 7 are context for the drain's cost,
+        not something this design stops.
+      - Reviews for #12362, #12363, #12367, #12369 and #12370 were admitted 16:39-16:54Z, after the latch. Each ran
+        and ended withheld on a timed-out base read (W1-T9907), and boot 3 redid all five at 17:16-17:25Z. They were
+        not abandoned by the drain, but they are admissions after the latch that delivered nothing before the boot.
   design: |
     Operator rulings: no hard thresholds (no fixed wait, age or count below), lean into automation.
     1. ONE PREDICATE. runDaemon exposes `restartAdmission(kind)` for kinds "review" and "fix-dispatch" (and any
