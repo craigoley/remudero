@@ -36,7 +36,8 @@ export type RunCommand = (command: string, args: string[], cwd: string) => Promi
 export const runCommand: RunCommand = (command, args, cwd) =>
   new Promise((resolvePromise, reject) => {
     execFile(command, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: SLOT_INSTALL_TIMEOUT_MS }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`${command} ${args.join(" ")} failed in ${cwd}: ${stderr.trim() || err.message}`));
+      if (err) reject(new Error(`${stderr.trim() || `${err.code ?? err.signal ?? err.name}: ${err.message}`}\n` +
+        `${command} ${args.join(" ")} failed in ${cwd}`));
       else resolvePromise(stdout);
     });
   });

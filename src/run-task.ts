@@ -480,6 +480,7 @@ import {
   type IntakeRungDecision,
   type IntakeRungRunResult,
   type LightPassScope,
+  lightPassFixAdmitted,
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
@@ -3198,6 +3199,7 @@ import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
+import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -36065,7 +36067,7 @@ export function memoryGovernorGateFor(
     const once = () => checkMemoryGovernor(
       readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy), policy, readContainer?.(), ownWorkLive,
     );
-    const result = reclaimBeforeHold(once(), once, reclaim);
+    const result = buildYieldsToRepair(reclaimBeforeHold(once(), once, reclaim), ownWorkLive); // W1-T9706: a fitting build yields to a waiting repair.
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
@@ -49101,7 +49103,9 @@ export function buildSweepLightHook(
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
-      const fixRungAllowed = !reviewOnly && fixRungAllowedBesideInFlight(
+      // W1-T9808: after a restart latched, a fix that would outlast the drain's time left closes the fix rung.
+      const fixAdmitted = lightPassFixAdmitted(scope);
+      const fixRungAllowed = fixAdmitted && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       );
@@ -49148,9 +49152,10 @@ export function buildSweepLightHook(
             runId,
             log,
             reviewerCodeRecovery,
+            restartAdmission: scope?.admit,
             // W1-T8086: own-red and conflict repairs use per-claim capacity on ordinary passes;
             // review-only still stands them down.
-            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, !reviewOnly),
+            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
             // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.

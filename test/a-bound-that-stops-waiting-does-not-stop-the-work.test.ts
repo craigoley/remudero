@@ -100,13 +100,18 @@ test("the retrigger interval is closed as a second entry route, not only the wal
   // asserted is exactly what makes the route safe: it passes the SAME liveness flag, so the gate
   // inside `runGatedSweep` refuses a retriggered pass on the identical condition.
   const src = readDaemonSource();
-  const retriggerCall = /runGatedSweep\(deps, pollIntervalMs, sweepRetrigger\.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined, sweepRetrigger\.liveness\)/;
+  // W1-T9808 appended the latched-admission predicate after the liveness flag, so the call is matched
+  // on the liveness argument rather than on being the final one, and may wrap across lines.
+  const retriggerCall =
+    /runGatedSweep\(deps, pollIntervalMs, sweepRetrigger\.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined,\s*sweepRetrigger\.liveness[,)]/;
   assert.match(src, retriggerCall, "the retrigger's own runGatedSweep call must thread the shared liveness flag");
   // And the flag it threads must be the SAME object the top-of-iteration calls hold — a fresh one
   // per route would make each route exclude only itself, which is not exclusion at all.
   assert.match(src, /liveness: sweepLiveness,/, "SweepRetrigger must carry the daemon's own sweepLiveness, not a fresh object");
-  const topOfIteration = [...src.matchAll(/runGatedSweep\([^)]*sweepLiveness\)/g)];
-  assert.equal(topOfIteration.length, 2, `both top-of-iteration call sites must thread it; found ${topOfIteration.length}`);
+  // The pause-hold pass and the per-tick pass pass it before an optional trailing `true`/predicate; the
+  // pre-restart final pass (W1-T9808) threads it ahead of the latched-admission predicate.
+  const topOfIteration = [...src.matchAll(/runGatedSweep\([^)]*\bsweepLiveness\b[^)]*\)/g)];
+  assert.equal(topOfIteration.length, 3, `all three daemon-owned call sites must thread it; found ${topOfIteration.length}`);
 });
 
 function readDaemonSource(): string {
