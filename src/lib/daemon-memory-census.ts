@@ -1,35 +1,21 @@
 /**
  * lib/daemon-memory-census.ts — W1-T9647: THE DAEMON NAMES WHAT HOLDS ITS HEAP, AND ITS CENSUS FILES THE TOP HOLDERS.
+ * After the slack reclaimer's full collection the daemon held 867 MiB p50 of live heap (2026-10-15, n=282) and
+ * W1-T9105's memo_sizes named 7 MiB of it; serve's `serve.memory` holders (W1-T5175/W1-T5355) are the model.
  *
- * OBSERVED 2026-10-15 (core ledger, 24 archives): after the slack reclaimer's full collection the daemon still held
- * 867 MiB p50 of LIVE heap (daemon.slack_reclaim n=282), and W1-T9105's `memo_sizes` named 7 MiB of it. Nothing said
- * what the rest was, so no heap reduction could be aimed, and none could show its saving. Serve answered the same
- * question for itself with `serve.memory` holders (W1-T5175/W1-T5355); this is the daemon's book.
+ * LIVE: {@link startDaemonMemoryCensus} writes `daemon.memory` on its own unref'd timer: every V8 heap space, heap and
+ * code statistics, /proc/self/status lines, and each holder with its `basis` — "accounted" (kept as it grew), "census"
+ * (entries × {@link DAEMON_MEMORY_CALIBRATION}'s measured figure) or "walked" (sliced so no turn spends more than
+ * {@link DAEMON_MEMORY_TURN_BUDGET_MS}). `unattributed_live_bytes` is the reclaimer's last live set less the holders.
+ * INVARIANT: no heap snapshot, no forced collection, no inspector session in the live process.
  *
- * TWO HALVES, ONE CONTRACT.
- *   1. LIVE: {@link startDaemonMemoryCensus} writes a `daemon.memory` row on its own unref'd timer: every V8 heap space,
- *      the heap and code statistics, the process's own rss/swap lines, and every registered holder's entries and
- *      bytes, each marked by how it was sized (`basis`):
- *        - "accounted": bytes the holder kept as it grew (the sized-memo pattern; ledger-union.ts's memo book);
- *        - "census":    entries × a per-entry figure the OFFLINE census measured ({@link DAEMON_MEMORY_CALIBRATION},
- *                       carried with its calibration id);
- *        - "walked":    a budgeted approximate walk, sliced across turns so no one turn spends more than
- *                       {@link DAEMON_MEMORY_TURN_BUDGET_MS} sizing.
- *      `unattributed_live_bytes` is the reclaimer's last measured live set less every holder: the census's coverage.
- *      NO heap snapshot, NO forced collection, NO inspector session in the live process — cheap counters only.
- *   2. OFFLINE: {@link measureHeapHolders} and {@link rankHeapCensus}, driven by scripts/daemon-heap-census.mts in a
- *      private `--expose-gc` process, build each holder at production scale, measure what it RETAINS (collect, read,
- *      drop it, collect, read again) and rank the holders by retained bytes.
+ * OFFLINE: {@link measureHeapHolders} / {@link rankHeapCensus}, driven by scripts/daemon-heap-census.mts in a private
+ * --expose-gc process, measure what each holder RETAINS (build, settle, drop, settle) and rank them.
  *
- * THE RULE THIS TASK ESTABLISHES (census feeds filing):
- *   - The census's ranked output is the filing input. Every holder at or above {@link censusFilingThreshold} (the
- *     lower of {@link CENSUS_FILING_SHARE} of the measured live set and {@link CENSUS_FILING_BYTES}) gets a
- *     `proposed_task` stub, and becomes its own filed task citing the census line and its `daemon.memory` series;
- *     that task's acceptance names the holder whose bytes it reduces.
- *   - A fix's saving is read from the row: the holder's bytes p50 over `daemon.memory` rows before vs after the
- *     fix's `boot_head_sha` (one generation each side). `unattributed_live_bytes` shrinking is the census's coverage.
- *   - A calibration whose live entries × per_entry_bytes drifts from the census by more than its own spread is re-run,
- *     not trusted. Filing automatically from the census JSON is a follow-up, not this module.
+ * THE RULE (census feeds filing): every holder at or above {@link censusFilingThreshold} gets a `proposed_task` and is
+ * filed as its own task naming its daemon.memory holder; its saving is that holder's bytes p50 one generation before
+ * vs after the fix's `boot_head_sha`; a shrinking `unattributed_live_bytes` is the census's coverage; a calibration
+ * that drifts past its own spread is re-run, not trusted.
  *
  * FALSIFIER: test/the-daemon-names-what-holds-its-heap.test.ts.
  */
