@@ -13640,6 +13640,15 @@ export async function runFixRung(opts: {
         reason: resumed.detail, scope_amendment_detail: `NEEDS_SCOPE ${paths.join(",")}` });
       return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
     }
+    // W1-T9807: a main-owned refusal is retried, without a worker, at the first head holding the main it compared.
+    const lastScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" && row.task_id === opts.taskId && row.pr_number === prNumber);
+    if (lastScope?.reason === "main-owned" && typeof lastScope.main_sha === "string" && Array.isArray(lastScope.paths) &&
+        Array.isArray(lastScope.changed_paths) && hostWorktreeGitResult(opts.worktreePath, ["merge-base", "--is-ancestor", lastScope.main_sha, priorHeadSha]).status === 0) {
+      const retried = await amendScope(lastScope.paths as string[], lastScope.changed_paths as string[], priorHeadSha);
+      if (retried.kind !== "refused") {
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
+      }
+    }
     const priorDesign = roundLedger.find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
@@ -14419,15 +14428,26 @@ export async function runFixRung(opts: {
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
       }
       let amendment: ScopeAmendmentOutcome;
-      const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);
-      if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) {
-        amendment = { kind: "refused", reason: "main-owned",
-          detail: `main changed ${scopeMain.owned.join(", ")} since this PR's merge base; refresh against main` };
-        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
-      } else try {
+      const readWorkerChanged = (): string[] => {
         const changed = workerChangedPaths(hostWorktreeGit(opts.worktreePath, ["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
         if (roundStartSha) changed.push(...hostWorktreeGit(opts.worktreePath, ["diff", "--name-only", "-z", roundStartSha, "HEAD"]).split("\0").filter(Boolean));
-        amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
+        return changed;
+      };
+      // W1-T9807: main's touch refuses only a path main is repairing, one this ci-log round's red names (#10369).
+      const scopeMainOwned = fixMode === "ci-log" && logNamedMain.outcome === "compared"
+        ? fixAction.paths.filter((path) => logNamedMain.owned.includes(path)) : [];
+      if (scopeMainOwned.length > 0) {
+        amendment = { kind: "refused", reason: "main-owned",
+          detail: `main changed ${scopeMainOwned.join(", ")} since this PR's merge base; refresh against main` };
+        let changed: string[] | undefined;
+        try { changed = readWorkerChanged(); } catch { changed = undefined; }
+        let mainSha: string | undefined;
+        try { mainSha = hostWorktreeGit(opts.worktreePath, ["rev-parse", "--verify", "refs/remotes/origin/main"]).trim(); } catch { mainSha = undefined; }
+        // The retry below needs both: the main this compared, and which requested paths the worker really changed.
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha,
+          pr_number: prNumber, main_sha: mainSha, changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)) });
+      } else try {
+        amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha);
       } catch (error) {
         amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
@@ -14450,6 +14470,17 @@ export async function runFixRung(opts: {
           throw error;
         } finally { logFixDone(landing?.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing); }
       } else logFixDone();
+      if (scopeMainOwned.length > 0 && deps.updateBranch && prNumber !== undefined) {
+        const refresh = { pr_number: prNumber, head_sha: priorHeadSha, red_checks: [...new Set((currentCiFailures ?? []).map((f) => f.name))],
+          test_files: [], matching_base_files: scopeMainOwned, method: "merge", reason: "scope-main-owned" };
+        try {
+          const updated = await deps.updateBranch(prNumber);
+          if (updated.ok) deps.log("fix.base_refreshed", refresh);
+          else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
+        } catch (error) {
+          deps.log("fix.base_refresh_failed", { ...refresh, error: String(error) });
+        }
+      }
       return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" };
     }
 
