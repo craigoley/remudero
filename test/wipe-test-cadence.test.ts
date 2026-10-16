@@ -635,6 +635,7 @@ test("wipe-test cadence: each check reports the bytes and rotations its evidence
 
     const restarted = cadence.createWipeTestEvidenceReader()(stateDir);
     assert.equal(restarted.cost.rotationsRead, 0, "a new reader answers every rotation from its durable digest");
+    assert.ok(restarted.cost.bytesRead > 0, "the digests and the live file it re-reads are counted as bytes read");
     assert.deepEqual(restarted.evidence, cold.evidence);
 
     const empty = cadence.createWipeTestEvidenceReader()(join(root, "no-state"));
