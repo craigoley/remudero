@@ -17422,34 +17422,6 @@ export function refreshManagedCheckout(
   return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
 }
 
-/**
- * W1-T9077: once the store holds the bundle for the managed checkout's revision, cut its engine tree (a detached worktree a
- * run child that outlives the daemon runs from), ledger how far the newest current engine lags main, and remove the engine
- * trees no run names. Off the loop, never rejects: a failure is ledgered and the previous engine stays the newest.
- */
-export async function buildEngineAfterStore(
-  repoDir: string,
-  stateRoot: string,
-  storeRoot: string,
-  stored: StoreBuildResult,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-  /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
-  seams: Partial<Pick<EngineBuildOptions, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
-): Promise<void> {
-  if (stored.kind !== "built" && stored.kind !== "present") return;
-  try {
-    const git = seams.git ?? ((dir: string, args: readonly string[]) => hostWorktreeGitAsync(dir, args));
-    const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
-    const { isCurrent, ...buildSeams } = seams;
-    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...buildSeams });
-    if (built.kind === "failed") return;
-    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git, ...(isCurrent ? { isCurrent } : {}) });
-    await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });
-  } catch (error) {
-    log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
-  }
-}
-
 /** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
 async function refreshHeldManagedCheckout(
   repoDir: string,
@@ -57641,8 +57613,10 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
-import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
+import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
+// W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
+import { buildEngineAfterStore } from "./lib/engine-tree.js";
+export { buildEngineAfterStore };
 import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
