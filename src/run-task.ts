@@ -3022,7 +3022,6 @@ export function handedOffHeadRiskJudge(
       input: {
         change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
         gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
-        // W1-T9799: the shard's own origin, design and rationale, and the digest a changed shard is re-judged on.
         planContext: riskJudgePlanContext(pr.taskId, task),
         planContextDigest: riskJudgePlanContextDigest(task),
       },
