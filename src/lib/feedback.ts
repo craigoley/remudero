@@ -997,10 +997,18 @@ function upstreamCapture(root: string, captured: FeedbackEntry, opts: CaptureFee
 
 // ── Read / lifecycle ─────────────────────────────────────────────────────────
 
+function feedbackEntryFrom(parsed: unknown, id: string): FeedbackEntry {
+  if (typeof parsed !== "object" || parsed === null) return parsed as FeedbackEntry;
+  const attachments = (parsed as { attachments?: unknown }).attachments;
+  if (attachments === undefined || attachments === null) return { ...(parsed as FeedbackEntry), attachments: [] };
+  if (!Array.isArray(attachments)) throw new FeedbackError(`feedback entry "${id}" has a non-list attachments value`);
+  return parsed as FeedbackEntry;
+}
+
 export function readFeedbackEntry(root: string, id: string): FeedbackEntry {
   const p = feedbackEntryPath(root, id);
   if (!existsSync(p)) throw new FeedbackError(`no feedback entry "${id}" (looked in ${p})`);
-  return parseYaml(readFileSync(p, "utf8")) as FeedbackEntry;
+  return feedbackEntryFrom(parseYaml(readFileSync(p, "utf8")), id);
 }
 
 /** List every captured entry, oldest first (id is Date.now()-prefixed, so filename sort = capture order). */
@@ -1010,7 +1018,7 @@ export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {
   const entries = readdirSync(dir)
     .filter((f) => f.endsWith(".yaml"))
     .sort()
-    .map((f) => parseYaml(readFileSync(join(dir, f), "utf8")) as FeedbackEntry);
+    .map((f) => feedbackEntryFrom(parseYaml(readFileSync(join(dir, f), "utf8")), f.replace(/\.yaml$/, "")));
   return opts.status ? entries.filter((e) => e.status === opts.status) : entries;
 }
 

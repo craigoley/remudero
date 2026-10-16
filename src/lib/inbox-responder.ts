@@ -1,6 +1,6 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createHash } from "node:crypto";
+import { classificationSnapshotKey } from "./read-page.js";
 
 import { systemClock, type Clock } from "./clock.js";
 import { buildDecisionSummarySpawnArgs } from "./feedback.js";
@@ -93,6 +93,8 @@ export type AttentionSourceState = "observed" | "partial" | "unavailable";
 export type AttentionJudgment = VerifyHumanRuling | { state?: undefined; decision: string; reason: string };
 
 export interface AttentionCensusInput {
+  /** The completed producer's lane-visible content and owned source; never read-time clocks. */
+  classificationContent?: unknown;
   dismissalAudit?: InboxDismissalAudit;
   views: ThreadSummaryView[];
   classifications: InboxClassification[];
@@ -191,9 +193,11 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
   const result = { scope: "core" as const, state, countSemantics: "observed_snapshot_not_verified" as const,
     sources: input.sources, counts, decisionReadiness, verifiedCounts, kinds, items,
     ...(input.dismissalAudit ? { dismissalAudit: input.dismissalAudit } : {}), ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
-  const snapshotKey = createHash("sha256").update(JSON.stringify(result)).digest("hex");
+  const snapshotKey = classificationSnapshotKey(input.classificationContent ?? null, result);
   return { ...result, snapshotKey };
 }
+
+export type AttentionCensus = ReturnType<typeof buildAttentionCensus>;
 
 const ACTIONS_BY_STATE: Record<InboxThreadItem["state"], InboxThreadAction[]> = {
   ready: ["approve", "decline", "edit"],

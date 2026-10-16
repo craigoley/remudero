@@ -1,0 +1,59 @@
+- id: W1-T9878
+  title: "THE RULE-CHECKS LANE IS SHARDED BY MEASURED DURATION AND SHARES ONE REPO SNAPSHOT PER JOB — selecting by folder grows it from 88 suites (226 s) to 254 (759 s serial), so it splits by the tier manifest's durations and each suite reads a tree-SHA-keyed snapshot instead of rescanning (test restructure, letter G, part 2)"
+  repo: remudero
+  depends_on: [W1-T9877, W1-T9861]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how the rule-checks lane runs; it edits a required CI step
+  band_meaning: blast-radius
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter G (part 2 of 2)'
+  plan_refs: [W1-T9877, W1-T9895]
+  files:
+    - scripts/list-rule-suites.mjs
+    - .github/workflows/ci.yml
+    - test/helpers/repo-snapshot.ts
+    - test/ci/gates/the-rule-checks-lane-is-sharded-by-measured-duration.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 6 (2026-10-16): shard the rules lane by measured duration, and give rule suites one shared repo
+    snapshot per CI job, keyed by tree SHA.
+    Citations re-verified at origin/main 889966ea5 (2026-10-16).
+    - scripts/list-rule-suites.mjs runRuleSuites (~16) runs the suites one file at a time.
+    - .github/workflows/ci.yml step `rule-checks` (~1098-1104) runs `node --import tsx scripts/list-rule-suites.mjs --run`.
+    - Durations come from scripts/test-tier-manifest.json, read through W1-T9861's manifestEntryFor.
+    MEASURED (taxonomy.md section 5): 88 suites take 226 s serial today; selection by folder makes it 254 suites and
+    759 s. Best-practices section 7.5: build one cached repo snapshot per job keyed by tree SHA (the dependency-cruiser
+    --cache model), instead of every census scanning again.
+  design: |
+    1. THE WALL-TIME TARGET IS MEASURED, NOT FIXED. Before changing anything, measure the rule-checks step's wall time on
+       recent main runs (p50 over the runs the builder can read; name them in the PR body). That is the target.
+       Shard count N = ceil(sum of measured suite durations / target). Suites are assigned by longest-processing-time
+       over manifestEntryFor durations; an unmeasured suite gets the median. The target and N are recomputed from data
+       on each run; no constant is written.
+    2. `list-rule-suites.mjs --run --shard k/N` runs one shard. ci.yml runs the shards in parallel (a matrix or
+       parallel processes in the job; the builder measures both and keeps the faster). The aggregate step outcome is
+       unchanged for the gates that read it.
+    3. test/helpers/repo-snapshot.ts repoSnapshot() returns HEAD's tracked file list and lazily read contents. It is
+       cached under the job's temp dir, keyed by `git rev-parse HEAD^{tree}`. A dirty worktree (non-empty
+       `git status --porcelain`) bypasses the cache, so the snapshot can never be stale. Migrate the rule suites whose
+       measured time dominates first; the PR lists the rest.
+    4. The PR body reports the step's wall time before and after, from real CI runs.
+    New test under test/ci/gates/.
+  acceptance:
+    - claim: 'rule suites are assigned to shards by measured duration'
+      proof: 'grep: test("W1-T9878: rule suites are assigned to shards by measured duration" in test/ci/gates/the-rule-checks-lane-is-sharded-by-measured-duration.test.ts'
+    - claim: 'the shard count is derived from the measured target wall time'
+      proof: 'grep: test("W1-T9878: the shard count is derived from the measured target wall time" in test/ci/gates/the-rule-checks-lane-is-sharded-by-measured-duration.test.ts'
+    - claim: 'the repo snapshot is reused for one tree sha and rebuilt for another'
+      proof: 'grep: test("W1-T9878: the repo snapshot is reused for one tree sha and rebuilt for another" in test/ci/gates/the-rule-checks-lane-is-sharded-by-measured-duration.test.ts'
+    - claim: 'a dirty worktree bypasses the snapshot cache'
+      proof: 'grep: test("W1-T9878: a dirty worktree bypasses the snapshot cache" in test/ci/gates/the-rule-checks-lane-is-sharded-by-measured-duration.test.ts'
+    - claim: 'CI runs the rule-checks lane in shards'
+      proof: 'grep: list-rule-suites\.mjs --run --shard in .github/workflows/ci.yml'
+  falsifier: |
+    On origin/main runRuleSuites spawns every suite in one serial loop with no --shard option, and no snapshot helper
+    exists, so every grep misses.

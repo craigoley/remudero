@@ -16,7 +16,7 @@
  * docs/forensics/panel-graph.md
  */
 
-import { readPage, readPageRequest, type ReadPageRequest } from "./read-page.js";
+import { readPage, readPageRequest, readSnapshotCursor, snapshotCursor, type ReadPageRequest } from "./read-page.js";
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -2527,12 +2527,39 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
  * the card below, over the same write-token scope every write uses.
  */
 export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+  const qualify: NonNullable<Route["cacheQualification"]> = (req) => {
+    if (!deps.inboxFromSlowLane) return undefined;
+    const planSource = deps.readPlanSource?.();
+    if (planSource?.state === "unavailable") return { status: 503, body: {
+      error: "plan_source_unavailable", detail: "Current plan evidence is unavailable.", planSource,
+    } };
+    if (planSource?.state === "stale") return { status: 503, body: {
+      error: "inbox_snapshot_stale", detail: "Current plan evidence is stale; wait for a qualified maintained classification.", planSource,
+    } };
+    const read = readSlowLaneInbox(deps);
+    if (!read) return { status: 503, body: { error: "inbox_not_ready", detail: "The slow lane has not persisted a classification yet." } };
+    if (!read.snapshotKey) return { status: 503, body: { error: "inbox_snapshot_pending", detail: "A keyed maintained classification is not available yet." } };
+    const age = systemClock.now() - Date.parse(read.classifiedAt ?? "");
+    if (!Number.isFinite(age) || age < 0 || age > INBOX_STALE_AFTER_MS) return {
+      status: 503, body: { error: "inbox_snapshot_stale", detail: "The maintained Inbox classification is not source-verified fresh." },
+    };
+    const shape = inboxShapeOf(req.url);
+    if ("error" in shape) return { status: 400, body: { error: "invalid_request", detail: shape.error } };
+    if (shape.section !== undefined && shape.section !== "needsYou") {
+      const cursor = readSnapshotCursor(shape.page.cursor, read.snapshotKey, shape.section);
+      if ("error" in cursor) { const { status, ...body } = cursor; return { status, body }; }
+    }
+    return { key: read.snapshotKey };
+  };
   return {
     method: "GET",
     path: "/v1/inbox",
     scope: "read",
+    cacheQualification: qualify,
     // A read writes nothing: the ratified-row prune and the fleet lane's snapshot (W1-T4089) are the slow lane's (inbox-view.ts).
     handler: async (req, res) => {
+      const qualified = qualify(req);
+      if (qualified && "status" in qualified) { sendJson(res, qualified.status, qualified.body); return; }
       const shape = inboxShapeOf(req.url);
       if ("error" in shape) {
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
@@ -2541,14 +2568,29 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
       if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await inboxRead(deps, readPlanSnapshot);
       if (!read) return void inboxNotReady(res);
+      if (deps.inboxFromSlowLane && !read.snapshotKey) {
+        sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained classification has no shared snapshot identity yet." }); return;
+      }
       const { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, counts } = read.lanes();
       const lanes = { ready, drafting, notReady, declined, fleet, archived, snoozed };
-      const at = { ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
+      const at = { ...(read.snapshotKey ? { snapshotKey: read.snapshotKey } : {}), ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, counts, ...at });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
-        const { items, page } = readPage<{ proposalId: string }>(lanes[shape.section], (item) => item.proposalId, shape.page);
-        sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts, ...at });
+        if (read.snapshotKey) {
+          const cursor = readSnapshotCursor(shape.page.cursor, read.snapshotKey, shape.section);
+          if ("error" in cursor) { const { status, ...body } = cursor; sendJson(res, status, body); return; }
+          const items = lanes[shape.section].slice(cursor.offset, cursor.offset + shape.page.limit);
+          const end = cursor.offset + items.length;
+          const nextCursor = end < lanes[shape.section].length ? snapshotCursor({ snapshotKey: read.snapshotKey, section: shape.section, offset: end }) : undefined;
+          sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, total: lanes[shape.section].length, limit: shape.page.limit,
+            ...(nextCursor ? { nextCursor } : {}) }, counts, ...at });
+        } else {
+          const legacyRequest = readPageRequest(new URL(req.url ?? "/", "http://localhost").searchParams, 100, 500);
+          if ("error" in legacyRequest) { sendJson(res, 400, { error: "invalid_request", detail: legacyRequest.error }); return; }
+          const { items, page } = readPage<{ proposalId: string }>(lanes[shape.section], (item) => item.proposalId, shape.page);
+          sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts, ...at });
+        }
       }
     },
   };
@@ -2569,7 +2611,11 @@ function inboxShapeOf(
   if (section === "needsYou") return paged ? { error: "needsYou is not paged" } : { section };
   const listSection = INBOX_LIST_SECTIONS.find((s) => s === section);
   if (listSection === undefined) return { error: `section must be one of needsYou, ${INBOX_LIST_SECTIONS.join(", ")}` };
-  const page = readPageRequest(params, 100, 500);
+  const cursor = params.get("cursor");
+  const limitOnly = new URLSearchParams(params);
+  limitOnly.delete("cursor");
+  const page = readPageRequest(limitOnly, 100, 500);
+  if (!("error" in page) && cursor !== null) page.cursor = cursor;
   return "error" in page ? page : { section: listSection, page };
 }
 
@@ -2589,9 +2635,9 @@ const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["st
 
 /** Every operator-owned item with its plain message and state, off the SAME classification
  *  `GET /v1/inbox` renders. */
-function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified: ThreadListInbox = classifyAllProposalsMemo(deps, readPlanSnapshot)): InboxThreadItem[] {
+function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified: ThreadListInbox = classifyAllProposalsMemo(deps, readPlanSnapshot), storedPlain?: PlainStore): InboxThreadItem[] {
   const { proposals, classifications } = classified;
-  const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
+  const plainStore = storedPlain ?? readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
   const items: InboxThreadItem[] = [];
   for (const c of classifications) {
     const state = CLASSIFICATION_TO_THREAD_STATE[c.state];
@@ -2665,6 +2711,32 @@ function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHu
       ...(ruling.state === "judged" ? { at: ruling.at?.slice(0, 64) ?? null } : {}) }]) };
 }
 
+/** One slow-lane census over the same owned content the section pages will use. */
+export function materializeInboxAttentionCensus(deps: PanelGraphDeps, classified: ClassifiedInbox, stores: InboxStores, content: unknown) {
+  const threads = readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
+  if (threads.status !== "ok") throw new Error("Inbox attention thread evidence is unavailable");
+  const evidence = classified.attentionEvidence;
+  if (!evidence) throw new Error("Inbox attention classification evidence is unavailable");
+  const plan = classified.plan;
+  const releaseReceipts = new Map(evidence.releases);
+  const { registryPath } = inboxInputPaths(deps);
+  const registry = parseProposalRegistryResult(readFileIfExists(registryPath));
+  const state = (stamp: string | undefined) => stamp === undefined || stamp.startsWith("unreadable:") ? "unavailable" as const : "observed" as const;
+  return buildAttentionCensus({
+    classificationContent: content,
+    views: listThreadViews(operatorThreadItems(deps, undefined, classified, stores.plainMessages), threads.threads, {}),
+    classifications: classified.classifications,
+    taskFacts: new Map(plan.tasks.map(task => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
+    releasedTaskIds: new Set(releaseReceipts.keys()), releaseReceipts, judgeByTask: new Map(evidence.judges),
+    mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
+    dismissalAudit: (content as { dismissalAudit?: import("./inbox-dismissal-audit.js").InboxDismissalAudit }).dismissalAudit,
+    sources: { plan: deps.readPlanSource?.()?.state === "stale" ? "partial" : "observed",
+      registry: registry.kind === "fault" ? "partial" : state(statStamp(registryPath)), liveLedger: state(statStamp(deps.ledgerPath)),
+      archiveLedger: evidence.archiveLedger,
+      githubProjection: [...classified.projection.values()].some(value => value.indeterminate) || classified.classifications.some(value => value.referentUnverified) ? "partial" : "observed" },
+  });
+}
+
 /** GET /v1/inbox/attention-census — read-only, core-scoped, source-qualified. */
 export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
@@ -2672,8 +2744,6 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
     handler: async (_req, res) => {
       res.setHeader("cache-control", "private, no-store");
       if (refusePlanSourceUnavailable(deps, res)) return;
-      const threads = readThreadsOr500(deps, res);
-      if (!threads) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
       const builtAtMs = systemClock.now();
@@ -2686,6 +2756,24 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         sendJson(res, 503, { error: "attention_snapshot_stale", detail: "The slow lane's Inbox classification is stale; a fresh classification is required before reporting current attention counts." });
         return;
       }
+      if (deps.inboxFromSlowLane) {
+        if (!classified.attentionEvidence) {
+          sendJson(res, 503, { error: "attention_evidence_pending", detail: "The slow lane has not persisted valid retained evidence yet." }); return;
+        }
+        if (!classified.snapshotKey || !classified.attentionCensus) {
+          sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The slow lane has not persisted a keyed attention census yet." }); return;
+        }
+        if (deps.readPlanSource?.()?.state === "stale") {
+          sendJson(res, 503, { error: "attention_snapshot_stale", detail: "Current plan evidence is stale; a fresh maintained census is required." }); return;
+        }
+        const builtAt = fixedClock(builtAtMs).iso();
+        sendJson(res, 200, { ...classified.attentionCensus,
+          source: { state: "fresh", classifiedAt: classified.classifiedAt, builtAt, verifiedAt: builtAt, ageMs: builtAtMs - classifiedAtMs },
+          ...withPlanSource(deps, {}) });
+        return;
+      }
+      const threads = readThreadsOr500(deps, res);
+      if (!threads) return;
       const plan = classified.plan();
       const planSource = deps.readPlanSource?.();
       const evidence = classified.attentionEvidence;
@@ -2783,6 +2871,8 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
 }
 
 interface InboxRead {
+  snapshotKey?: string;
+  attentionCensus?: import("./inbox-responder.js").AttentionCensus;
   dismissalAudit?: import("./inbox-dismissal-audit.js").InboxDismissalAudit;
   proposals: Proposal[];
   classifications: InboxClassification[];
@@ -2823,6 +2913,7 @@ function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowL
   let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
+    snapshotKey: persisted.snapshotKey, attentionCensus: persisted.attentionCensus,
     attentionEvidence: persisted.attentionEvidence,
     dismissalAudit: persisted.dismissalAudit,
     mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,

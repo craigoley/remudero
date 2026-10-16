@@ -1,0 +1,73 @@
+- id: W1-T9863
+  title: "EVERY TEST FINDS THE REPO ROOT THROUGH ONE HELPER, AND EVERY RULE SUITE FAILS WHEN IT INSPECTS FEWER FILES THAN AN INDEPENDENT COUNT — about 989 tests compute the root as .. from their own folder, so a suite moved down a level would read test/src and pass comparing nothing (test restructure, letter B)"
+  repo: remudero
+  depends_on: [W1-T9872]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one mechanical concern, how a test finds the repo root, applied across about 989 test files
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter B'
+  plan_refs: [W1-T9872, W1-T9864, W1-T9879]
+  files:
+    - test/helpers/repo-root.ts
+    - test/helpers/inspected-population.ts
+    - scripts/test-repo-root-codemod.mjs
+    - test/every-test-finds-the-repo-root-through-one-helper.test.ts
+    - test/a-count-assertion-names-its-members.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED at a323d87ed (plan/seeds/test-restructure-2026-10-16/taxonomy.md section 8):
+    - 989 tests compute the repo root from their own location.
+    - The most common shapes, counted at origin/main 889966ea5:
+      - `join(dirname(fileURLToPath(import.meta.url)), "..")`: 302 files;
+      - `join(__dirname, "..")`: 131;
+      - `join(import.meta.dirname, "..")`: 63;
+      - `fileURLToPath(new URL("..", import.meta.url))`: 57.
+    - 95 tests walk a repo population.
+    Inventory section C: a census whose root is wrong mostly fails with ENOENT, which is loud. It is SILENT where the
+    root is only a spawn cwd, or sits behind existsSync.
+    PRECEDENT: scripts/lib/repo-root.mjs (audit R-59) already gives every scripts/*.mjs caller one fixed-depth
+    derivation, because "each [is] a chance to get the '..' count wrong once a file moves".
+    The global rule applies: a check that passes while comparing nothing is the most dangerous failure mode. Anything
+    producing data asserts a minimum result count.
+  design: |
+    1. test/helpers/repo-root.ts exports repoRoot() and REPO_ROOT. It uses one fixed-depth derivation from its own
+       location, symlink-safe, in the same shape as scripts/lib/repo-root.mjs. It asserts that the directory it returns
+       holds this repository's package.json.
+    2. scripts/test-repo-root-codemod.mjs rewrites every own-location root computation in test/**/*.test.ts to the
+       helper's import, as one content-only commit; no file moves. It enumerates the shapes it handles and prints a
+       count for each. A shape it cannot rewrite safely is listed in the PR body and left as it is, never guessed.
+       Computations in test/helpers, test/setup and test/lib are out of scope, because those files do not move.
+    3. MINIMUM RESULT. Every rule suite asserts that its inspected count is > 0 AND equals an independent count of the
+       same population taken a different way (for example, its own walk against `git ls-files -- <pathspec>`).
+       - "Every rule suite" means listRuleSuites(repoRoot) (src/lib/ci-parity.ts), plus every other test that walks a
+         repo population, enumerated at build time.
+       - A shared helper, test/helpers/inspected-population.ts assertInspected(label, inspected, independent), names
+         both counts in its message.
+       - No fixed minimum number is written anywhere.
+    4. GUARD, test/every-test-finds-the-repo-root-through-one-helper.test.ts. It counts the test files that still
+       derive the root from their own location. The count at head may not exceed the count at the merge base
+       (`git merge-base HEAD origin/main`; derived, never a constant), and a new test file contributes 0.
+       It fault-injects by pointing a census-shaped walk at a wrong root in a fixture and requiring it to fail its
+       inspected-count assertion.
+    Depends on W1-T9872, which edits the same top-level-walking census tests first. The PR conflicts with in-flight
+    test edits only on the replaced lines. Regenerate against current main rather than rebasing.
+  acceptance:
+    - claim: 'one helper resolves the repo root for tests'
+      proof: 'grep: export function repoRoot( in test/helpers/repo-root.ts'
+    - claim: 'a census pointed at the wrong root fails its inspected-count assertion'
+      proof: 'grep: test("W1-T9863: a census pointed at the wrong root fails its inspected count" in test/every-test-finds-the-repo-root-through-one-helper.test.ts'
+    - claim: 'no new test derives the repo root from its own folder'
+      proof: 'grep: test("W1-T9863: no new test derives the repo root from its own folder" in test/every-test-finds-the-repo-root-through-one-helper.test.ts'
+    - claim: 'the own-folder root count never rises above the merge base'
+      proof: 'grep: test("W1-T9863: the own-folder root count never rises above the merge base" in test/every-test-finds-the-repo-root-through-one-helper.test.ts'
+    - claim: 'a migrated rule suite takes the root from the helper'
+      proof: 'grep: helpers/repo-root\.js in test/a-count-assertion-names-its-members.test.ts'
+  falsifier: |
+    On origin/main test/helpers/repo-root.ts does not exist. test/a-count-assertion-names-its-members.test.ts computes
+    `fileURLToPath(new URL("..", import.meta.url))` from its own folder. No test asserts an inspected count against an
+    independent count, so a census moved down a level would walk test/src and pass.

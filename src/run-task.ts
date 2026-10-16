@@ -1898,6 +1898,7 @@ import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -2889,7 +2890,7 @@ export function buildSweepEffects(
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string) => // W1-T8833: the sweep rung pushes as the run loop's does
-      pushFixRoundPrechecked(deps.log, wt, branch, sha, {}, pushFixRound, prior),
+      pushFixRoundPrechecked(deps.log, wt, branch, sha, { repo: deps.repo }, pushFixRound, prior),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
@@ -11138,6 +11139,8 @@ export async function runFixRebase(
     return { rebased: false, reason: decision.reason };
   }
 
+  // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+  io.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: target.number, forcedBy: "fix-rebase", nowMs: systemClock.now() }));
   const result = await io.updateBranch(target.number);
   if (!result.ok) {
     const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
@@ -12733,6 +12736,9 @@ export async function runFixRung(opts: {
             ...(refreshMainSha === undefined ? {} : { main_sha: refreshMainSha }), checks: refreshChecks, test_files: refreshTestFiles }, clearance));
         }
         if (decision.refresh && clearance?.refresh !== false) {
+          // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+          deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber, headSha: review.headSha, forcedBy: "fix-base-refresh",
+            nowMs: systemClock.now() }));
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             const reason =
@@ -19118,12 +19124,13 @@ export async function pushFixRound(
 }
 
 /**
- * W1-T4797: the pre-push DIFF-COVERAGE precheck's answer, as three DISTINCT values — never collapsed.
+ * W1-T4797: the pre-push DIFF-COVERAGE precheck's answers — never collapsed.
  * `uncovered` refuses the round before any push, carrying CI's own uncovered-lines text; `covered`
  * pushes as today; `unavailable` (timeout, spawn failure, unreadable lcov, a selector that cannot
- * scope) ALSO pushes: a precheck that cannot look must never block.
+ * scope) ALSO pushes: a precheck that cannot look must never block; consumer repos return `not-applicable`.
  */
 export type CoveragePrecheck =
+  | { outcome: "not-applicable"; repo: string; reason: string }
   | { outcome: "covered"; reason: string; suites: number }
   | { outcome: "uncovered"; text: string; suites: number }
   | { outcome: "unavailable"; reason: string };
@@ -19133,6 +19140,7 @@ export type CoverageRunResult = { status: number | null; output: string; timedOu
 
 /** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
 export type CoveragePrecheckPorts = {
+  repo?: string;
   changedFiles?: (wt: string) => string[] | Promise<string[]>;
   select?: (wt: string, changed: string[]) => AffectedSelection | Promise<AffectedSelection>;
   manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
@@ -19252,6 +19260,9 @@ function coverageRefusalText(output: string): string {
  * bound is `unavailable`, not `uncovered`.
  */
 export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): Promise<CoveragePrecheck> {
+  if (ports.repo !== undefined && !fixCensusAppliesToRepo(ports.repo, () => {})) {
+    return { outcome: "not-applicable", repo: ports.repo, reason: `core's diff-coverage selector does not apply to ${ports.repo}` };
+  }
   const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
   let changed: string[];
   try {
@@ -19306,7 +19317,8 @@ export function coveragePushRefusal(
     site,
     outcome: result.outcome,
     reason: result.outcome === "uncovered" ? "diff-coverage would refuse this head" : result.reason,
-    ...(result.outcome === "unavailable" ? {} : { suites: result.suites }),
+    ...(result.outcome === "covered" || result.outcome === "uncovered" ? { suites: result.suites } : {}),
+    ...(result.outcome === "not-applicable" ? { repo: result.repo } : {}),
     ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
   });
   if (result.outcome !== "uncovered") return undefined;
@@ -21430,7 +21442,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
+      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await gitPushRunBranchAsync(worktreePath);
@@ -21444,7 +21456,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
           ...(refusalLabel === "coverage-refused"
-            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push.repair") }
+            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push.repair") }
             : {}),
         });
         if (rung.outcome === "refused") {
@@ -21783,7 +21795,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
+          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, { repo: task.repo }, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           escalationIssues: ghIssueGatewayAsync(owner, task.repo),
@@ -39945,27 +39957,25 @@ export async function daemonCommand(
   } catch (censusError) {
     log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
   }
-  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot. The tracker is seeded
-  // from the ledger this boot opened with and fed every run-child row this daemon writes since (`childLog`); it keeps counts.
-  // Read here, before adoption, so the boot's adoption pass is folded once, live.
+  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot, fed every run-child
+  // row this daemon writes since (`childLog`); it keeps counts. W1-T9816: that window and the settlements are one UNION read,
+  // because rotation prunes them from the live file. Read here, before adoption, so the boot's adoption pass is folded once.
   const bootLedgerLines = readLedgerLines(ledgerPath);
   const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
-  const childModeTracker = createRunChildModeTracker(bootLedgerLines);
+  const bootChildPolicy = readRunChildPolicy(childPolicy);
+  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
+  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
+  const childBoot = childMode
+    ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log }) : undefined;
+  const childModeTracker = childBoot?.tracker ?? createRunChildModeTracker(bootLedgerLines);
   const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
     log(step, extra);
     childModeTracker.observe(step, extra);
   };
-  const bootChildPolicy = readRunChildPolicy(childPolicy);
-  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
-  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const adoptedRunIds = new Set<string>();
-  const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["run_child.settled"], pattern: /"step":"run_child\.settled"/, refuseIncomplete: true,
-  }) : undefined;
-  if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
-  const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
+  const adoptedChildren: AdoptedRunChild[] = childBoot ? adoptRunChildren({
     stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log: childLog,
-    settledRunIds: new Set((childSettlements?.rows ?? []).flatMap((row) => typeof row.run_id === "string" ? [row.run_id] : [])),
+    settledRunIds: childBoot.settledRunIds,
   }) : [];
   for (const child of adoptedChildren) {
     adoptedRunIds.add(child.runId);
@@ -57606,7 +57616,7 @@ import {
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
-import { createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
+import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 export { hashInstallInputs, installHashMarkerPath };
 

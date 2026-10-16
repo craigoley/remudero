@@ -1,0 +1,145 @@
+name: Semgrep runtime compatibility
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-runtime-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-compatibility:
+    name: semgrep-runtime-compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # Trusted workflow literal binds committed auditor bytes without extra API reads.
+      AUDITOR_SHA256: 67419139a6bdc3506b849c1c3fd422acf62b390d7a869eff71930c9ac6a90f04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect runtime lock changes
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --name-only \
+            "$BASE_SHA...$HEAD_SHA" -- .github/semgrep/requirements.txt \
+            .github/semgrep/build-requirements.txt > "$RUNNER_TEMP/runtime-lock-changes"
+          if test -s "$RUNNER_TEMP/runtime-lock-changes"; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Runtime locks unchanged; explicit success without downloads/build/install.'
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          fi
+          # Use Git's complete diff, not API filename pagination or workflow path
+          # filters. Policy-only changes still exercise the exact pinned runtime.
+          git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --name-only \
+            "$BASE_SHA...$HEAD_SHA" -- .github/semgrep/requirements.txt \
+            .github/semgrep/build-requirements.txt .github/semgrep/runtime-compatibility-audit.py \
+            .github/semgrep/runtime_audit_test_fixtures.py .github/semgrep/test_runtime_compatibility_audit.py \
+            .github/workflows/semgrep-runtime-compatibility.yml > "$RUNNER_TEMP/runtime-policy-changes"
+          if test -s "$RUNNER_TEMP/runtime-policy-changes"; then
+            echo 'test-policy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'test-policy=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set up pinned Python
+        if: steps.scope.outputs.test-policy == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.15"
+          architecture: x64
+      - name: Create neutral private audit root
+        if: steps.scope.outputs.test-policy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUDIT_ROOT="$(mktemp -d "${RUNNER_TEMP}/semgrep-audit.XXXXXX")"
+          echo "AUDIT_ROOT=$AUDIT_ROOT" >> "$GITHUB_ENV"
+      - name: Test Semgrep artifact audit policy
+        if: steps.scope.outputs.test-policy == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: unit
+        run: &staged_auditor_phase |
+          set -euo pipefail
+          # Restage exact committed bytes for EACH phase. Never execute a mutable
+          # PR checkout helper or reuse an auditor a prior build could replace.
+          python -I -S - "$HEAD_SHA" "$AUDITOR_SHA256" "$AUDIT_PHASE" \
+            "$AUDIT_ROOT" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" <<'PY'
+          import hashlib, os, pathlib, re, subprocess, sys, tempfile
+          head, expected, phase, root, workspace, scratch = sys.argv[1:]
+          assert re.fullmatch(r"[a-f0-9]{40}", head) and re.fullmatch(r"[a-f0-9]{64}", expected)
+          assert phase in {"unit", "download", "original", "build", "built", "install", "verify"}
+          env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+          env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", workspace, *args],
+                                    env=env, check=True, capture_output=True, timeout=15).stdout
+          assert git("rev-parse", "HEAD").decode().strip() == head
+          path = ".github/semgrep/runtime-compatibility-audit.py"
+          record = git("ls-tree", "-z", head, "--", path)
+          assert re.fullmatch(rb"100644 blob [a-f0-9]{40}\t" + re.escape(path.encode()) + rb"\x00", record)
+          blob = record.split(b"\t", 1)[0].split()[2].decode()
+          size = int(git("cat-file", "-s", blob))
+          assert 0 < size <= 65536
+          raw = git("cat-file", "blob", blob)
+          assert len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob
+          assert hashlib.sha256(raw).hexdigest() == expected, "auditor differs from trusted workflow literal"
+          stage = pathlib.Path(tempfile.mkdtemp(prefix="semgrep-audit-code-", dir=scratch)) / "runtime-compatibility-audit.py"
+          with stage.open("xb") as sink:
+              sink.write(raw)
+              sink.flush()
+              os.fsync(sink.fileno())
+          os.execv(sys.executable, [sys.executable, "-I", "-S", str(stage), "--phase", phase,
+                                   "--root", root, "--workspace", workspace, "--head", head])
+          PY
+      - name: Download original artifacts without candidate execution
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: download
+        run: *staged_auditor_phase
+      - name: Audit original artifact metadata before candidate execution
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: original
+        run: *staged_auditor_phase
+      - name: Build only approved Peewee after original audit
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: build
+        run: *staged_auditor_phase
+      - name: Audit built Peewee metadata and destinations before install
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: built
+        run: *staged_auditor_phase
+      - name: Install only audited hash-bound wheel set
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: install
+        run: *staged_auditor_phase
+      - name: Verify installed pip closure and scanner bootstrap additionally
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: verify
+        run: *staged_auditor_phase
