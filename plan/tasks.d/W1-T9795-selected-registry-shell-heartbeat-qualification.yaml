@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator instruction 2026-10-16: qualify real shell and heartbeat consumers before private ops staging, no live replacement or new schedules"
   plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T9793]
-  files: [deploy/install-host-units.sh, deploy/recycle-container.sh, deploy/serve-container.sh, deploy/host-update.sh, deploy/field-trials-refresh.sh, deploy/registry-shadow.sh, scripts/fleet-heartbeat.sh, src/selected-registry-shadow-main.ts, src/lib/selected-registry-consumers.ts, src/lib/child-entry-argv.ts, test/selected-registry-shell-consumers.test.ts, test/host-units-install.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/fleet-heartbeat.test.ts, test/field-trials-flow.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  files: [deploy/install-host-units.sh, deploy/recycle-container.sh, deploy/serve-container.sh, deploy/host-update.sh, deploy/field-trials-refresh.sh, deploy/registry-shadow.sh, scripts/fleet-heartbeat.sh, src/selected-registry-shadow-main.ts, src/lib/selected-registry-consumers.ts, src/lib/child-entry-argv.ts, src/run-task.ts, test/selected-registry-shell-consumers.test.ts, test/host-units-install.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/fleet-heartbeat.test.ts, test/field-trials-flow.test.ts, test/cli-registry-dispatches.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
   status: queued
   attempts: 0
   rationale: |
@@ -33,6 +33,9 @@
        a daemon, scanner, new scheduler or a second permissive YAML parser.
        A new entry must use the maintained entry contract, real defaults and
        controlled Bash3.2/Linux fixtures, not production-only fake call text.
+       The actual maintained run-task command dispatch must invoke the bounded
+       selectedRegistryShadowMain entry; test real CLI dispatch and supported
+       argv alongside script effects. A dummy call added for grep is not wiring.
     2. Require an explicit SHADOW qualification option; environment path presence
        alone never enables policy or observations. Preserve true absence versus
        explicit invalid selection in observations while leaving the independent
@@ -77,6 +80,8 @@
        only if ALL affected. Preserve owner/admin override, trusted PR flow,
        scoped services and the complete public Apache implementation/templates.
   acceptance:
+    - claim: Maintained CLI dispatch reaches the bounded data-only shell observer entry
+      proof: 'grep: selectedRegistryShadowMain( in src/run-task.ts'
     - claim: Actual scripts and generated trusted launchers observe one bounded selected binding
       proof: 'unit test: selected shell shadow reaches real lifecycle and heartbeat consumers'
     - claim: Later child and measurement observations detect changed or unsupported selection

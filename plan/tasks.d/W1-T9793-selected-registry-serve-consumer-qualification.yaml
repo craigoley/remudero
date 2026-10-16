@@ -10,7 +10,7 @@
   risk: high
   band_meaning: span
   origin: "operator instruction 2026-10-16: complete remaining registry-consumer qualification without duplicate work, schedules, activation or loss of owner override"
-  plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T4227, W1-T4265, W1-T4266]
+  plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T4227, W1-T4265, W1-T4266, W1-T5433, W1-T5434]
   files: [src/lib/selected-registry-consumers.ts, src/lib/serve.ts, src/lib/instance-gateway.ts, src/lib/repositories-view.ts, src/lib/repo-dashboard-route.ts, src/lib/benchmark-aa-readiness.ts, src/lib/inbox.ts, src/lib/config-schema.ts, src/run-task.ts, test/selected-registry-serve-consumers.test.ts, test/one-registry-for-the-fleet.test.ts, test/one-gateway-serves-every-instance.test.ts, test/onboarding-readiness.test.ts, test/repo-dashboard-route.test.ts, test/benchmark-aa-readiness.test.ts, test/instances-view.test.ts, test/config-schema.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
   status: queued
   attempts: 0
@@ -30,6 +30,12 @@
     records and every actual subject blob with9559/9572 title controls. No remaining
     selected-consumer task was found. Own diffs12294/freshness,12289/host identity
     and12219/run-child policy are other owners' work, not this implementation.
+    Re-entry at main1dc62df45 with ALL11 OPEN heads retained the39 subject-task
+    corpus and9559/9572 title controls. W5433's exclusive calibration-gap append
+    admission and W5434's concurrent frozen-population winner/EEXIST recovery
+    also declare benchmark-aa-readiness, but not selected-registry discovery.
+    Their existing run branches are not abandoned-work evidence: preserve their
+    ownership, locks and population algorithms; do not implement or retire them.
   design: |
     1. Re-census actual current-main callers, including served and cold routes,
        onboarding readiness/go-live composition, topology/liveness and independent
@@ -38,7 +44,9 @@
        or a fixture-only producer. Do not claim pure parser coverage is wiring.
     2. Reuse the existing bounded asynchronous selected reader and explicit
        selectedRegistryMode mode: shadow opt-in. Add one shared typed observation
-       adapter only where these consumers need it; no parallel registry parser,
+       adapter observeSelectedRegistry only where these consumers need it; its
+       real serve composition must invoke it, not merely import it. No dummy
+       production call or text satisfies the behavioral obligation. No parallel registry parser,
        service, scanner, scheduler or implicit environment-only activation.
        Genuine absent configuration performs no selected read/receipt and keeps
        all legacy defaults, cached bodies and effects unchanged. An explicit
@@ -82,6 +90,8 @@
        approved FULL AFFECTED WRITER STOP, ALL only if ALL are actually affected.
        Preserve complete public Apache core and independent owner/admin override.
   acceptance:
+    - claim: Maintained serve composition invokes the shared bounded observation adapter
+      proof: 'grep: observeSelectedRegistry( in src/lib/serve.ts'
     - claim: Real serve and discovery composition observe the selected source without changing legacy results
       proof: 'unit test: selected registry shadow reaches real serve and discovery consumers'
     - claim: Selected observations never borrow healthy legacy or served-cache evidence after failure

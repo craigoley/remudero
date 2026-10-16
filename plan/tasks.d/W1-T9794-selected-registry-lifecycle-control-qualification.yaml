@@ -26,11 +26,13 @@
     ALL-open subject audit found no selected lifecycle-control implementation;
     freshness12294 and claim identity12289 remain with their owners.
   design: |
-    1. Reuse W9793's observation adapter and bounded selected reader at actual
+    1. Reuse W9793's observeSelectedRegistry adapter and bounded selected reader at actual
        deploy/rollback/recycle, serve-policy convergence, pause/resume and SRE
        target adoption seams. Forward the explicit SHADOW context from real CLI
        and daemon composition, not fixture-only ports or stored trusted strings.
-       Retain the existing independent legacy target and each actual outcome.
+       The maintained deployer must invoke this adapter at real target adoption,
+       not an import, fixture-only call or dummy production text. Retain the
+       existing independent legacy target and each actual outcome.
        Do not turn on the SRE lane, invoke a real recycle or change its detectors.
     2. Snapshot original code/registry digest, actual instance/repository, current
        root and intended action before async work. Recheck after current admission
@@ -68,6 +70,8 @@
        AFFECTED WRITER STOP, ALL only when ALL affected. Admission pause is not
        zero writers. Preserve full Apache public core and owner/admin override.
   acceptance:
+    - claim: Maintained deployment composition invokes the shared bounded observation adapter
+      proof: 'grep: observeSelectedRegistry( in src/lib/deployer.ts'
     - claim: Real CLI and daemon lifecycle target consumers receive opt-in selected observations
       proof: 'unit test: selected lifecycle shadow reaches actual deploy pause and daemon consumers'
     - claim: Revisions and identity changes invalidate observations at the actual attempted effect

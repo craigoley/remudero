@@ -22,9 +22,11 @@
     qualification survives changed config, admission waits, fallback, detach and
     restart/adoption. Nor may a private registry be handed to an untrusted worker
     merely because a trusted orchestration child can read it. PR12219/W9087 owns
-    real run-child policy changes and remains OPEN/uncredited in the fresh named
-    census. WAIT its actual normal source merge and re-census, not its open head
-    or status field. This task does not duplicate its auto-promotion policy.
+    real run-child policy changes and merged normally at2026-10-16T12:08:37Z
+    as870008347b7aea1e695061d18a0068bd25de9ac3. Re-entry main1dc62df45 includes
+    that source; review actual merged behavior, not a copied former open head
+    or decorative task status. This task does not duplicate its auto-promotion
+    policy and source merge is not deployment, live uptake or activation.
   design: |
     1. After actual W9087 and W9793 merges, trace the real daemon/in-process,
        trusted run child, probe, fallback, detach/adopt and resumed effect paths
@@ -32,6 +34,9 @@
        only demonstrated lost opt-in/snapshot/recheck seams. Reuse maintained
        versioned run-child spec/status, engine identity, reservation and adoption
        contracts rather than a new child service or checkpoint registry.
+       Real run-child-main composition invokes observeSelectedRegistry from the
+       shared adapter; imports, fixture-only calls and dummy call text do not
+       establish the actual child/resume behavior.
     2. Explicit SHADOW intent and original selected binding must survive awaits,
        serializing/parsing, transport mutation and restart without silently
        adopting current global config or a different file/instance. Bind actual
@@ -76,6 +81,8 @@
        config/access needs FULL AFFECTED WRITER STOP, ALL only if ALL affected.
        Keep the complete public Apache core, owner override and no new schedules.
   acceptance:
+    - claim: Maintained trusted child entry invokes the shared bounded observation adapter
+      proof: 'grep: observeSelectedRegistry( in src/run-child-main.ts'
     - claim: Real trusted child dispatch and fallback retain explicit immutable shadow intent
       proof: 'unit test: selected registry shadow intent survives actual trusted child transport'
     - claim: Admission waits and resumed effects recheck original binding instead of current global defaults
