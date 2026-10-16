@@ -3328,7 +3328,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
-import { taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -14373,7 +14373,8 @@ export async function runFixRung(opts: {
         reason: green ? "flake-confirmed" : "flake claim refuted" };
     }
     if (fixAction.kind === "hand-off") {
-      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha });
+      const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
+      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }
