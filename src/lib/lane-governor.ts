@@ -180,7 +180,8 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
     if (raw === undefined) highEventsUnread = "no high line in memory.events";
     else highEvents = Number(raw);
   } catch (error) {
-    highEventsUnread = error instanceof Error ? error.message : String(error);
+    const reason = error instanceof Error ? error.message : String(error);
+    highEventsUnread = reason;
   }
   return {
     containerBaseMib: numbers.containerProjectedMib,

@@ -19,7 +19,7 @@ import {
 } from "../src/lib/lane-governor.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { loadLaneGovernorMode, parseLaneGovernorMode, PolicyError } from "../src/lib/policy.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 
 /** A container with room for four more 1,400 MiB build trees under its 8,379 MiB memory.high, and a roomy host. */
 function quiet(over: Partial<LaneMemoryReading> = {}): LaneMemoryReading {

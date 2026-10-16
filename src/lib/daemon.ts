@@ -3907,7 +3907,10 @@ export async function runDaemon(
     if (!laneTargetReading || nowMs - laneTargetReading.atMs >= pollIntervalMs) {
       let memory: LaneMemoryReading | { unread: string };
       try { memory = laneGovernorPorts.read(); }
-      catch (error) { memory = { unread: error instanceof Error ? error.message : String(error) }; }
+      catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        memory = { unread: reason };
+      }
       const result = laneTarget({ previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount() });
       laneTargetReading = { atMs: nowMs, result };
       log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
