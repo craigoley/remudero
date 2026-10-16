@@ -20,7 +20,7 @@ jobs:
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       # Trusted workflow literal binds committed auditor bytes without extra API reads.
-      AUDITOR_SHA256: 51e36c69a60c6ff8e3dd66143b869175cf727946a2c15d255449a4a0c99a2c12
+      AUDITOR_SHA256: 6ff379fe0cb9b049771acabf922311227fffdc0f323e0c51bbf547110cce64f2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

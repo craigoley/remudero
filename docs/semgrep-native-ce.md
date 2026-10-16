@@ -135,6 +135,22 @@ and [Semgrep licensing](https://semgrep.dev/docs/licensing/).
 
 ## Deadline-aware native author validation
 
+The inert artifact auditor supports metadata 2.5 import declarations as untrusted
+data, never as a namespace or installation permission. It checks identifier/private
+syntax, empty-name semantics, same-project ambiguity and bounded cross-project
+exclusive-name collisions. A shared parent may contain distinct exclusive children;
+one exclusive parent cannot capture another project's namespace child. Existing
+whole-artifact/destination/RECORD/tool/startup guards still decide installation safety.
+Importability is not inferred from metadata and remains unproved by this inert audit.
+Unsupported metadata versions still refuse. Final wheel dependencies are enforced
+even when marked Dynamic; unresolved source dependencies/import declarations refuse.
+
+Metadata controls are a separately hash-bound first-party module. Every existing
+literal test identity is retained, and source staging, policy-change detection and
+receipt verification include the module. No source-size limit is increased.
+References: [core metadata](https://packaging.python.org/en/latest/specifications/core-metadata/)
+and [PEP 794](https://peps.python.org/pep-0794/).
+
 The local author gate still runs its verified affected selection (including full fallback)
 and all default static checks. It does not replace hosted coverage, security, review or merge.
 Normal author runs now save compact file-wrapper durations beside their native logs; a

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import keyword
 import os
 import platform
 import ssl
@@ -252,12 +253,65 @@ class _RawMetadata(importlib.metadata.Distribution):
         raise AuditBlocked("NO_METADATA_FILESYSTEM", str(path))
 
 
+def declared_imports(msg, name: str) -> tuple[set[str], set[str]]:
+    """PEP 794 declarations are untrusted data, never layout permissions.
+
+    Syntax and cross-project claims can be checked without importing anything.
+    Actual importability cannot be inferred from these headers and is not proved.
+    """
+    fields = [msg.get_all(field, []) for field in ("Import-Name", "Import-Namespace")]
+    need(sum(map(len, fields)) <= 128, "IMPORT_DECLARATION_BOUND", name)
+    need(not any(fields) or str(msg["Metadata-Version"]) == "2.5", "IMPORT_DECLARATION_VERSION", name)
+    parsed = []
+    for index, values in enumerate(fields):
+        names = set()
+        for value in values:
+            raw = str(value).strip()
+            if raw == "":
+                need(index == 0, "IMPORT_DECLARATION", name)
+                names.add("")
+                continue
+            parts = raw.split(";")
+            need(len(parts) <= 2 and (len(parts) == 1 or parts[1].strip() == "private"), "IMPORT_DECLARATION", name)
+            item = parts[0].strip()
+            need(0 < len(item) <= 256 and all(p.isidentifier() and not keyword.iskeyword(p) for p in item.split(".")),
+                 "IMPORT_DECLARATION", name)
+            names.add(item)
+        parsed.append(names)
+    exclusive, namespaces = parsed
+    if "" in exclusive:
+        need(len(fields[0]) == 1 and exclusive == {""} and not namespaces, "IMPORT_DECLARATION", name)
+        exclusive = set()
+    need(not exclusive.intersection(namespaces), "IMPORT_DECLARATION_AMBIGUOUS", name)
+    return exclusive, namespaces
+
+
+def verify_declared_imports(rows: list[dict]) -> int:
+    exclusive, namespaces = [], []
+    for row in rows:
+        msg = BytesParser(policy=email.policy.default.clone(raise_on_defect=True)).parsebytes(row["metadata"])
+        own, shared = declared_imports(msg, row["name"])
+        exclusive.extend((row["name"], value.casefold()) for value in own)
+        namespaces.extend((row["name"], value.casefold()) for value in shared)
+        need(len(exclusive) + len(namespaces) <= 256, "IMPORT_DECLARATION_BOUND", "whole set")
+    for index, (owner, value) in enumerate(exclusive):
+        for other, claimed in exclusive[index + 1:]:
+            need(owner == other or not (value == claimed or value.startswith(claimed + ".") or claimed.startswith(value + ".")),
+                 "IMPORT_DECLARATION_COLLISION", owner + "/" + other)
+        for other, claimed in namespaces:
+            # An exclusive child inside another project's shared parent is normal.
+            # An exclusive parent cannot capture that project's namespace child.
+            need(owner == other or not (value == claimed or claimed.startswith(value + ".")),
+                 "IMPORT_DECLARATION_COLLISION", owner + "/" + other)
+    return len(exclusive) + len(namespaces)
+
+
 def metadata_distribution(raw: bytes, entries: bytes, name: str, version: str, api, *, source_kind="wheel"):
     need(0 < len(raw) <= MAX_METADATA and len(entries) <= MAX_METADATA, "METADATA_BOUND", name)
     msg = BytesParser(policy=email.policy.default.clone(raise_on_defect=True)).parsebytes(raw)
     for field in ("Metadata-Version", "Name", "Version"):
         need(len(msg.get_all(field, [])) == 1, "AMBIGUOUS_METADATA", field)
-    need(str(msg["Metadata-Version"]) in {"2.1", "2.2", "2.3", "2.4"}, "METADATA_VERSION_UNKNOWN", name)
+    need(str(msg["Metadata-Version"]) in {"2.1", "2.2", "2.3", "2.4", "2.5"}, "METADATA_VERSION_UNKNOWN", name)
     need(api.canonicalize_name(str(msg["Name"])) == name and api.Version(str(msg["Version"])) == api.Version(version), "METADATA_IDENTITY", name)
     need(len(msg.get_all("Requires-Python", [])) <= 1, "AMBIGUOUS_METADATA", "Requires-Python")
     dynamic = {v.strip().lower() for row in msg.get_all("Dynamic", []) for v in str(row).split(",")}
@@ -267,7 +321,8 @@ def metadata_distribution(raw: bytes, entries: bytes, name: str, version: str, a
     # NOT an instruction to run a hook or ignore final Requires-* values.
     # Source distributions may still change those fields during an actual build.
     if source_kind == "sdist":
-        need(not dynamic.intersection({"requires-dist", "requires-python"}), "DYNAMIC_METADATA", name)
+        need(not dynamic.intersection({"requires-dist", "requires-python", "import-name", "import-namespace"}), "DYNAMIC_METADATA", name)
+    declared_imports(msg, name)
     need(api.check_requires_python(msg.get("Requires-Python"), sys.version_info[:3]), "REQUIRES_PYTHON", name)
     # Full PEP 508 parsing is pip's vendored packaging, including inactive rows.
     for row in msg.get_all("Requires-Dist", []):
@@ -452,6 +507,7 @@ def audit_distribution_set(rows: list[dict], api) -> dict:
                 need(len(prior) == 1 or prior <= APPROVED_SHARED_NAMESPACES.get(root, frozenset()), "NAMESPACE_OWNERSHIP", root)
             owners[key] = {"owner": name, "source": source, "kind": kind}
             directories.update(key[:i] for i in range(1, len(key)))
+    declared_import_count = verify_declared_imports(rows)
     by_name = {row["name"]: row for row in rows}
     extras = {name: set() for name in by_name}
     dependencies, queue = {}, list(by_name)
@@ -489,6 +545,7 @@ def audit_distribution_set(rows: list[dict], api) -> dict:
     return {"state": "ORIGINAL_METADATA_AND_LAYOUT_AUDIT_ONLY", "qualified": False, "candidateExecutionAllowed": False,
             "pipApi": api.provenance, "packages": [{k: r[k] for k in ("name", "version", "sha256", "kind")} for r in rows],
             "originalMetadataClosure": True, "destinationCount": len(owners),
+            "declaredImportCount": declared_import_count, "declaredImportAccuracy": "NOT_ESTABLISHED",
             "requestedExtras": {name: sorted(values) for name, values in extras.items() if values},
             "approvedSdistNeedsSeparateBuiltWheelAndMetadataAudit": any(r["kind"] == "approved-sdist" for r in rows),
             "notProven": ["pinned 26.2.1 API compatibility", "original real artifact inventory", "built Peewee wheel destinations/metadata", "installed pip check", "runtime/version/core truthfulness"]}
