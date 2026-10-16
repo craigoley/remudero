@@ -1176,7 +1176,7 @@ const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./l
 };
 workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 const ciRemedyComponent = captureCiRemedyComponent(workerBoundaryStack.loadedModule, ciLogNamedSourcePaths, existsSync, join);
-import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
+import { benchmarkCohortCadence, type BenchmarkCohortCadence, type BenchmarkCohortCadenceDeps } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
@@ -32080,30 +32080,10 @@ export function buildLedgerCompactionDaemonHooks(deps: {
   return { checkLedgerCompaction: check, runLedgerCompaction: run };
 }
 
-interface BenchmarkCohortHookDeps {
-  config?: Config;
-  clock?: Clock;
-  intervalMs?: number;
-  run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
-}
-
-export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = {}): {
-  checkBenchmarkCohort: () => boolean;
-  runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
-} {
-  const clock = deps.clock ?? systemClock;
-  const intervalMs = deps.intervalMs ?? 30_000;
-  let lastStartedAt = Number.NEGATIVE_INFINITY;
-  return {
-    checkBenchmarkCohort: () => {
-      const current = clock.now();
-      if (current - lastStartedAt < intervalMs) return false;
-      lastStartedAt = current;
-      return true;
-    },
-    runBenchmarkCohortPass: () => (deps.run ?? ((stateDir) => runBenchmarkCohortPass(stateDir, { maxSources: 4 })))
-      (dirname(ledgerPathFor(deps.config ?? loadConfig()))),
-  };
+export function buildBenchmarkCohortDaemonHooks(
+  deps: Omit<BenchmarkCohortCadenceDeps, "stateDir"> & { config?: Config } = {},
+): BenchmarkCohortCadence {
+  return benchmarkCohortCadence({ ...deps, stateDir: () => dirname(ledgerPathFor(deps.config ?? loadConfig())) });
 }
 
 /** The live ledger is bounded independently of its rotations, so this reads the recent fire
