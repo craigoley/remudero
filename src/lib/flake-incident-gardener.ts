@@ -212,6 +212,9 @@ interface Evidence {
   prs: number[];
   /** Newest evidence row per PR, for "new since the last filing". */
   latestMs: Map<number, number>;
+  /** W1-T9730: per PR, the newest CI run a coverage-shard log names, and the newest fix-round row. */
+  latestRunId: Map<number, number>;
+  latestFixRoundMs: Map<number, number>;
   runs: Set<number>;
   recovered: number;
   alsoFailed: number;
@@ -298,9 +301,18 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
     const retries = counted.filter((o) => o.duplicate !== true);
     const latestMs = new Map<number, number>();
     const alsoFailedPrs = new Set(retries.filter((o) => o.outcome === "also_failed").flatMap((o) => o.prs.filter((pr) => verdict.get(pr) === true)));
-    for (const o of counted) for (const pr of o.prs) if (verdict.get(pr) === true) latestMs.set(pr, Math.max(latestMs.get(pr) ?? 0, o.tsMs));
+    const latestRunId = new Map<number, number>();
+    const latestFixRoundMs = new Map<number, number>();
+    for (const o of counted) {
+      for (const pr of o.prs) {
+        if (verdict.get(pr) !== true) continue;
+        latestMs.set(pr, Math.max(latestMs.get(pr) ?? 0, o.tsMs));
+        if (o.runId !== undefined) latestRunId.set(pr, Math.max(latestRunId.get(pr) ?? 0, o.runId));
+        else latestFixRoundMs.set(pr, Math.max(latestFixRoundMs.get(pr) ?? 0, o.tsMs));
+      }
+    }
     return {
-      prs, latestMs, runs: new Set(counted.flatMap((o) => (o.runId === undefined ? [] : [o.runId]))),
+      prs, latestMs, latestRunId, latestFixRoundMs, runs: new Set(counted.flatMap((o) => (o.runId === undefined ? [] : [o.runId]))),
       recovered: retries.filter((o) => o.outcome === "recovered").length,
       alsoFailed: retries.filter((o) => o.outcome === "also_failed").length,
       alsoFailedPrs: alsoFailedPrs.size,
@@ -347,9 +359,15 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
     }
     return undefined;
   };
-  const lastFiledMs = (origin: string): number => Math.max(0, ...byStep("flake_incident.filed")
-    .filter((r) => r.origin === origin || (typeof r.origin === "string" && flakeIncidentOriginFile(r.origin) === flakeIncidentOriginFile(origin)))
-    .map((r) => Date.parse(String(r.ts))).filter(Number.isFinite));
+  /** The origin's newest filing: when it was written, and the newest CI run it cited (absent on an older row). */
+  const lastFiling = (origin: string): { ms: number; maxRunId?: number } => {
+    const last = byStep("flake_incident.filed")
+      .filter((r) => r.origin === origin || (typeof r.origin === "string" && flakeIncidentOriginFile(r.origin) === flakeIncidentOriginFile(origin)))
+      .map((r) => ({ ms: Date.parse(String(r.ts)), runs: Array.isArray(r.run_ids) ? r.run_ids.filter(isCount) : [] }))
+      .filter((r) => Number.isFinite(r.ms)).sort((a, b) => b.ms - a.ms)[0];
+    if (last === undefined) return { ms: 0 };
+    return last.runs.length > 0 ? { ms: last.ms, maxRunId: Math.max(...last.runs) } : { ms: last.ms };
+  };
   const filedThisPass = new Map<string, string>();
 
   let filed = 0;
@@ -384,9 +402,13 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
         if (!said) deps.log("flake_incident.skipped", { origin, file, title, reason, prs: evidence.prs });
         continue;
       }
-      // After a merged repair, only PRs that failed AFTER the last filing can reopen the incident.
-      const since = lastFiledMs(origin);
-      const fresh = evidence.prs.filter((pr) => (evidence.latestMs.get(pr) ?? 0) > since);
+      // After a merged repair, only PRs that failed AFTER the last filing can reopen the incident. W1-T9730: a
+      // coverage-shard row is written when its log is read, so it is fresh only for a CI run newer than every run
+      // the filing cited. A fix-round row, or any row against a filing that cited no run, is judged by its ts.
+      const last = lastFiling(origin);
+      const fresh = evidence.prs.filter((pr) => last.maxRunId === undefined
+        ? (evidence.latestMs.get(pr) ?? 0) > last.ms
+        : (evidence.latestRunId.get(pr) ?? 0) > last.maxRunId || (evidence.latestFixRoundMs.get(pr) ?? 0) > last.ms);
       if (fresh.length < policy.filePrs || filed >= policy.filingsPerPass) continue;
       filedThisPass.set(file, await fileIncident(deps, sources, { origin, file, title, evidence, prs: evidence.prs }));
       filed++;
