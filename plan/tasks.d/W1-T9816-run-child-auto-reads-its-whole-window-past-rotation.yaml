@@ -14,7 +14,7 @@
     - src/lib/run-child-mode.ts
     - src/run-task.ts
     - test/run-child-auto-reads-its-whole-window-past-rotation.test.ts
-  status: queued
+  status: merged
   priority: 1  # raised 2026-10-16 (R1 freshness-yield investigation): run children are the fix for 279 freshness yields in 6 days, and this read decides whether they ever stay on; was 2 (operator-2026-10-16: auto is live on core; a forgotten loss re-promotes the detached-child contract it was demoted for, and the 30-min boot window keeps promotion from ever happening on a daemon that lives longer)
   attempts: 0
   rationale: |

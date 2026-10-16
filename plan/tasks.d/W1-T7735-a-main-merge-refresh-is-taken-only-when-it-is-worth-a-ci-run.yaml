@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-10: throughput study (ledger union 05:53-15:39Z, gh PR timelines), operator asked for flow improvements"
   plan_refs: [W1-T4351, W1-T7214, W1-T6022, W1-T528, W1-T5921, W1-T2789, W1-T6404, W1-T6405, W1-T5490, W1-T5903, W1-T5939, W1-T7736, W1-T100, W1-T9595]
   files: [src/lib/refresh-value.ts, src/lib/sweep.ts, src/run-task.ts, src/lib/ledger.ts, test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

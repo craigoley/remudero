@@ -14,7 +14,7 @@
     - src/lib/benchmark-cohort.ts
     - src/run-task.ts
     - test/the-benchmark-cohort-checkpoint-never-blocks-the-daemon-loop.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
