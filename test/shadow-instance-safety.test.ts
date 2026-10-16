@@ -14,6 +14,7 @@ import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import {
   buildSweepEffects,
   ghPrCreateFillCommand,
@@ -102,19 +103,17 @@ test("the independent sweep path cannot arm a shadow instance", async () => {
 
 test("selected mode shadow evidence reaches actual run and sweep consumers", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-run-`));
-  const origin = join(root, "origin.git"), seed = join(root, "seed"), repoDir = join(root, "repos", "remudero");
+  const origin = gitRepo({ bare: true }), seed = gitRepo({ cloneFrom: origin.dir });
+  const repoDir = join(root, "repos", "remudero");
   const selected = join(root, "selected.yaml"), planPath = join(root, "tasks.yaml");
   const now = Date.now(), branch = `run-T-SELECTED-${now}`, head = "deadbeef";
   const selectedText = (mode: string) => registry(mode).replace("  worker:", "  fixture:").replace("owner/repo", "owner/remudero");
   writeFileSync(selected, selectedText("shadow"));
   writeFileSync(planPath, "- id: T-SELECTED\n  title: selected deferred arm fixture\n  repo: remudero\n  type: implement\n  verify: auto\n  risk: medium\n  files: [src/lib/daemon.ts]\n  origin: architect\n  status: queued\n");
   const git = (args: string[]) => execFileSync("git", args, { stdio: "pipe" });
-  git(["init", "-q", "--bare", "--initial-branch=main", origin]);
-  git(["clone", "-q", origin, seed]);
-  for (const args of [["user.name", "selected-mode-fixture"], ["user.email", "selected@example.invalid"]]) git(["-C", seed, "config", ...args]);
-  writeFileSync(join(seed, "README.md"), "fixture\n"); git(["-C", seed, "add", "README.md"]);
-  git(["-C", seed, "commit", "-qm", "test: seed"]); git(["-C", seed, "push", "-q", "origin", "main"]);
-  mkdirSync(join(root, "repos")); git(["clone", "-q", origin, repoDir]);
+  writeFileSync(join(seed.dir, "README.md"), "fixture\n"); seed.git("add", "README.md");
+  seed.git("commit", "-qm", "test: seed"); seed.git("push", "-q", "origin", "main");
+  mkdirSync(join(root, "repos")); git(["clone", "-q", origin.dir, repoDir]);
   for (const args of [["user.name", "selected-mode-fixture"], ["user.email", "selected@example.invalid"]]) git(["-C", repoDir, "config", ...args]);
   const shim = ghShim([
     { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch }) },
@@ -173,5 +172,6 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
     if (previous.registry === undefined) delete process.env.RMD_INSTANCE_REGISTRY; else process.env.RMD_INSTANCE_REGISTRY = previous.registry;
     if (previous.name === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = previous.name;
     rmSync(shim.dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
+    seed.cleanup(); origin.cleanup();
   }
 });

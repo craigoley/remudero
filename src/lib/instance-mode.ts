@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import type { SelectedModeSettings } from "./config-schema.js";
+export type { SelectedModeSettings } from "./config-schema.js";
 
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
@@ -28,14 +30,6 @@ export function readInstanceRegistryText(repoRoot: string): string | undefined {
   }
 }
 
-export interface SelectedModeSettings {
-  mode: "shadow";
-  instanceName?: string;
-  registryPath?: string;
-  contractVersion?: number;
-  maxBytes?: number;
-  timeoutMs?: number;
-}
 export interface SelectedModeInput extends RegistrySelectionInput { instanceName?: string }
 export type SelectedModeAction = "run-arm" | "sweep-arm" | "arm" | "direct-merge" | "queue";
 type ModeEvidence = {

@@ -42,9 +42,19 @@ export interface ModelApproval {
   expiresAt?: string;
 }
 
+/** Configuration owns this data-only contract; it must not import an effect consumer. */
+export interface SelectedModeSettings {
+  mode: "shadow";
+  instanceName?: string;
+  registryPath?: string;
+  contractVersion?: number;
+  maxBytes?: number;
+  timeoutMs?: number;
+}
+
 export interface Config {
   contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
-  selectedRegistryMode?: import("./instance-mode.js").SelectedModeSettings;
+  selectedRegistryMode?: SelectedModeSettings;
   claudeBin: string;
   root: string;
   diskArtifactScanRoots?: string[];
