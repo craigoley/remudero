@@ -20,9 +20,13 @@
       - Main went red at bd42ca367 (CI run 38946416242, ci-shard 4/8). The one failing test was
         "a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry" in
         test/a-retired-index-line-keeps-its-frozen-bullet.test.ts.
-      - Its unresolved citation was doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md. That path
-        is named in files: by plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml, which #12389 (6841dac49, a
-        plan-only PR of 42 shards) added. The session repaired that red in #12405 (32dc6614f); this task touches neither that test nor the shard.
+      - Its unresolved citation was the planned doctrine body new-tests-go-in-their-computed-folder.md (section plan-and-task-hygiene). At 6841dac49
+        it was named in files: by plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml, which #12389 (a plan-only
+        PR of 42 shards) added. The session repaired that red in #12405 (32dc6614f); this task touches neither that
+        test nor the shard.
+      - SECOND INSTANCE, THIS FILING: its first draft quoted that doctrine path in prose. Run locally, the same test
+        went red on the draft (`# fail 1`, the same unresolved path), and the plan-only selector would again not have
+        picked it. The draft was reworded before push.
     REPRODUCED at origin/main 07a425844, where scripts/diff-class.mjs and src/lib/plan-scope.ts are unchanged since
     6841dac49's parent (`git log 6841dac49^..origin/main -- scripts/diff-class.mjs src/lib/plan-scope.ts` is empty):
       - `node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files <file holding
