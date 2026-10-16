@@ -8489,6 +8489,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^src/lib/review\\.ts$",
   "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
+  // Semgrep source/engine trust policy controls which artifacts the security gate accepts.
+  "^\\.github/semgrep/source-build-policy\\.json$",
   "^scripts/[^/]*-ratchet\\.mjs$",
   "^scripts/diff-coverage\\.mjs$",
   "^scripts/[^/]*-baseline\\.json$",
