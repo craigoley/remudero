@@ -43,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import { readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
+import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
 import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
@@ -542,6 +543,7 @@ export interface ServeDeps {
   };
   /** W1-T4264: `GET /v1/onboarding/readiness`'s inputs; `gateway` defaults to the real GitHub reads. */
   onboardingReadiness?: {
+    selectedRegistryObservation?: SelectedRegistryConsumerOptions;
     gateway?: OnboardingReadinessGateway;
     asyncGateway?: OnboardingReadinessGatewayAsync;
     repoRegistryPath?: string;
@@ -2016,6 +2018,7 @@ export type OnboardingReadinessRouteInput = NonNullable<ServeDeps["onboardingRea
  * makes that ONE check `unknown` (path-free code, as buildRegistryRoute) — never a 503, never a pass.
  */
 export function buildOnboardingReadinessRoute(deps: OnboardingReadinessRouteInput): Route {
+  const selected = createSelectedRegistryObserver(deps.selectedRegistryObservation);
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
   const clock = deps.clock ?? systemClock;
   const cache = new Map<string, { atMs: number; snapshot: OnboardingReadinessSnapshot }>();
@@ -2058,14 +2061,16 @@ export function buildOnboardingReadinessRoute(deps: OnboardingReadinessRouteInpu
         return;
       }
       const [owner, name] = repoParam.split("/");
-      let registry: OnboardingRegistryRead;
-      try {
-        const parsed = parseInstanceRegistry(await readText(deps.repoRegistryPath));
-        registry = { repos: parsed.instances.filter((i) => i.live).map((i) => i.repo) };
-      } catch (error) {
-        registry = { unreadable: error instanceof InstanceRegistryError ? error.code : "unreadable" };
-      }
-      sendJson(res, 200, onboardingReadiness(owner, name, registry, await evidence(owner, name)));
+      await observeSelectedRegistry(selected, "serve-readiness", { repository: repoParam }, async () => {
+        let registry: OnboardingRegistryRead;
+        try {
+          const parsed = parseInstanceRegistry(await readText(deps.repoRegistryPath));
+          registry = { repos: parsed.instances.filter((i) => i.live).map((i) => i.repo) };
+        } catch (error) {
+          registry = { unreadable: error instanceof InstanceRegistryError ? error.code : "unreadable" };
+        }
+        sendJson(res, 200, onboardingReadiness(owner, name, registry, await evidence(owner, name)));
+      });
     },
   };
 }

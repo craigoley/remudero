@@ -1,0 +1,173 @@
+import type { SelectedModeSettings } from "./config-schema.js";
+import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
+  type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
+
+export type RegistryConsumerAction = "serve-registry" | "serve-readiness" | "serve-go-live" | "serve-topology"
+  | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery";
+export interface RegistryConsumerTarget { repository?: string; instanceName?: string }
+export type RegistryObservationSink = (step: string, fields: Readonly<Record<string, unknown>>) => unknown;
+/** Trusted composition only. Neither this context nor its selected input belongs in a public body. */
+export interface SelectedRegistryConsumerOptions {
+  settings?: SelectedModeSettings;
+  input?: RegistrySelectionInput;
+  record?: RegistryObservationSink;
+  io?: RegistryFileIO;
+}
+export interface SelectedRegistryObserver {
+  observe<T>(action: RegistryConsumerAction, target: RegistryConsumerTarget, operation: () => T | Promise<T>): Promise<T>;
+  observeSync<T>(action: RegistryConsumerAction, target: RegistryConsumerTarget, operation: () => T): T;
+  settled(): Promise<void>;
+  close(): void;
+}
+type Evidence = { selected_state: "ready" | "absent" | "retired" | "unknown"; reason?: string; binding_digest?: string };
+type Bound = { kind: "ready"; binding: SelectedRegistryBinding } | { kind: "unknown"; reason: string };
+type Captured = { kind: "off" } | { kind: "unknown"; record?: RegistryObservationSink }
+  | { kind: "selected"; input: RegistrySelectionInput; io: RegistryFileIO; name?: string; record?: RegistryObservationSink };
+const unknown = (reason: string, digest?: string): Evidence => ({ selected_state: "unknown", reason,
+  ...(digest === undefined ? {} : { binding_digest: digest }) });
+const LIMIT = 32;
+
+function capture(options: SelectedRegistryConsumerOptions | undefined): Captured {
+  let record: RegistryObservationSink | undefined;
+  try {
+    if (options?.settings?.mode !== "shadow") return { kind: "off" };
+    const settings = options.settings, input = options.input;
+    record = options.record;
+    const io = options.io ?? registryFileIO, lstat = io.lstat.bind(io), open = io.open.bind(io);
+    const ports: RegistryFileIO = Object.freeze({ lstat, open: async (path: string) => {
+      const handle = await open(path);
+      return Object.freeze({ stat: handle.stat.bind(handle), read: handle.read.bind(handle), close: handle.close.bind(handle) });
+    } });
+    return { kind: "selected", record, name: settings.instanceName,
+      input: Object.freeze({ cliPath: input?.cliPath, envPath: input?.envPath,
+        configuredPath: input?.configuredPath === undefined ? settings.registryPath : input.configuredPath,
+        contractVersion: input?.contractVersion ?? settings.contractVersion,
+        requiredCapabilities: Object.freeze([...(input?.requiredCapabilities ?? []), "identity"]),
+        expectedDigest: input?.expectedDigest, maxBytes: input?.maxBytes ?? settings.maxBytes,
+        timeoutMs: input?.timeoutMs ?? settings.timeoutMs, signal: input?.signal }), io: ports };
+  } catch {
+    // Unreadable selection/ports cannot establish authority. Retain unknown without exposing their exception.
+    return { kind: "unknown", record };
+  }
+}
+
+function targetSnapshot(target: RegistryConsumerTarget, name: string | undefined): {
+  fields: Readonly<Record<string, string>>; repository?: string; instanceName?: string; reason?: string;
+} {
+  try {
+    const repository = target.repository, instanceName = target.instanceName ?? name;
+    if (repository !== undefined && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return { fields: {}, reason: "invalid_repository" };
+    if (instanceName !== undefined && !/^[A-Za-z0-9_-]+$/.test(instanceName)) return { fields: {}, reason: "invalid_instance" };
+    return { repository: repository?.toLowerCase(), instanceName,
+      fields: Object.freeze({ ...(repository === undefined ? {} : { target_repo: repository.toLowerCase() }),
+        ...(instanceName === undefined ? {} : { target_instance: instanceName }) }) };
+  } catch {
+    // A hostile target is unknown identity, not arbitrary text for the receipt or a fallback target.
+    return { fields: {}, reason: "target_unreadable" };
+  }
+}
+
+/** Bounded SHADOW observations, independent of the result, exception and timing of the legacy effect. */
+export function createSelectedRegistryObserver(options: SelectedRegistryConsumerOptions | undefined): SelectedRegistryObserver | undefined {
+  const captured = capture(options);
+  if (captured.kind === "off") return undefined;
+  const controller = new AbortController();
+  const signal = captured.kind === "selected" && captured.input.signal
+    ? AbortSignal.any([controller.signal, captured.input.signal]) : controller.signal;
+  let closed = false, diagnosticSent = false, sinkPending = 0;
+  const pending = new Set<Promise<void>>(), keys = new Set<string>();
+  const unavailable = (): void => {
+    if (diagnosticSent) return;
+    diagnosticSent = true;
+    try { console.error("instance_registry.consumer_shadow_unrecorded"); }
+    catch {
+      // A failed diagnostic channel is still unrecorded; it must never replace the legacy effect.
+    }
+  };
+  const read = async (): Promise<Bound> => {
+    if (captured.kind !== "selected") return { kind: "unknown", reason: "input_unreadable" };
+    try {
+      const result = await readSelectedInstanceRegistry({ ...captured.input, signal }, captured.io);
+      return result.kind === "ready" ? result : { kind: "unknown", reason: result.kind === "legacy" ? "selection_missing" : result.reason };
+    } catch {
+      // A rejected custom port remains unknown, never cached/legacy selected authority.
+      return { kind: "unknown", reason: "source_read_rejected" };
+    }
+  };
+  let held: Promise<Bound> | undefined, retryNeeded = false;
+  const current = async (original: Promise<Bound>, target: ReturnType<typeof targetSnapshot>): Promise<Evidence> => {
+    if (target.reason) return unknown(target.reason);
+    const bound = await original;
+    if (bound.kind !== "ready") {
+      // Retry only at the NEXT real consumer event, never an inbox scan or timer. No ready identity existed to pin.
+      if (held === original) retryNeeded = true;
+      return unknown(bound.reason);
+    }
+    const digest = bound.binding.digest;
+    try {
+      const checked = await bound.binding.recheck(signal);
+      if (checked.kind !== "unchanged") return unknown("reason" in checked ? checked.reason : "revision_changed", digest);
+    } catch {
+      // A failed final recheck is unknown; the original ready digest is not permission to borrow a healthy cache.
+      return unknown("recheck_failed", digest);
+    }
+    const rows = bound.binding.instances.filter(row => (target.instanceName === undefined || row.name === target.instanceName)
+      && (target.repository === undefined || row.repo.toLowerCase() === target.repository));
+    if (rows.length === 0) return { selected_state: "absent", reason: "target_absent", binding_digest: digest };
+    if (rows.every(row => !row.live)) return { selected_state: "retired", reason: "target_retired", binding_digest: digest };
+    return { selected_state: "ready", binding_digest: digest };
+  };
+  const report = (action: RegistryConsumerAction, target: ReturnType<typeof targetSnapshot>, evidence: Evidence, threw: boolean): void => {
+    if (closed) return;
+    const fields = Object.freeze({ mode: "shadow", action, ...target.fields, ...evidence,
+      legacy_outcome: threw ? "threw" : "returned", publication_permission: "not-granted" });
+    const key = JSON.stringify(fields);
+    if (keys.has(key)) return;
+    if (typeof captured.record !== "function" || sinkPending >= LIMIT) return unavailable();
+    try {
+      const result = captured.record("instance_registry.consumer_shadow_observed", fields);
+      if (keys.size >= LIMIT) keys.delete(keys.values().next().value!);
+      keys.add(key);
+      sinkPending++;
+      void Promise.resolve(result).catch(() => {
+        // A rejected sink is unrecorded/unknown, not durable success. Allow a later consumer to retry this key.
+        keys.delete(key); unavailable();
+      }).finally(() => { sinkPending--; });
+    } catch {
+      // A throwing sink is unrecorded. SHADOW never converts it into a public error or effect gate.
+      unavailable();
+    }
+  };
+  const queue = (action: RegistryConsumerAction, target: ReturnType<typeof targetSnapshot>, threw: boolean, original: Promise<Bound>): void => {
+    if (closed) return;
+    if (pending.size >= LIMIT) { report(action, target, unknown("observation_capacity"), threw); return; }
+    const work = current(original, target).then(evidence => report(action, target, evidence, threw)).catch(() => {
+      // Unexpected observer failure still reports unknown, with no raw result, exception, bytes or private path.
+      report(action, target, unknown("observation_failed"), threw);
+    }).finally(() => pending.delete(work));
+    pending.add(work);
+  };
+  return Object.freeze({
+    observe: async <T>(action: RegistryConsumerAction, target: RegistryConsumerTarget, operation: () => T | Promise<T>): Promise<T> => {
+      const capturedTarget = targetSnapshot(target, captured.kind === "selected" ? captured.name : undefined);
+      if (held === undefined || retryNeeded) { held = read(); retryNeeded = false; }
+      const original = held;
+      let result: T;
+      try { result = await operation(); }
+      catch (error) { queue(action, capturedTarget, true, original); throw error; }
+      queue(action, capturedTarget, false, original); return result;
+    },
+    observeSync: <T>(action: RegistryConsumerAction, target: RegistryConsumerTarget, operation: () => T): T => {
+      const snapshot = targetSnapshot(target, captured.kind === "selected" ? captured.name : undefined);
+      try { const result = operation(); report(action, snapshot, unknown(snapshot.reason ?? "synchronous_seam"), false); return result; }
+      catch (error) { report(action, snapshot, unknown(snapshot.reason ?? "synchronous_seam"), true); throw error; }
+    },
+    settled: async (): Promise<void> => { await Promise.all([...pending]); },
+    close: (): void => { closed = true; controller.abort(); keys.clear(); },
+  });
+}
+
+export async function observeSelectedRegistry<T>(observer: SelectedRegistryObserver | undefined, action: RegistryConsumerAction,
+  target: RegistryConsumerTarget, operation: () => T | Promise<T>): Promise<T> {
+  return observer === undefined ? operation() : observer.observe(action, target, operation);
+}
