@@ -21,7 +21,7 @@
     - src/lib/plan.ts
     - CLAUDE.md
     - AGENTS.md
-    - doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md
+    - doctrine/plan-and-task-hygiene/
     - test/new-test-minters-place-the-test.test.ts
   status: queued
   priority: 2
@@ -54,7 +54,7 @@
        with sameTestFile (W1-T9862), so the shape survives the move.
     4. DOCTRINE. Add a CLAUDE.md headline under "Plan and task hygiene": "**A new test goes in the test/<folder>/ that
        `rmd test-place` computes from its imports — never directly under test/.** →
-       doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md". The body cites this task and
+       the new body page new-tests-go-in-their-computed-folder.md in the plan-and-task-hygiene doctrine section". The body cites this task and
        placeTest. Run `npm run agents-md`.
     New test flat in test/.
   acceptance:
