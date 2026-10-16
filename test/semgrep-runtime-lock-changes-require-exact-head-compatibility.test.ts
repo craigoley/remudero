@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {mkdtempSync,readFileSync,rmSync,mkdirSync,symlinkSync,unlinkSync,writeFileSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
@@ -34,7 +35,10 @@ function fixture(){
   pull_requests:[{number:11468,head:{sha:head},base:{sha:base,repo:{url:'https://api.github.com/repos/craigoley/remudero'}}}]};
  const job:any={id:55,run_id:44,run_attempt:1,head_sha:head,name:context,
   check_run_url:'https://api.github.com/'+prefix+'/check-runs/22',status:'completed',conclusion:'success',
-  steps:['Detect runtime lock changes','Set up pinned Python','Verify hash-locked install and dependency closure']
+  steps:['Detect runtime lock changes','Set up pinned Python','Create neutral private audit root',
+   'Download original artifacts without candidate execution','Audit original artifact metadata before candidate execution',
+   'Build only approved Peewee after original audit','Audit built Peewee metadata and destinations before install',
+   'Install only audited hash-bound wheel set','Verify installed pip closure and scanner bootstrap additionally']
    .map((name,i)=>({name,number:i+1,status:'completed',conclusion:'success'}))};
  const trusted:any={type:'file',path:workflow,sha:blob,size:4096},proposed:any={...trusted};
  const executed:any={data:{node:{__typename:'WorkflowRun',url:'https://github.com/craigoley/remudero/actions/runs/44',runAttempt:1,file:{path:workflow,
@@ -130,9 +134,9 @@ const mutations:[string,(f:ReturnType<typeof fixture>)=>void][]=[
  ['old associated head',f=>{f.run.pull_requests[0].head.sha=foreign;}],['missing PR association',f=>{f.run.pull_requests=[];}],
  ['ambiguous PR association',f=>{f.run.pull_requests.push(f.run.pull_requests[0]);}],
  ['foreign associated base',f=>{f.run.pull_requests[0].base.repo.url='https://api.github.com/repos/attacker/repo';}],
- ['missing steps',f=>{delete f.job.steps;}],['installation skipped',f=>{f.job.steps[2].conclusion='skipped';}],
- ['duplicate installation step',f=>{f.job.steps.push({...f.job.steps[2]});}],
- ['unfinished installation step',f=>{f.job.steps[2].status='in_progress';}],['invalid step number',f=>{f.job.steps[2].number=0;}],
+ ['missing steps',f=>{delete f.job.steps;}],['installation skipped',f=>{f.job.steps[7].conclusion='skipped';}],
+ ['duplicate installation step',f=>{f.job.steps.push({...f.job.steps[7]});}],
+ ['unfinished installation step',f=>{f.job.steps[7].status='in_progress';}],['invalid step number',f=>{f.job.steps[7].number=0;}],
  ['generation bound',f=>{for(let i=0;i<8;i++)f.checks.push({...f.runtime,id:30+i});}],
  ['missing workflow node',f=>{delete f.run.node_id;}],['malformed workflow node',f=>{f.run.node_id='bad" query';}],
  ['GraphQL errors',f=>{(f.executed as any).errors=[{message:'unavailable'}];}],
@@ -147,6 +151,18 @@ for(const [label,mutate] of mutations)test('runtime compatibility refuses '+labe
  const f=fixture();mutate(f);const result=readSecurityMergeDecisionSync(target,f.read);
  assert.equal(result.decision.state,'unknown');assert.equal(result.decision.mergeAllowed,false);
 });
+
+for(const name of ['Audit original artifact metadata before candidate execution',
+ 'Audit built Peewee metadata and destinations before install']){
+ for(const disposition of ['missing','skipped','duplicate'])test('runtime compatibility independently requires '+name+' '+disposition,()=>{
+  const f=fixture(),step=f.job.steps.find((s:any)=>s.name===name);
+  if(disposition==='missing')f.job.steps=f.job.steps.filter((s:any)=>s.name!==name);
+  else if(disposition==='skipped')step.conclusion='skipped';
+  else f.job.steps.push({...step});
+  assert.deepEqual(readSecurityMergeDecisionSync(target,f.read).decision,
+   {state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
+ });
+}
 
 test('a genuine incompatible runtime is blocked but compatibility does not waive security alerts',()=>{
  const f=fixture();f.runtime.conclusion=f.run.conclusion=f.job.conclusion='failure';
@@ -232,10 +248,24 @@ test('runtime workflow is unprivileged exact-head closure-only and never makes s
  const job=flow.jobs['runtime-compatibility'];assert.equal(job.name,context);assert.equal(job['timeout-minutes'],10);
  assert.equal(job['runs-on'],'ubuntu-24.04');assert.equal(job.permissions,undefined);
  assert.equal(job.steps[0].with.ref,'${{ github.event.pull_request.head.sha }}');assert.equal(job.steps[0].with['persist-credentials'],false);
- const install=job.steps.find((s:any)=>s.name==='Verify hash-locked install and dependency closure');
- assert.equal(install['continue-on-error'],undefined);assert.ok(install.run.includes('"$VENV/bin/python" -I -m pip check'));
- assert.ok(install.run.includes('"$VENV/bin/semgrep" --version'));assert.ok(install.run.includes('SemgrepCore.executable_path()'));
- assert.ok(install.run.includes('--require-hashes'));assert.ok(install.run.includes('--no-index'));
+ const auditor=readFileSync(new URL('../.github/semgrep/runtime-compatibility-audit.py',import.meta.url));
+ assert.equal(job.env.AUDITOR_SHA256,createHash('sha256').update(auditor).digest('hex'));
+ const phases=[['Download original artifacts without candidate execution','download'],
+  ['Audit original artifact metadata before candidate execution','original'],['Build only approved Peewee after original audit','build'],
+  ['Audit built Peewee metadata and destinations before install','built'],['Install only audited hash-bound wheel set','install'],
+  ['Verify installed pip closure and scanner bootstrap additionally','verify']];
+ let previous=-1;
+ for(const [name,phase] of phases){
+  const index=job.steps.findIndex((s:any)=>s.name===name),step=job.steps[index];
+  assert.ok(index>previous);previous=index;
+  assert.equal(step.env.AUDIT_PHASE,phase);assert.equal(step['continue-on-error'],undefined);
+  assert.ok(step.run.includes('python -I -S -'));assert.ok(step.run.includes('git("cat-file", "blob", blob)'));
+  assert.ok(step.run.includes('hashlib.sha256(raw).hexdigest() == expected'));
+  assert.ok(step.run.includes('os.execv(sys.executable'));
+ }
+ const code=auditor.toString();assert.ok(code.includes('"-m", "pip", "check"'));
+ assert.ok(code.includes('SemgrepCore.executable_path()'));assert.ok(code.includes('--require-hashes'));
+ assert.ok(code.includes('--no-index'));assert.ok(code.includes('scan_approved_peewee_sdist'));
  assert.equal(text.includes('security-events: write'),false);assert.equal(text.includes('secrets.'),false);
  assert.equal(text.includes('scripts/'),false);assert.equal(text.includes('semgrep scan'),false);
  for(const step of job.steps.filter((s:any)=>s.run)){
@@ -246,9 +276,9 @@ test('runtime workflow is unprivileged exact-head closure-only and never makes s
  assert.equal(producer.jobs.metadata.permissions.actions,'read');assert.equal(producer.jobs.metadata.steps[0].with.ref,'main');
 });
 
-test('real isolated Python stages only committed closed locks and rejects PR module shadowing and expanded inputs',t=>{
+test('real isolated Python stages only digest-bound committed auditor bytes and rejects PR module shadowing',t=>{
  const flow=parse(readFileSync(new URL('../.github/workflows/semgrep-runtime-compatibility.yml',import.meta.url),'utf8'));
- const install=flow.jobs['runtime-compatibility'].steps.find((s:any)=>s.name==='Verify hash-locked install and dependency closure');
+ const install=flow.jobs['runtime-compatibility'].steps.find((s:any)=>s.name==='Download original artifacts without candidate execution');
  const match=/<<'PY'\n([\s\S]*?)\nPY\n/.exec(install.run);assert.ok(match);
  const script=match[1],dir=mkdtempSync(join(tmpdir(),'rmd-runtime-inputs-')),repo=join(dir,'repo');
  t.after(()=>rmSync(dir,{recursive:true,force:true}));mkdirSync(repo);mkdirSync(join(repo,'.github','semgrep'),{recursive:true});
@@ -256,22 +286,23 @@ test('real isolated Python stages only committed closed locks and rejects PR mod
   env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null'}});
  const git=(args:string[])=>{const r=invoke('git',args);assert.equal(r.status,0,r.stderr);};
  git(['init','--quiet']);
- for(const name of ['build-requirements.txt','requirements.txt'])writeFileSync(join(repo,'.github','semgrep',name),
-  readFileSync(new URL('../.github/semgrep/'+name,import.meta.url)));
+ const auditor=join(repo,'.github','semgrep','runtime-compatibility-audit.py');
+ const trusted='import json,sys\nprint(json.dumps({"fixture":"STAGED_AUDITOR_FIXTURE","noSite":sys.flags.no_site,"isolated":sys.flags.isolated}))\n';
+ writeFileSync(auditor,trusted);const digest=createHash('sha256').update(trusted).digest('hex');
  const marker=join(repo,'shadow-ran');writeFileSync(join(repo,'pathlib.py'),'open("shadow-ran", "w").write("not isolated")\nraise RuntimeError("PR module executed")\n');
  const commit=()=>{git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','--quiet','--allow-empty','-m','fixture']);};
  commit();
- const stage=(isolated:boolean)=>{const out=mkdtempSync(join(dir,'out-'));
-  const r=invoke('python3',[...(isolated?['-I']:[]),'-',out,repo],script);return {...r,out};};
+ const stage=(isolated:boolean,expected=digest)=>{const out=mkdtempSync(join(dir,'out-'));
+  const current=invoke('git',['rev-parse','HEAD']).stdout.trim();
+  const r=invoke('python3',[...(isolated?['-I','-S']:[]),'-',current,expected,'download',out,repo,dir],script);return {...r,out};};
  const negative=stage(false);assert.notEqual(negative.status,0);assert.match(negative.stderr,/PR module executed/);
  assert.equal(readFileSync(marker,'utf8'),'not isolated');unlinkSync(marker);
  const positive=stage(true);assert.equal(positive.status,0,positive.stderr);
- for(const name of ['build-requirements.txt','requirements.txt'])assert.deepEqual(readFileSync(join(positive.out,name)),readFileSync(join(repo,'.github','semgrep',name)));
+ assert.deepEqual(JSON.parse(positive.stdout),{fixture:'STAGED_AUDITOR_FIXTURE',noSite:1,isolated:1});
  assert.throws(()=>readFileSync(marker),/ENOENT/);
- const lock=join(repo,'.github','semgrep','requirements.txt'),original=readFileSync(lock,'utf8');
- for(const invalid of [original+'-r extra.txt\n',original+'--index-url https://example.invalid\n',original.replace('semgrep==1.180.0','semgrep==1.181.0')]){
-  writeFileSync(lock,invalid);commit();const r=stage(true);assert.notEqual(r.status,0);assert.match(r.stderr,/AssertionError/);
- }
- writeFileSync(join(repo,'outside.txt'),original);unlinkSync(lock);symlinkSync('../../outside.txt',lock);commit();
- const linked=stage(true);assert.notEqual(linked.status,0);assert.match(linked.stderr,/committed regular file/);
+ writeFileSync(auditor,'raise RuntimeError("mutable checkout helper executed")\n');
+ assert.equal(stage(true).status,0,'uncommitted checkout bytes must not execute');
+ commit();const changed=stage(true);assert.notEqual(changed.status,0);assert.match(changed.stderr,/auditor differs from trusted workflow literal/);
+ writeFileSync(join(repo,'outside.txt'),trusted);unlinkSync(auditor);symlinkSync('../../outside.txt',auditor);commit();
+ const linked=stage(true);assert.notEqual(linked.status,0);assert.match(linked.stderr,/AssertionError/);
 });

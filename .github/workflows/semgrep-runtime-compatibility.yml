@@ -17,6 +17,10 @@ jobs:
     name: semgrep-runtime-compatibility
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # Trusted workflow literal binds committed auditor bytes without extra API reads.
+      AUDITOR_SHA256: aa120f0d2fb3426c0734f40ad2bca7ce98276847f22b2c936da8d6ce3fa5b296
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,9 +31,9 @@ jobs:
         id: scope
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
+          set -euo pipefail
           test "$(git rev-parse HEAD)" = "$HEAD_SHA"
           git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --name-only \
             "$BASE_SHA...$HEAD_SHA" -- .github/semgrep/requirements.txt \
@@ -37,7 +41,7 @@ jobs:
           if test -s "$RUNNER_TEMP/runtime-lock-changes"; then
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           else
-            echo 'Runtime locks unchanged; no dependency installation required.'
+            echo 'Runtime locks unchanged; explicit success without downloads/build/install.'
             echo 'changed=false' >> "$GITHUB_OUTPUT"
           fi
       - name: Set up pinned Python
@@ -46,64 +50,78 @@ jobs:
         with:
           python-version: "3.12.15"
           architecture: x64
-      - name: Verify hash-locked install and dependency closure
+      - name: Create neutral private audit root
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUDIT_ROOT="$(mktemp -d "${RUNNER_TEMP}/semgrep-audit.XXXXXX")"
+          echo "AUDIT_ROOT=$AUDIT_ROOT" >> "$GITHUB_ENV"
+      - name: Download original artifacts without candidate execution
         if: steps.scope.outputs.changed == 'true'
         shell: bash
         env:
-          NO_SQLITE: "1"
-          SEMGREP_SEND_METRICS: "off"
-          SEMGREP_ENABLE_VERSION_CHECK: "0"
-          GIT_CONFIG_GLOBAL: /dev/null
-          GIT_CONFIG_SYSTEM: /dev/null
-        run: |
-          INPUTS="$(mktemp -d "${RUNNER_TEMP}/semgrep-runtime-inputs.XXXXXX")"
-          python -I - "$INPUTS" "$GITHUB_WORKSPACE" <<'PY'
-          import hashlib, pathlib, re, subprocess, sys
-          output, repo = map(pathlib.Path, sys.argv[1:])
-          for filename in ("build-requirements.txt", "requirements.txt"):
-              path = ".github/semgrep/" + filename
-              def git(*args):
-                  return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(repo), *args], check=True, capture_output=True, timeout=15).stdout
-              record = git("ls-tree", "-z", "HEAD", "--", path)
-              assert re.fullmatch(rb"100644 blob [a-f0-9]{40}\t" + re.escape(path.encode()) + rb"\x00", record), "lock must be one committed regular file"
-              blob = record.split()[2].split(b"\t")[0].decode()
-              size = int(git("cat-file", "-s", blob))
-              assert 0 < size <= 131072, "lock size outside input bound"
-              data = git("cat-file", "blob", blob)
-              assert len(data) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + data).hexdigest() == blob
-              text = data.decode("ascii")
-              pins = {}
-              for line in text.splitlines():
-                  if not line.strip() or line.startswith("#"):
-                      continue
-                  pin = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*) --hash=sha256:([a-f0-9]{64})", line)
-                  assert pin, "lock admits only one closed version/hash pin per line; no includes, paths or options"
-                  name = re.sub(r"[-_.]+", "-", pin[1].lower())
-                  assert name not in pins, "duplicate normalized package"
-                  pins[name] = pin[2]
-              if filename == "build-requirements.txt":
-                  assert set(pins) == {"packaging", "pip", "setuptools", "wheel"}
-              else:
-                  assert pins.get("semgrep") == "1.180.0", "lock must match the currently trusted scanner recipe"
-              with (output / filename).open("xb") as sink:
-                  sink.write(data)
+          AUDIT_PHASE: download
+        run: &staged_auditor_phase |
+          set -euo pipefail
+          # Restage exact committed bytes for EACH phase. Never execute a mutable
+          # PR checkout helper or reuse an auditor a prior build could replace.
+          python -I -S - "$HEAD_SHA" "$AUDITOR_SHA256" "$AUDIT_PHASE" \
+            "$AUDIT_ROOT" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" <<'PY'
+          import hashlib, os, pathlib, re, subprocess, sys, tempfile
+          head, expected, phase, root, workspace, scratch = sys.argv[1:]
+          assert re.fullmatch(r"[a-f0-9]{40}", head) and re.fullmatch(r"[a-f0-9]{64}", expected)
+          assert phase in {"download", "original", "build", "built", "install", "verify"}
+          env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+          env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", workspace, *args],
+                                    env=env, check=True, capture_output=True, timeout=15).stdout
+          assert git("rev-parse", "HEAD").decode().strip() == head
+          path = ".github/semgrep/runtime-compatibility-audit.py"
+          record = git("ls-tree", "-z", head, "--", path)
+          assert re.fullmatch(rb"100644 blob [a-f0-9]{40}\t" + re.escape(path.encode()) + rb"\x00", record)
+          blob = record.split(b"\t", 1)[0].split()[2].decode()
+          size = int(git("cat-file", "-s", blob))
+          assert 0 < size <= 65536
+          raw = git("cat-file", "blob", blob)
+          assert len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob
+          assert hashlib.sha256(raw).hexdigest() == expected, "auditor differs from trusted workflow literal"
+          stage = pathlib.Path(tempfile.mkdtemp(prefix="semgrep-audit-code-", dir=scratch)) / "auditor.py"
+          with stage.open("xb") as sink:
+              sink.write(raw)
+              sink.flush()
+              os.fsync(sink.fileno())
+          os.execv(sys.executable, [sys.executable, "-I", "-S", str(stage), "--phase", phase,
+                                   "--root", root, "--workspace", workspace, "--head", head])
           PY
-          cd "$INPUTS"
-          VENV="$(mktemp -d "${RUNNER_TEMP}/semgrep-runtime.XXXXXX")"
-          python -I -m venv "$VENV"
-          "$VENV/bin/python" -I -m pip --isolated install \
-            --index-url https://pypi.org/simple --require-hashes \
-            --only-binary=:all: --no-deps --force-reinstall \
-            -r build-requirements.txt
-          "$VENV/bin/python" -I -m pip --isolated download \
-            --index-url https://pypi.org/simple --require-hashes \
-            --only-binary=:all: --no-binary=peewee --no-build-isolation \
-            --no-deps --dest "$VENV/artifacts" -r requirements.txt
-          "$VENV/bin/python" -I -m pip --isolated install \
-            --no-index --find-links "$VENV/artifacts" --no-cache-dir --require-hashes \
-            --only-binary=:all: --no-binary=peewee --no-build-isolation --no-deps \
-            --force-reinstall -r requirements.txt
-          "$VENV/bin/python" -I -m pip check
-          test "$("$VENV/bin/semgrep" --version)" = "1.180.0"
-          "$VENV/bin/python" -I -c 'import pathlib, subprocess, sys; from semgrep.semgrep_core import SemgrepCore; engine = pathlib.Path(SemgrepCore.executable_path()).resolve(); assert engine.is_relative_to(pathlib.Path(sys.prefix).resolve()); subprocess.run([str(engine), "-version"], check=True, timeout=15)'
-          echo 'Dependency closure verified. Findings and vulnerability policies are separate and unchanged.'
+      - name: Audit original artifact metadata before candidate execution
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: original
+        run: *staged_auditor_phase
+      - name: Build only approved Peewee after original audit
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: build
+        run: *staged_auditor_phase
+      - name: Audit built Peewee metadata and destinations before install
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: built
+        run: *staged_auditor_phase
+      - name: Install only audited hash-bound wheel set
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: install
+        run: *staged_auditor_phase
+      - name: Verify installed pip closure and scanner bootstrap additionally
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: verify
+        run: *staged_auditor_phase

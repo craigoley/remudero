@@ -66,7 +66,10 @@ export function* semgrepRuntimeMetadataRequests(input) {
   if (run.status !== 'completed' || run.conclusion !== check.conclusion) return unknown('semgrep-runtime-run-not-closed');
   if (check.conclusion === 'failure') return {state:'blocked',mergeAllowed:false,reason:'semgrep-runtime-incompatible-or-install-failed'};
   if (check.conclusion !== 'success') return unknown('semgrep-runtime-compatibility-not-successful');
-  for (const name of ['Detect runtime lock changes','Set up pinned Python','Verify hash-locked install and dependency closure']) {
+  for (const name of ['Detect runtime lock changes','Set up pinned Python','Create neutral private audit root',
+    'Download original artifacts without candidate execution','Audit original artifact metadata before candidate execution',
+    'Build only approved Peewee after original audit','Audit built Peewee metadata and destinations before install',
+    'Install only audited hash-bound wheel set','Verify installed pip closure and scanner bootstrap additionally']) {
     const steps = Array.isArray(job.steps) ? job.steps.filter(step => step.name === name) : [];
     if (steps.length !== 1 || !positive(steps[0].number) || steps[0].status !== 'completed' || steps[0].conclusion !== 'success')
       return unknown('semgrep-runtime-required-step-not-successful');
