@@ -32,6 +32,39 @@ not-granted. A digest is integrity evidence, not a private-source release decisi
 
 ## Bounded compatibility window
 
+### Optional run and sweep mode observations
+
+W1-T9572 adds `selectedRegistryMode` to the public configuration schema. Only an
+explicit `mode: shadow` opts into these observations; an environment variable
+alone does not enable them. The configured instance/path and supplied environment
+values are captured before asynchronous work. Genuine absence still uses the
+original legacy readers, default arm dependencies and effects without a selected
+read or receipt. This source change does not write or activate configuration.
+
+The run body retains its original binding through review and deferred arming.
+Sweep construction forwards it to ordinary and armed-idle physical arm, direct
+REST merge and queue dependencies. Asynchronous physical writes recheck after
+their existing security reads; synchronous-only seams report unknown fresh
+authority rather than installing a blocking adapter. Each redacted observation
+names the actual repository/PR target. A mismatched or unreadable target cannot
+borrow another repository's selected evidence. Changed, missing, malformed,
+unsupported, cancelled or unavailable evidence stays would-refuse, not selected
+live. The original digest is never silently replaced.
+
+These are immutable SHADOW observations of the actual unchanged legacy outcome,
+not effect permission. Existing genuine shadow-instance holds, owner/admin
+override, human/service scopes and normal review/CI/security remain independent.
+An observation sink failure cannot substitute its error for the operation's
+result or original exception. Publication permission is always not-granted.
+
+This does not qualify deployment, serve, pause/resume, heartbeat or every child
+process; those consumers still need separate compatibility and recovery evidence
+before private staging or selection. Isolated source/tests do not require a
+worker stop. Live compatible replacement requires separately approved affected
+instance draining; incompatible shared state, claims, credentials or config
+requires an approved full affected-writer stop, all workers only if all are
+affected. No scheduler, deployment or admission activation is included.
+
 ### Carried lifecycle fields
 
 W1-T9559 gives the selected reader and proposal writer one frozen field vocabulary
