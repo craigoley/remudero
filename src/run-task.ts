@@ -48667,7 +48667,6 @@ export function buildSweepHook(
     let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
-    // W1-T9124: this pass's review-input identities, for the daemon's stale-body visibility log.
     let thisPassReviewInputViews: NonNullable<SweepCycleOutcome["reviewInputViews"]> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
