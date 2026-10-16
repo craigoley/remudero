@@ -184,9 +184,9 @@ export type DependabotTitleFit =
   | { kind: "unfittable"; reason: string };
 
 const VERSION_TEXT = String.raw`v?\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?`;
-const SINGLE_BUMP_RE = new RegExp(String.raw`^(bump)\s+([^\s,]+)\s+from\s+(${VERSION_TEXT})\s+to\s+(${VERSION_TEXT})`, "i");
-const GROUP_BUMP_RE = /^(bump)\s+the\s+([\w./-]+)\s+group/i;
-const TITLE_CLAUSE_RE = /\s+(in the [\w./-]+ group|across \d+ director(?:y|ies)|in \/\S*|with \d+ updates?)/y;
+export const SINGLE_BUMP_RE = new RegExp(String.raw`^(bump)\s+([^\s,]+)\s+from\s+(${VERSION_TEXT})\s+to\s+(${VERSION_TEXT})`, "i");
+export const GROUP_BUMP_RE = /^(bump)\s+the\s+([\w./-]+)\s+group/i;
+export const TITLE_CLAUSE_RE = /\s+(in the [\w./-]+ group|across \d+ director(?:y|ies)|in \/\S*|with \d+ updates?)/y;
 
 export function overHeaderLimit(title: string): boolean {
   return checkCommitMessage(title).some((v) => v.rule === "header-max-length");
