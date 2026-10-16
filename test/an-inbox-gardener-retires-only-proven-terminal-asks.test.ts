@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, renameSync, chmodSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { hostname } from "node:os";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -10,7 +10,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import { readPersistedInbox, triageFleetLane } from "../src/lib/fleet-lane.js";
 import { runInboxGardener, defaultInboxGardenerPorts, inboxGardenerSemanticInput, readInboxGardenerLedger, INBOX_GARDENER_SOURCE_LIMITS, type InboxGardenerPack, type InboxGardenerPorts } from "../src/lib/inbox-gardener.js";
 import { readInboxGardenerStore, inboxGardenerPath, inboxSemanticDigest, inboxProposalRevision, validInboxTerminalProof, inboxRetirementFor,
-  restoreInboxRetirement, writeInboxGardenerStore, proofDebtPopulationPermit, mechanicalAskPurpose, inboxGardenerMode, type InboxGardenerScope, type InboxTerminalProof } from "../src/lib/inbox-retirement.js";
+  restoreInboxRetirement, writeInboxGardenerStore, proofDebtPopulationPermit, stampVerificationAsk, mechanicalAskPurpose, inboxGardenerMode, type InboxGardenerScope, type InboxTerminalProof } from "../src/lib/inbox-retirement.js";
 import { mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
 import { parseProposalRegistry, anchorFingerprint, updateProposalRegistry, type Proposal } from "../src/lib/inbox.js";
 import { buildInboxDismissalAudit } from "../src/lib/inbox-dismissal-audit.js";
@@ -102,6 +102,9 @@ test("the inbox gardener retires a proven terminal ask once and can restore it",
 
 test("the inbox gardener preserves a held security ask when source evidence is partial", async t => {
   const f = await fixture(t);
+  updateProposalRegistry(f.registry, all => all.map(p => p.id === "verify-human:W1-T216" ? stampVerificationAsk(p, "W1-T216") : p));
+  mintProofDebtProposals([{ taskId: "W1-T216", criterionIndex: 0, cause: "grep-path-absent", claim: "held drill proof", proof: "grep: held in src/missing.ts" }], () => "plan/tasks.yaml", f.registry,
+    { sourcePermit: proofDebtPopulationPermit(loadPlan(f.planPath).tasks.filter(task => task.id === "W1-T216")) });
   const proposals = parseProposalRegistry(readFileSync(f.registry, "utf8"));
   proposals.push({ id: "ruling:budget", summary: "Spend tenant budget and enable irreversible policy", evidenceAnchors: [] });
   writeFileSync(f.registry, JSON.stringify({ proposals }));
@@ -112,6 +115,7 @@ test("the inbox gardener preserves a held security ask when source evidence is p
     const result = await f.run({ capture: async () => pack }); assert.equal(result.state, "source_partial");
   }
   const result = await f.run(); assert.equal("retired" in result && result.retired, 1, "same corpus has a live positive terminal control");
+  await f.run();
   await f.refresh();
   for (const id of ["verify-human:W1-T216", "ruling:budget"]) {
     assert.notEqual(f.source().classifications.find(c => c.proposalId === id)?.state, "retired");
@@ -175,7 +179,7 @@ test("failed and in-flight residual judgment remains triage without repeated spe
 test("independent later outcomes preserve the original retirement anchor and restore alone is not false dismissal", async t => {
   const f = await fixture(t); await f.run(); const original = f.store().events[0]!;
   await f.run(); assert.equal(f.store().events.length, 1, "the retirement itself is not an independent outcome");
-  f.advance(); await f.run(); await f.run(); const events = f.store().events;
+  await f.refresh(); f.advance(); await f.run(); await f.run(); const events = f.store().events;
   assert.equal(events.length, 2); assert.equal(events[1]?.receipt.kind, "outcome");
   assert.equal(events[1]?.receipt.snapshotKey, original.receipt.snapshotKey); assert.equal(events[1]?.receipt.retirementId, original.receipt.id);
   const input = { proposalId: ID, retirementId: original.receipt.id, snapshotKey: original.receipt.snapshotKey, taskId: TASK, reason: "Review again" };
@@ -358,4 +362,51 @@ test("the real default instance source admits only a same-key restore and replay
   f.mismatch(false); const accepted = await f.restore(input); assert.equal(accepted.status, 200);
   f.mismatch(true); const replay = await f.restore(input); assert.equal(replay.status, 200); assert.deepEqual(replay.body.receipt, accepted.body.receipt);
   await f.refresh(); assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.retirement?.state, "restored_for_review");
+});
+
+
+test("defined but invalid terminal proof never crosses the retirement guard", async t => {
+  const f = await fixture(t), candidate = (await f.ports().capture()).candidates.find(c => c.proposal.id === ID)!;
+  const ports = f.ports(); await ports.capture();
+  const proof = await ports.proof(candidate); assert.equal(proof?.kind, "merged-task");
+  for (const patch of [{ state: "CLOSED" }, { repository: "foreign/core" }, { body: "no trailer" }, { implementationCredit: false }, { headSha: "bad" }]) {
+    const invalid = { ...proof!, ...patch } as InboxTerminalProof;
+    const result = await f.run({ proof: async () => invalid });
+    assert.equal("retired" in result && result.retired, 0, JSON.stringify(patch)); assert.equal(f.store().events.length, 0);
+  }
+  const positive = await f.run(); assert.equal("retired" in positive && positive.retired, 1);
+});
+
+test("default merged-credit proof refuses plan-only foreign and removed credit with a positive control", async t => {
+  const f = await fixture(t); let mode = "plan-only";
+  const ports = () => defaultInboxGardenerPorts({ stateDir: f.state, scope: f.scope, planPath: f.planPath, codeSha: "c".repeat(40), githubJson: async args => {
+    if (args[1] === "view") return { files: [{ path: mode === "plan-only" ? "plan/tasks.yaml" : "src/lib/inbox.ts" }] };
+    return [{ number: 1200, url: `https://github.com/${f.repository}/pull/1200`, state: "MERGED", headRefName: mode === "foreign" ? "run-W1-T9999-1234" : `run-${TASK}-1234`, headRefOid: "a".repeat(40), mergeCommit: { oid: "b".repeat(40) }, body: `Remudero-Task: ${TASK}` }];
+  } });
+  let p = ports(), candidate = (await p.capture()).candidates.find(c => c.proposal.id === ID)!;
+  // A plan-only proof is refused for the actual implement task, even though its trailer matches.
+  assert.equal(await p.proof(candidate), undefined);
+  mode = "foreign"; p = ports(); await p.capture(); assert.equal(await p.proof(candidate), undefined);
+  mode = "positive"; p = ports(); await p.capture(); assert.equal((await p.proof(candidate))?.kind, "merged-task");
+  writeFileSync(join(f.root, "plan", "credit-overrides.yaml"), JSON.stringify([{ task: TASK, pr: 1200, action: "remove-credit", author_class: "operator", reason: "wrong credit" }]));
+  p = ports(); await p.capture(); assert.equal(await p.proof(candidate), undefined);
+  const bounded = defaultInboxGardenerPorts({ stateDir: f.state, scope: f.scope, planPath: f.planPath, codeSha: "c".repeat(40), githubJson: async () => Array(10).fill({}) });
+  await bounded.capture(); await assert.rejects(bounded.proof(candidate), /bound/);
+});
+
+
+test("the default GitHub transport shells out to an owned offline executable", async t => {
+  const f = await fixture(t), bin = join(f.root, "bin"); mkdirSync(bin);
+  const list = JSON.stringify([{ number: 1200, url: `https://github.com/${f.repository}/pull/1200`, state: "MERGED", headRefName: `run-${TASK}-1234`, headRefOid: "a".repeat(40), mergeCommit: { oid: "b".repeat(40) }, body: `Remudero-Task: ${TASK}` }]);
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\ncase "$1 $2" in\n  'pr list') printf '%s' '${list}' ;;;\n  'pr view') printf '%s' '{"files":[{"path":"src/lib/inbox.ts"}]}' ;;;\n  *) exit 7 ;;;\nesac\n`.replaceAll(";;;", ";;"), { mode: 0o755 });
+  const names = ["PATH", "GH_TOKEN", "RMD_GH_TRANSPORT_FLOOR", "RMD_GH_CACHE_HOME"] as const;
+  const old = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  process.env.PATH = `${bin}:${process.env.PATH}`; process.env.GH_TOKEN = "offline-owned-executable";
+  process.env.RMD_GH_TRANSPORT_FLOOR = "advisory"; process.env.RMD_GH_CACHE_HOME = join(f.state, "gh-cache");
+  t.after(() => { for (const name of names) { if (old[name] === undefined) delete process.env[name]; else process.env[name] = old[name]; } });
+  const ports = defaultInboxGardenerPorts({ stateDir: f.state, scope: f.scope, planPath: f.planPath, codeSha: "c".repeat(40) });
+  const candidate = (await ports.capture()).candidates.find(c => c.proposal.id === ID)!;
+  assert.equal((await ports.proof(candidate))?.kind, "merged-task");
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+  await assert.rejects(ports.proof(candidate), /failed|exit|Command|7/);
 });
