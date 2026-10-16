@@ -21,7 +21,9 @@
     READ at origin/main ba6e16276 (2026-10-16):
     - #11968 (a Dependabot bump of the OSV Scanner reusable workflow) opened with a 162-character auto-generated
       title. `.github/workflows/pr-title-lint.yml` job `commitlint` went red on header-max-length and stayed red until
-      a hand retitle on 10-15. #12322 exempted Dependabot in commitlint.config.mjs (PR_TITLE_AUTHOR); the operator
+      a hand retitle on 10-15. Read 15:34Z: #11968 is still open as "chore(deps): bump OSV Scanner reusable workflow
+      to 2.7.0" (56 chars). The hand title dropped `from <a>`, so `parseDependabotBumpFacts` reads no fact from it.
+      That is the failure a fit must avoid. #12322 exempted Dependabot in commitlint.config.mjs (PR_TITLE_AUTHOR); the operator
       rejected that and #12343 reverts it. The limit is `CONVENTIONAL_LIMITS.headerMaxLength` in
       src/lib/commit-message.ts, the mirror of @commitlint/config-conventional.
     - THE RE-TRIGGER ALREADY EXISTS: pr-title-lint.yml runs `on: pull_request: types: [opened, synchronize, reopened,
