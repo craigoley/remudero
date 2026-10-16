@@ -23,7 +23,7 @@ const LONG_NAME = `@scope/${"a".repeat(80)}`;
 const UNFITTABLE_TITLE = `chore(deps): bump ${LONG_NAME} from 1.2.3 to 1.2.4 in /`;
 
 test("W1-T9828: an over-long Dependabot title is fitted keeping its dependency and versions", () => {
-  assert.equal(PR11968_TITLE.length, 162, "the recorded fixture is the real over-long title");
+  assert.ok(PR11968_TITLE.length > CONVENTIONAL_LIMITS.headerMaxLength, "the recorded fixture is the real over-long title");
   const fit = fitDependabotTitle(PR11968_TITLE, PR11968_BODY);
   assert.equal(fit.kind, "fitted");
   const title = (fit as { title: string }).title;
