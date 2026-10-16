@@ -19,9 +19,9 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { serveCommand, benchmarkAaReadinessRuntime, buildInboxDraftSpawnArgs, lintPlanCommand, main } from "../src/run-task.js";
+import { serveCommand, benchmarkAaReadinessRuntime, buildInboxDraftSpawnArgs, lintPlanCommand, main, approveCommand } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { inboxDraftExampleFragmentYaml } from "../src/lib/inbox.js";
+import { inboxDraftExampleFragmentYaml, composeStampLine, fileRatificationDraft, fileRatificationBatch, RatificationDraftRefusedError } from "../src/lib/inbox.js";
 import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -52,6 +52,45 @@ function instance(serve?: { host?: string; port?: number }): { home: string; roo
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT, serve }));
   return { home, root };
 }
+
+test("selected real approve command scopes single and batch fileability adapters without publication", async (t) => {
+  const { home, root } = instance(), selectedPath = join(home, "selected.yaml"), state = join(root, "state");
+  t.after(() => rmSync(home, { recursive: true, force: true })); mkdirSync(state, { recursive: true });
+  writeFileSync(selectedPath, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
+  const config = JSON.parse(readFileSync(join(home, ".config", "remudero", "config.json"), "utf8"));
+  const plan = join(home, "tasks.yaml"); writeFileSync(plan, "[]\n");
+  const ids = ["P-selected-approval-a", "P-selected-approval-b"];
+  const proposals = JSON.stringify({ proposals: ids.map(id => ({ id, summary: "qualification only", evidenceAnchors: [] })) });
+  writeFileSync(join(state, "inbox-proposals.json"), proposals);
+  writeFileSync(join(state, "inbox-drafts.json"), JSON.stringify(Object.fromEntries(ids.map((id, index) => [id, {
+    proposalId: id, fragmentYaml: inboxDraftExampleFragmentYaml().replace("Tighten the empty-input guard in parseTasksFromYaml", `Qualify xenolith riverbed alpenglow ${index ? "borealis" : "albedo"}`),
+    stampLine: composeStampLine(id, "qualification only", ["NEW-1"]), anchorFingerprint: "",
+  }]))));
+  const quiet = t.mock.method(console, "error", () => {}); t.after(() => quiet.mock.restore());
+  const trappedFs = { mkdirSync: () => assert.fail("invalid draft must not create a directory"),
+    writeFileSync: () => assert.fail("invalid draft must not write"), readFileSync: () => "" };
+  for (const batch of [false, true]) for (const enabled of [false, true]) {
+    writeFileSync(join(state, "ledger.ndjson"), "");
+    config.selectedRegistryMode = enabled ? { mode: "shadow", instanceName: "fixture", registryPath: selectedPath } : undefined;
+    let entered = 0;
+    const gateway = { createRatificationBranch: (payload: Parameters<typeof fileRatificationDraft>[1]) => {
+      entered++; fileRatificationDraft(root, { ...payload, fragmentYaml: "not valid: [" }, trappedFs, join); return "unreachable";
+    }, openPlanPr: () => assert.fail("qualification cannot open a PR") };
+    const batchGateway = { createRatificationBranch: (payloads: readonly Parameters<typeof fileRatificationDraft>[1][]) => {
+      entered++; fileRatificationBatch(root, payloads.map(payload => ({ ...payload, fragmentYaml: "not valid: [" })),
+        () => assert.fail("qualification cannot mint"), trappedFs, join); return "unreachable";
+    }, openPlanPr: () => assert.fail("qualification cannot open a PR") };
+    await assert.rejects(approveCommand(batch ? ids : ids.slice(0, 1), { config, planPath: plan, gateway, batchGateway }), RatificationDraftRefusedError);
+    assert.equal(entered, 1, "the actual command must reach its selected fileability adapter, not refuse classification first");
+    const rows = readFileSync(join(state, "ledger.ndjson"), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
+    const observed = rows.filter(row => row.step === "instance_registry.consumer_shadow_observed");
+    assert.equal(observed.length, enabled ? 1 : 0, "real single/batch command invocation must own the context even with an alternative filing adapter");
+    assert.ok(observed.every(row => row.action === "inbox-discovery" && row.selected_state === "unknown" && row.publication_permission === "not-granted"));
+    assert.ok(!JSON.stringify(observed).includes(selectedPath));
+    assert.equal(rows.some(row => row.step === "ratify.approved"), false);
+    assert.equal(readFileSync(join(state, "inbox-proposals.json"), "utf8"), proposals, "refusal retains the human's pending proposals");
+  }
+});
 
 test("selected loaded CLI config reaches benchmark delayed draft evaluation and actual offline lint without activation", async (t) => {
   const { home, root } = instance(), repo = gitRepo({ kind: "selected-cli-lint" });
