@@ -43,7 +43,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import { readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
-import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
+import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions, type SelectedRegistryObserver, type RegistryConsumerTarget } from "./selected-registry-consumers.js";
 import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
@@ -1966,10 +1966,11 @@ export type HostRegistryState = InstancesHostRegistryState;
  * W1-T5056: while the `instances` view serves, the answer is that body's projection and reads no file.
  */
 export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches" | "autoMode">;
-  selectedRegistryObserver?: SelectedRegistryObserver };
+  selectedRegistryObserver?: SelectedRegistryObserver; selectedRegistryTarget?: RegistryConsumerTarget };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
   const selectedRegistryObserver = deps.selectedRegistryObserver;
+  const selectedRegistryTarget = deps.selectedRegistryTarget && { ...deps.selectedRegistryTarget };
   const selectedInput = deps.selectedRegistry === undefined ? undefined : {
     ...deps.selectedRegistry,
     ...(deps.selectedRegistry.requiredCapabilities ? { requiredCapabilities: [...deps.selectedRegistry.requiredCapabilities] } : {}),
@@ -1989,7 +1990,7 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     method: "GET",
     path: "/v1/registry",
     scope: "read",
-    handler: (_req, res) => observeSelectedRegistry(selectedRegistryObserver, "serve-registry", {}, async () => {
+    handler: (_req, res) => observeSelectedRegistry(selectedRegistryObserver, "serve-registry", selectedRegistryTarget ?? {}, async () => {
       if (selectedInput !== undefined) {
         const selected = await readSelectedInstanceRegistry(selectedInput, deps.selectedRegistryIO);
         if (selected.kind === "unknown" || selected.kind === "refused") {
@@ -3072,6 +3073,7 @@ function assembleServeRoutes(
     buildRegistryRoute({
       ...deps.registry,
       selectedRegistryObserver,
+      selectedRegistryTarget: { instanceName: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository },
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       ...(readModel ? { readModel } : {}),
     }),

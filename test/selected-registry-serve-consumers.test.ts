@@ -246,6 +246,7 @@ test("selected real serve CLI forwards loaded opt-in but environment alone never
         else {
           assert.ok(receipt, "the actual CLI loaded config must reach production composition");
           assert.equal(receipt.fields.target_instance, "core", "observe the actual serving instance, not configured boot text");
+          assert.equal(receipt.fields.selected_state, "absent", "the selected fixture is not the actual serving core identity");
           assert.equal(receipt.fields.publication_permission, "not-granted");
           assert.ok(!JSON.stringify(receipt).includes(f.path));
         }

@@ -42248,6 +42248,9 @@ export async function serveCommand(
   const supervised = supervisedRole(process.env);
   const channel = supervised && (deps.generation ?? processChannel());
   const server = await buildReadyServeServer({
+    selectedRegistryObservation: config.selectedRegistryMode?.mode === "shadow" ? {
+      settings: { ...config.selectedRegistryMode }, input: { envPath: process.env.RMD_INSTANCE_REGISTRY }, record: log,
+    } : undefined,
     ...(channel ? { generation: { requestHandoff: (detail) => channel.send({ ...detail, type: GENERATION_MESSAGES.handoffRequest }) } } : {}),
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     board: boardDeps,
