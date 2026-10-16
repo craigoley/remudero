@@ -698,6 +698,31 @@ async function driveMigrationDepReview(opts: {
   };
 }
 
+test("W1-T9689 dep review selects current attempts without reviving superseded runs", async (t) => {
+  const old = { name: "ci-gate", conclusion: "FAILURE", status: "COMPLETED",
+    startedAt: "2026-10-15T10:00:00Z", completedAt: "2026-10-15T10:01:00Z", checkRunId: 101, workflowId: 5, workflowRunId: 10 };
+  const newer = { ...old, conclusion: "SUCCESS", startedAt: "2026-10-15T11:00:00Z",
+    completedAt: "2026-10-15T11:01:00Z", checkRunId: 102, workflowRunId: 11 };
+  const cases = [
+    { label: "newer same-producer success", checks: [old, newer] },
+    { label: "late old-run rerun", checks: [newer, { ...old, checkRunId: 103,
+      startedAt: "2026-10-15T12:00:00Z", completedAt: "2026-10-15T12:01:00Z" }] },
+    { label: "equal-time numeric check ID", checks: [old, { ...old, checkRunId: 102, conclusion: "SUCCESS" }] },
+    { label: "commit statuses", checks: [
+      { context: "ci-gate", state: "FAILURE", startedAt: "2026-10-15T10:00:00Z" },
+      { context: "ci-gate", state: "SUCCESS", startedAt: "2026-10-15T11:00:00Z" },
+    ] },
+  ];
+  for (const row of cases) await t.test(row.label, async () => {
+    const r = await driveMigrationDepReview({ title: PR80_TITLE, body: PR80_BODY, diff: PR80_DIFF, checks: row.checks });
+    try {
+      assert.equal(r.code, 0, "the actual command must not revive a superseded red");
+      assert.equal(r.armCalls.length, 1); assert.equal(r.statusPosts[0]?.state, "success");
+      assert.equal(r.mutations.closes.length, 0, "ordinary minor/patch flow never closes the PR");
+    } finally { rmSync(r.tmp, { recursive: true, force: true }); }
+  });
+});
+
 test("depReviewCommand posts verified pin-only status with a lane-specific decision revision", async () => {
   const r = await driveMigrationDepReview({
     prNumber: 8020,
