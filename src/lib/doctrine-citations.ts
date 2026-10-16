@@ -6,11 +6,13 @@
  * citation is. Pure: the caller reads the checkout. #12389 filed a shard citing the page its build creates, and
  * main went red at merge.
  */
-const DOCTRINE_PATH_RE = /doctrine\/[a-z0-9-]+\/[a-z0-9._-]+\.md/g;
+/** One cited body path: a section directory, then a page. */
+export const DOCTRINE_PATH_RE = /doctrine\/[a-z0-9-]+\/[a-z0-9._-]+\.md/;
 
 /** Paths into a real section only: `doctrine/x/y.md` in a shard is an example, not a citation. */
 export function citedDoctrinePaths(texts: readonly string[], sections: ReadonlySet<string>): Set<string> {
-  return new Set(texts.flatMap((t) => t.match(DOCTRINE_PATH_RE) ?? []).filter((p) => sections.has(p.split("/")[1]!)));
+  const every = new RegExp(DOCTRINE_PATH_RE.source, "g");
+  return new Set(texts.flatMap((t) => t.match(every) ?? []).filter((p) => sections.has(p.split("/")[1]!)));
 }
 
 export function unresolvedDoctrineCitations(
