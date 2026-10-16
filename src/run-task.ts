@@ -24023,8 +24023,8 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
 async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const readChecks = deps.selectedChecksRead ?? (deps.gh === undefined ? ghJsonAsync : undefined);
-  const view = await (deps.gh ?? ghJsonAsync)([
+  const readChecks = deps.selectedChecksRead ?? (deps.gh === undefined ? (args: string[]) => ghJsonAsync(args) : undefined);
+  const view = structuredClone(await (deps.gh ?? ghJsonAsync)([
     "pr",
     "view",
     prArg,
@@ -24032,7 +24032,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     slug,
     "--json",
     "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
-  ]) as {
+  ])) as {
     number: number;
     url: string;
     title: string;
