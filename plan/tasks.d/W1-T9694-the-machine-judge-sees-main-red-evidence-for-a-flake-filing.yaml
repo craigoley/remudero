@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: #12073 (fc5515cac) released W1-T9668 at verify: auto; #12091 retires it by hand"
   plan_refs: [W1-T9551, W1-T6406, W1-T9042, W1-T8830, W1-T6024, W1-T5350, W1-T9668]
   files: [src/lib/machine-filing-judge.ts, src/lib/flake-incident-gardener.ts, src/run-task.ts, test/the-machine-judge-sees-main-red-evidence-for-a-flake-filing.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a released flake incident sends the fleet to pin an intermittent cause that does not exist
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15 (fan-out R1/R2): W1-T7532 and W1-T7765 queued at verify: auto for census reds their own PRs caused"
   plan_refs: [W1-T6406, W1-T2969, W1-T2809, W1-T9551, W1-T9694, W1-T7532, W1-T7765, W1-T7269]
   files: [src/lib/flake-incident-gardener.ts, src/lib/ci-parity.ts, test/a-tree-walk-red-a-pr-causes-is-never-a-flake-incident.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a PR-caused census red filed as a flake sends the fleet to pin an intermittent cause that does not exist (W1-T7532 and W1-T7765, retired in the same PR)
   attempts: 0
   rationale: |
