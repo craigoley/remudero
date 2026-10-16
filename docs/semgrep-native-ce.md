@@ -71,8 +71,10 @@ install destination. A same-content `.data` alias or different destination is no
 the reviewed member. No general startup-hook, foreign-metadata, namespace, tool,
 stdlib, collision, dependency or RECORD guard is disabled.
 
-The 117-case source inventory retains the original 107 controls and adds ten exact
-layout controls. Synthetic tuple controls are not original-artifact proof; real
+The initial 117-case layout inventory retained the original 107 controls and added
+ten exact layout controls. The complete inventory now contains 168 literal controls,
+including metadata declaration and trusted source-recipe controls. Synthetic tuple
+controls are not original-artifact proof; real
 approved-archive positives and wrong-owner/version/hash/path/body/destination
 negatives must be retained separately. Source controls do not establish installed
 closure, scanner operation, Python 3.12.15 qualification or pilot activation.
@@ -150,6 +152,29 @@ literal test identity is retained, and source staging, policy-change detection a
 receipt verification include the module. No source-size limit is increased.
 References: [core metadata](https://packaging.python.org/en/latest/specifications/core-metadata/)
 and [PEP 794](https://peps.python.org/pep-0794/).
+
+## Trusted source-recipe staging, before lock adoption
+
+The compatibility workflow stages four regular, committed first-party files for
+every phase: the auditor, `runtime_source_recipe.py`, source assembler and policy.
+Each is checked against its independent workflow SHA256 before execution; unit
+controls additionally bind their complete source inventory. A mutable checkout,
+symlink, wrong digest or unknown recipe cannot replace those committed bytes.
+
+The added recipe accepts only the reviewed local distribution and MCP 1.30.0 pins.
+Source assembly occurs in the isolated parent, after checking the recorded Linux
+x86_64, CPython 3.12.15 and zlib 1.3 profile. The exact whole-wheel hash must match
+before the wheel joins the original-artifact population. Raw TLS acquisition is
+separate from inert assembly. Newly created build/runtime environments have private
+directory entries; existing entries and their permissions are never repaired or reused.
+
+This staging does not modify either lock or the Scan workflow, and does not resolve
+the current committed Semgrep/MCP incompatibility by itself. Merge the trusted
+workflow staging before a separate lock/Scan adoption PR. Original and built
+metadata audits, offline hash installation, standard `pip check` and installed
+version/engine checks remain mandatory. Source controls, relocated private Python
+checks and inert artifact audits do not qualify the production runner, MCP startup,
+HTTP authentication, repository scans or the pilot.
 
 ## Deadline-aware native author validation
 
