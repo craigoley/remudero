@@ -4858,6 +4858,11 @@ export async function refreshStaleRollupAfterRefusal(
 }
 
 /** W1-T6404's own precondition: only a head GitHub reports blocked AND mergeable is refreshed. */
+/** W1-T9913: an armed head GitHub still blocks is re-reviewed at the same head, so a stale event can be refreshed. */
+export function depReviewDedupStandsAside(pr: Pick<OpenPrView, "autoMergeArmed" | "mergeableState">): boolean {
+  return pr.autoMergeArmed === true && pr.mergeableState === "blocked";
+}
+
 export function staleRollupRefreshApplies(pr: Pick<OpenPrView, "mergeable" | "mergeableState">): boolean {
   return pr.mergeableState === "blocked" && pr.mergeable === true;
 }
@@ -6728,6 +6733,13 @@ export function classifyRollupSupersession<T extends RollupCheckEntry>(rollup: r
     return [{ entry, supersededBy, pendingRerun: !REQUIRED_CHECK_OK.has(s) && !REQUIRED_CHECK_FAIL.has(s) }];
   });
   return { latest, superseded };
+}
+
+/** W1-T9913 — check names whose dropped failure is outranked by a newest run that PASSED, never by a red or a pending one. */
+export function supersededRedsNowPassing(rollup: readonly RollupCheckEntry[]): string[] {
+  const state = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+  return [...new Set(classifyRollupSupersession(rollup).superseded
+    .filter((r) => REQUIRED_CHECK_OK.has(state(r.supersededBy))).map((r) => r.entry.name ?? r.entry.context ?? ""))];
 }
 
 /** W1-T4105 — what a fix worker was sent against: the PR head and the check(s) it must fix. */
@@ -17750,7 +17762,7 @@ export async function runSweep(
         }
         break;
       case "dep-review":
-        alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`);
+        alreadyDone = prior.depReviewed.has(`${pr.prNumber}@${pr.headSha}`) && !depReviewDedupStandsAside(pr);
         // W1-T2427: names the TERMINAL-outcome dedup specifically, because a `hold` deliberately
         // does NOT dedup (see `priorActionsFromLedger`'s own dep-review arm) — so "deduped" here
         // is a positive statement about the prior outcome, never a silent skip.
