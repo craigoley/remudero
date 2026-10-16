@@ -16,6 +16,14 @@ the identical layout under an alternate absolute root for testing.
 
 Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 
+The installer also installs `cache-reclaim.py` and `retire-legacy-sweeper.py` in
+both layouts. `--retire-legacy-sweeper` is an explicit additional installer option,
+composable with `--shared`. It disables future launch admission only for the
+known `com.craigoley.disk-sweep` job after verifying its exact plist arguments,
+ownership and historical script hash. The plist is retained with a disabled
+suffix. It never stops a running process, changes cron entries, or retires an
+unknown/replaced job. Ordinary code-only installation does not change schedules.
+
 The scan includes `~/Remudero`, nested disposable checkouts below the protected
 operator checkout `~/Remudero/remudero`, `~/rmd-work`, and temporary roots. Git
 discovery is bounded to eight levels and reports incomplete scans. It never
@@ -50,6 +58,35 @@ unrecognized contents stay protected. Each file needs six hours of both mtime
 and ctime inactivity, with fresh process/CWD/open-file checks before removal.
 Cache roots and sibling fixtures/source/state stay in place. Delegated cache
 counts are logged separately from workspace-removal counts.
+
+The regular janitor additionally inspects this account's `.codex/work-artifacts`
+for exact ignored package duplicates and `.next/cache/turbopack` compiler data.
+Each invocation uses one account lock and serial probes. Inspection is bounded
+to 45 seconds, 500,000 entries and 2 GiB of content reads; budget exhaustion is
+a typed keep decision. Already admitted staging finishes or restores safely.
+Duplicate package removal requires equal complete byte/mode/symlink namespaces
+and an unchanged full payload anchor retained in place. Unique `.vite` results
+and `.rmd-dependency-seed.json` receipts remain at their original paths. Source,
+Git, dirty/unpublished changes, coverage evidence, compiled Next.js outputs and
+preview/action metadata never enter this cache-only removal set. Broken Git,
+warnings about missing object lenders, shared references, recent activity,
+unknown ownership and incomplete probes retain the candidate. The helper does
+not repair or infer lost Git metadata and makes no publication claim.
+
+The temporary cleaner delegates recognized `node-compile-cache` directories to
+the same helper. Only single-link, owned files with the observed Node cache
+header, hexadecimal name and version/architecture directory layout qualify.
+Old files need six hours of both mtime and ctime; fresh files and the cache root
+remain. Whole-cache process/CWD/open-file probes run before the bounded batch,
+and file/parent identities are rechecked before fd-bound staged unlinks. Unknown
+data or an absent helper has no generic deletion fallback.
+
+`cache-reclaim:` JSON receipts include inspection duration, bytes/entries read,
+per-target removal/retention reasons and filesystem free bytes before/after.
+Listed path allocation and net free-space change are separate measurements.
+Staging races restore data; a completed deletion whose final source verification
+is unavailable is reported as `removed-unverified` with a nonzero exit, never as
+a successful retention or certified removal.
 
 Fresh `git ls-remote` advertisements establish recoverability. Current heads/tags
 can prove ancestry when their commit objects are available locally; PR head refs

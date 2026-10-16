@@ -274,7 +274,9 @@ def workspace_guard(workspace, target, budget):
     rel = str(target.relative_to(workspace))
     tracked = git(workspace, "ls-files", "-z", "--", rel)
     ignored = git(workspace, "check-ignore", "-q", "--", rel)
-    if top.returncode or top.stdout.strip() != str(workspace) or tracked.returncode or tracked.stdout or ignored.returncode:
+    if (top.returncode or top.stderr.strip() or top.stdout.strip() != str(workspace)
+            or tracked.returncode or tracked.stderr.strip() or tracked.stdout
+            or ignored.returncode or ignored.stderr.strip()):
         raise Hold("git-provenance-unavailable")
     # No source publication claim is made: only duplicate generated data can go.
     for p, s in walk(workspace, budget, {workspace / ".git"}):
@@ -335,6 +337,8 @@ def references(home, candidates, budget):
 
 
 def remove_target(workspace, target, kind, metadata, budget, anchor=None):
+    if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+        raise Hold("fd-safe-removal-unavailable")
     packages = kind == "packages"
     stage = target.parent / (".rmd-cache-stage-" + uuid.uuid4().hex)
     before_read = budget.read_bytes

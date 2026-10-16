@@ -139,6 +139,7 @@ def deletion(path):
  original(path)
  p=pathlib.Path(path).parents[2]/'after-removal.txt'
  p.write_text('external source writer')
+deletion.avoids_symlink_attacks=original.avoids_symlink_attacks
 ns['shutil'].rmtree=deletion`);
     assert.equal(changed.status, 2, changed.stderr + changed.stdout); assert.match(changed.stdout, /removed-unverified/);
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
@@ -152,6 +153,8 @@ test("artifact cache probe errors retain data and never become successful deleti
     assert.equal(r.status, 0, r.stderr + r.stdout); assert.ok(existsSync(cache)); assert.match(r.stdout, /cwd-query-unavailable/);
     const direct = spawnSync("python3", ["-c", "import runpy,sys; ns=runpy.run_path(sys.argv[1]);\ntry:ns['command'](['__rmd_missing_command__'])\nexcept ns['Hold']:sys.exit(0)\nsys.exit(1)", script], { encoding: "utf8" });
     assert.equal(direct.status, 0, direct.stderr);
+    const unsupported = fx.run("ns['shutil'].rmtree=lambda path: None");
+    assert.equal(unsupported.status, 0, unsupported.stderr + unsupported.stdout); assert.ok(existsSync(cache)); assert.match(unsupported.stdout, /fd-safe-removal-unavailable/);
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 });
 
