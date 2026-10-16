@@ -78,8 +78,7 @@ test("selected real daemon draft batch retains its captured intent through the a
         assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
         assert.ok(!args.prompt.includes(selectedPath), "private intent cannot be added to an untrusted prompt");
         config.selectedRegistryMode = undefined; await Promise.resolve();
-        return { text: `=== FRAGMENT START ===\n${fragment}\n=== FRAGMENT END ===\nSTAMP: qualification only`,
-          blocks: [], sessionId: "private-draft-fixture", costUsd: 0, numTurns: 1, subtype: "success", stderr: "", isError: false, apiError: false } as WorkerResult;
+        return fakeWorkerResult(`=== FRAGMENT START ===\n${fragment}\n=== FRAGMENT END ===\nSTAMP: qualification only`);
       });
     assert.equal(calls, 1); assert.equal(outcome[0]?.ok, true);
     const selected = rows.filter(row => row.step === "instance_registry.consumer_shadow_observed");
