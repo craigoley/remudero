@@ -33,10 +33,9 @@
     action: escalate
     confidence: 0.88
     reasons:
-      - "The plan record is type \"recon\" with a report-only acceptance, so the described work is tracing and reporting on how declared files reach the staging step. It doesn't describe modifying behavior."
-      - "The acceptance criteria concern the three refusal sites in src/run-task.ts, the fix-lane callers, and whether W1-T4074 and W1-T7699 already cover each path. None of this touches secrets, credentials, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions."
-      - "The task is not asking for an operator-only decision. It only recommends follow-up tasks, and the operator reads the report. Each criterion has a stated demonstration, so the finding can be verified from the report."
-      - "The gates state is clean: filingTime is true, the author class is operator, and the evidence shows 2 of 2 declared files exist at the base. The family track record (3 merged, 1 declined, Beta mean 0.67) is mixed but not alarming. No actual change view was supplied, so this judgment rests on the description and files list only."
+      - "The plan record types this as a recon task whose acceptance criteria are all report outputs (refusal sites, caller table, coverage of W1-T4074 and W1-T7699), with nothing touching secrets, auth, deletion, merge/deploy policy, or irreversible actions."
+      - "It was filed by the operator and ratified via rmd approve. Both declared files exist at base, and the family track record is 3 merged and 1 declined (Beta mean 0.67), which is acceptable."
+      - "It only recommends follow-up tasks and requests no operator decision. Its findings are checkable from the report's line references, and the bounded change view shows no unusual shape."
       - "the judge said proceed, but W1-T9748: at verify: auto it fails lint (proof-dialect)"
-    judged_at: "2026-10-16T15:57:52.845Z"
-    pin: "4534d3b90e3474edd927f0461dc08caffe945567fb7b4fc6a35a8b87140f674d"
+    judged_at: "2026-10-16T17:04:29.782Z"
+    pin: "a19a37c0425841c269d3c9b03141e70ab5e3c0c478650f82d98a07871c801327"
