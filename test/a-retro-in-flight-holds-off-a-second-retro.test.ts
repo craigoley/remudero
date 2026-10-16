@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRO_BRANCH_PREFIX, type OpenPrRow } from "../src/lib/retro-open-pr-guard.js";
-import { resolveRepoRoot, serializedRetroCommand } from "../src/run-task.js";
+import { resolveRepoRoot, retroCommand } from "../src/run-task.js";
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { offlineGithub } from "./setup/offline-github.js";
@@ -52,7 +52,7 @@ async function driveRetro(
     try {
       exit = await withHealthyRetroProbeGh(() =>
         withLiveWritesAllowed(() =>
-          serializedRetroCommand(args, {
+          retroCommand(args, {
             github: offlineGithub(),
             openPrs: () => {
               fetched += 1;
