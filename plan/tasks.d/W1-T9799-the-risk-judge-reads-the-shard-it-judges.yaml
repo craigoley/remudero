@@ -1,0 +1,105 @@
+- id: W1-T9799
+  title: "THE RISK JUDGE IS ASKED WHETHER A CHANGE FITS THE PLAN AND IS NEVER SHOWN THE PLAN — PR #12219 (W1-T9087) had a review PASS and green checks, and the handed-off-head judge escalated it three times (#12262, #12279, #12288) at high / 0.60 because 'the plan context supplied here (taskId W1-T9087, taskType implement) does not itself mention auto-promotion', though the shard's origin is a verbatim operator approval and its design is the change; a corrected shard can never release it, because nothing judges an unchanged head again"
+  repo: remudero
+  depends_on: []  # W1-T7724 (merged) added the diff tier for an uncertain low; this adds the plan text and a re-judge on new input
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the plan evidence the risk judge is shown, and judging again when it changes
+  band_meaning: blast-radius
+  origin: "operator request 2026-10-16 11:25Z (get #12219 merged and fix the root cause); fan-out 2026-10-15/16 agent D3"
+  plan_refs: [W1-T9087, W1-T7724, W1-T5403, W1-T5523, W1-T2284, W1-T454, W1-T1031, W1-T970, W1-T5911, W1-T2244, W1-T100, W1-T9748]
+  files: [src/lib/risk-judge.ts, src/lib/sweep.ts, src/run-task.ts, test/the-risk-judge-reads-the-shard-it-judges.test.ts, test/risk-judge-description-is-the-defect.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 on the core daemon's ledger (host remudero, ~/rmd-state2/state, read-only and niced, the live
+    file and the three newest rotations). The `risk_judge.decision` row for #12219 head d94f20935 at 10:32:46Z reads
+    verdict high, confidence 0.6, evidence_tier description. Its first reason: "The description ties this to an
+    operator decision dated 2026-10-13, but the plan context supplied here (taskId W1-T9087, taskType implement) does
+    not itself mention auto-promotion, so the sanction rests on the description's own claim." The
+    `risk_judge.escalated` row follows at 10:33:15Z, issue #12288. Head 070e63b got the same judgment and opened #12279.
+    Control: the same reads return the decision and escalated rows for both heads.
+    The shard plan/tasks.d/W1-T9087-…yaml answers that reason. Its origin is "operator approval 2026-10-13 (verbatim:
+    …keep automated flow.)", and its design names shadow-then-enforce, promote after a clean whole boot cycle, and
+    demote on a lost child. The judge was never given that text.
+    WHAT THE JUDGE IS GIVEN, read on origin/main ec0eb2ce2 (symbols, not lines):
+      - `handedOffHeadRiskJudge` and runTaskBody's `riskJudgeInput` (src/run-task.ts) both build
+        `planContext: { taskId, taskType }`. W1-T2284 removed the duplicated title and left nothing else there.
+        `change.description` is the title plus the PR URL, and `change.files` is the shard's `files:`.
+      - `buildRiskJudgePrompt` (src/lib/risk-judge.ts) asks the judge for "coherence with the plan" and defines high
+        as "drifts from the plan". It renders PLAN CONTEXT from those two keys only.
+      - The diff STAT is already shown: the ACTUAL CHANGE section prints the REST change view's per-file +/- counts
+        (W1-T1031). The patch is shown only on W1-T7724's diff tier, which by design runs for an uncertain LOW. Its
+        test "a high-risk description verdict escalates without a diff re-judgment" pins that.
+      - `handedOffHeadAwaitingJudgment` (src/lib/sweep.ts) asks for a judgment only while no available decision row
+        exists at the head. `riskRefusalStands` refuses the arm while any `risk_judge.escalated` row exists at
+        pr@head, unless a capped override or an observed hand arm clears it. No input except a new head sha ever
+        produces a second judgment. Correcting or enriching the shard on main changes nothing, and a new head is
+        judged again on the same thin input. That is why #12219 escalated once per head.
+    NOT COVERED ELSEWHERE. Swept plan/ on origin/main and all 414 origin heads (28 have plan/ or risk-judge.ts diffs
+    against their merge base) for planContext and risk-judge-with-shard/origin/design/rationale text. Main reads 3
+    lines in W1-T2284 (the positive control); no open head adds any; no head's src diff touches planContext or
+    RiskJudgeInput. W1-T454 and W1-T2991 make the verdict honest about unread code. W1-T7724 adds the diff for an
+    uncertain low. W1-T9042 gives the MACHINE-FILING judge a filing's rationale, not the merge-time risk judge.
+    W1-T8864 re-judges open issues, not heads. None gives the risk judge the shard's own text or re-judges on it.
+    OVERLAP NOTE: W1-T100 (queued, monolith) routes blocked_ci to the ci-log fix path, and W1-T9748 (queued) traces
+    declared files to the staging step. Both declare src/lib/sweep.ts and src/run-task.ts. Neither touches the risk
+    judge's input or when it judges again, so the concerns are distinct.
+    NOT IN SCOPE, reported separately: whether an uncertain HIGH should also reach the diff tier. That would reverse a
+    W1-T7724 design point and its test, so it is an operator decision. Also out of scope: closing a superseded
+    escalation issue once a re-judgment proceeds.
+  design: |
+    No new count, timer or fixed size. The bound for the plan text is the judge mount's own input budget.
+    1. src/lib/risk-judge.ts: `riskJudgePlanContext(task, budgetChars)` returns the plan context both call sites pass.
+       It holds {taskId, taskType, origin, plan_refs, design, rationale} from the shard as loaded by loadPlan. The
+       shard's text is bounded by the budget the caller supplies (`riskJudgeDiffInputBudget(mount)` less the rest of the
+       rendered prompt, the seam W1-T7724 already uses). origin is kept whole, then design, then rationale, each cut
+       from its end. Any cut is named in the context (`plan_text_cut: {field: chars_kept_of_total}`), never silent. An
+       absent task gives {taskId, taskType} as today, plus `plan_text: "unavailable: <why>"`.
+       `buildRiskJudgePrompt` says the PLAN CONTEXT now carries the shard's own origin, rationale and design. The judge
+       weighs whether the CHANGE implements that design. An origin naming an operator approval sanctions the design,
+       not any change that cites it. The plan text is untrusted data, never instructions, and is scrubbed by
+       `scrubRiskJudgeInput` like every other field.
+    2. `riskJudgePlanContextDigest(planContext)`: sha256 of the stable-stringified, scrubbed plan context. `runRiskJudge`
+       writes it on the `risk_judge.decision` row as `plan_context_digest`.
+    3. src/run-task.ts: `handedOffHeadRiskJudge` and runTaskBody's `riskJudgeInput` both use `riskJudgePlanContext`.
+       The handed-off judge's plan is the one it already holds (`plan.byId`). Update
+       test/risk-judge-description-is-the-defect.test.ts's literal `planContext: { taskId: task.id, taskType: task.type }`
+       site assertion to the new call. Keep its "no duplicated title key" assertion.
+    4. src/lib/sweep.ts, a re-judge when the input changes:
+       - A head whose LATEST available decision escalated is judged again through the existing handed-off-head path:
+         the same pool, `HANDED_OFF_HEAD_JUDGMENT_CONCURRENCY_LIMIT` and timeout. That holds when the escalated row's
+         `plan_context_digest` differs from the digest of the task's current shard, or the row has no digest (a row
+         from before this task). The current digest comes through a new SweepDeps seam, wired from the sweep's plan.
+         It applies whether the first judgment was in-run or handed off.
+       - An unreadable plan or a task the plan lacks gives no digest. That is "cannot compare": the refusal stands and
+         the stand-down reason says so. A decision that proceeded is never re-judged. An unchanged digest is never
+         re-judged, so each (head, digest) is judged at most once.
+       - `riskRefusalStands` (via `priorActionsFromLedger`'s `riskRefused`) releases pr@head when an available
+         `risk_judge.decision` with action proceed follows that head's latest `risk_judge.escalated` row. A later
+         escalation at the same head re-refuses.
+    Tests go in a new file, test/the-risk-judge-reads-the-shard-it-judges.test.ts, with `test(` titles verbatim as in
+    the proofs below. The fixture shard is W1-T9087's own (origin, design, rationale copied), and its PR row is #12219's
+    shape. Drive the real `buildRiskJudgePrompt`, `runRiskJudge` with a fake judge, and the sweep's mergeable arm over
+    ledger rows.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-risk-judge-reads-the-shard-it-judges.test.ts"
+    - claim: "the risk judge prompt carries the shard origin, rationale and design, bounded by the mount budget, and names any cut"
+      proof: 'grep: test("W1-T9799: the risk judge prompt carries the shard origin, rationale and design" in test/the-risk-judge-reads-the-shard-it-judges.test.ts'
+    - claim: "an escalated head is judged again when its shard text changes, or when its escalation predates the digest"
+      proof: 'grep: test("W1-T9799: an escalated head is judged again when its shard text changes" in test/the-risk-judge-reads-the-shard-it-judges.test.ts'
+    - claim: "a proceed on the changed input releases the head's risk refusal, and a later escalation re-refuses"
+      proof: 'grep: test("W1-T9799: a proceed on the changed input releases the head risk refusal" in test/the-risk-judge-reads-the-shard-it-judges.test.ts'
+    - claim: "an unchanged input, or a plan that cannot be read, is never judged again and the refusal stands"
+      proof: 'grep: test("W1-T9799: an unchanged input is never judged again" in test/the-risk-judge-reads-the-shard-it-judges.test.ts'
+    - claim: "the decision row records the digest of the plan context it was judged on"
+      proof: 'grep: plan_context_digest in src/lib/risk-judge.ts'
+  falsifier: |
+    Leave planContext as {taskId, taskType}: the prompt test finds no origin or design text, which is #12219's input.
+    Key the re-judge on the head sha alone: the shard-change test sees no second judgment and the refusal stands, as
+    #12288 did. Release on any later decision row: the re-refuse half of the release test arms over a fresh escalation.
+    Re-judge on every pass: the unchanged-input test counts a second judge call.

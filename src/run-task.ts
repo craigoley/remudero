@@ -1039,6 +1039,7 @@ import {
   type RetroAttemptRecord,
   type RetroBackoffDecision,
   type RetroBackoffPolicy,
+  serializeRetroDispatch,
 } from "./lib/retro.js";
 import {
   runRetroPrepublishPreflight,
@@ -33875,9 +33876,24 @@ async function retroCommand(
      * real dynamically-enumerated plan-reading preflight. */
     prepublishPreflight?: typeof runRetroPrepublishPreflight;
     openPrs?: GhApiFetcher;
+    /** W1-T9363: set only by the lane gate below, on its own re-entry, once it holds the lock. */
+    inRetroLane?: true;
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  // W1-T9363: one retro at a time per root, held from the open-PR read through publication, so a
+  // second retro (an operator run beside the daemon's) defers instead of synthesizing from the same
+  // merge-base. A dry-run writes nothing, so it never takes the lock.
+  if (!dryRun && !opts.inRetroLane) {
+    const laneConfig = loadConfig();
+    const lane = await serializeRetroDispatch(join(laneConfig.root, "state", "retro.lock"),
+      () => retroCommand(rest, { ...opts, inRetroLane: true }));
+    if (lane.kind === "completed") return lane.value;
+    appendLedger(ledgerPathFor(laneConfig), { run_id: `RETRO-${nextLaneEpochMs()}`, task_id: "RETRO", step: "retro.skipped_in_flight",
+      lane: "retro", holder_pid: lane.holder.pid, holder_host: lane.holder.host, holder_started_at: lane.holder.startedAt });
+    console.log(`\n### [retro] retro skipped — another retro (pid ${lane.holder.pid} on ${lane.holder.host}) holds the lane`);
+    return 1;
+  }
   const checkoutRoot = opts.repoRoot ?? repoRoot;
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
