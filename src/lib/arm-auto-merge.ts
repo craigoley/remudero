@@ -440,7 +440,7 @@ export function mergeDirectViaRest(
   const head = securityMergeHead(prUrl, securityRead ?? (path => JSON.parse(String(exec("gh", ["api", path],
     { encoding: "utf8", stdio: "pipe", timeout: 15_000, maxBuffer: 2 << 20, killSignal: "SIGKILL" })))), expectedHead);
   const write = () => exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
-  if (qualification) qualification.observeSync("direct-merge", write);
+  if (qualification) qualification.observeSync("direct-merge", write, prUrl);
   else write();
 }
 
@@ -460,7 +460,7 @@ export async function mergeDirectViaRestAsync(
   }
   const head = await securityMergeHeadAsync(prUrl, securityRead, expectedHead);
   await observeSelectedMode(qualification, "direct-merge", () =>
-    exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8" }));
+    exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8" }), prUrl);
 }
 
 /**
@@ -647,7 +647,7 @@ export function realArmDeps(
         encoding: "utf8",
         stdio: "pipe",
       });
-      if (qualification) qualification.observeSync("arm", write);
+      if (qualification) qualification.observeSync("arm", write, prUrl);
       else write();
     },
     mergeDirect: (prUrl) => {
@@ -685,7 +685,7 @@ export function realArmDeps(
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       const head = securityMergeHead(prUrl, readSecurity);
       const write = () => runGh(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])], { encoding: "utf8", stdio: "pipe" });
-      if (qualification) qualification.observeSync("queue", write);
+      if (qualification) qualification.observeSync("queue", write, prUrl);
       else write();
     },
     stackPrerequisite: (prUrl) => stackPrerequisiteFromRest(prUrl),
@@ -729,7 +729,7 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
       assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
       const head = await securityMergeHeadAsync(prUrl);
       await observeSelectedMode(qualification, "arm", () =>
-        ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])]));
+        ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash", ...(head ? ["--match-head-commit", head] : [])]), prUrl);
     },
     mergeDirect: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
@@ -746,7 +746,7 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       const head = await securityMergeHeadAsync(prUrl);
       await observeSelectedMode(qualification, "queue", () =>
-        ghTextAsync(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])]));
+        ghTextAsync(["pr", "merge", prUrl, ...(head ? ["--match-head-commit", head] : [])]), prUrl);
     },
   };
 }

@@ -2308,7 +2308,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   // reviewed plan PR GitHub reads `blocked` reaches the direct merge a local review would make.
   const sweepArmImpl: (prUrl: string, taskId: string | undefined, checksGreenReviewed: boolean) => ArmOutcome | ArmAttemptResult | Promise<ArmOutcome | ArmAttemptResult> = (prUrl, taskId, checksGreenReviewed) => {
     const prNumber = prNumberFromRef(prUrl);
-    const armDeps = realArmDepsAsync(() => config);
+    const armDeps = realArmDepsAsync(() => config, selectedModeQualification);
     return armImpl(prUrl, prNumber === undefined ? taskId : sweepArmTaskId({ taskId, prNumber }, armSessionPrs),
       { ...armDeps, ledgerLines: () => armLedgerLinesForPr(armDeps.ledgerLines(), prUrl),
         ...(checksGreenReviewed ? { checksGreenReviewed: true as const } : {}) });
@@ -2587,7 +2587,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
       const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
-        ...realArmDepsAsync(() => config),
+        ...realArmDepsAsync(() => config, selectedModeQualification),
         ledgerLines: () => armLedgerLinesForPr(readLedgerLines(ledgerPath), pr.prUrl), // ledger-read-intent: live
         headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
           const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
@@ -2601,7 +2601,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
         mergeDirect: async (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
-          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha);
+          await mergeDirectViaRestAsync(prUrl, (_file, args) => ghTextAsync(args), undefined, pr.headSha, selectedModeQualification);
         },
       } : undefined;
       let attemptError: string | undefined;
@@ -2653,7 +2653,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // W1-T8620: a refused direct merge hands GitHub's refusal text to the armed-idle branch.
       if (folded === "direct-merge-failed" && attemptError !== undefined) return { outcome: folded, error: attemptError };
       return typeof folded === "object" ? { ...folded, error: attemptError } : folded;
-    }),
+    }, pr.prUrl),
 
     // W1-T1000002 — THE CONVERGING WITHDRAWAL: sweep.ts calls this ONLY when an operator hold
     // stands over a PR GitHub already reports armed (`disarmAutoMerge(` — the grep proof that

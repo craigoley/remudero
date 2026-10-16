@@ -46,12 +46,23 @@ type ModeEvidence = {
 type BoundMode = { kind: "ready"; mode: "shadow" | "live"; binding: SelectedRegistryBinding }
   | { kind: "unknown"; evidence: ModeEvidence };
 export interface SelectedModeQualification {
-  observe<T>(action: SelectedModeAction, operation: () => T | Promise<T>): Promise<T>;
-  observeSync<T>(action: SelectedModeAction, operation: () => T): T;
+  observe<T>(action: SelectedModeAction, operation: () => T | Promise<T>, prUrl?: string): Promise<T>;
+  observeSync<T>(action: SelectedModeAction, operation: () => T, prUrl?: string): T;
 }
 const unavailable = (reason: string, digest?: string): ModeEvidence => ({
   selected_outcome: "would-refuse", reason, ...(digest === undefined ? {} : { binding_digest: digest }),
 });
+
+function modeTarget(ownerRepo: string, prUrl: string | undefined): {
+  fields: Readonly<Record<string, string | number>>; reason?: string;
+} {
+  const match = typeof prUrl === "string"
+    ? /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)(?:[/?#].*)?$/.exec(prUrl) : null;
+  if (!match || !Number.isSafeInteger(Number(match[3]))) return { fields: Object.freeze({}), reason: "target_unavailable" };
+  const repo = `${match[1]}/${match[2]}`.toLowerCase();
+  return { fields: Object.freeze({ target_repo: repo, target_pr: Number(match[3]) }),
+    ...(repo !== ownerRepo.toLowerCase() ? { reason: "target_mismatch" } : {}) };
+}
 
 function immutableModeIO(io: RegistryFileIO): RegistryFileIO {
   const lstat = io.lstat.bind(io), open = io.open.bind(io);
@@ -80,10 +91,10 @@ export function createSelectedModeQualification(
   record: (step: string, fields: Record<string, unknown>) => void, io: RegistryFileIO = registryFileIO,
   reading: "async" | "sync" = "async",
 ): SelectedModeQualification | undefined {
-  if (settings?.mode !== "shadow") return undefined;
   let initial: Promise<BoundMode>;
   let signal: AbortSignal | undefined;
   try {
+    if (settings?.mode !== "shadow") return undefined;
     const name = input.instanceName === undefined ? settings.instanceName : input.instanceName;
     const required = input.requiredCapabilities;
     const snapshot: RegistrySelectionInput = {
@@ -115,7 +126,8 @@ export function createSelectedModeQualification(
     }
   };
   let lastKey: string | undefined, recordFailureReported = false;
-  const report = (action: SelectedModeAction, evidence: ModeEvidence, result: unknown, threw = false): void => {
+  const report = (action: SelectedModeAction, evidence: ModeEvidence, result: unknown,
+    target: ReturnType<typeof modeTarget>, threw = false): void => {
     let outcome: unknown = result;
     try {
       if (typeof result === "object" && result !== null) outcome = Object.getOwnPropertyDescriptor(result, "outcome")?.value;
@@ -128,7 +140,8 @@ export function createSelectedModeQualification(
       "arm-error-ignored", "irreversible-refused", "hold-refused", "draft-refused", "stack-parent-refused",
       "plan-pr-held", "shadow-refused", "shadow-instance-refused", "no-merge-boundary-refused", "result-unreadable"]);
     const legacy = threw ? "threw" : typeof outcome === "string" && known.has(outcome) ? outcome : "returned";
-    const fields = { mode: "shadow", action, ...evidence, legacy_outcome: legacy, publication_permission: "not-granted" };
+    const fields = Object.freeze({ mode: "shadow", action, ...evidence, ...target.fields,
+      legacy_outcome: legacy, publication_permission: "not-granted" });
     const key = JSON.stringify(fields);
     if (key === lastKey) return;
     try { record("instance_mode.shadow_observed", fields); lastKey = key; recordFailureReported = false; }
@@ -139,24 +152,26 @@ export function createSelectedModeQualification(
     }
   };
   return Object.freeze({
-    observe: async <T>(action: SelectedModeAction, operation: () => T | Promise<T>): Promise<T> => {
-      const evidence = await current();
+    observe: async <T>(action: SelectedModeAction, operation: () => T | Promise<T>, prUrl?: string): Promise<T> => {
+      const target = modeTarget(ownerRepo, prUrl);
+      const evidence = target.reason === undefined ? await current() : unavailable(target.reason);
       let result: T;
       try { result = await operation(); }
-      catch (error) { report(action, evidence, undefined, true); throw error; }
-      report(action, evidence, result); return result;
+      catch (error) { report(action, evidence, undefined, target, true); throw error; }
+      report(action, evidence, result, target); return result;
     },
-    observeSync: <T>(action: SelectedModeAction, operation: () => T): T => {
+    observeSync: <T>(action: SelectedModeAction, operation: () => T, prUrl?: string): T => {
+      const target = modeTarget(ownerRepo, prUrl);
       let result: T;
       try { result = operation(); }
-      catch (error) { report(action, unavailable("synchronous_seam"), undefined, true); throw error; }
-      report(action, unavailable("synchronous_seam"), result); return result;
+      catch (error) { report(action, unavailable(target.reason ?? "synchronous_seam"), undefined, target, true); throw error; }
+      report(action, unavailable(target.reason ?? "synchronous_seam"), result, target); return result;
     },
   });
 }
 
 export async function observeSelectedMode<T>(
-  qualification: SelectedModeQualification | undefined, action: SelectedModeAction, operation: () => T | Promise<T>,
+  qualification: SelectedModeQualification | undefined, action: SelectedModeAction, operation: () => T | Promise<T>, prUrl?: string,
 ): Promise<T> {
-  return qualification === undefined ? operation() : qualification.observe(action, operation);
+  return qualification === undefined ? operation() : qualification.observe(action, operation, prUrl);
 }
