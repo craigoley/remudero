@@ -8,6 +8,9 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { ANALYTICS_REFRESH_INTERVAL_MS, ANALYTICS_REFRESH_TIMEOUT_MS } from "./analytics-route.js";
 import { projectRepairCostContext } from "./repair-cost-evidence.js";
+import { spendAmountUsd, spendRoleOf } from "./spend-rows.js";
+import { foldRepositoryFlowHistory, readRepositoryFlowHistory, recordRepositoryFlowHistory,
+  repositoryQualitySchema, type FlowHistoryUpdate } from "./repository-flow-history.js";
 
 export const REPOSITORY_FLOW_VERSION = "repository-flow-v1";
 /** BACKSTOP: optional graph evidence leaves room for existing Analytics in the same response. */
@@ -53,8 +56,9 @@ const schema = z.strictObject({ version: z.literal(REPOSITORY_FLOW_VERSION), sco
   limits: z.strictObject({ prRows: z.literal(MAX_PRS), repairIdentities: z.literal(MAX_REPAIR_IDENTITIES),
     publicBytes: z.literal(REPOSITORY_FLOW_MAX_BYTES), evidencePerWindow: z.literal(64) }),
   gaps: z.array(z.string().max(160)).max(16),
-  notCollected: z.strictObject({ firstPass: z.literal(unknowns.firstPass), repairLatency: z.literal(unknowns.repairLatency),
-    backlog: z.literal(unknowns.backlog), efficiency: z.literal(unknowns.efficiency) }),
+  notCollected: z.strictObject({ firstPass: z.string().max(160).nullable(), repairLatency: z.string().max(160).nullable(),
+    backlog: z.string().max(160).nullable(), efficiency: z.string().max(160).nullable() }),
+  quality: repositoryQualitySchema.optional(),
   windows: z.array(z.strictObject({ days: z.union([z.literal(7), z.literal(30)]), from: stamp, through: stamp,
     coverage: z.strictObject({ opened: z.enum(["complete", "observed", "unknown"]), merged: z.enum(["complete", "observed", "unknown"]),
       repairs: z.enum(["observed", "unknown"]), partialCounts: z.literal("observed lower bounds; not complete historical totals") }),
@@ -96,7 +100,10 @@ export function publicRepositoryFlow(value: unknown, repository: string, materia
   const now = time(materializedAt) ?? systemClock.now();
   try {
     if (Buffer.byteLength(JSON.stringify(value)) > REPOSITORY_FLOW_MAX_BYTES) return empty(repository, now, "over_budget");
-    const parsed = schema.safeParse(value);
+    const raw = value as Record<string, unknown> | null;
+    const quality = raw?.quality === undefined ? undefined : repositoryQualitySchema.safeParse(raw.quality);
+    const parsed = schema.safeParse(quality && (!quality.success || quality.data.observedAt !== null && Date.parse(quality.data.observedAt) > now)
+      ? { ...raw, quality: foldRepositoryFlowHistory(undefined, materializedAt, [], "invalid_history") } : value);
     if (!parsed.success || parsed.data.repository !== repository || parsed.data.windows[0]!.days !== 7 ||
       parsed.data.windows[1]!.days !== 30 || parsed.data.windows.some(w => w.buckets.length !== w.days ||
         w.evidence.some(e => e.url !== `https://github.com/${repository}/pull/${e.prNumber}`))) {
@@ -117,6 +124,30 @@ export function publicRepositoryFlow(value: unknown, repository: string, materia
 export async function captureRepositoryFlow(root: string, stateDir: string, repository: string | undefined,
   clock: Clock = systemClock): Promise<RepositoryFlow | undefined> {
   if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || repository.length > 240) return undefined;
+  const update: FlowHistoryUpdate = { publications: [], costs: [], inventories: [] };
+  const qualityEvidence: QualityCollection = { overflow: false, delivered: [] };
+  const result = await captureBaseFlow(root, stateDir, repository, clock, update, qualityEvidence);
+  const written = qualityEvidence.overflow ? { ok: false as const, reason: "history_over_budget" as const }
+    : recordRepositoryFlowHistory(stateDir, repository, update);
+  const retained = readRepositoryFlowHistory(stateDir, repository);
+  result.quality = foldRepositoryFlowHistory(retained.ok ? retained.history : undefined, clock.iso(),
+    qualityEvidence.delivered,
+    !written.ok ? written.reason : !retained.ok ? retained.reason : null);
+  const window = result.quality.windows[1]!;
+  if (window.firstPass.eligible) result.notCollected.firstPass = null;
+  if (window.repairLatency.samples || window.repairLatency.censored) result.notCollected.repairLatency = null;
+  if (result.quality.backlog.some(b => b.sampledAt !== null)) result.notCollected.backlog = null;
+  if (window.efficiency.linkedPrs) result.notCollected.efficiency = null;
+  if (Buffer.byteLength(JSON.stringify(result)) > REPOSITORY_FLOW_MAX_BYTES) {
+    delete result.quality;
+    result.gaps.push("quality projection over budget; base flow retained");
+  }
+  return publicRepositoryFlow(result, repository, clock.iso());
+}
+
+type QualityCollection = { overflow: boolean; delivered: Array<{ pr: number; at: string }> };
+async function captureBaseFlow(root: string, stateDir: string, repository: string, clock: Clock,
+  update: FlowHistoryUpdate, qualityEvidence: QualityCollection): Promise<RepositoryFlow> {
   const now = clock.now();
   const result = empty(repository, now, "missing_source");
   const [owner, repo] = repository.split("/") as [string, string];
@@ -130,6 +161,12 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
   const identity = (p: BoardPrRest) => Number.isSafeInteger(p.number) && p.number > 0 &&
     p.url === `https://github.com/${repository}/pull/${p.number}` && ["OPEN", "CLOSED", "MERGED"].includes(p.state);
   if (!rows.every(identity)) return empty(repository, now, "invalid_source");
+  qualityEvidence.delivered = rows.filter(p => p.state === "MERGED" && time(p.mergedAt) !== undefined)
+    .map(p => ({ pr: p.number, at: p.mergedAt! }));
+  if (open.ok && openAt !== undefined && openAt <= now) {
+    update.inventories!.push({ at: open.snapshot.savedAt, generation: `board:${open.snapshot.savedAt}`, complete: true,
+      prs: open.snapshot.rows.map(p => ({ pr: p.number, head: p.headRefOid, createdAt: p.createdAt ?? null, reasons: ["unknown"] })) });
+  }
   const prs = new Map<number, BoardPrRest>();
   for (const p of rows) {
     const previous = prs.get(p.number);
@@ -164,8 +201,10 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
   if (result.sources.prFreshness === "stale") gaps.add("PR checkpoint is older than the Analytics freshness bound");
   let complete = true, live = false, earliest: number | undefined, latest: number | undefined, overflow = false;
   const fingerprints = new Set<string>();
+  const qualityFingerprints = new Set<string>();
+  const publicationScopes = new Map<string, Set<string>>();
   const repairs = new Map<string, Repair>();
-  const stream = openLedgerUnion(stateDir, { since: result.windows[1]!.from, dedupe: false,
+  const stream = openLedgerUnion(stateDir, { since: fixedClock(now - 90 * DAY_MS).iso(), dedupe: false,
     onUnreadArchive: () => { complete = false; }, onUnreadLive: () => { complete = false; },
     onMalformedRow: () => { complete = false; }, onLiveRead: () => { live = true; },
     onAcceptedRecord: (row, raw) => {
@@ -173,6 +212,35 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
       if (at === undefined || at > now) { complete = false; return; }
       earliest = earliest === undefined ? at : Math.min(earliest, at);
       latest = latest === undefined ? at : Math.max(latest, at);
+      if (!qualityEvidence.overflow && (row.step === "pr.opened" || spendRoleOf(row) === "produced")) {
+        const fingerprint = fingerprintLedgerLine(raw);
+        if (!qualityFingerprints.has(fingerprint)) {
+          if (qualityFingerprints.size >= 8192) { qualityEvidence.overflow = true; return; }
+          qualityFingerprints.add(fingerprint);
+          const small = (v: unknown): string | null => typeof v === "string" && v.length > 0 && v.length <= 160 ? v : null;
+          const run = small(row.run_id), task = small(row.task_id);
+          if (row.step === "pr.opened") {
+            const match = typeof row.pr_url === "string" && /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/([1-9][0-9]*)$/.exec(row.pr_url);
+            if (match && run) {
+              const scopes = publicationScopes.get(run) ?? new Set<string>(); scopes.add(match[1]!); publicationScopes.set(run, scopes);
+            }
+            if (match && match[1] === repository && Number.isSafeInteger(Number(match[2])) && typeof row.head_sha === "string" &&
+                /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.head_sha) && row.adopted !== true && row.joined !== true)
+              update.publications!.push({ pr: Number(match[2]), head: row.head_sha, at: fixedClock(at).iso(), run, task });
+          } else {
+            const scope = row.repository ?? row.repo;
+            const scoped = (scope === undefined || scope === repository) && row.scope !== "host" && row.scope !== "fleet";
+            const price = spendAmountUsd(row);
+            const validAmount = (v: unknown): number | null => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+            const usage = row.tokens as Record<string, unknown> | undefined;
+            const tokenValues = usage && [usage.input, usage.output, usage.cacheRead, usage.cacheCreation];
+            update.costs!.push({ identity: fingerprint, at: fixedClock(at).iso(), run: scoped ? run : null, task,
+              cash: row.provider === "cash" || row.billing_mode === "api" && row.provider !== "codex" ? validAmount(price) : null,
+              modeled: validAmount(row.notional_cost_usd),
+              tokens: tokenValues && tokenValues.every(v => validAmount(v) !== null) ? validAmount(tokenValues.reduce<number>((sum, v) => sum + (v as number), 0)) : null });
+          }
+        }
+      }
       if (row.step !== "fix.dispatch") return;
       const fingerprint = fingerprintLedgerLine(raw);
       if (fingerprints.has(fingerprint)) return;
@@ -216,6 +284,7 @@ export async function captureRepositoryFlow(root: string, stateDir: string, repo
     gaps.add("ledger collection failed; repair totals are unavailable");
   }
   result.sources.ledgerObservedAt = live ? clock.iso() : null;
+  for (const cost of update.costs!) if (cost.run && (publicationScopes.get(cost.run)?.size ?? 0) > 1) cost.run = null;
   result.sources.ledgerCorpus = live && complete ? "observed" : live || earliest !== undefined ? "partial" : "unavailable";
   result.sources.earliestLedgerAt = earliest === undefined ? null : fixedClock(earliest).iso();
   result.sources.latestLedgerAt = latest === undefined ? null : fixedClock(latest).iso();
