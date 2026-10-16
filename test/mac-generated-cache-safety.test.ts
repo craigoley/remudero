@@ -4,7 +4,15 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
+
+// Every case drives the real Python helpers. A host without python3 (e.g. a
+// minimal review sandbox) cannot execute them at all, so say so as an explicit
+// skip instead of a spawn failure (status null). Hosts that have python3 — CI
+// and the Mac janitor host — still run every case unchanged.
+const pythonMissing = spawnSync("python3", ["-c", "pass"]).status !== 0;
+const test = (name: string, fn: () => void) =>
+  nodeTest(name, { skip: pythonMissing ? "python3 is not available on this host; run where python3 exists" : false }, fn);
 
 const script = resolve("deploy/mac/cache-reclaim.py");
 const retire = resolve("deploy/mac/retire-legacy-sweeper.py");
