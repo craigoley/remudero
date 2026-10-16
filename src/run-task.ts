@@ -142,6 +142,7 @@ import {
   ArmSeamRequiredError,
   requireExplicitArmSeam,
   realArmDeps,
+  realArmDepsAsync,
   mergeDirectRefusalMayBeUnsettled,
   REST_MERGE_UNSETTLED_MAX_READS,
   REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS,
@@ -520,7 +521,8 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
-import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import {
@@ -1625,6 +1627,7 @@ import {
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
   decideDepReview,
+  readSelectedDepReviewChecks,
   isDependabotAuthor,
   syncNodePinForImageBump,
   type NodePinSyncIo,
@@ -17194,6 +17197,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
   preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
+  selectedModeFileIO?: RegistryFileIO;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserverAsync;
@@ -18273,6 +18277,7 @@ async function runTask(
     prCreateExec?: Parameters<typeof runGhPrCreate>[4];
     prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
+    selectedModeFileIO?: RegistryFileIO;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
     /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
@@ -19512,6 +19517,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
   // Hold the instance mode for the run so a registry edit cannot flip its deferred arm decision.
   const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
+  const selectedModeQualification = createSelectedModeQualification(config.selectedRegistryMode, `${owner}/${task.repo}`,
+    { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
@@ -22244,11 +22251,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
     const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
-    const armOutcome: ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused" = !shadowArmDecision.armed
+    const armOutcome = await observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
+      selectedModeQualification, "run-arm", async () => !shadowArmDecision.armed
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
-        ? await armAutoMergeAtOpenAsync(prUrl, undefined, irreversible)
-        : "no-merge-boundary-refused";
+        ? await armAutoMergeAtOpenAsync(prUrl,
+          selectedModeQualification === undefined ? undefined : realArmDepsAsync(() => config, selectedModeQualification), irreversible)
+        : "no-merge-boundary-refused", prUrl);
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
     // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).
@@ -23912,6 +23921,8 @@ export interface DepReviewDeps {
   contributorAdmission?: AdmissionObserver;
   clock?: Clock;
   gh?: (args: string[]) => unknown;
+  /** Exact-head checks read over the bounded async transport. A legacy injected `gh` opts out unless this port is supplied. */
+  selectedChecksRead?: GhApiFetcher;
   prDiff?: (prUrl: string) => string;
   config?: Config;
   postStatus?: typeof postReviewStatusGuarded;
@@ -24020,7 +24031,8 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
 async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
-  const view = (deps.gh ?? ghJson)([
+  const readChecks = deps.selectedChecksRead ?? (deps.gh === undefined ? (args: string[]) => ghJsonAsync(args) : undefined);
+  const view = structuredClone(await (deps.gh ?? ghJsonAsync)([
     "pr",
     "view",
     prArg,
@@ -24028,7 +24040,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     slug,
     "--json",
     "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
-  ]) as {
+  ])) as {
     number: number;
     url: string;
     title: string;
@@ -24076,13 +24088,29 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
   }
 
-  const result = decideDepReview({
+  let selectedChecks = dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []);
+  const input = {
     author: { login: view.author?.login ?? "" },
     title: view.title ?? "",
     body: view.body ?? "",
     diff,
-    checks: view.statusCheckRollup ?? [],
-  });
+    checks: selectedChecks,
+  };
+  let result = decideDepReview(input);
+  if (readChecks !== undefined && (result.decision === "arm" || result.decision === "hold")) {
+    const observed = await readSelectedDepReviewChecks(owner, repo,
+      { number: view.number, url: view.url, headSha: view.headRefOid, body: view.body ?? "" }, readChecks);
+    if (observed.kind === "unknown") result = { ...result, decision: "hold", reason: `selected check evidence unknown: ${observed.reason}` };
+    else {
+      selectedChecks = dedupeRollupByLatestAttempt(observed.checks);
+      result = decideDepReview({ ...input, checks: selectedChecks });
+    }
+  }
+  if (result.decision === "arm") {
+    const selectedState = checksStateFromRollup(selectedChecks, undefined);
+    if (selectedState !== "green") result = { ...result, decision: "hold",
+      reason: `selected check evidence is ${selectedState}; no success or arm without current green evidence` };
+  }
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
