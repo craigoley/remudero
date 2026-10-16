@@ -17389,6 +17389,8 @@ export function refreshManagedCheckout(
  * W1-T9077: once the store holds the bundle for the managed checkout's revision, cut its engine tree (a detached worktree a
  * run child that outlives the daemon runs from), ledger how far the newest current engine lags main, and remove the engine
  * trees no run names. Off the loop, never rejects: a failure is ledgered and the previous engine stays the newest.
+ * W1-T9738: `repoDir` may be a run's worktree; the engine's node_modules comes from the managed checkout it was cut from
+ * (its git common dir's parent), never from the worktree, which its worker can rewrite.
  */
 export async function buildEngineAfterStore(
   repoDir: string,
@@ -17403,8 +17405,10 @@ export async function buildEngineAfterStore(
   try {
     const git = seams.git ?? ((dir: string, args: readonly string[]) => hostWorktreeGitAsync(dir, args));
     const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
+    const common = (await git(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    const nodeModulesFrom = basename(common) === ".git" ? dirname(common) : repoDir;
     const { isCurrent, ...buildSeams } = seams;
-    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...buildSeams });
+    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, nodeModulesFrom, storeRoot, log, ...buildSeams });
     if (built.kind === "failed") return;
     const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git, ...(isCurrent ? { isCurrent } : {}) });
     await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });

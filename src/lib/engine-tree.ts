@@ -5,14 +5,15 @@
 // that outlives the daemon therefore runs from an ENGINE TREE: `<state>/engines/<sourceHash>/`, a detached worktree of
 // the managed checkout at one revision, with the stored bundle materialized into its dist/ and node_modules linked to
 // the install. Nothing moves an engine tree while a run's status names it; it is removed only when none does.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+// W1-T9738: that link names the RESOLVED install, never a path under a worker's worktree, which the worker can rewrite.
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { materializeFromStore, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
-import { linkWorktreeNodeModules, type NodeModulesLinkOutcome } from "./worker.js";
+import { linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -29,6 +30,8 @@ export interface EngineRecord {
   sourceHash: string;
   /** Milliseconds since the epoch when the tree was published: what "newest" orders by. */
   builtAt: number;
+  /** W1-T9738: the resolved install its node_modules links to. Absent on an engine built before the record named it. */
+  nodeModulesTarget?: string;
 }
 export interface EngineRef extends EngineRecord {
   root: string;
@@ -53,8 +56,9 @@ function readRecord(root: string): EngineRecord | undefined {
     throw err;
   }
   const r = parsed as Partial<EngineRecord> | null;
+  const target = typeof r?.nodeModulesTarget === "string" ? { nodeModulesTarget: r.nodeModulesTarget } : {};
   return r && typeof r.sha === "string" && GIT_SHA.test(r.sha) && typeof r.sourceHash === "string" && SHA256_HEX.test(r.sourceHash) && Number.isFinite(r.builtAt)
-    ? { sha: r.sha, sourceHash: r.sourceHash, builtAt: r.builtAt as number }
+    ? { sha: r.sha, sourceHash: r.sourceHash, builtAt: r.builtAt as number, ...target }
     : undefined;
 }
 
@@ -77,6 +81,69 @@ export function listEngines(stateRoot: string): EngineRef[] {
   return found.sort((a, b) => b.builtAt - a.builtAt || (a.sourceHash < b.sourceHash ? -1 : 1));
 }
 
+// ── node_modules trust (W1-T9738) ─────────────────────────────────────────────────────────────
+
+/**
+ * The roots a worker's worktree sits under, derived from `<root>/state` as worker.ts derives them from `config.root`:
+ * worktreesDir's `<root>/worktrees`, adhocLaneRoot's `<root>/lanes`, and the state directory's own `worktrees/`.
+ */
+export function workerWritableRoots(stateRoot: string): string[] {
+  const state = resolve(stateRoot);
+  return [join(dirname(state), "worktrees"), join(dirname(state), "lanes"), join(state, "worktrees")];
+}
+
+export type TrustedModules =
+  | { ok: true; target: string }
+  | { ok: false; reason: "node-modules-missing" | "node-modules-untrusted"; detail: string };
+
+/** The root `path` sits at or under, compared on real paths so a symlinked root cannot hide a worktree. */
+function rootHolding(path: string, roots: readonly string[]): string | undefined {
+  return roots.map((r) => (existsSync(r) ? realpathSync(r) : resolve(r))).find((r) => path === r || path.startsWith(r.endsWith(sep) ? r : `${r}${sep}`));
+}
+
+/**
+ * The install a node_modules source resolves to, followed through every link to its real path, or why an engine may not
+ * link it: nothing to resolve is `node-modules-missing`, and a real path under a worker-writable root is
+ * `node-modules-untrusted`. A symlinked worktree node_modules is followed to the install it names now.
+ */
+export function resolveTrustedModules(source: string | undefined, roots: readonly string[]): TrustedModules {
+  if (source === undefined) return { ok: false, reason: "node-modules-missing", detail: "no node_modules source" };
+  let target: string;
+  try {
+    target = realpathSync(source);
+  } catch (err) {
+    // A dangling link or an absent path resolves to nothing; any other failure is not an answer and propagates.
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+    return { ok: false, reason: "node-modules-missing", detail: `${source} does not resolve` };
+  }
+  const held = rootHolding(target, roots);
+  if (held) return { ok: false, reason: "node-modules-untrusted", detail: `${source} resolves to ${target}, under worker-writable ${held}` };
+  return { ok: true, target };
+}
+
+export type EngineModules = { kind: "trusted"; target: string } | { kind: "absent" } | { kind: "dangling" | "untrusted"; detail: string };
+
+/**
+ * What a published engine's node_modules resolves to. Trusted only when it is a link that names its resolved install
+ * directly (one hop, so no worktree sits between), outside every worker-writable root, and, when the record names a
+ * target, that target. `absent` is no entry at all: no worktree is on that path. Dangling and untrusted engines are
+ * never current, and the newest of them loses its retention.
+ */
+export function engineModules(root: string, recorded: string | undefined, roots: readonly string[]): EngineModules {
+  const link = join(root, "node_modules");
+  const entry = lstatSync(link, { throwIfNoEntry: false });
+  if (!entry) return { kind: "absent" };
+  if (!entry.isSymbolicLink()) return { kind: "untrusted", detail: `${link} is not a link` };
+  const resolved = resolveTrustedModules(link, roots);
+  if (!resolved.ok) return { kind: resolved.reason === "node-modules-missing" ? "dangling" : "untrusted", detail: resolved.detail };
+  const named = resolve(root, readlinkSync(link));
+  if (named !== resolved.target) return { kind: "untrusted", detail: `${link} links through ${named}, not directly to ${resolved.target}` };
+  if (recorded !== undefined && recorded !== resolved.target) return { kind: "untrusted", detail: `${link} resolves to ${resolved.target}, not the recorded ${recorded}` };
+  return { kind: "trusted", target: resolved.target };
+}
+
+const modulesUnsafe = (m: EngineModules): m is { kind: "dangling" | "untrusted"; detail: string } => m.kind === "dangling" || m.kind === "untrusted";
+
 // ── seams ────────────────────────────────────────────────────────────────────────────────────
 
 export type EngineGit = (repoDir: string, args: readonly string[]) => Promise<string>;
@@ -86,12 +153,18 @@ export const hardenedEngineGit: EngineGit = (repoDir, args) => hostWorktreeGitAs
 export interface EngineBuildOptions {
   /** The managed checkout the engine is a worktree of. */
   repoDir: string;
+  /** W1-T9738: the checkout whose install the engine links (resolveNodeModulesSource of it); default `repoDir`. */
+  nodeModulesFrom?: string;
+  /** Roots no linked install may resolve under; default {@link workerWritableRoots} of the state root. */
+  worktreeRoots?: readonly string[];
+  resolveModulesSource?: (dir: string) => string | undefined;
   /** Where W1-T8776's stored bundles live. */
   storeRoot: string;
   log?: StoreLog;
   clock?: Clock;
   git?: EngineGit;
-  linkNodeModules?: (repoDir: string, treeRoot: string) => NodeModulesLinkOutcome;
+  /** Links `<treeRoot>/node_modules` to `target`, the resolved install. */
+  linkNodeModules?: (target: string, treeRoot: string) => NodeModulesLinkOutcome;
   materialize?: (treeRoot: string, storeRoot: string) => StoreLookup;
 }
 
@@ -99,6 +172,8 @@ export type EngineBuildResult =
   | { kind: "built"; root: string; ms: number }
   | { kind: "present"; root: string }
   | { kind: "failed"; reason: string };
+/** What buildEngine hands ensureEngineTree: a build also names its link target, for the ledger row only. */
+type BuildOutcome = Exclude<EngineBuildResult, { kind: "built" }> | { kind: "built"; root: string; ms: number; nodeModulesTarget: string };
 
 /** Removes an engine tree and its worktree registration. The default asks git first, then clears what is left. */
 async function removeEngineDir(path: string, repoDir: string, git: EngineGit): Promise<void> {
@@ -130,30 +205,41 @@ export function ensureEngineTree(stateRoot: string, sha: string, sourceHash: str
   if (running) return running;
   const log = deps.log ?? (() => {});
   const pass = buildEngine(stateRoot, sha, sourceHash, deps)
-    .catch((err: unknown): EngineBuildResult => ({ kind: "failed", reason: reasonOf(err) }))
-    .then((result) => {
-      if (result.kind === "built") log("engine.built", { sha, source_hash: sourceHash, ms: result.ms });
-      if (result.kind === "failed") log("engine.build_failed", { sha, source_hash: sourceHash, reason: result.reason });
-      return result;
+    .catch((err: unknown): BuildOutcome => ({ kind: "failed", reason: reasonOf(err) }))
+    .then((outcome): EngineBuildResult => {
+      if (outcome.kind === "built") {
+        const { nodeModulesTarget, ...built } = outcome;
+        log("engine.built", { sha, source_hash: sourceHash, ms: built.ms, node_modules_target: nodeModulesTarget });
+        return built;
+      }
+      if (outcome.kind === "failed") log("engine.build_failed", { sha, source_hash: sourceHash, reason: outcome.reason });
+      return outcome;
     })
     .finally(() => inFlight.delete(key));
   inFlight.set(key, pass);
   return pass;
 }
 
-async function buildEngine(stateRoot: string, sha: string, sourceHash: string, deps: EngineBuildOptions): Promise<EngineBuildResult> {
+async function buildEngine(stateRoot: string, sha: string, sourceHash: string, deps: EngineBuildOptions): Promise<BuildOutcome> {
   if (!GIT_SHA.test(sha)) return { kind: "failed", reason: `sha-invalid: ${JSON.stringify(sha)}` };
   if (!SHA256_HEX.test(sourceHash)) return { kind: "failed", reason: `source-hash-invalid: ${JSON.stringify(sourceHash)}` };
   const clock = deps.clock ?? systemClock;
   const git = deps.git ?? hardenedEngineGit;
   const final = enginePath(stateRoot, sourceHash);
   if (readRecord(final)?.sourceHash === sourceHash) return { kind: "present", root: final };
+  // Resolved before anything is cut: an install under a worker's worktree, or none, publishes nothing.
+  const modules = resolveTrustedModules(
+    (deps.resolveModulesSource ?? resolveNodeModulesSource)(deps.nodeModulesFrom ?? deps.repoDir),
+    deps.worktreeRoots ?? workerWritableRoots(stateRoot),
+  );
+  if (!modules.ok) return { kind: "failed", reason: `${modules.reason}: ${modules.detail}` };
   const started = clock.now();
   mkdirSync(enginesRoot(stateRoot), { recursive: true });
   const temp = join(enginesRoot(stateRoot), `${BUILD_PREFIX}${sourceHash.slice(0, 12)}-${process.pid}-${started}`);
   try {
     await git(deps.repoDir, ["worktree", "add", "--detach", temp, sha]);
-    const linked = (deps.linkNodeModules ?? ((repo, tree) => linkWorktreeNodeModules(repo, tree)))(deps.repoDir, temp);
+    const link = deps.linkNodeModules ?? ((target, tree) => linkWorktreeNodeModules(target, tree, { resolveSource: () => target }));
+    const linked = link(modules.target, temp);
     if (linked !== "linked") return { kind: "failed", reason: `node-modules-${linked}` };
     const lookup = (deps.materialize ?? materializeFromStore)(temp, deps.storeRoot);
     if (lookup.outcome !== "hit") return { kind: "failed", reason: `store-${lookup.reason}` };
@@ -164,9 +250,9 @@ async function buildEngine(stateRoot: string, sha: string, sourceHash: string, d
       await removeEngineDir(final, deps.repoDir, git);
     }
     await git(deps.repoDir, ["worktree", "move", temp, final]);
-    const record: EngineRecord = { sha, sourceHash, builtAt: clock.now() };
+    const record: EngineRecord = { sha, sourceHash, builtAt: clock.now(), nodeModulesTarget: modules.target };
     writeAtomic(join(final, ENGINE_RECORD), `${JSON.stringify(record)}\n`);
-    return { kind: "built", root: final, ms: clock.now() - started };
+    return { kind: "built", root: final, ms: clock.now() - started, nodeModulesTarget: modules.target };
   } catch (err) {
     return { kind: "failed", reason: reasonOf(err) };
   } finally {
@@ -193,6 +279,8 @@ export interface NewestEngineOptions {
   git?: EngineGit;
   /** Seam for the currency judgement; the default is scripts/build-child-entries.mjs's own childEntryIsCurrent per entry. */
   isCurrent?: (root: string) => boolean;
+  /** W1-T9738: roots an engine's node_modules may not resolve into; default {@link workerWritableRoots}. */
+  worktreeRoots?: readonly string[];
 }
 
 async function isAncestor(git: EngineGit, repoDir: string, ancestor: string, tip: string): Promise<boolean> {
@@ -215,9 +303,16 @@ export async function newestCurrentEngine(stateRoot: string, mainSha: string, de
   const log = deps.log ?? (() => {});
   const git = deps.git ?? hardenedEngineGit;
   const current = deps.isCurrent ?? bundleIsCurrent;
+  const roots = deps.worktreeRoots ?? workerWritableRoots(stateRoot);
   let chosen: EngineRef | undefined;
   for (const engine of listEngines(stateRoot)) {
     try {
+      // Judged apart from the bundle seam: no currency answer makes modules a worker can rewrite current.
+      const modules = engineModules(engine.root, engine.nodeModulesTarget, roots);
+      if (modulesUnsafe(modules)) {
+        log("engine.candidate_skipped", { source_hash: engine.sourceHash, sha: engine.sha, reason: `node-modules-${modules.kind}: ${modules.detail}` });
+        continue;
+      }
       if (!current(engine.root)) continue;
       if (engine.sha !== mainSha && !(await isAncestor(git, deps.repoDir, engine.sha, mainSha))) continue;
       chosen = engine;
@@ -248,6 +343,8 @@ export interface PruneEngineOptions {
   probe?: RunChildProbe;
   /** An engine to keep besides the newest published one (the newest CURRENT engine, when it is an older one). */
   keep?: string;
+  /** W1-T9738: roots an engine's node_modules may not resolve into; default {@link workerWritableRoots}. */
+  worktreeRoots?: readonly string[];
 }
 
 /** Engine hashes and shas that a non-terminal run directory names, or a reason the answer cannot be known. */
@@ -289,7 +386,9 @@ export async function pruneEngineTrees(stateRoot: string, deps: PruneEngineOptio
     log("engine.prune_deferred", { reason: named.undecidable });
     return [];
   }
-  const newest = engines[0]?.sourceHash;
+  // W1-T9738: the newest is kept only while its modules are safe; a dangling or worktree-linked one is pruned and rebuilt.
+  const roots = deps.worktreeRoots ?? workerWritableRoots(stateRoot);
+  const newest = engines[0] && !modulesUnsafe(engineModules(engines[0].root, engines[0].nodeModulesTarget, roots)) ? engines[0].sourceHash : undefined;
   const removed: string[] = [];
   for (const engine of engines) {
     if (engine.sourceHash === newest || engine.sourceHash === deps.keep) continue;
