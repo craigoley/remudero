@@ -121,6 +121,8 @@ test("selected gateway observes the actual core request identity without changin
   const routes = buildInstanceGatewayRoutes([{ method: "GET", path: "/v1/status", scope: "read", handler: (_req, res) => {
     effects++; res.writeHead(200); res.end("legacy-core");
   } }], options);
+  options.selectedRegistryObserver = createSelectedRegistryObserver({ ...f.options, record: () => {} })!;
+  t.after(() => options.selectedRegistryObserver.close());
   const route = routes.find(route => route.path === "/v1/i/core/status"); assert.ok(route);
   let result = "";
   await route.handler({ url: route.path } as never, { writeHead() {}, end: (text: string) => { result += text; } } as never, { params: {} });
@@ -144,8 +146,11 @@ test("selected liveness rides the existing callback with real target and shutdow
     readLastRows: (instance) => { reads++; assert.equal(instance.name, "site"); return [{ ts: clock.iso(), step: "sweep.summary" }]; },
     gh: () => assert.fail("healthy control must never open or close a real issue"),
   };
-  const stop = watchInstanceLiveness(options); t.after(stop);
-  assert.equal(timers, 1); tick(); await observer.settled();
+  const stop = watchInstanceLiveness(options); t.after(() => { if (!stopped) stop(); });
+  options.selectedRegistryObserver = createSelectedRegistryObserver({ ...f.options, record: () => {} })!;
+  t.after(() => options.selectedRegistryObserver.close());
+  assert.equal(timers, 1); tick();
+  await observed(f.rows);
   assert.equal(reads, 1, "no second legacy scan is introduced by the observation");
   const row = f.rows.find(row => row.fields.action === "serve-liveness"); assert.ok(row);
   assert.equal(row.fields.target_instance, "site"); assert.equal(row.fields.target_repo, "owner/site"); assert.equal(row.fields.selected_state, "ready");
