@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { serveCommand, benchmarkAaReadinessRuntime, buildInboxDraftSpawnArgs, lintPlanCommand, main } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { inboxDraftExampleFragmentYaml } from "../src/lib/inbox.js";
 import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -81,7 +82,8 @@ test("selected loaded CLI config reaches benchmark delayed draft evaluation and 
       const args = buildInboxDraftSpawnArgs({ cwd: repo.dir, settingsFile: "/unused/read-only-settings", prompt: "draft", mount: { model: "fixture" } as never,
         config, disallowedTools: [], proposalId: "P-selected", draftRoutingLog: (step, fields) => { routingRows.push({ step, ...fields }); } });
       if (config.selectedRegistryMode) config.selectedRegistryMode.mode = "legacy";
-      assert.equal(args.draftRouting?.evaluate({ text: "FRAGMENT\nnot valid: [\nEND FRAGMENT\nSTAMP\nstamp\nEND STAMP", blocks: [] } as never).clean, false);
+      const evaluation = args.draftRouting?.evaluate({ text: `=== FRAGMENT START ===\n${inboxDraftExampleFragmentYaml()}\n=== FRAGMENT END ===\nSTAMP: qualification only`, blocks: [] } as never);
+      assert.equal(evaluation?.contractFailed, false, "a real parsed draft must reach lint, not short-circuit at parse");
       assert.equal(routingRows.some(row => row.step === "instance_registry.consumer_shadow_observed"), enabled,
         "the actual delayed evaluation must retain the loaded opt-in, but ambient env must not enable it");
       // Main's existing invocation config read, not a new read in the offline lint helper.
