@@ -62,6 +62,7 @@ export function daemonProcessEntry(repoDir: string, argv1: string | undefined = 
   try {
     rel = relative(realpathSync(repoDir), realpathSync(argv1));
   } catch {
+    // Deliberate: an argv[1] or root that does not resolve is no entry, and every consumer treats both the same way.
     return undefined;
   }
   if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return undefined;
