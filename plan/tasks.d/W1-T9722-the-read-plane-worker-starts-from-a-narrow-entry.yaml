@@ -1,0 +1,70 @@
+- id: W1-T9722
+  title: "THE DAEMON'S READ-PLANE WORKER STARTS FROM A NARROW ENTRY, NOT FROM ALL OF src/run-task.ts — startReadPlane is handed `new URL(import.meta.url)` of run-task.ts, so the worker isolate loads 758 modules / 97.9 MiB heapUsed to run createTickReadProducer; a narrow entry measured 542 modules / 71.7 MiB offline, about -26 MiB per worker isolate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, which module the read-plane worker starts from; what the tick read produces is unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9091 builder measurements (logs-8864/9091-bench-tsx.log, 9091-measure-tools/)'
+  plan_refs: [W1-T4075, W1-T9091, W1-T9117, W1-T8777, W1-T9370, W1-T9647]
+  files:
+    - src/run-task.ts
+    - src/lib/tick-read-worker.ts
+    - scripts/build-child-entries.mjs
+    - test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/run-task.ts's daemon command calls startReadPlane({workerUrl: new URL(import.meta.url), workerInput:
+      readOptions, ...}). The worker loads run-task.ts as its entry, and the module's top level runs
+      `readPlaneWorkerInput<TickReadOptions>()` and, in a worker, runReadPlaneWorker(createTickReadProducer(...))
+      (W1-T4075).
+    - createTickReadProducer and what it closes over are a small part of run-task.ts: the W1-T9091 builder's
+      closure extraction counts 126 declarations, ~3.2k lines and 27 imports.
+    - scripts/build-child-entries.mjs WORKER_ENTRIES lists the worker modules that get a bundle
+      (read-model-worker, read-model-slow-lane, status, board-worker). The read-plane worker is not one, so it
+      always starts from source.
+    - W1-T9091 (queued, blocked on W1-T9089 -> W1-T9087) narrows the DAEMON's own entry; it does not move the
+      read-plane worker, and this task does not depend on it.
+    OBSERVED offline by the W1-T9091 builder at a5d569886 (logs-8864/9091-bench-tsx.log, loaded under tsx, round 3):
+    - run-task.ts: 758 modules, heapUsed 97.9 MiB, RSS 307-312 MiB.
+    - a narrow tick-read worker entry: 542 modules, heapUsed 71.7 MiB, RSS 237.6 MiB.
+    - Under tsx with source maps on, a worker that parses run-task.ts's own map adds another 15.8 MiB
+      (9091-bench-parsed-maps.log).
+    INFERRED: about -26 MiB heap (and ~-70 MiB RSS) for the daemon's read-plane worker isolate, and fewer modules
+    to compile at each daemon start.
+  design: |
+    1. Move createTickReadProducer and the declarations only it uses into a new src/lib/tick-read-worker.ts that
+       is also the worker's entry: its top level installs runReadPlaneWorker when readPlaneWorkerInput() is
+       present. It exports `tickReadWorkerUrl()`, its own URL. run-task.ts imports the producer from it for the
+       inline fallback and passes `workerUrl: tickReadWorkerUrl()` to startReadPlane. Shared helpers stay where they are and are imported, never copied.
+    2. The new module must not import src/run-task.ts, directly or through another module. A test walks the
+       entry's static import graph and fails if run-task.ts is in it.
+    3. Bundled workers: add the module to WORKER_ENTRIES so a current bundle starts it (W1-T8777/W1-T9370),
+       keeping that path's rules: execArgv refuses V8 flags in a worker, and keepNames plus module headers stay so
+       heap naming still works (#11859).
+    4. No change to what the producer reads or returns; the inline producer and the worker give the same facts.
+    5. Measure: the read-plane worker reports its own heapUsed and module count once after start on the existing
+       worker telemetry (the daemon's worker heap rows, W1-T7092), so the saving is read per generation.
+    Tests go in test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts, titled verbatim as in the proofs.
+    One test starts a real worker from the new entry and gets a tick read back, so the default path is covered.
+  acceptance:
+    - claim: "the read-plane worker's entry module does not load src/run-task.ts"
+      proof: 'grep: test("W1-T9722: the read-plane worker entry never imports run-task" in test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts'
+    - claim: "a worker started from the narrow entry returns the same tick-read facts as the inline producer"
+      proof: 'grep: test("W1-T9722: the narrow worker returns the same tick read as the inline producer" in test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts'
+    - claim: "the daemon starts its read-plane worker from the narrow entry's URL"
+      proof: 'grep: workerUrl: tickReadWorkerUrl( in src/run-task.ts'
+    - claim: "the narrow entry is a bundled worker entry"
+      proof: 'grep: src/lib/tick-read-worker\.ts in scripts/build-child-entries.mjs'
+  falsifier: |
+    On origin/main the daemon passes run-task.ts's own URL, so a test that resolves startReadPlane's workerUrl and
+    walks its static imports finds src/run-task.ts and the first test fails. Move the producer but leave one helper
+    import pointing back into run-task.ts: the import walk finds it and the first test fails again. Omit the module
+    from WORKER_ENTRIES: the fourth proof reads 0 matches. On origin/main the daemon passes
+    `new URL(import.meta.url)`, so the third proof reads 0 matches.
