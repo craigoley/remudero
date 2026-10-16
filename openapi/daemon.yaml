@@ -11177,6 +11177,10 @@ components:
           enum: [needs_operator, automate, backlog]
         at:
           type: [string, "null"]
+        whyMeReceiptIds:
+          type: array
+          description: Exact advisory correction receipts supplied to this judgment; no execution authority.
+          items: {type: string, pattern: '^[a-f0-9]{64}$'}
 
     InboxDismissalAudit:
       type: object
@@ -11415,6 +11419,8 @@ components:
         source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
       required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
       properties:
+        whyMeFeedback:
+          $ref: "#/components/schemas/InboxWhyMeFeedback"
         dismissalAudit:
           $ref: "#/components/schemas/InboxDismissalAudit"
         planSource:
@@ -11711,6 +11717,119 @@ components:
               action: {type: string, enum: [reframe]}
               tier: {type: string, enum: [low]}
               path: {type: string}
+
+    InboxWhyMeCorrectionRequest:
+      type: object
+      additionalProperties: false
+      required: [repository, instance, threadId, proposalId, snapshotKey, intentId, correction]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        threadId: {type: string}
+        proposalId: {type: string}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+        intentId: {type: string, minLength: 8, maxLength: 128}
+        correction: {type: string, enum: [fleet_can_handle, still_need_me]}
+        note: {type: string, maxLength: 2000}
+        supersedes: {type: string, pattern: '^[a-f0-9]{64}$'}
+
+    InboxWhyMeCorrection:
+      type: object
+      required: [repository, instance, threadId, proposalId, snapshotKey, intentId, correction, receiptId, operator, recordedAt, note, original]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        threadId: {type: string}
+        proposalId: {type: string}
+        snapshotKey: {type: string}
+        intentId: {type: string}
+        correction: {type: string, enum: [fleet_can_handle, still_need_me]}
+        note: {type: string}
+        supersedes: {type: string}
+        receiptId: {type: string}
+        operator: {type: string, description: Service-verified actor; never a client-supplied identity.}
+        recordedAt: {type: string, format: date-time}
+        original:
+          type: object
+          required: [whyMe, sourceFacts]
+          properties:
+            whyMe: {type: string}
+            sourceFacts: {type: array, items: {$ref: '#/components/schemas/InboxAttentionCensusFact'}}
+            judgment: {$ref: '#/components/schemas/InboxAttentionJudgment'}
+
+    InboxWhyMeOutcome:
+      type: object
+      required: [observedAt, assessmentAt, snapshotKey, state, authority, assessmentRelation]
+      description: Fleet observation of advisory feedback against its maintained assessment; never execution or release authority.
+      properties:
+        observedAt: {type: string, format: date-time}
+        assessmentAt: {type: string, format: date-time, description: As-of time of the maintained assessment, separate from observation time.}
+        snapshotKey: {type: string}
+        state: {type: string, enum: [held, awaiting_assessment, assessment_observed, item_absent, superseded, snapshot_changed]}
+        authority: {type: string, enum: [unchanged]}
+        classification: {type: string}
+        assessmentRelation: {type: string, enum: [receipt_joined, unjoined], description: Receipt-joined means the existing judge received this advisory input; it does not claim a causal benefit.}
+        judgment: {$ref: '#/components/schemas/InboxAttentionJudgment'}
+
+    InboxWhyMeFeedback:
+      type: object
+      description: >
+        Separate maintained advisory receipt projection. Its identity/generatedAt qualify its own history;
+        classificationSnapshotKey names the unchanged frozen census. It never changes census items,
+        authority or page keys. Missing outcomes are pending; partial history is not verified absence.
+        Public items are bounded to 16KiB; every original settled receipt remains durable.
+      required: [contract, identity, generatedAt, scope, classificationSnapshotKey, state, total, truncated, items]
+      properties:
+        contract: {type: string, enum: [inbox-why-me-v1]}
+        identity: {type: string}
+        generatedAt: {type: string, format: date-time}
+        scope:
+          type: object
+          required: [repository, instance]
+          properties:
+            repository: {type: string}
+            instance: {type: string}
+        classificationSnapshotKey: {type: string}
+        state: {type: string, enum: [observed, partial, unavailable]}
+        reason: {type: string}
+        total: {type: integer, minimum: 0}
+        truncated: {type: boolean}
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/InboxWhyMeCorrection'
+              - type: object
+                required: [mismatch, active, latest, sameAskFacts, currentSnapshot]
+                properties:
+                  mismatch: {type: boolean}
+                  active: {type: boolean}
+                  latest: {type: boolean, description: Latest non-superseded correction for this operator/ask; historical snapshot context remains explicit.}
+                  sameAskFacts: {type: boolean, description: Current non-judge source facts still match the original ask.}
+                  currentSnapshot: {type: boolean}
+                  outcome: {$ref: '#/components/schemas/InboxWhyMeOutcome'}
+
+    InboxWhyMeCorrectionResult:
+      type: object
+      required: [repository, instance, ok, delivery, authority, audit, correction, receipt]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        ok: {type: boolean, enum: [true]}
+        delivery: {type: string, enum: [delivered]}
+        authority: {type: string, enum: [feedback_only]}
+        audit: {type: string, enum: [receipt_recorded]}
+        correction: {$ref: '#/components/schemas/InboxWhyMeCorrection'}
+        replayed: {type: boolean}
+        receipt:
+          type: object
+          required: [intentId, key, status, action, threadId]
+          properties:
+            intentId: {type: string}
+            key: {type: string}
+            status: {type: string, enum: [settled]}
+            action: {type: string, enum: [why-me-correction]}
+            threadId: {type: string}
 
     InstanceInboxReframeRequest:
       allOf:
@@ -18179,6 +18298,38 @@ paths:
         '404': {description: Proposal absent from this instance's active registry.}
         '409': {description: Requested repository or instance does not match the route.}
         '503': {description: Instance proposal source unavailable.}
+
+  /v1/i/{instance}/inbox/why-me-correction:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    post:
+      summary: Correct why an ask needs this verified operator, without granting authority.
+      description: >
+        LOW-tier advisory feedback bound to the exact operator, repository/instance, proposal/thread,
+        observed maintained classification snapshot and durable intent. A new stale/foreign request
+        writes no correction. Exact settled replay returns its immutable receipt before rechecking
+        the current snapshot. A shared bearer cannot impersonate an operator. Opposite new-intent
+        feedback reverses the advisory position while preserving original evidence/history and holds.
+        The settled receipt is the authoritative audit; uncertain receipt durability returns unknown.
+        The slow lane exposes history later under its separate projection identity; GET never scans it.
+      x-rmd-write-tier: low
+      security: [{bearerWrite: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InboxWhyMeCorrectionRequest'}
+      responses:
+        '200':
+          description: One durable advisory correction receipt, or its exact replay.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InboxWhyMeCorrectionResult'}
+        '400': {description: Malformed or client-forged operator/authority fields.}
+        '403': {description: A verified operator identity is required.}
+        '404': {description: The observed source does not contain this actionable item.}
+        '409': {description: Foreign scope, changed snapshot, changed replay or uncertain prior intent.}
+        '503': {description: Source or receipt durability unavailable; delivery remains explicit.}
 
   /v1/i/{instance}/inbox/reframe:
     parameters:

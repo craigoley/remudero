@@ -1140,6 +1140,8 @@ import {
   type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./lib/verify-human-judge.js";
+import { withWhyMeJudgmentInput } from "./lib/inbox-why-me.js";
+import { readPersistedInbox } from "./lib/fleet-lane.js";
 import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
@@ -32380,7 +32382,7 @@ export async function defaultVerifyHumanCadenceResult(
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const result = await verifyHumanCadence({
-      shards: parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited),
+      shards: withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME }),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
       judge: shadowedVerifyHumanJudge({
@@ -52822,7 +52824,7 @@ export async function verifyHumanSweepCommand(
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited);
+  const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
   const priorVerdicts = priorVerifyHumanVerdicts(rows);
 
   if (dryRun) {
