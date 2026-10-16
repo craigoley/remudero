@@ -89,8 +89,8 @@ import {
   type Proposal,
   type ReadinessContext,
 } from "./inbox.js";
-import { loadPlan, type MergedResolver, type Plan, type RetirementReason } from "./plan.js";
-import { readOperatorReleases } from "./machine-filing-judge.js";
+import { loadPlan, type MergedResolver, type Plan, type RetirementReason, type Task } from "./plan.js";
+import { escalationAgeDays, machineFamily, MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS, readOperatorReleases } from "./machine-filing-judge.js";
 import { automergeHoldFromLedger, describeHoldSetter, holdClaimMismatch, type AutomergeHold, type MergeHoldActor } from "./review.js";
 import {
   buildLedgerIndex,
@@ -524,6 +524,13 @@ export interface UncreditedBuildRow {
   namedIn: "title" | "body";
 }
 
+/** W1-T9043: one filer family's parked filings. `ageDays` counts from the pinned escalation; `null` is a record the
+ *  judge has not escalated yet (no escalate ruling, or an unreadable `judged_at`), never 0. */
+export interface ParkedFamilyDigest {
+  family: string;
+  records: { id: string; ageDays: number | null }[];
+}
+
 /** NEEDS ME — the board's own escalation surface, distinct from `rmd serve`'s HTML "Needs me" panel, which is
  *  task-escalation-driven. A future sentinel is a new field here, not a new section. */
 export interface NeedsMeSection {
@@ -532,6 +539,9 @@ export interface NeedsMeSection {
   /** Queued machine filings still parked for a person or the ratified judge. Unknown when merge or
    *  durable release state cannot be read; a missing gateway never becomes a reassuring zero. */
   parkedProposals?: { count?: number; taskIds: string[]; unknownReason?: string };
+  /** W1-T9043: the same parked filings rolled into one digest, every record grouped by its filer family with its
+   *  age since escalation. Absent exactly when `parkedProposals` is unknown. */
+  parkedDigest?: ParkedFamilyDigest[];
   costAnomaly: CostAnomalyRow[];
   imageDrift?: ImageDriftRow;
   /** W1-T1000003: currently-standing operator merge holds — empty (never `undefined`) when none stand, so the quiet
@@ -2140,14 +2150,29 @@ function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHe
   return rows;
 }
 
+/** W1-T9043: every parked filing grouped by family (sorted by name), oldest escalation first, not-yet-escalated last. */
+function parkedFamilyDigest(parked: readonly Task[], nowMs: number): ParkedFamilyDigest[] {
+  const byFamily = new Map<string, ParkedFamilyDigest["records"]>();
+  for (const task of parked) {
+    const ageDays = task.risk_ruling?.action === "escalate" ? escalationAgeDays(task, nowMs) : null;
+    const family = machineFamily(task);
+    byFamily.set(family, [...(byFamily.get(family) ?? []), { id: task.id, ageDays }]);
+  }
+  const order = (a: ParkedFamilyDigest["records"][number], b: ParkedFamilyDigest["records"][number]) =>
+    (b.ageDays ?? -1) - (a.ageDays ?? -1) || a.id.localeCompare(b.id);
+  return [...byFamily].sort(([a], [b]) => a.localeCompare(b)).map(([family, records]) => ({ family, records: records.sort(order) }));
+}
+
 function deriveNeedsMe(
   lines: ReadonlyArray<Record<string, unknown>>,
   mergeHeld: MergeHeldRow[],
   projections: Map<string, StatusProjection> | undefined,
-  plan?: Plan,
-  operatorReleasedIds: ReadonlySet<string> = new Set(),
-  releaseReadError?: string,
+  plan: Plan | undefined,
+  operatorReleasedIds: ReadonlySet<string>,
+  releaseReadError: string | undefined,
+  nowMs: number,
 ): NeedsMeSection {
+  let parkedDigest: ParkedFamilyDigest[] | undefined;
   const parkedProposals: NonNullable<NeedsMeSection["parkedProposals"]> =
     !plan || !projections || releaseReadError
       ? { taskIds: [], unknownReason: releaseReadError ?? (!plan ? "plan is unreadable" : "merge state is unavailable") }
@@ -2155,13 +2180,12 @@ function deriveNeedsMe(
           const ledgerReleased = new Set(
             lines.filter((line) => line.step === "ratify.approved" && typeof line.task_id === "string").map((line) => line.task_id as string),
           );
-          const taskIds = plan.tasks
-            .filter((task) =>
-              task.author_class === "machine" && task.verify === "human" && task.status === "queued" &&
-              projections.get(task.id)?.merged === false && !operatorReleasedIds.has(task.id) && !ledgerReleased.has(task.id),
-            )
-            .map((task) => task.id)
-            .sort();
+          const parked = plan.tasks.filter((task) =>
+            task.author_class === "machine" && task.verify === "human" && task.status === "queued" &&
+            projections.get(task.id)?.merged === false && !operatorReleasedIds.has(task.id) && !ledgerReleased.has(task.id),
+          );
+          parkedDigest = parkedFamilyDigest(parked, nowMs);
+          const taskIds = parked.map((task) => task.id).sort();
           return { count: taskIds.length, taskIds };
         })();
   const { costAnomaly, imageDrift, tokenFallback, uncreditedBuilds } = deriveOperatorItems(lines, projections);
@@ -2172,6 +2196,7 @@ function deriveNeedsMe(
 
   return {
     parkedProposals,
+    ...(parkedDigest ? { parkedDigest } : {}),
     costAnomaly,
     imageDrift,
     mergeHeld,
@@ -2470,7 +2495,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
   const operatorReleases = readOperatorReleasesForBoard(root);
-  const needsMe = deriveNeedsMe(lines, blockedPrSections.mergeHeld, projections, plan, operatorReleases.ids, operatorReleases.reason);
+  const needsMe = deriveNeedsMe(lines, blockedPrSections.mergeHeld, projections, plan, operatorReleases.ids, operatorReleases.reason, nowMs);
   needsMe.dispatchClaims = staleDispatchClaimEscalations(
     dispatchClaims.status === "held" ? dispatchClaims.claims : [], nowMs, deps.localHost ?? hostname(),
   );
@@ -2817,6 +2842,17 @@ export function costAnomalyUsd(row: CostAnomalyRow, field: "cost_usd" | "median_
   return `$${(field === "cost_usd" ? row.costUsd : row.medianCostUsd).toFixed(2)}`;
 }
 
+/** W1-T9043: the rolled-up digest of parked filings — one line per family naming every record with its age since
+ *  escalation, then what silence does: re-asked, then withdrawn, never released. */
+function renderParkedDigest(digest: readonly ParkedFamilyDigest[]): string[] {
+  if (digest.length === 0) return [];
+  const age = (d: number | null) => (d === null ? "not yet escalated" : `${d}d`);
+  return [
+    ...digest.map((f) => `  ${f.family} (${f.records.length}): ${f.records.map((r) => `${r.id} ${age(r.ageDays)}`).join(", ")}`),
+    `  an escalation unanswered for ${MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS}d is withdrawn by the judge in its own PR, never released or approved`,
+  ];
+}
+
 /** W1-T931 — one line per un-dismissed `cost.anomaly` row, naming the run, its class, its cost and the median exceeded.
  *  W1-T1021 adds an image-drift row naming both shas. `nothing needs you` only when NEITHER has anything to report. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
@@ -2843,9 +2879,10 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
     const remaining = parked!.taskIds.length - ids.length;
     out.push(
       `${parked!.count} machine-authored proposals awaiting a ruling: ${ids.join(", ")}` +
-        (remaining > 0 ? ` (+${remaining} more in plan)` : "") +
+        (remaining > 0 ? ` (+${remaining} more, every one listed by family below)` : "") +
         ` — release one with \`rmd approve ${ids[0]}\` or let the ratified machine-filing judge rule`,
     );
+    out.push(...renderParkedDigest(n.parkedDigest ?? []));
   }
   if (n.tokenFallback) {
     const since = n.tokenFallback.lastOkTs ? `last good refresh ${n.tokenFallback.lastOkTs}` : "no successful refresh on record";
