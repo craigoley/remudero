@@ -226,6 +226,11 @@ def scan_wheel(filename: str, raw: bytes, api) -> dict:
     for path, (parts, _data) in files.items():
         destination = _wheel_destination(parts, info_dir, name)
         lower = tuple(p.lower() for p in destination)
+        need(not (lower[0] == "bin" and (lower[1] == "pyvenv.cfg" or lower[1].endswith("._pth"))),
+             "INTERPRETER_CONFIGURATION", path)
+        metadata_parts = [i for i, part in enumerate(lower) if part.endswith((".dist-info", ".egg-info"))]
+        need(not metadata_parts or (metadata_parts == [1] and parts[0] == info_dir and destination[1] == info_dir),
+             "FOREIGN_DISTRIBUTION_METADATA", path)
         need(not any(p.endswith((".pyc", ".pyo", ".egg-link")) or p == "__pycache__" for p in lower), "STARTUP_OR_BYTECODE", path)
         need(not any(p.split(".", 1)[0] in {"sitecustomize", "usercustomize"} for p in lower), "STARTUP_CUSTOMIZE", path)
         if any(p.endswith(".pth") for p in lower):
@@ -293,6 +298,7 @@ def audit_distribution_set(rows: list[dict], api) -> dict:
             need(key not in owners and key not in directories and not any(key[:i] in owners for i in range(1, len(key))), "DESTINATION_COLLISION", "/".join(destination))
             if key[0] == "bin":
                 command = key[1]
+                need(command != "pyvenv.cfg" and not command.endswith("._pth"), "INTERPRETER_CONFIGURATION", command)
                 need(not re.fullmatch(r"python(?:[0-9.]+)?", command), "RESERVED_ENTRYPOINT", command)
                 reserved = "pip" if re.fullmatch(r"pip(?:[0-9.]+)?", command) else RESERVED_COMMAND_OWNERS.get(command)
                 need(reserved is None or reserved == name, "RESERVED_ENTRYPOINT", command)
@@ -307,12 +313,37 @@ def audit_distribution_set(rows: list[dict], api) -> dict:
                 need(len(prior) == 1 or prior <= APPROVED_SHARED_NAMESPACES.get(root, frozenset()), "NAMESPACE_OWNERSHIP", root)
             owners[key] = {"owner": name, "source": source, "kind": kind}
             directories.update(key[:i] for i in range(1, len(key)))
-    package_set = {r["name"]: api.PackageDetails(r["dist"].version, r["dependencies"]) for r in rows}
+    by_name = {row["name"]: row for row in rows}
+    extras = {name: set() for name in by_name}
+    dependencies, queue = {}, list(by_name)
+    while queue:
+        name = queue.pop(0)
+        row = by_name[name]
+        # Preserve base dependencies as well as every requested extra context.
+        # Only the pinned pip metadata API evaluates PEP 508 markers.
+        requirements = list(row["dist"].iter_dependencies())
+        if extras[name]:
+            provided = set(row["dist"].iter_provided_extras())
+            need(extras[name] <= provided, "UNKNOWN_REQUESTED_EXTRA", name)
+            requirements.extend(row["dist"].iter_dependencies(sorted(extras[name])))
+        dependencies[name] = list({str(req): req for req in requirements}.values())
+        for req in dependencies[name]:
+            target = api.canonicalize_name(req.name)
+            if target not in by_name:
+                continue  # check_package_set below must report the missing package.
+            requested = {api.canonicalize_name(extra) for extra in req.extras}
+            if not requested <= extras[target]:
+                extras[target].update(requested)
+                need(sum(map(len, extras.values())) <= 256, "REQUESTED_EXTRA_BOUND", target)
+                if target not in queue:
+                    queue.append(target)
+    package_set = {r["name"]: api.PackageDetails(r["dist"].version, dependencies[r["name"]]) for r in rows}
     missing, conflicting = api.check_package_set(package_set)  # actual pip function, no reimplementation
     need(not missing and not conflicting, "DEPENDENCY_CLOSURE", repr({"missing": missing, "conflicting": conflicting}))
     return {"state": "ORIGINAL_METADATA_AND_LAYOUT_AUDIT_ONLY", "qualified": False, "candidateExecutionAllowed": False,
             "pipApi": api.provenance, "packages": [{k: r[k] for k in ("name", "version", "sha256", "kind")} for r in rows],
             "originalMetadataClosure": True, "destinationCount": len(owners),
+            "requestedExtras": {name: sorted(values) for name, values in extras.items() if values},
             "approvedSdistNeedsSeparateBuiltWheelAndMetadataAudit": any(r["kind"] == "approved-sdist" for r in rows),
             "notProven": ["pinned 26.2.1 API compatibility", "original real artifact inventory", "built Peewee wheel destinations/metadata", "installed pip check", "runtime/version/core truthfulness"]}
 
