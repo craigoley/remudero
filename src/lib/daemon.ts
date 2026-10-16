@@ -6262,13 +6262,14 @@ export async function runDaemon(
         : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
       const tickLaneTarget = enforcedLaneTarget(occupiedTasks.length, tickQueueAdmission?.wipLimit);
       const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length);
-      if (budget <= 0 && wipBudget > occupiedTasks.length) {
-        log("dispatch.lane_target_held", { lane_count: laneCount, target: tickLaneTarget, in_flight: occupiedTasks.length });
-      } else if (laneCount >= 2 && budget <= 0) {
+      if (laneCount >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
-        log("dispatch.wip_deferred", {
+        // W1-T9097: a zero the enforced lane target produced (the WIP budget had room) is named as the target's.
+        const targetHeld = wipBudget > occupiedTasks.length;
+        log(targetHeld ? "dispatch.lane_target_held" : "dispatch.wip_deferred", {
           lane_count: laneCount,
+          ...(targetHeld ? { target: tickLaneTarget, in_flight: occupiedTasks.length } : {}),
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: deps.openPrCount?.() ?? null,
           ...wipDeferredAdmissionFields(tickQueueAdmission),
