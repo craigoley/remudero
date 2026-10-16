@@ -14,6 +14,7 @@ import { realArmDepsAsync, type ArmDeps } from "../src/lib/arm-auto-merge.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { registryFileIO } from "../src/lib/instance-registry-selection.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const OBSERVED = "instance_mode.shadow_observed";
@@ -300,4 +301,54 @@ test("selected mode real run retains its original binding through deferred armin
     if (previous.name === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = previous.name;
     rmSync(shim.dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("selected mode unknown catches and sinks preserve the exact independent operation", async (t) => {
+  const fx = fixture("shadow");
+  try {
+    const rows: Array<Record<string, unknown>> = [];
+    const record = (_step: string, row: Record<string, unknown>) => { rows.push(row); };
+    await t.test("input port getter", async () => {
+      const io = Object.defineProperty({}, "lstat", { get() { throw new Error(fx.root); } }) as typeof registryFileIO;
+      const q = createSelectedModeQualification(fx.settings, "owner/repo", {}, record, io)!;
+      assert.equal(await q.observe("arm", () => "armed", pr.prUrl), "armed");
+      assert.equal(rows.at(-1)?.reason, "input_unreadable");
+    });
+    await t.test("initial rejection", async () => {
+      const signal = Object.defineProperty({}, "aborted", { get() { throw new Error(fx.root); } }) as AbortSignal;
+      const q = createSelectedModeQualification(fx.settings, "owner/repo", { signal }, record)!;
+      assert.equal(await q.observe("arm", () => "armed", pr.prUrl), "armed");
+      assert.equal(rows.at(-1)?.reason, "read_failed");
+    });
+    await t.test("recheck rejection", async () => {
+      let unreadable = false;
+      const signal = { get aborted() { if (unreadable) throw new Error(fx.root); return false; },
+        addEventListener() {}, removeEventListener() {} } as unknown as AbortSignal;
+      const q = createSelectedModeQualification(fx.settings, "owner/repo", { signal }, record)!;
+      await q.observe("arm", () => "armed", pr.prUrl);
+      assert.equal(rows.at(-1)?.selected_outcome, "would-shadow", "the initial real file read is a positive control");
+      unreadable = true;
+      await q.observe("arm", () => "armed", pr.prUrl);
+      assert.equal(rows.at(-1)?.reason, "recheck_failed");
+    });
+    await t.test("hostile result and original throw", async () => {
+      const q = createSelectedModeQualification(fx.settings, "owner/repo", {}, record)!;
+      const result = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error(fx.root); } });
+      assert.equal(await q.observe("arm", () => result, pr.prUrl), result);
+      assert.equal(rows.at(-1)?.legacy_outcome, "result-unreadable");
+      const error = new Error("actual operation identity");
+      await assert.rejects(q.observe("arm", () => { throw error; }, pr.prUrl), caught => caught === error);
+      assert.equal(rows.at(-1)?.legacy_outcome, "threw");
+    });
+    await t.test("rejected async sink", async () => {
+      const errors: unknown[][] = [], consoleSpy = t.mock.method(console, "error", (...values) => { errors.push(values); });
+      try {
+        const q = createSelectedModeQualification(fx.settings, "owner/repo", {}, async () => { throw new Error(fx.root); })!;
+        assert.equal(await q.observe("arm", () => "armed", pr.prUrl), "armed");
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.deepEqual(errors, [["instance_mode.shadow_observation_unrecorded"]]);
+      } finally { consoleSpy.mock.restore(); }
+    });
+    assert.equal(JSON.stringify(rows).includes(fx.root), false);
+  } finally { fx.cleanup(); }
 });
