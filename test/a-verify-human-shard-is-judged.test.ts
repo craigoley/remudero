@@ -728,14 +728,14 @@ test("W1-T3188: a shard whose file IS in git reports a real age in days, not the
 import { world as whyMeWorld } from "./helpers/why-me-world.js";
 
 test("the production sweep intake reads correction receipts from its configured state root", async t => {
-  const w = await whyMeWorld(t);
+  const repo = gitRepo({ kind: "why-me-production", seedCommit: false });
+  t.after(() => repo.cleanup());
+  const w = await whyMeWorld(t, { root: repo.dir });
   writeFileSync(w.planPath, w.plan + "  files: [DECISIONS.md]\n"); await w.refresh();
   mkdirSync(join(w.root, ".remudero"));
   (await import("node:fs")).copyFileSync(join(import.meta.dirname, "..", ".remudero", "mounts.yaml"), join(w.root, ".remudero", "mounts.yaml"));
-  const { execFileSync } = await import("node:child_process");
   const { persistedInboxPath } = await import("../src/lib/fleet-lane.js");
-  execFileSync("git", ["init", "--quiet", w.root]);
-  execFileSync("git", ["-C", w.root, "remote", "add", "origin", "https://github.com/owner/core.git"]);
+  repo.addRemote("origin", "https://github.com/owner/core.git");
   const before = process.env.RMD_INSTANCE_NAME;
   t.after(() => { if (before === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = before; });
   const intake = async (check: (shard: ShardUnderJudgement) => void) => {

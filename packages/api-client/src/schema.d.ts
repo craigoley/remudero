@@ -5060,7 +5060,16 @@ export interface components {
       reason?: string;
       total: number;
       truncated: boolean;
-      items: (unknown)[];
+      items: ((InboxWhyMeCorrection) & ({
+        mismatch: boolean;
+        active: boolean;
+        /** Latest non-superseded correction for this operator/ask; historical snapshot context remains explicit. */
+        latest: boolean;
+        /** Current non-judge source facts still match the original ask. */
+        sameAskFacts: boolean;
+        currentSnapshot: boolean;
+        outcome?: InboxWhyMeOutcome;
+      }))[];
     };
     InboxWhyMeCorrectionResult: {
       repository: string;
@@ -5079,7 +5088,14 @@ export interface components {
         threadId: string;
       };
     };
-    InstanceInboxReframeRequest: unknown;
+    InstanceInboxReframeRequest: (InboxReframeRequest) & ({
+      repository: string;
+      instance: string;
+      /** Must identify the same proposal as proposalId. */
+      threadId: string;
+      intentId: string;
+      snapshotKey: string;
+    });
     InstanceInboxReframeResult: {
       repository: string;
       instance: string;
@@ -7097,7 +7113,10 @@ export interface paths {
   "/v1/i/{instance}/inbox": {
     get: {
       responses: {
-          "200": unknown;
+          "200": (InboxResult) & ({
+            repository: string;
+            instance: string;
+          });
           "503": undefined;
         };
     };
@@ -7105,7 +7124,11 @@ export interface paths {
   "/v1/i/{instance}/inbox/attention-census": {
     get: {
       responses: {
-          "200": unknown;
+          "200": (InboxAttentionCensusResult) & ({
+            repository: string;
+            instance: string;
+            contract: "read-write" | "read-only";
+          });
           "503": undefined;
         };
     };

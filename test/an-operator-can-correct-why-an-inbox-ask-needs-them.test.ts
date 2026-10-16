@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, chmodSync, appendFileSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, appendFileSync, copyFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,7 @@ import { buildInboxAttentionCensusRoute, type PanelGraphDeps } from "../src/lib/
 import { createService, type IdentityProvider } from "../src/lib/service.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { declaredBody, violations, type Schema } from "./helpers/openapi-strict.js";
 
 import { world, PROPOSAL } from "./helpers/why-me-world.js";
 const REPOSITORY = "owner/core", INSTANCE = "core";
@@ -269,12 +270,15 @@ test("the actual atomic receipt writer exposes a filesystem durability failure",
   const w = await world(t);
   const failing = await w.served({ recordWhyMeReceipt: (path, text) => {
     const dir = join(w.state, INBOX_RECEIPT_DIR);
-    chmodSync(dir, 0o500);
-    try { return writeAtomic(path, text); } finally { chmodSync(dir, 0o700); }
+    // A file at the stage's parent path denies the real writer for every uid.
+    renameSync(dir, dir + ".saved");
+    writeFileSync(dir, "not a directory");
+    try { return writeAtomic(path, text); }
+    finally { rmSync(dir); renameSync(dir + ".saved", dir); }
   } });
   const out = await failing(w.request("why-me-real-atomic-failure"));
   assert.equal(out.status, 503); assert.equal(out.body.audit, "unavailable");
-  assert.match(out.body.detail, /EACCES|EPERM/);
+  assert.match(out.body.detail, /EEXIST|ENOTDIR/);
   const saved = JSON.parse(readFileSync(join(w.state, INBOX_RECEIPT_DIR, out.body.receipt.key + ".json"), "utf8"));
   assert.equal(saved.status, "pending"); assert.equal(saved.body, undefined);
 });
@@ -427,10 +431,12 @@ test("an unavailable correction presence index prevents a success-shaped receipt
   assert.equal(out.body.receipt.status, "pending");
   const unknown = withWhyMeJudgmentInput([{ id: "W1-T216" }], w.state, undefined, Date.now(), OWN_SCOPE);
   assert.match(unknown[0]!.whyMeFeedbackUnavailable!, /previous correction.*unavailable/);
-  chmodSync(w.state, 0o000);
+  // ENOTDIR is a real unreadable parent for every uid, including privileged CI containers.
+  renameSync(w.state, w.state + ".saved");
+  writeFileSync(w.state, "not a directory");
   try {
     assert.match(withWhyMeJudgmentInput([{ id: "W1-T216" }], w.state, undefined, Date.now(), OWN_SCOPE)[0]!.whyMeFeedbackUnavailable!, /previous correction.*unavailable/);
-  } finally { chmodSync(w.state, 0o700); }
+  } finally { rmSync(w.state); renameSync(w.state + ".saved", w.state); }
 });
 
 
@@ -510,4 +516,29 @@ test("corrupt settled correction acknowledgements stay unknown without replay or
   writeFileSync(path, original); rmSync(persistedInboxPath(w.state));
   const intact = await w.call(input); assert.equal(intact.status, 200); assert.deepEqual(intact.body.correction, ack.body.correction);
   assert.equal(readFileSync(path, "utf8"), original, "source loss still permits exact immutable verified replay");
+});
+
+
+test("the scoped census declares its real read-write and read-only contract modes", async t => {
+  const w = await world(t, { native: true });
+  const schema = declaredBody("/v1/i/{instance}/inbox/attention-census", "GET", 200);
+  const extension = (schema.allOf as Schema[]).find(part => part.properties !== undefined)!;
+  assert.ok(extension, "the scoped response declares its own wire extension");
+  assert.deepEqual(extension.required, ["repository", "instance", "contract"]);
+  for (const mode of ["read-write", "read-only"] as const) {
+    if (mode === "read-only") renameSync(w.registry, w.registry + ".saved");
+    try {
+      const read = await w.call();
+      assert.equal(read.status, 200, JSON.stringify(read.body));
+      assert.equal(read.body.contract, mode);
+      const scope = { repository: read.body.repository, instance: read.body.instance,
+        contract: read.body.contract };
+      assert.deepEqual(violations(scope, extension), []);
+      const { contract: _contract, ...missing } = scope;
+      assert.match(violations(missing, extension).join("\n"), /contract: required, absent/);
+      assert.match(violations({ ...scope, contract: "unknown" }, extension).join("\n"), /not in enum/);
+    } finally {
+      if (mode === "read-only") renameSync(w.registry + ".saved", w.registry);
+    }
+  }
 });

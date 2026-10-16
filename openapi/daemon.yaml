@@ -18278,7 +18278,12 @@ paths:
               schema:
                 allOf:
                   - $ref: '#/components/schemas/InboxAttentionCensusResult'
-                  - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
+                  - type: object
+                    required: [repository, instance, contract]
+                    properties:
+                      repository: {type: string}
+                      instance: {type: string}
+                      contract: {type: string, enum: [read-write, read-only]}
         '503': {description: Instance or maintained classification unavailable.}
 
   /v1/i/{instance}/inbox/proposal:

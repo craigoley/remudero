@@ -18,9 +18,9 @@ const operator: IdentityProvider = { name: "test-operator", grant: () => undefin
   if (req.headers.authorization === "Bearer bob") return { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:bob" };
   return undefined;
 } };
-export async function world(t: T, options: { instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"] } = {}) {
+export async function world(t: T, options: { root?: string; instance?: string; repository?: string; native?: boolean; planSource?: PanelGraphDeps["readPlanSource"] } = {}) {
   const instance = options.instance ?? INSTANCE, repository = options.repository ?? REPOSITORY;
-  const root = makeTempDir("why-me"); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = options.root ?? makeTempDir("why-me"); t.after(() => rmSync(root, { recursive: true, force: true }));
   const state = join(root, "state"); mkdirSync(state);
   const sourceRoot = options.native ? join(root, "repos", repository.split("/")[1]!) : root;
   mkdirSync(join(sourceRoot, "plan"), { recursive: true });
