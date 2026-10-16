@@ -103,7 +103,7 @@ import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText, run
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries,
   readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
-  type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
+  type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
@@ -22635,6 +22635,8 @@ export const ESCALATION_TRIAGE_EVIDENCE_SLICE: EscalationTriageSlice = {
  */
 export type EscalationTriageHistoryReader = ((stateDir: string) => Promise<LedgerUnionRecordRead>) & {
   current(stateDir: string): LedgerUnionRecordRead;
+  /** W1-T9710: the last union pass's loop reads, parsed lines and seeded rotations. */
+  lastPass(): IncrementalUnionPass;
 };
 
 /**
@@ -22692,10 +22694,16 @@ export function createEscalationTriageHistoryReader(
         holder: identity.holder, durableDigest, statKey, pattern, ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       await memo.load(fresh);
+      // W1-T9710: hand the union what the load just kept, so its pass never re-reads those digests on the loop.
+      for (const entry of fresh) {
+        const key = stats.get(entry.path) as string;
+        const read = memo.kept(entry.path, key);
+        if (read) union.seed(entry.path, key, read);
+      }
     }
     loaded = stats;
     return current(stateDir);
-  }, { current });
+  }, { current, lastPass: union.lastPass });
 }
 
 /** One walk of the rung's slice: each issue's NEWEST birth row, and every state key already rejudged. */
