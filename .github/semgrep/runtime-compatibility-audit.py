@@ -326,7 +326,14 @@ def audit_distribution_set(rows: list[dict], api) -> dict:
             provided = set(row["dist"].iter_provided_extras())
             need(extras[name] <= provided, "UNKNOWN_REQUESTED_EXTRA", name)
             requirements.extend(row["dist"].iter_dependencies(sorted(extras[name])))
-        dependencies[name] = list({str(req): req for req in requirements}.values())
+        dependencies[name] = []
+        for req in {str(req): req for req in requirements}.values():
+            # These edges already passed pip's real base/requested-extra marker
+            # evaluation. check_package_set rechecks missing packages with extra
+            # "", so give it independent active-edge copies, not cached originals.
+            active = api.Requirement(str(req))
+            active.marker = None
+            dependencies[name].append(active)
         for req in dependencies[name]:
             target = api.canonicalize_name(req.name)
             if target not in by_name:
