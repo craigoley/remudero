@@ -1,0 +1,94 @@
+- id: W1-T9753
+  title: "A LANDING NEVER CARRIES FORWARD A RECORD THE BRANCH ONLY INHERITED FROM MAIN — readBranchPending treats every ownedDir file on origin/<landing-branch> as pending, and stageBranchPending re-stages the branch's copy over main's unless it is identical or (feedback only) main's copy has lineage; so a record or shard main changed after the branch was cut is reverted by the next landing build. LIVE 2026-10-15: three landing branches carry 119 such stale copies against 14 of their own"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, which files a landing carries forward from its branch; possible data loss: triage and shard edits on main are reverted
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9638 builder report (PR 12228), item V, confirmed live by the operator session'
+  plan_refs: [W1-T3560, W1-T191, W1-T3888, W1-T9638, W1-T5460, W1-T5965]
+  files:
+    - src/lib/feedback-landing.ts
+    - test/a-landing-never-carries-forward-an-inherited-record.test.ts
+    - test/feedback-landing-reconcile.test.ts
+    - test/feedback-landing.test.ts
+    - test/feedback-landing-deleted-ref.test.ts
+    - test/feedback-landing-union-writer.test.ts
+  status: queued
+  priority: 0.5  # first: possible data loss; every landing kind that carries forward shares the path
+  attempts: 0
+  rationale: |
+    READ at origin/main 3ce249c80 (src/lib/feedback-landing.ts; symbols, not lines):
+    - readBranchPending lists `ls-tree -r --name-only origin/<branch>` filtered to kind.ownedDir and returns ALL of
+      it as pending: the branch's own new records AND every record it merely inherited from the main it was cut
+      from.
+    - stageBranchPending, for each such path, skips it only when the branch blob equals origin/main's. Otherwise:
+      - a feedback record whose main copy has lineage (hasFeedbackLineage: `contribution != null`) goes through
+        decideFeedbackStage;
+      - every other path, including a feedback record WITHOUT lineage and every non-feedback ownedDir (the
+        ci-learning kind's plan/tasks.d), is staged at the BRANCH's blob, over main's newer one.
+    - Both builders call it after `read-tree origin/main`: landPendingSteps (feedback, decisions) and
+      landContentSteps (ci-learning via landCiLearningShards*, plan-reconcile via landPlanReconcileShards, status
+      content via landFeedbackStatusContent). A branch cut before main changed a record therefore re-adds the old
+      record (or a record main deleted) in the next landing tree.
+    OBSERVED in a fixture by the W1-T9638 builder at a5d569886 (logs-8864/W1-T9638-bench/revert-probe.mts): main's
+    `fb-a: accepted` landed as `new`, and a record main deleted was re-added.
+    OBSERVED LIVE, operator session 2026-10-16 ~01:40Z, read-only (branch tips from a cadenced ls-remote at
+    2026-10-15T22:35Z; main = 4b4d6ff39; method: a file is STALE when the branch blob differs from main's and equals
+    its blob at merge-base(tip, main), i.e. the branch never changed it and main did; evidence
+    logs-8864/batch1015-V-live-check.txt):
+    - feedback-landing-craigoley-remudero-console-home-node-remudero-145a156f8b24 (tip 8ea8fb201, 2026-09-19): 206
+      plan/feedback files, 44 stale. Example: fb-1789365371529-7b4ba1 is `status: new` on the branch and
+      `status: accepted` with proposal_pr 9824 on main (triaged 2026-10-07, af0f20a28); main's copy has no
+      `contribution`, so it would be staged at the branch's `new`.
+    - feedback-landing-craigoley-remudero-site-home-node-remudero-9d5ce343d7ca (tip b8735991e, 2026-09-19): 208
+      files, 44 stale.
+    - ci-learning-landing (tip 1ae3398b6, main merged in at 19:38Z on 10-15): plan/tasks.d, 33 differ from main, 31
+      stale (W1-T9615, W1-T9601, W1-T9617, W1-T9527, W1-T9361 among them), 2 its own. Non-feedback paths skip the
+      lineage check entirely.
+    - Total: 119 stale vs 14 own. CONTROL: the same comparison with main itself as the tip gives 0 of 368 differing.
+    OBSERVED (core ledger, from the coordinator): feedback.landing_sweep rows at 2026-10-15 17:02Z and 2026-10-16
+    01:12Z read file_count 0, landed false, so core's landing is idle now. OBSERVED: ci-learning-landing landed as
+    #11978 at 01:39Z with 2 files, no revert, because a squash merge applies only the branch's own diff.
+    INFERRED: the revert fires on the next landing BUILD that has something to stage, because that build restages
+    the stale copies into a fresh tree on main and force-pushes it; its PR then reverts them on merge.
+  design: |
+    1. The pending set is what the landing commit itself changed, not everything the branch holds: a landing tip
+       has a single parent, the main it was built on, so pending = `git diff --name-only -z <tip>^ <tip> --
+       <ownedDir>` (adds, modifications and deletions), plus one `ls-tree -r -z <tip> -- <ownedDir>` for the blobs.
+       A tip that is a merge commit (someone merged main into the branch, as ci-learning-landing at 19:38Z) or has no
+       readable parent is diffed against merge-base(tip, origin/main) instead, so inherited files are never pending.
+    2. stageBranchPending stages only those paths. A path main changed since the tip's base keeps main's copy unless
+       the landing commit changed it too, in which case the existing feedback lineage decision (decideFeedbackStage)
+       applies, and for a non-feedback path the conflict is REFUSED with the path named, never resolved silently.
+    3. The same rule for every kind that carries forward: feedback, decisions, ci-learning, plan-reconcile and status
+       content.
+    4. Measure: the landing row gains `carried: n` and `inherited_skipped: n`, so a landing that would have reverted
+       work is visible.
+    5. Fix sketch is from the W1-T9638 builder; INFERRED it also drops ~420 of the ~518 git children per landing
+       pass (one diff and one ls-tree instead of per-file rev-parse pairs). Update the named existing suites
+       (feedback-landing-reconcile, feedback-landing's rev-parse race, deleted-ref, union-writer) to the new pending
+       set; do not weaken what they assert about the branch's own records.
+    No new constant.
+    Tests go in test/a-landing-never-carries-forward-an-inherited-record.test.ts, titled verbatim as in the proofs,
+    starting from logs-8864/W1-T9638-bench/revert-probe.mts: a real bare origin, a landing branch cut from an older
+    main, then triage and a deletion on main.
+  acceptance:
+    - claim: "a feedback landing built after main triaged and deleted records the branch inherited keeps main's triage and does not re-add the deleted record, while the branch's own new record lands"
+      proof: 'grep: test("W1-T9753: a feedback landing keeps main triage and deletions of inherited records" in test/a-landing-never-carries-forward-an-inherited-record.test.ts'
+    - claim: "a content landing (ci-learning plan/tasks.d) never restages an inherited shard main changed, and a landing tip that merged main is diffed against its merge-base"
+      proof: 'grep: test("W1-T9753: a content landing never restages an inherited shard" in test/a-landing-never-carries-forward-an-inherited-record.test.ts'
+    - claim: "the plan-reconcile landing shares the rule"
+      proof: 'grep: test("W1-T9753: the plan-reconcile landing never restages an inherited shard" in test/a-landing-never-carries-forward-an-inherited-record.test.ts'
+    - claim: "a path both main and the landing commit changed is decided by lineage for feedback and refused by name otherwise"
+      proof: 'grep: test("W1-T9753: a path both sides changed is decided by lineage or refused by name" in test/a-landing-never-carries-forward-an-inherited-record.test.ts'
+  falsifier: |
+    On origin/main, run the probe's shape through sweepFeedbackLanding: a landing branch cut from main at "base"
+    holding its own fb-p, then main sets fb-a to accepted and deletes fb-d. The new landing tree carries fb-a: new and
+    re-adds fb-d, so the first test fails. Build a ci-learning landing branch whose tip merged an older main and then
+    let main change one inherited shard: landContentSteps restages the old shard, so the second test fails. Take the
+    pending set from `<tip>^..<tip>` but skip the merge-base fallback: the merge commit's diff lists every inherited
+    file main moved and the second test fails again.
