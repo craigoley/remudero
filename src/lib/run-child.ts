@@ -18,6 +18,7 @@ import {
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
+import { decideRunChildMode, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence } from "./run-child-mode.js";
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpecOptions, type RunChildStatus,
@@ -304,9 +305,10 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     );
     if (child.pid !== undefined) reservation.bindRoot(child.pid);
     const ended = await runProbe(child, sampler, seams.timeoutMs ?? PROBE_TIMEOUT_MS, seams.sampleMs ?? PROBE_SAMPLE_MS);
+    const estimateMib = reservation.estimateMib;
     reservation.releaseOccupancy();
     reservation = undefined;
-    const row = settleRow({ taskId: input.taskId, runId, dir, engine, launch, ended, peakMib, mode, effective });
+    const row = settleRow({ taskId: input.taskId, runId, dir, engine, launch, ended, peakMib, estimateMib, mode, effective });
     log(RUN_CHILD_SHADOW_STEP, row);
     try {
       prunePlanSnapshots(input.stateRoot);
@@ -329,7 +331,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
 
 function settleRow(a: {
   taskId: string; runId: string; dir: string; engine: EngineRef; launch: EngineChildLaunch; ended: ChildEnd;
-  peakMib: number | undefined; mode: RunChildMode; effective: { mode: string; fellBack: boolean };
+  peakMib: number | undefined; estimateMib: number | undefined; mode: RunChildMode; effective: { mode: string; fellBack: boolean };
 }): Record<string, unknown> {
   const status = readStatus(a.dir);
   let raw: { loadMs?: unknown; maxRssBytes?: unknown; planTasks?: unknown } = {};
@@ -365,6 +367,8 @@ function settleRow(a: {
     entry_reason: a.launch.reason,
     load_ms: typeof raw.loadMs === "number" ? raw.loadMs : null,
     tree_peak_bytes: peakBytes,
+    // W1-T9087: the class estimate the probe was admitted under, so `auto` can ask whether the peak fit it.
+    class_estimate_bytes: typeof a.estimateMib === "number" && Number.isFinite(a.estimateMib) ? Math.round(a.estimateMib * 1024 * 1024) : null,
     child_max_rss_bytes: typeof raw.maxRssBytes === "number" ? raw.maxRssBytes : null,
     plan_tasks: typeof raw.planTasks === "number" ? raw.planTasks : null,
     exit_code: a.ended.code,
@@ -402,10 +406,17 @@ export function chainAbortSignal<T extends { signal?: AbortSignal }>(args: T, ab
   return { ...args, signal: args.signal === undefined ? abort : AbortSignal.any([args.signal, abort]) };
 }
 
-/** Whether `sweep.runChild.mode` is `on`. An unreadable policy is `on: false` WITH its reason: the run stays in-process, as before. */
-export function runChildModeIsOn(read: () => RunChildMode = () => loadRunChildMode()): { on: boolean; unreadable?: string } {
+/**
+ * Whether a run starts a child: `sweep.runChild.mode` is `on`, or it is `auto` and {@link decideRunChildMode} answers `on` over
+ * `evidence` (W1-T9087; no evidence reads as shadow). An unreadable policy is `on: false` WITH its reason: the run stays in-process.
+ */
+export function runChildModeIsOn(
+  read: () => RunChildMode = () => loadRunChildMode(), evidence?: () => RunChildModeEvidence,
+): { on: boolean; unreadable?: string } {
   try {
-    return { on: read() === "on" };
+    const mode = read();
+    if (mode === "auto") return { on: evidence !== undefined && decideRunChildMode(evidence()).to === "on" };
+    return { on: mode === "on" };
   } catch (error) {
     return { on: false, unreadable: reasonOf(error) };
   }
@@ -755,26 +766,41 @@ export function adoptRunChildren(input: {
 }, ports: { probe?: RunChildProbe; pollMs?: number; watch?: boolean; clock?: () => number;
   reserve?: typeof adoptRunChildReservation } = {}): AdoptedRunChild[] {
   const root = join(input.stateRoot, "runs");
-  if (!existsSync(root)) return [];
+  // W1-T9087: every pass ledgers what it saw, so `auto` can tell a boot that adopted every live child from one that never looked.
+  const pass = { live: 0, adopted: 0, unreadable: 0, misidentified: 0 };
   const adopted: AdoptedRunChild[] = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
+  for (const entry of existsSync(root) ? readdirSync(root, { withFileTypes: true }) : []) {
     if (!entry.isDirectory() || entry.name.startsWith("probe-") || input.settledRunIds.has(entry.name)) continue;
     const dir = join(root, entry.name);
     const spec = readSpec(dir);
-    if (!spec.ok || spec.value.instance !== input.instance || spec.value.runId !== entry.name) continue;
+    if (!spec.ok || spec.value.instance !== input.instance) continue;
+    if (spec.value.runId !== entry.name) {
+      // A LIVE process under a directory whose spec names another run is a misidentified child; a dead one is only debris.
+      if (classifyRunDir(dir, ports.probe).kind === "live") {
+        pass.live += 1;
+        pass.misidentified += 1;
+        input.log("run_child.adoption_misidentified", { run_id: entry.name, spec_run_id: spec.value.runId, task_id: spec.value.taskId });
+      }
+      continue;
+    }
     const classified = classifyRunDir(dir, ports.probe);
     const { taskId, runId } = spec.value;
     const pid = classified.status?.identity.pid ?? 0;
     if (classified.kind === "unreadable") {
+      pass.unreadable += 1;
       input.log("run_child.adoption_unreadable", { task_id: taskId, run_id: runId, reason: classified.detail });
       continue;
     }
     const reservation = classified.kind === "live"
       ? (ports.reserve ?? adoptRunChildReservation)(dir, { ledger: { root: join(input.stateRoot, "..") } }, ports.probe) : undefined;
-    if (classified.kind === "live") input.log("run_child.adopted", {
-      task_id: taskId, run_id: runId, pid, engine_sha: classified.status!.engineSha,
-      age_ms: Math.max(0, (ports.clock ?? Date.now)() - statSync(dir).birthtimeMs),
-    });
+    if (classified.kind === "live") {
+      pass.live += 1;
+      pass.adopted += 1;
+      input.log("run_child.adopted", {
+        task_id: taskId, run_id: runId, pid, engine_sha: classified.status!.engineSha,
+        age_ms: Math.max(0, (ports.clock ?? Date.now)() - statSync(dir).birthtimeMs),
+      });
+    }
     let detach: (() => void) | undefined;
     const settled = awaitRunChild({
       taskId, runId, dir, probe: ports.probe, pollMs: ports.pollMs ?? RUN_CHILD_POLL_MS,
@@ -784,5 +810,6 @@ export function adoptRunChildren(input: {
     void settled.catch((error: unknown) => { void error; /* The pool owns and classifies this rejection. */ });
     adopted.push({ started: true, taskId, runId, dir, pid, settled, acknowledge: settlementReceipt(taskId, runId, input.log), detach: () => detach?.(), abort: () => abortRunChild(dir, { probe: ports.probe, log: input.log }) });
   }
+  input.log(RUN_CHILD_ADOPTION_PASS_STEP, pass);
   return adopted;
 }

@@ -1,0 +1,110 @@
+- id: W1-T9793
+  title: Selected registry observations reach serve and discovery consumers in shadow only
+  repo: remudero
+  depends_on: [W1-T9572]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator instruction 2026-10-16: complete remaining registry-consumer qualification without duplicate work, schedules, activation or loss of owner override"
+  plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T4227, W1-T4265, W1-T4266, W1-T5433, W1-T5434]
+  files: [src/lib/selected-registry-consumers.ts, src/lib/serve.ts, src/lib/instance-gateway.ts, src/lib/repositories-view.ts, src/lib/read-model-worker.ts, src/lib/repo-dashboard-route.ts, src/lib/benchmark-aa-readiness.ts, src/lib/inbox.ts, src/lib/config-schema.ts, src/run-task.ts, test/selected-registry-serve-consumers.test.ts, test/one-registry-for-the-fleet.test.ts, test/one-gateway-serves-every-instance.test.ts, test/onboarding-readiness.test.ts, test/repo-dashboard-route.test.ts, test/benchmark-aa-readiness.test.ts, test/instances-view.test.ts, test/config-schema.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    READ current main ec0eb2ce2ea6b4c3e09cdd00b55100b11af4d8eb. Actual normal
+    source merges11714/11802/11845/12004/12269 provide the public binding, proposal
+    writer, lifecycle grammar and run/sweep mode observations. They do not qualify
+    serve topology, readiness, liveness or discovery. buildRegistryRoute alone
+    calls readSelectedInstanceRegistry; buildOnboardingReadinessRoute and
+    buildOnboardingGoLiveRoutes independently read/parse legacy text. Serve's
+    instance gateway, liveness and read-model composition retain fixed-path inputs.
+    repositories-view reads its path synchronously; repo-dashboard-route,
+    benchmark-aa-readiness and inbox have separate registry discovery reads.
+    instances-view's pure parser is a projection compatibility control, not a
+    reason to rewrite every parser. The controlled main/ALL7-open-head audit
+    walked3914 task shards and794 source/script paths on main, read39 subject
+    records and every actual subject blob with9559/9572 title controls. No remaining
+    selected-consumer task was found. Own diffs12294/freshness,12289/host identity
+    and12219/run-child policy are other owners' work, not this implementation.
+    Re-entry at main1dc62df45 with ALL11 OPEN heads retained the39 subject-task
+    corpus and9559/9572 title controls. W5433's exclusive calibration-gap append
+    admission and W5434's concurrent frozen-population winner/EEXIST recovery
+    also declare benchmark-aa-readiness, but not selected-registry discovery.
+    Their existing run branches are not abandoned-work evidence: preserve their
+    ownership, locks and population algorithms; do not implement or retire them.
+  design: |
+    1. Re-census actual current-main callers, including served and cold routes,
+       onboarding readiness/go-live composition, topology/liveness and independent
+       repository/dashboard/benchmark/inbox discovery. Bind each observation to
+       its actual operation and instance/repository, not only buildRegistryRoute
+       or a fixture-only producer. Do not claim pure parser coverage is wiring.
+    2. Reuse the existing bounded asynchronous selected reader and explicit
+       selectedRegistryMode mode: shadow opt-in. Add one shared typed observation
+       adapter observeSelectedRegistry only where these consumers need it; its
+       real serve composition must invoke it, not merely import it. No dummy
+       production call or text satisfies the behavioral obligation. No parallel registry parser,
+       service, scanner, scheduler or implicit environment-only activation.
+       Genuine absent configuration performs no selected read/receipt and keeps
+       all legacy defaults, cached bodies and effects unchanged. An explicit
+       selected failure cannot borrow healthy legacy/cache evidence for its
+       observation. Distinguish unknown from known absence and retired identity.
+    3. Capture input/ports/required capabilities before awaits. Preserve immutable
+       original digest and real target identity, and recheck at actual request,
+       cached-view adoption or liveness observation rather than trusting boot
+       text. Changing a revision cannot silently retarget a pending observation.
+       A synchronous-only seam reports unknown fresh authority; do not add a
+       blocking adapter or critical-loop scan. Use existing asynchronous/off-loop
+       composition and bounded receipt deduplication with shutdown ownership.
+    4. Observe the independent ACTUAL legacy result/exception without replacing,
+       blocking or rerouting it. A rejected receipt sink is unrecorded evidence,
+       not success or permission. Never change a public response's data source,
+       mount private data into untrusted readers, clear an owner hold or activate
+       onboarding. Publication permission is always not-granted. Redact private
+       paths, bytes, state roots and secrets from public bodies, receipts and
+       worker/proof inputs. Preserve scoped services and trusted PR flow.
+    5. Test actual composition and real asynchronous filesystem defaults with
+       disposable selected and healthy-legacy traps; cover every new catch,
+       explicit empty/unreadable/malformed/unsupported inputs, current revisions,
+       mutation during awaits, stale served data, non-owner/public projection and
+       owner/configured-human/service/no-config controls. Delete actual forwarding,
+       recheck and snapshot fixes, observe failures, restore exact green. Commit
+       before verified-path, tsx/tmp-preloaded shipped-host-slot tests; instrument
+       every changed source SF in same-tree mapped diff coverage.
+    6. Before build AND publication refresh exact anchored merged Task trailer OR
+       run-branch credit, task claim/run refs, actual main and ALL OPEN-head subject
+       blobs/real own diffs with positive/window controls, and package selector.
+       Never reclaim a contested holder or compete with a normal fix round.
+       Normally merge an evidenced files-only amendment BEFORE out-of-scope edits.
+       No baseline/exemption/primitive rename, gate waiver, extra reviewer or
+       unchanged-failure retry. Reproduce every native failed title on that run's
+       actual unchanged pinned base with complete TAP before attribution/repair.
+    7. This qualifies SHADOW evidence only. It does not certify lifecycle shells,
+       detached child transport, private staging, deployment or live uptake.
+       WORKERS CONTINUE for isolated source/tests; no schedule or live config
+       write. Compatible live replacement needs separate human exact-instance
+       drain; incompatible shared state/claims/credentials/config/access needs
+       approved FULL AFFECTED WRITER STOP, ALL only if ALL are actually affected.
+       Preserve complete public Apache core and independent owner/admin override.
+  acceptance:
+    - claim: Maintained serve composition invokes the shared bounded observation adapter
+      proof: 'grep: observeSelectedRegistry( in src/lib/serve.ts'
+    - claim: Real serve and discovery composition observe the selected source without changing legacy results
+      proof: 'unit test: selected registry shadow reaches real serve and discovery consumers'
+    - claim: Selected observations never borrow healthy legacy or served-cache evidence after failure
+      proof: 'unit test: selected serve failure never borrows legacy or cached authority'
+    - claim: Actual request and liveness observations reject changed revisions and caller mutation
+      proof: 'unit test: selected serve observations retain current immutable source identity'
+    - claim: Public projections and untrusted inputs never receive private selection material or permission
+      proof: 'unit test: selected serve qualification keeps private material out of public consumers'
+    - claim: Real defaults and catches are bounded and absence preserves owner and legacy behavior
+      proof: 'unit test: selected serve defaults remain asynchronous shadow only and legacy compatible'
+  falsifier: |
+    The unchanged filing base has only the selected registry route and run/sweep
+    observations, not these actual consumers. Tests must fail at real missing
+    composition/recheck seams, not merely assert a new type exists. Deleting each
+    load-bearing fix restores that failure; exact restoration preserves independent
+    legacy effects, owner override and private-publication permission not-granted.

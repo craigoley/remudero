@@ -202,6 +202,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic } from "./lib/fs-race-safe.js";
+import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
@@ -1039,6 +1040,7 @@ import {
   type RetroAttemptRecord,
   type RetroBackoffDecision,
   type RetroBackoffPolicy,
+  serializeRetroDispatch,
 } from "./lib/retro.js";
 import {
   runRetroPrepublishPreflight,
@@ -1431,6 +1433,9 @@ import {
   realRiskJudge,
   resolveRiskJudgeMount,
   riskJudgeDiffInputBudget,
+  riskJudgePlanContext,
+  riskJudgePlanContextDigest,
+  riskJudgePlanContextDigestFor,
   riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
@@ -1623,6 +1628,7 @@ import {
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
+  reconcileDependabotRefusedPath,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -1652,7 +1658,7 @@ import {
   gitClaimRunnerAsync,
   dispatchClaimRef,
   // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
-  parseClaimAnchorMessage,
+  claimDropRefusal,
   pidIsPresent,
   readNamespaceBootMs,
   findClaimMintRow,
@@ -3019,7 +3025,8 @@ export function handedOffHeadRiskJudge(
       input: {
         change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
         gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
-        planContext: { taskId: pr.taskId, taskType: task?.type },
+        planContext: riskJudgePlanContext(pr.taskId, task),
+        planContextDigest: riskJudgePlanContextDigest(task),
       },
       config: (() => {
         const riskPolicy = readRiskPolicy(policyPath(repoRoot));
@@ -22079,7 +22086,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { taskId: task.id, taskType: task.type },
+      planContext: { ...riskJudgePlanContext(task.id, task) },
+      planContextDigest: riskJudgePlanContextDigest(task),
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
@@ -24160,7 +24168,19 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
 
   if (result.decision === "refuse") {
-    console.log(`no remudero-review posted (refused): ${view.url}`);
+    const refused = reconcileDependabotRefusedPath({
+      registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+      body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
+      capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+    });
+    if (refused === "failed") {
+      // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
+      log("dep-review.decided", { ...result, decision: "hold", review_decision: "refuse",
+        reason: "refused-path proposal not captured; will retry", pr_url: view.url, head_sha: view.headRefOid });
+      console.log(`refused, owned-build proposal NOT captured; will retry: ${view.url}`);
+      return 1;
+    }
+    console.log(`no remudero-review posted (refused; owned-build proposal ${refused}): ${view.url}`);
     return 2;
   }
   if (result.decision === "hold") {
@@ -27890,7 +27910,7 @@ export function classifyReservationAnchor(message: string, caller?: ReservationC
     const holder = callerFromReservationAnchor(m);
     if (!caller) return "fleet";
     if (!holder) return "unknown";
-    return holder.pid === caller.pid && holder.host === caller.host ? "self" : "fleet";
+    return holder.pid === caller.pid && sameHost(holder.host, caller.host) ? "self" : "fleet";
   }
   if (/^reserve\s+W1-T\d+\b/.test(m)) return "operator";
   return "unknown";
@@ -33881,9 +33901,24 @@ async function retroCommand(
      * real dynamically-enumerated plan-reading preflight. */
     prepublishPreflight?: typeof runRetroPrepublishPreflight;
     openPrs?: GhApiFetcher;
+    /** W1-T9363: set only by the lane gate below, on its own re-entry, once it holds the lock. */
+    inRetroLane?: true;
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  // W1-T9363: one retro at a time per root, held from the open-PR read through publication, so a
+  // second retro (an operator run beside the daemon's) defers instead of synthesizing from the same
+  // merge-base. A dry-run writes nothing, so it never takes the lock.
+  if (!dryRun && !opts.inRetroLane) {
+    const laneConfig = loadConfig();
+    const lane = await serializeRetroDispatch(join(laneConfig.root, "state", "retro.lock"),
+      () => retroCommand(rest, { ...opts, inRetroLane: true }));
+    if (lane.kind === "completed") return lane.value;
+    appendLedger(ledgerPathFor(laneConfig), { run_id: `RETRO-${nextLaneEpochMs()}`, task_id: "RETRO", step: "retro.skipped_in_flight",
+      lane: "retro", holder_pid: lane.holder.pid, holder_host: lane.holder.host, holder_started_at: lane.holder.startedAt });
+    console.log(`\n### [retro] retro skipped — another retro (pid ${lane.holder.pid} on ${lane.holder.host}) holds the lane`);
+    return 1;
+  }
   const checkoutRoot = opts.repoRoot ?? repoRoot;
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
@@ -39312,9 +39347,9 @@ export interface RunInChildInput {
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
 export async function runInChildWhenOn(
   input: RunInChildInput,
-  seams: { readMode?: () => RunChildMode; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
+  seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
 ): Promise<RunChildHandle | undefined> {
-  const mode = runChildModeIsOn(seams.readMode);
+  const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const fallback = (reason: string): undefined => {
     input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
     return undefined;
@@ -39934,24 +39969,38 @@ export async function daemonCommand(
   } catch (censusError) {
     log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
   }
-  const childMode = runChildModeIsOn(deps.readRunChildMode).on;
+  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot. The tracker is seeded
+  // from the ledger this boot opened with and fed every run-child row this daemon writes since (`childLog`); it keeps counts.
+  // Read here, before adoption, so the boot's adoption pass is folded once, live.
+  const bootLedgerLines = readLedgerLines(ledgerPath);
+  const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
+  const childModeTracker = createRunChildModeTracker(bootLedgerLines);
+  const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
+    log(step, extra);
+    childModeTracker.observe(step, extra);
+  };
+  const bootChildPolicy = readRunChildPolicy(childPolicy);
+  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
+  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const adoptedRunIds = new Set<string>();
   const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["run_child.settled"], refuseIncomplete: true,
+    step: ["run_child.settled"], pattern: /"step":"run_child\.settled"/, refuseIncomplete: true,
   }) : undefined;
   if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
   const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
-    stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log,
+    stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log: childLog,
     settledRunIds: new Set((childSettlements?.rows ?? []).flatMap((row) => typeof row.run_id === "string" ? [row.run_id] : [])),
   }) : [];
   for (const child of adoptedChildren) {
     adoptedRunIds.add(child.runId);
     void child.settled.then(() => adoptedRunIds.delete(child.runId), () => adoptedRunIds.delete(child.runId));
   }
+  // Once per boot, after the adoption pass the decision reads: `auto` ledgers what it decided and why.
+  if (bootChildPolicy.mode === "auto") childModeTracker.record(runChildModeFor("auto", childModeTracker.evidence()).decision, log, true);
   // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
   // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
   // though the closure is invoked after that write. See the crashLoopCheck argument below.
-  const priorDaemonBootTs = readLedgerLines(ledgerPath)
+  const priorDaemonBootTs = bootLedgerLines
     .filter((l) => l.step === "daemon.boot")
     .map((l) => String(l.ts ?? ""))
     .filter(Boolean)
@@ -40405,10 +40454,14 @@ export async function daemonCommand(
         ...(childMode ? { adoptRunChildren: () => adoptedChildren } : {}),
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
+          // W1-T9087: each dispatch asks the mode; under `auto` that is the evidence's current answer, ledgered when it changes.
+          const dispatchPolicy = readRunChildPolicy(childPolicy);
+          const dispatchMode = dispatchPolicy.mode === undefined ? undefined : runChildModeFor(dispatchPolicy.mode, childModeTracker.evidence());
+          childModeTracker.record(dispatchMode?.decision, log);
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
           const inChild = await runInChildWhenOn({
-            taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log, planSync: planSyncCoalescer.sync,
-          }, { readMode: deps.readRunChildMode });
+            taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+          }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
             runOptions?.onChild?.(inChild);
             return inChild.settled;
@@ -40416,9 +40469,9 @@ export async function daemonCommand(
           // W1-T9082: under mode shadow an unawaited, never-rejecting probe child measures a run child's cost beside this run.
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
-            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
+            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log: childLog,
             options: childOptions,
-          });
+          }, dispatchMode ? { readMode: () => dispatchMode.mode } : {});
           return runTaskFn(taskId, {
             planPath: target.planPath,
             config,
@@ -40437,7 +40490,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
+            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).externalWaitFreshness,
             restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
@@ -40534,8 +40587,8 @@ export async function daemonCommand(
         // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
         // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
-          ? daemonFreshnessReads(repoRoot).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
+          ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
@@ -47307,6 +47360,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       behindMainByPr,
       baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+      planContextDigestFor: riskJudgePlanContextDigestFor(plan),
       handedOffHeadJudgments,
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
@@ -48702,6 +48756,7 @@ export function buildSweepHook(
           baseChangedFilesByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+          planContextDigestFor: riskJudgePlanContextDigestFor(plan),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
@@ -49093,6 +49148,7 @@ export function buildSweepLightHook(
                 readMainPlan: resolvedReadMainPlan },
             }),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
+            planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
@@ -53628,7 +53684,7 @@ export async function approveCommand(
       if (!candidate) return undefined;
       // W1-T9161: the approve that wrote this row may still be in its CI wait, about to merge the PR or arm it. A pid is
       // only a process on the host that wrote it; a dead pid, another host's, or a row naming none keeps the join.
-      if (candidate.actorPid !== undefined && candidate.host === hostname() && defaultIsPidAlive(candidate.actorPid)) {
+      if (candidate.actorPid !== undefined && sameHost(candidate.host, hostname()) && defaultIsPidAlive(candidate.actorPid)) {
         log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
         return undefined;
       }
@@ -56782,11 +56838,9 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
       console.error(`rmd claim: ${ref} is not held — nothing to drop`);
       return 1;
     }
-    const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
-    const localHost = opts.localHost ?? hostname();
-    if (!identity || identity.host !== localHost) {
-      const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
-      console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);
+    const refusal = claimDropRefusal(ref, reserver.anchorMessage?.(taskId), opts.localHost ?? hostname());
+    if (refusal !== undefined) {
+      console.error(`rmd claim: ${refusal}`);
       return 1;
     }
     if (!reserver.drop(taskId, { expect: sha })) {
@@ -57567,7 +57621,8 @@ import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
-import type { RunChildMode } from "./lib/policy.js";
+import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
+import { createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 export { hashInstallInputs, installHashMarkerPath };
 

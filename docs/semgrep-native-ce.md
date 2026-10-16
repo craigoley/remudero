@@ -8,6 +8,8 @@ Operator-approved CE 1.180.0 replaces 1.167.0, whose dependency constraints forc
 MCP 1.23.3 and PyJWT 2.13.0 with reported security advisories. The reviewed new closure
 uses MCP 1.29.0 and PyJWT 2.15.1; PyPI reported no advisories for this exact closure at
 lock preparation. That point-in-time result is not an exhaustive vulnerability audit.
+Semgrep 1.180.0 (and every release through 1.181.0) declares `mcp==1.29.0` exactly, so mcp moves
+only with a Semgrep release: the 1.30.0 bump (#12295) failed `pip check` in Scan and was reverted.
 
 `.github/workflows/semgrep.yml` uses Ubuntu 24.04 x86_64 and Python 3.12.15 through a
 full-commit-pinned official setup action. The existing Scan name, 20-minute deadline,
