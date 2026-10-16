@@ -1835,6 +1835,7 @@ export function threadViews(opts: {
   };
   const spawnLane = (lane: Lane, restoreCosts = true): void => {
     const data: ReadModelViewsData = { ...opts.data, selectedRegistryIntent, kind: READ_MODEL_VIEWS_KIND, lane: lane.name, restoreCosts };
+    if (selectedRegistryIntent === undefined) delete data.selectedRegistryIntent;
     const spawned = lane === fast ? spawnViews(opts.workerUrl, data) : spawnHeavyViews(opts.workerUrl, data);
     lane.worker = spawned;
     lane.building = undefined;
@@ -1966,7 +1967,7 @@ export function runReadModelWorker(
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), selectedRegistryIntent: data.selectedRegistryIntent },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {
@@ -2382,7 +2383,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     const shared = new SharedArrayBuffer(8);
     const data: ReadModelWorkerData = {
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
-      selectedRegistryIntent,
+      ...(selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent }),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),

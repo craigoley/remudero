@@ -2953,7 +2953,7 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes(served).map(route => route.path !== "/v1/views/repositories" || selectedRegistryObserver === undefined ? route : { ...route,
+    ...buildReadModelViewRoutes(served).map((route): Route => route.path !== "/v1/views/repositories" || selectedRegistryObserver === undefined ? route : { ...route,
       handler: (req, res, context) => observeSelectedRegistry(selectedRegistryObserver, "repositories-view",
         { instanceName: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository }, () => route.handler(req, res, context)) }),
     ...viewEvents.routes,

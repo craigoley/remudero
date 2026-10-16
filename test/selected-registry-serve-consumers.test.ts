@@ -284,7 +284,9 @@ test("selected trusted-worker intent snapshots data without carrying ports or gr
   await observer.observe("repositories-view", { instanceName: "fixture", repository: "owner/repo" }, () => "legacy");
   await observer.settled(); assert.equal(f.rows.at(-1)?.fields.selected_state, "ready", "restored data uses the real bounded async reader");
   assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
-  for (const invalid of [{ ...intent, version: 999 }, { ...intent, input: null }, { kind: "unknown", version: 1 }, { get kind() { throw new Error("private-intent-sentinel"); } }]) {
+  for (const invalid of [null, "invalid", { ...intent, version: 999 }, { ...intent, input: null }, { kind: "unknown", version: 1 },
+    { ...intent, input: { requiredCapabilities: [42] } }, { ...intent, input: { timeoutMs: "invalid" } },
+    { ...intent, input: { requiredCapabilities: "invalid" } }, { get kind() { throw new Error("private-intent-sentinel"); } }]) {
     const unknown = Reflect.apply(restore, undefined, [invalid, f.options.record]) as typeof observer; t.after(() => unknown.close());
     await unknown.observe("repositories-view", { instanceName: "fixture" }, () => "legacy"); await unknown.settled();
     assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown"); assert.equal(f.rows.at(-1)?.fields.reason, "transport_unavailable");

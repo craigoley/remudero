@@ -61,18 +61,22 @@ function capture(options: SelectedRegistryConsumerOptions | undefined): Captured
 }
 
 /** Data for trusted projector/view threads only, never a public body or untrusted worker argument. */
-export function copySelectedRegistryIntent(value: SelectedRegistryIntent | undefined): SelectedRegistryIntent | undefined {
+export function copySelectedRegistryIntent(value: unknown): SelectedRegistryIntent | undefined {
   if (value === undefined) return undefined;
   try {
-    if (value.version !== 1 || value.kind !== "shadow" || !value.input || typeof value.input !== "object") return unavailableIntent();
-    const { cliPath, envPath, configuredPath, expectedDigest, contractVersion, requiredCapabilities, maxBytes, timeoutMs } = value.input;
-    const instanceName = value.instanceName;
+    if (typeof value !== "object" || value === null) return unavailableIntent();
+    const candidate = value as SelectedRegistryIntent;
+    if (candidate.version !== 1 || candidate.kind !== "shadow") return unavailableIntent();
+    const { input, instanceName } = candidate;
+    if (!input || typeof input !== "object" || Array.isArray(input)) return unavailableIntent();
+    const { cliPath, envPath, configuredPath, expectedDigest, contractVersion, requiredCapabilities, maxBytes, timeoutMs } = input;
+    const capabilities = requiredCapabilities === undefined ? undefined : Array.isArray(requiredCapabilities) ? [...requiredCapabilities] : null;
     if ([cliPath, envPath, configuredPath, expectedDigest, instanceName].some(v => v !== undefined && typeof v !== "string")
       || [contractVersion, maxBytes, timeoutMs].some(v => v !== undefined && typeof v !== "number")
-      || (requiredCapabilities !== undefined && (!Array.isArray(requiredCapabilities) || requiredCapabilities.some(v => typeof v !== "string")))) return unavailableIntent();
+      || capabilities === null || capabilities?.some(v => typeof v !== "string")) return unavailableIntent();
     return Object.freeze({ kind: "shadow", version: 1, instanceName, input: Object.freeze({ cliPath, envPath, configuredPath,
       expectedDigest, contractVersion, maxBytes, timeoutMs,
-      ...(requiredCapabilities === undefined ? {} : { requiredCapabilities: Object.freeze([...requiredCapabilities]) }) }) });
+      ...(capabilities === undefined ? {} : { requiredCapabilities: Object.freeze(capabilities) }) }) });
   } catch {
     // Malformed/unreadable transport cannot establish identity; never serialize its exception or substitute a real port.
     return unavailableIntent();
@@ -87,7 +91,7 @@ export function captureSelectedRegistryIntent(options: SelectedRegistryConsumerO
   return copySelectedRegistryIntent({ kind: "shadow", version: 1, input, instanceName: captured.name });
 }
 
-export function selectedRegistryObserverFromIntent(intent: SelectedRegistryIntent | undefined, record: RegistryObservationSink): SelectedRegistryObserver | undefined {
+export function selectedRegistryObserverFromIntent(intent: unknown, record: RegistryObservationSink): SelectedRegistryObserver | undefined {
   const copied = copySelectedRegistryIntent(intent);
   if (copied === undefined) return undefined;
   if (copied.kind === "unknown") return consumerObserver({ kind: "unknown", record }, readSelectedInstanceRegistry, "transport_unavailable");
