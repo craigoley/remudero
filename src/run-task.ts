@@ -201,6 +201,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic } from "./lib/fs-race-safe.js";
+import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
@@ -27815,7 +27816,7 @@ export function classifyReservationAnchor(message: string, caller?: ReservationC
     const holder = callerFromReservationAnchor(m);
     if (!caller) return "fleet";
     if (!holder) return "unknown";
-    return holder.pid === caller.pid && holder.host === caller.host ? "self" : "fleet";
+    return holder.pid === caller.pid && sameHost(holder.host, caller.host) ? "self" : "fleet";
   }
   if (/^reserve\s+W1-T\d+\b/.test(m)) return "operator";
   return "unknown";
@@ -53520,7 +53521,7 @@ export async function approveCommand(
       if (!candidate) return undefined;
       // W1-T9161: the approve that wrote this row may still be in its CI wait, about to merge the PR or arm it. A pid is
       // only a process on the host that wrote it; a dead pid, another host's, or a row naming none keeps the join.
-      if (candidate.actorPid !== undefined && candidate.host === hostname() && defaultIsPidAlive(candidate.actorPid)) {
+      if (candidate.actorPid !== undefined && sameHost(candidate.host, hostname()) && defaultIsPidAlive(candidate.actorPid)) {
         log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
         return undefined;
       }
@@ -56676,7 +56677,7 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
     }
     const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
     const localHost = opts.localHost ?? hostname();
-    if (!identity || identity.host !== localHost) {
+    if (!identity || !sameHost(identity.host, localHost)) {
       const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
       console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);
       return 1;
