@@ -6,7 +6,61 @@ import { classifyAllProposalsMemo, classifyAllProposalsSliced, inboxClassificati
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
-import type { StatusProjection } from "../src/lib/status.js";
+import type { PrRef, StatusProjection } from "../src/lib/status.js";
+
+function standaloneFixture(t: { after(fn: () => void): void }, ids = ["board-review:stale:#11968"]) {
+  const root = makeTempDir("rmd-inbox-standalone"); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state"); mkdirSync(stateDir, { recursive: true });
+  const ledgerPath = join(stateDir, "ledger.ndjson"); writeFileSync(ledgerPath, "");
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: ids.map(id => ({ id, summary: "Fixture board request", evidenceAnchors: [] })) }));
+  const plan = loadPlanFromYaml("[]\n", "fixture");
+  let open: PrRef[] | null = [{ number: 11968, state: "OPEN", url: "https://github.com/fixture/repository/pull/11968", headRefName: "dependabot/fixture" }];
+  const github = fakeGitHub({ listOpenHeadBranches: () => open });
+  const deps: PanelGraphDeps = { root, inboxRoot: root, planPath: join(root, "tasks.yaml"), ledgerPath,
+    github: { prView: () => null }, statusGithub: github, ratify: { approve: () => undefined, reframe: () => undefined }, inboxMainSha: () => "a".repeat(40) };
+  return { plan, deps, github, setOpen: (next: PrRef[] | null) => { open = next; } };
+}
+
+test("standalone Inbox stale referents use the already-read open PR batch", async t => {
+  const f = standaloneFixture(t);
+  for (const read of [classifyAllProposalsMemo(f.deps, () => f.plan), await classifyAllProposalsSliced({ ...f.deps }, () => f.plan)]) {
+    assert.equal(read.projection.size, 0, "positive control: this is not a plan-owned PR");
+    assert.equal(read.classifications[0]?.referentUnverified, undefined);
+    assert.equal(read.classifications[0]?.state, "not_ready", "known open does not mean ready, retired or approved");
+    assert.equal(inboxClassificationEvidence(read).complete, true);
+  }
+  assert.equal(f.github.calls.filter(c => c.method === "listOpenHeadBranches").length, 2, "exactly one existing board batch per pass");
+  assert.equal(f.github.calls.filter(c => c.method === "prByRef").length, 0, "no per-proposal network lookup");
+});
+
+test("standalone Inbox referents invalidate the memo without inferring resolution from absence", t => {
+  const f = standaloneFixture(t);
+  f.setOpen([]);
+  const missing = classifyAllProposalsMemo(f.deps, () => f.plan);
+  assert.equal(missing.classifications[0]?.referentUnverified, true);
+  f.setOpen([{ number: 11968, state: "OPEN", url: "https://github.com/fixture/repository/pull/11968" }]);
+  const observed = classifyAllProposalsMemo(f.deps, () => f.plan);
+  assert.equal(observed.classifications[0]?.referentUnverified, undefined);
+  assert.notEqual(observed.classifications, missing.classifications, "a standalone board change matters without a plan or main-SHA change");
+  const repeated = classifyAllProposalsMemo(f.deps, () => f.plan);
+  assert.equal(repeated.classifications, observed.classifications, "identical board evidence still reuses the memo");
+  for (const open of [[], null, [{ number: 11968, state: "OPEN", url: "fixture" }, { number: 11968, state: "CLOSED", url: "fixture" }]]) {
+    f.setOpen(open);
+    const read = classifyAllProposalsMemo(f.deps, () => f.plan);
+    assert.equal(read.classifications[0]?.referentUnverified, true);
+    assert.notEqual(read.classifications[0]?.state, "retired");
+    assert.equal(inboxClassificationEvidence(read).complete, false);
+  }
+});
+
+test("standalone Inbox escalations require actual escalation evidence, not just an open PR", async t => {
+  const f = standaloneFixture(t, ["board-review:stale:#11968", "board-review:escalation:#11968"]);
+  const read = await classifyAllProposalsSliced(f.deps, () => f.plan);
+  assert.equal(read.classifications[0]?.referentUnverified, undefined);
+  assert.equal(read.classifications[1]?.referentUnverified, true, "an open list never measured zero escalations");
+  assert.notEqual(read.classifications[1]?.state, "retired");
+  assert.equal(inboxClassificationEvidence(read).complete, false, "the unknown escalation keeps its guard");
+});
 
 test("the production Inbox classifier observes its own board referent without a second GitHub read", async t => {
   const root = makeTempDir("rmd-inbox-referents"); t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -69,4 +123,10 @@ test("board referent evidence refuses unavailable conflicting and unobserved sta
   assert.deepEqual([...observed.states], [["#1", { status: "open", unhandledEscalations: 1 }],
     ["#2", { status: "merged", unhandledEscalations: 0 }], ["#3", { status: "dead", unhandledEscalations: 0 }]]);
   assert.equal(inboxBoardReferents(new Map()).states.size, 0, "empty evidence retires nothing by absence");
+  const additional = inboxBoardReferents(new Map([["known", row(1, { needsHuman: true })], ["conflict", row(2, { prState: "MERGED" })]]), [
+    { number: 1, state: "OPEN" }, { number: 2, state: "OPEN" }, { number: 0, state: "OPEN" },
+    { number: 1.5, state: "OPEN" }, { number: 11968, state: "OPEN" }, { number: 11968, state: "OPEN" },
+  ]);
+  assert.deepEqual([...additional.states], [["#1", { status: "open", unhandledEscalations: 1 }], ["#11968", { status: "open" }]],
+    "a current open batch does not erase stronger escalation facts or reconcile a contradiction");
 });
