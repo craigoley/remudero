@@ -58,7 +58,10 @@ function servedPaths(): string[] {
       daemonHealth: { exec: () => "{}" },
       instances: { registryPath, stateBase: join(root, "instances") },
     } as unknown as ServeDeps;
-    const routes = buildServeRoutes(deps).map((route) => route.path);
+    const assembled = buildServeRoutes(deps);
+    const routes = assembled.map((route) => route.path);
+    assert.deepEqual(assembled.filter(route => route.path === "/v1/i/site/inbox/why-me-correction")
+      .map(route => route.method), ["POST"], "the real registry row mounts the advisory write");
     const stable = routes.filter((path) => path.startsWith("/v1/") && !path.startsWith("/v1/i/"));
     // The instance family is registry-conditional. Positive-control each newly declared route
     // against the real registry row before normalizing to the OpenAPI path parameter.
@@ -75,7 +78,7 @@ function servedPaths(): string[] {
     const instanceAnswers = routes.filter((path) => path === "/v1/i/site/manual/approve" || path === "/v1/i/site/escalation/mark-handled")
       .map((path) => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceAnswers.length, 2, "both answer routes now names for an instance's escalations must be mounted for a registered instance");
-    const inbox = ["inbox", "inbox/attention-census", "inbox/proposal", "inbox/reframe"];
+    const inbox = ["inbox", "inbox/attention-census", "inbox/proposal", "inbox/reframe", "inbox/why-me-correction"];
     const instanceInbox = routes.filter(path => inbox.some(p => path === `/v1/i/site/${p}`))
       .map(path => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceInbox.length, inbox.length, "every declared instance Inbox route is mounted for the real registry row");
@@ -104,4 +107,16 @@ test("W1-T4579: every served /v1 route is in the contract or its shrink-only bas
 test("W1-T4579: the drift names a new undeclared route and a declared route nothing serves", () => {
   const drift = contractDrift(["/v1/status", "/v1/tasks/:id", "/v1/new-route"], ["/v1/status", "/v1/tasks/{id}", "/v1/gone"]);
   assert.deepEqual(drift, { undeclared: ["/v1/new-route"], unserved: ["/v1/gone"] });
+});
+
+test("W1-T9286: the real instance why-me route survives the census and parameter aliases", () => {
+  const served = servedPaths(), path = "/v1/i/{instance}/inbox/why-me-correction";
+  const declared = declaredPaths(readFileSync(join(ROOT, "openapi", "daemon.yaml"), "utf8"));
+  assert.equal(served.filter(route => route === path).length, 1,
+    "the real mounted POST must survive the instance-family census projection");
+  assert.ok(declared.includes(normalise(path)), "the maintained contract declares this scoped route");
+  for (const alias of [path, "/v1/i/:instance/inbox/why-me-correction"])
+    assert.deepEqual(contractDrift([alias], [path]), { undeclared: [], unserved: [] });
+  assert.deepEqual(contractDrift(served.filter(route => route !== path), [path]).unserved,
+    [normalise(path)], "removing the mounted route must remain a detected contract failure");
 });
