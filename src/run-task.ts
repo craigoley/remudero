@@ -207,7 +207,9 @@ import { startDaemonSreLane } from "./lib/daemon.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, gardenPendingSignal, isPromiseLike, runStepsEager, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
+import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
 import { issueRevalidationJudgeText, issueTaskId, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { gardenSchedule } from "./lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "./lib/gardener-runtime.js";
@@ -633,6 +635,7 @@ import { codeqlAlertsReadDue } from "./lib/pr-blocker.js";
 import {
   buildMainHealthRung,
   mainCeilingLogReducer,
+  mainRepairRecordsFromLedger,
   mainRepairMergesBrief,
   withMainHealthOnLightPass,
   type MainCeilingLogVerdict,
@@ -52625,10 +52628,18 @@ export function productionMachineFilingJudgePorts(opts: {
   spawn?: typeof spawnWorker;
   fetcher?: GhApiFetcher;
   clock?: Clock;
+  /** Test files main's CI failed at a sha (W1-T9694). Absent: read from GitHub, as the flake-incident gardener does. */
+  mainFailures?: SelectorShadowMainFailures;
 }): MachineJudgePorts {
   let judge: ((input: RiskJudgeInput) => Promise<RiskJudgeVerdict>) | undefined;
   const fetcher = opts.fetcher ?? ghJson;
   return {
+    flakeEvidence: flakeJudgeEvidencePort({
+      stateDir: opts.stateDir, log: opts.log, clock: opts.clock ?? systemClock,
+      mainFailures: opts.mainFailures ?? selectorShadowMainFailures(opts.owner, opts.repo),
+      // ledger-read-intent: live — the main.repair rows the main-health rung itself reads.
+      repairs: () => [...mainRepairRecordsFromLedger(readLedgerLines(join(opts.stateDir, LEDGER_FILENAME))).values()],
+    }),
     stateDir: opts.stateDir,
     plan: () => loadPlan(resolveRepoLayout(opts.repoRoot).planMonolith),
     riskJudge: (input) => {
