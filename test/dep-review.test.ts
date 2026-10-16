@@ -23,7 +23,6 @@ import {
   parseVersionBumps,
   renderDepReviewMigrationFeedback,
   redChecks,
-  readSelectedDepReviewChecks,
   type DepReviewCheck,
   CONVENTIONAL_TITLE_PREFIX_RE,
 } from "../src/lib/dep-review.js";
@@ -729,6 +728,10 @@ test("W1-T9689 dep review holds current red pending and unread evidence", async 
   for (const item of [
     { label: "current red", checks: [{ name: "ci-gate", conclusion: "FAILURE" }], code: 1 },
     { label: "current pending", checks: [{ name: "ci-gate", status: "IN_PROGRESS" }], code: 1 },
+    { label: "newer pending supersedes older green", checks: [
+      { name: "ci-gate", conclusion: "SUCCESS", startedAt: "2026-10-15T10:00:00Z", checkRunId: 101, workflowId: 5, workflowRunId: 10 },
+      { name: "ci-gate", status: "IN_PROGRESS", startedAt: "2026-10-15T11:00:00Z", checkRunId: 102, workflowId: 5, workflowRunId: 11 },
+    ], code: 1 },
     { label: "unknown conclusion", checks: [{ name: "ci-gate", conclusion: "FUTURE_STATE" }], code: 1 },
     { label: "no check evidence", checks: [], code: 1 },
     { label: "lane-owned status exclusion", checks: [...GREEN_CHECKS, { context: "remudero-review", state: "FAILURE" }], code: 0 },
@@ -760,6 +763,7 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
     { label: "real async child, late older-run red, and commit status", code: 0 },
     { label: "current red", code: 1, checks: { total_count: 1, check_runs: [{ ...green, conclusion: "failure" }] } },
     { label: "pending", code: 1, checks: { total_count: 1, check_runs: [{ ...green, status: "in_progress", conclusion: null }] } },
+    { label: "newer pending beside older green", code: 1, checks: { total_count: 2, check_runs: [check(101, 10, "success", "10"), { ...green, status: "in_progress", conclusion: null }] } },
     { label: "transport outage", code: 1, exit: 1 },
     { label: "malformed JSON", code: 1, stdout: "not-json" },
     { label: "missing check corpus", code: 1, checks: {} },
@@ -819,6 +823,7 @@ test("W1-T9689 the default dep review reader binds checks to the selected head",
 });
 
 test("W1-T9689 selected evidence retains snapshots and explicit unknown shape outcomes", async (t) => {
+  const { readSelectedDepReviewChecks } = await import("../src/lib/dep-review.js");
   const sha = "a".repeat(40), target = { number: 3654, url: "https://github.com/craigoley/remudero/pull/3654", headSha: sha, body: "body" };
   const pull = { id: 8, number: 3654, html_url: target.url, state: "open", merged: false, head: { sha },
     base: { repo: { id: 55, full_name: "craigoley/remudero" } }, body: "body" };
