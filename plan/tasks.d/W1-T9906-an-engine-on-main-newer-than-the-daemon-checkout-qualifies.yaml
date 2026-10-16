@@ -51,9 +51,10 @@
        both `startRunChildProbe` and `spawnRunChild`, replacing `rev-parse HEAD`. The port's name and shape are
        unchanged, so injected fakes keep working. The daemon's plan sync fetches origin in that checkout every tick,
        so the ref is main's tip as last fetched.
-    2. An unreadable tip is never answered with HEAD. The read throws, and each function's existing catch names it:
-       `run_child.shadow_skipped` for the probe and `run_child.fallback` for the spawn, with a reason that starts
-       "origin/main tip unreadable".
+    2. An unreadable tip is never answered with HEAD, and its reason starts "origin/main tip unreadable". The probe
+       catches the read where it makes it and skips (`run_child.shadow_skipped`), so the failure is not written as a
+       `run_child.shadow` row with contract unknown, as a probe that ran. The spawn's existing catch already falls
+       back (`run_child.fallback`) with the error in its reason.
     3. newestCurrentEngine is unchanged. The modules check (W1-T9738), the bundle-currency check and the
        ancestor-of-tip check all still run. An engine cut at a worker's own commit, which is not reachable from
        origin/main, is still refused. A running child still finishes on the engine it started on.
@@ -78,5 +79,6 @@
     At origin/main the default `mainSha` reads HEAD (H). D is not H and not an ancestor of H, so spawnRunChild returns
     started:false "no current engine tree for main" and the probe skips with the same reason: the first two tests
     fail. With refs/remotes/origin/main deleted, origin/main still reads HEAD and goes on to the same "no current
-    engine" skip rather than naming the tip, so the fourth fails. The third passes before and after; it guards
-    against a fix that drops the ancestry check.
+    engine" skip rather than naming the tip, so the fourth fails. The third's refusal of W holds before and after,
+    which guards against a fix that drops the ancestry check; it fails at origin/main only where it asserts that
+    `engine.lag` measures against main's tip, because there main_sha is HEAD.
