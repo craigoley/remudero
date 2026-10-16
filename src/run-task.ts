@@ -24081,7 +24081,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     title: view.title ?? "",
     body: view.body ?? "",
     diff,
-    checks: view.statusCheckRollup ?? [],
+    checks: dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []),
   });
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
