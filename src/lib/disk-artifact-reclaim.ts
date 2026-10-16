@@ -209,7 +209,9 @@ function sweepArtifactRoot(
   try {
     names = listEntries(scanRoot);
   } catch {
-    return { reclaimed, kept, bytesReclaimed }; // unreadable root — best-effort, matches reapStaleWorktrees
+    // Enumeration failure is observable; retain this root and continue independent roots.
+    keep(scanRoot, "unreadable", { what: "readdir" });
+    return { reclaimed, kept, bytesReclaimed };
   }
 
   for (const name of names) {
