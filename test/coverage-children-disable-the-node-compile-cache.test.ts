@@ -62,7 +62,7 @@ console.log(JSON.stringify({
 }));
 `;
 
-function runProbe(t: TestContext, coverage: boolean) {
+function runProbe(t: TestContext, coverage: boolean, inheritedDisable?: string) {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}coverage-compile-cache-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const cache = join(dir, "compile-cache");
@@ -70,9 +70,8 @@ function runProbe(t: TestContext, coverage: boolean) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_COMPILE_CACHE: cache,
-    // Node v24 treats the nonempty string "0" as disabling too. The ordinary
-    // positive control must omit it, rather than assume shell-style booleans.
-    NODE_DISABLE_COMPILE_CACHE: coverage ? "0" : undefined,
+    // Node v24 treats nonempty "0" as disabling too; undefined is the enabled positive control.
+    NODE_DISABLE_COMPILE_CACHE: inheritedDisable,
     NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE ?? "",
     TEST_RETRY: "0",
   };
@@ -92,7 +91,8 @@ function runProbe(t: TestContext, coverage: boolean) {
 }
 
 test("the real coverage first pass disables inherited and programmatic Node compile caching", (t) => {
-  const { raw, observed } = runProbe(t, true);
+  for (const inheritedDisable of [undefined, "0", "1"]) {
+  const { raw, observed } = runProbe(t, true, inheritedDisable);
   assert.equal(observed.cache, null);
   assert.equal(observed.disabled, "1");
   assert.equal(observed.status, observed.disabledStatus);
@@ -104,6 +104,7 @@ test("the real coverage first pass disables inherited and programmatic Node comp
     const report = JSON.parse(readFileSync(join(raw, name), "utf8")) as { result?: unknown[] };
     return Array.isArray(report.result) && report.result.length > 0;
   }), "a real nonempty V8 coverage corpus is the positive control");
+  }
 });
 
 test("ordinary wrapper commands retain their original Node compile-cache environment", (t) => {
@@ -113,4 +114,10 @@ test("ordinary wrapper commands retain their original Node compile-cache environ
   assert.notEqual(observed.status, observed.disabledStatus);
   assert.equal(observed.coverage, process.env.NODE_V8_COVERAGE ?? "");
   assert.ok(observed.cacheDir?.startsWith(cache), "the ordinary child's cache remains enabled");
+  for (const inheritedDisable of ["0", "1"]) {
+    const disabled = runProbe(t, false, inheritedDisable).observed;
+    assert.equal(disabled.disabled, inheritedDisable);
+    assert.equal(disabled.status, disabled.disabledStatus);
+    assert.notEqual(disabled.cache, null, "ordinary settings are not rewritten even when disabled");
+  }
 });
