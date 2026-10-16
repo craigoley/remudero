@@ -293,3 +293,84 @@ test("selected mode unknown catches and sinks preserve the exact independent ope
     assert.equal(JSON.stringify(rows).includes(fx.root), false);
   } finally { fx.cleanup(); }
 });
+
+test("selected mode refuses missing invalid and retired evidence without changing shadow effects", async (t) => {
+  for (const item of [
+    { label: "no selection", settings: { registryPath: undefined }, reason: "selection_missing" },
+    { label: "explicit empty path", settings: { registryPath: "" }, reason: "invalid_path" },
+    { label: "missing instance", settings: { instanceName: undefined }, reason: "invalid_instance" },
+    { label: "wrong instance", settings: { instanceName: "another" }, reason: "instance_missing_or_ambiguous" },
+    { label: "retired instance", content: registry("shadow").replace("    github_repo:", "    live: false\n    github_repo:"), reason: "instance_retired" },
+    { label: "unsupported contract", settings: { contractVersion: 99 }, reason: "unsupported_contract" },
+    { label: "invalid deadline", settings: { timeoutMs: 0 }, reason: "invalid_bounds" },
+    { label: "malformed bytes", content: "instances: not-a-row\n", reason: "malformed" },
+  ]) await t.test(item.label, async () => {
+    const fx = fixture("shadow"), rows: Array<Record<string, unknown>> = [];
+    try {
+      if (item.content !== undefined) writeFileSync(fx.selected, item.content);
+      const q = createSelectedModeQualification({ ...fx.settings, ...item.settings }, "owner/repo", {}, (_step, row) => { rows.push(row); })!;
+      assert.equal(await q.observe("arm", () => "armed", pr.prUrl), "armed");
+      assert.equal(rows.at(-1)?.selected_outcome, "would-refuse");
+      assert.equal(rows.at(-1)?.reason, item.reason); assert.equal(rows.at(-1)?.publication_permission, "not-granted");
+    } finally { fx.cleanup(); }
+  });
+});
+
+test("selected mode synchronous seams remain unknown and never create a selected read", async () => {
+  const fx = fixture("shadow"), rows: Array<Record<string, unknown>> = [];
+  let reads = 0, effects = 0;
+  try {
+    const q = createSelectedModeQualification(fx.settings, "owner/repo", {}, (_step, row) => { rows.push(row); },
+      { lstat: async path => { reads++; return registryFileIO.lstat(path); }, open: registryFileIO.open }, "sync")!;
+    assert.equal(q.observeSync("arm", () => { effects++; return "armed"; }, pr.prUrl), "armed");
+    assert.equal(await q.observe("arm", () => { effects++; return "armed"; }, pr.prUrl), "armed");
+    assert.equal(reads, 0); assert.equal(effects, 2); assert.equal(rows.length, 1, "unchanged cause stays quiet");
+    assert.equal(rows[0]?.reason, "synchronous_seam");
+    await q.observe("arm", () => "armed", "https://github.com/owner/repo/pull/0");
+    assert.equal(rows.at(-1)?.reason, "target_unavailable");
+    const original = new Error("sync effect");
+    assert.throws(() => q.observeSync("arm", () => { throw original; }, pr.prUrl), error => error === original);
+  } finally { fx.cleanup(); }
+});
+
+test("selected mode snapshots real input and handle methods across pending filesystem work", async () => {
+  const fx = fixture("shadow"), rows: Array<Record<string, unknown>> = [];
+  let release!: () => void, entered!: () => void, handle: Awaited<ReturnType<typeof registryFileIO.open>> | undefined, closed = 0;
+  const barrier = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
+  const io = { ...registryFileIO, open: async (path: string) => {
+    const real = await registryFileIO.open(path);
+    handle = { stat: async () => { entered(); await barrier; return real.stat(); }, read: real.read,
+      close: async () => { closed++; await real.close(); } };
+    return handle;
+  } };
+  const caps = ["identity"], input = { requiredCapabilities: caps };
+  try {
+    const q = createSelectedModeQualification(fx.settings, "owner/repo", input, (_step, row) => { rows.push(row); }, io)!;
+    const pending = q.observe("arm", () => "armed", pr.prUrl);
+    await started;
+    caps.push("unsupported"); fx.settings.registryPath = fx.other;
+    io.open = async () => { throw new Error(fx.root); };
+    handle!.read = async () => { throw new Error(fx.root); }; handle!.close = async () => { throw new Error(fx.root); };
+    release(); assert.equal(await pending, "armed");
+    assert.equal(rows.at(-1)?.selected_outcome, "would-shadow"); assert.equal(closed, 2, "initial read and final recheck close their captured real handles");
+  } finally { release(); fx.cleanup(); }
+});
+
+test("selected mode cancellation returns unknown while late real handles still close", async () => {
+  const fx = fixture("shadow"), rows: Array<Record<string, unknown>> = [], controller = new AbortController();
+  let release!: () => void, entered!: () => void, didClose!: () => void, closed = 0;
+  const barrier = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
+  const closing = new Promise<void>(resolve => { didClose = resolve; });
+  try {
+    const q = createSelectedModeQualification(fx.settings, "owner/repo", { signal: controller.signal }, (_step, row) => { rows.push(row); },
+      { ...registryFileIO, open: async path => {
+        const real = await registryFileIO.open(path); entered(); await barrier;
+        return { ...real, close: async () => { closed++; await real.close(); didClose(); } };
+      } })!;
+    const pending = q.observe("arm", () => "armed", pr.prUrl);
+    await started; await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(closed, 0, "real default filesystem handle is demonstrably in flight");
+    controller.abort(); assert.equal(await pending, "armed"); assert.equal(rows.at(-1)?.reason, "cancelled");
+    release(); await closing; assert.equal(closed, 1);
+  } finally { release(); fx.cleanup(); }
+});
