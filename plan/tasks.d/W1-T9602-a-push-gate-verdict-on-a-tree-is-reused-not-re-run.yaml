@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: read-only investigation of the core daemon's CPU and memory, 02:25-02:57Z (coordinator brief, task B). The brief asks that no worker-written result is ever trusted, and that the record names that trust boundary"
   plan_refs: [W1-T8778, W1-T8920, W1-T8945, W1-T9556, W1-T6120, W1-T6138, W1-T3222, W1-T3225, W1-T3280, W1-T4403]
   files: [src/lib/gate-verdict-record.ts, src/lib/git-push.ts, src/lib/preopen-gate.ts, test/a-build-is-gated-on-the-fast-preflight-before-its-pr-opens.test.ts, test/a-push-gate-verdict-on-a-tree-is-reused-not-re-run.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

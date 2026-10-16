@@ -18,9 +18,10 @@
  * caller, which only logs it. A reader that cannot parse the file says so; it never reads an empty series as flat.
  */
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { writeAtomic } from "./fs-race-safe.js";
+import { collectMemoryCalibration, kernelMemoryObservation } from "./host-memory-calibration.js";
 
 export const DAEMON_FOOTPRINT_FILE = "daemon-footprint.json";
 /** The window the budget reads (host-memory-shadow.ts's last hour). */
@@ -36,11 +37,13 @@ export interface FootprintSample {
 }
 
 export interface DaemonFootprintIo {
+  observeCalibration?: (stateDir: string, at: number) => void;
   readFile: (path: string) => string;
   writeFile: (path: string, content: string) => void;
 }
 
 const realIo: DaemonFootprintIo = {
+  observeCalibration: (stateDir, at) => { collectMemoryCalibration(stateDir, kernelMemoryObservation(at)); },
   readFile: (path) => readFileSync(path, "utf8"),
   writeFile: (path, content) => void writeAtomic(path, content, { tmpTag: "footprint-tmp" }),
 };
@@ -76,7 +79,7 @@ function errnoOrMessage(error: unknown): string {
 export interface DaemonFootprint {
   readonly path: string;
   /** Add one sample, drop the expired ones, persist. Returns the persist error, if any; the sample is kept either way. */
-  record(sample: FootprintSample): { persisted: true } | { persisted: false; reason: string };
+  record(sample: FootprintSample): { persisted: true; reason?: string } | { persisted: false; reason: string };
   samples(): readonly FootprintSample[];
 }
 
@@ -96,10 +99,12 @@ export function createDaemonFootprint(path: string, io: DaemonFootprintIo = real
         .slice(-FOOTPRINT_MAX_SAMPLES);
       try {
         io.writeFile(path, `${JSON.stringify({ samples: held })}\n`);
-        return { persisted: true };
       } catch (error) {
         return { persisted: false, reason: errnoOrMessage(error) };
       }
+      try { io.observeCalibration?.(dirname(path), sample.at); }
+      catch (error) { return { persisted: true, reason: `calibration:${errnoOrMessage(error)}` }; }
+      return { persisted: true };
     },
     samples: () => held,
   };
