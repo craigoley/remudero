@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { inboxDismissalReceipt, type InboxDismissalReceipt } from "./inbox-dismissal-audit.js";
@@ -186,12 +187,12 @@ export function writeInboxGardenerStore(stateDir: string, store: InboxGardenerSt
 }
 
 /** One shared lock coordinates child passes and restoration. Reclaims only a proven dead own-host holder. */
-export async function withInboxGardenerLock<T>(stateDir: string, run: () => T | Promise<T>): Promise<T | { state: "busy" }> {
+export async function withInboxGardenerLock<T>(stateDir: string, run: () => T | Promise<T>, clock: Clock = systemClock): Promise<T | { state: "busy" }> {
   fs.mkdirSync(stateDir, { recursive: true });
   const path = inboxGardenerPath(stateDir) + ".lock";
   const acquire = () => {
     const fd = fs.openSync(path, "wx");
-    try { fs.writeSync(fd, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() })); }
+    try { fs.writeSync(fd, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: clock.iso() })); }
     finally { fs.closeSync(fd); }
   };
   try { acquire(); }

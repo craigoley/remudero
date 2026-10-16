@@ -149,7 +149,7 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
     const complete = candidates.length === 0 || after === candidates.at(-1)?.proposal.id;
     store.cursor = { generation, after: complete ? "" : after }; writeInboxGardenerStore(options.stateDir, store);
     return { state: complete ? "complete" : "pending", complete, evaluated, retired, judged, proofReads };
-  }).catch(error => ({ state: "failed", delivery: "unknown", complete: false, reason: String(error) }));
+  }, clock).catch(error => ({ state: "failed", delivery: "unknown", complete: false, reason: String(error) }));
 }
 
 const RELEVANT_STEPS = ["panel.proposal_reframe_requested", "panel.proposal_declined", "panel.proposal_restored", "ratify.reframed", "ratify.approved", "inbox.gardener_retired", "inbox.gardener_restored", "inbox.gardener_outcome"];

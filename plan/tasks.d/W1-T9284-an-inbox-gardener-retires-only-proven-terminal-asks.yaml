@@ -4,14 +4,14 @@
   depends_on: ["W1-T9282","W1-T9285","W1-T9288","W1-T9286"]
   priority: 1.75
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 35.00
   risk: high
   band_meaning: blast-radius
   origin: "2026-10-13 operator-approved follow-up; issue #7708"
   plan_refs: ["W1-T4738","W1-T4768","W1-T4853"]
-  files: ["openapi/daemon.yaml","packages/api-client/src/schema.d.ts","src/lib/ask-classification.ts","src/lib/benchmark-run.ts","src/lib/config-schema.ts","src/lib/fleet-lane.ts","src/lib/garden-registry.ts","src/lib/inbox-dismissal-audit.ts","src/lib/inbox-gardener.ts","src/lib/inbox-responder.ts","src/lib/inbox-retirement.ts","src/lib/inbox-thread.ts","src/lib/inbox-view.ts","src/lib/inbox.ts","src/lib/instance-inbox-contract.ts","src/lib/measurement-cadence.ts","src/lib/machine-filing-judge.ts","src/lib/panel-graph.ts","src/lib/status-board.ts","src/lib/verify-human-judge.ts","src/run-task.ts","test/a-consolidated-proposal-retires-its-predecessors.test.ts","test/a-proposal-outlives-its-own-task.test.ts","test/a-retired-tasks-proposal-cannot-be-ratified.test.ts","test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts","test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts","test/inbox-released-machine-judge-ask.test.ts","test/inbox-task-risk-history.test.ts","test/the-proof-debt-producer-reaches-production.test.ts","test/the-registered-config-garden-isolates-its-mount-sweep.test.ts","test/the-machine-judge-runs-off-the-daemon-loop.test.ts","test/the-inbox-intake-rung-derives-readiness-from-the-batched-gateway.test.ts","test/the-inbox-is-classified-once-per-change.test.ts","plan/tasks.d/W1-T4884-retire-stale-verify-human-ask-on-verify-auto.yaml","test/a-released-human-ask-leaves-the-inbox.test.ts","test/archive-release-inbox-reconciliation.test.ts","test/operator-attention-census.test.ts"]
+  files: ["openapi/daemon.yaml","packages/api-client/src/schema.d.ts","src/lib/ask-classification.ts","src/lib/benchmark-run.ts","src/lib/config-schema.ts","src/lib/fleet-lane.ts","src/lib/garden-registry.ts","src/lib/inbox-dismissal-audit.ts","src/lib/inbox-gardener.ts","src/lib/inbox-gardener-runtime.ts","src/lib/inbox-responder.ts","src/lib/inbox-retirement.ts","src/lib/inbox-thread.ts","src/lib/inbox-view.ts","src/lib/inbox.ts","src/lib/instance-inbox-contract.ts","src/lib/measurement-cadence.ts","src/lib/machine-filing-judge.ts","src/lib/panel-graph.ts","src/lib/status-board.ts","src/lib/verify-human-judge.ts","src/run-task.ts","test/a-consolidated-proposal-retires-its-predecessors.test.ts","test/a-proposal-outlives-its-own-task.test.ts","test/a-retired-tasks-proposal-cannot-be-ratified.test.ts","test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts","test/an-inbox-gardener-retires-only-proven-terminal-asks.test.ts","test/inbox-released-machine-judge-ask.test.ts","test/inbox-task-risk-history.test.ts","test/the-proof-debt-producer-reaches-production.test.ts","test/the-registered-config-garden-isolates-its-mount-sweep.test.ts","test/the-machine-judge-runs-off-the-daemon-loop.test.ts","test/the-inbox-intake-rung-derives-readiness-from-the-batched-gateway.test.ts","test/the-inbox-is-classified-once-per-change.test.ts","plan/tasks.d/W1-T4884-retire-stale-verify-human-ask-on-verify-auto.yaml","test/a-released-human-ask-leaves-the-inbox.test.ts","test/archive-release-inbox-reconciliation.test.ts","test/operator-attention-census.test.ts"]
   status: queued
   attempts: 0
   rationale: |
@@ -19,6 +19,9 @@
   design: |
     Use changed input identity or the existing low-cost gardener cadence. Revalidate against the current source-qualified plan, merged PR trailer/build-branch credit, release receipts, superseding verdicts and open referents. Retire only from a positive terminal or handoff receipt proving the operator is no longer the next actor. Preserve registry/thread history, record the reason and source, and provide an idempotent restore path. Never infer consent, retire by age alone, or treat an unavailable source as terminal. Route mechanical follow-ups through the existing fleet lane. Ask a judge only for residual cases with changed inputs, and expose failure/low confidence through the needs-triage contract. Integrate the audit task before broad adoption; keep held security, budget, tenant, policy and irreversible questions visible.
   implementation_notes: |
+    This operator-requested hand build intentionally supersedes W1-T4884 claim/proof text with code.
+    It retains human ownership under rule15-filing; the existing build authorization does not record
+    an approval, release or merge. Priority, risk, budget and the canonical acceptance/falsifier remain.
     Immutable-key and current source qualification depend on W1-T9288; verified operator admission and
     freshness leaf depend on W1-T9286. The gardener defaults off and needs separate operator activation.
     Only the real open/unmerged proof-debt cadence can stamp new mechanical purpose. Legacy untyped

@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { fixedClock } from "../src/lib/clock.js";
 import { readPersistedInbox, triageFleetLane } from "../src/lib/fleet-lane.js";
 import { runInboxGardener, defaultInboxGardenerPorts, inboxGardenerSemanticInput, readInboxGardenerLedger, INBOX_GARDENER_SOURCE_LIMITS, type InboxGardenerPack, type InboxGardenerPorts } from "../src/lib/inbox-gardener.js";
-import { readInboxGardenerStore, inboxGardenerPath, inboxSemanticDigest, inboxProposalRevision, validInboxTerminalProof, inboxRetirementFor,
+import { withInboxGardenerLock, readInboxGardenerStore, inboxGardenerPath, inboxSemanticDigest, inboxProposalRevision, validInboxTerminalProof, inboxRetirementFor,
   restoreInboxRetirement, writeInboxGardenerStore, proofDebtPopulationPermit, stampMechanicalAsk, stampVerificationAsk, mechanicalAskPurpose, inboxGardenerMode, type InboxGardenerScope, type InboxTerminalProof } from "../src/lib/inbox-retirement.js";
 import { mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
 import { parseProposalRegistry, anchorFingerprint, updateProposalRegistry, type Proposal } from "../src/lib/inbox.js";
@@ -22,7 +22,8 @@ import { createService } from "../src/lib/service.js";
 import { world } from "./helpers/why-me-world.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
-import { inboxGardenerRunTaskPorts } from "../src/run-task.js";
+import { inboxGardenerRunTaskPorts } from "../src/lib/inbox-gardener-runtime.js";
+import { ghShim } from "./helpers/gh-shim.js";
 import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 
 type T = Parameters<typeof world>[0];
@@ -405,18 +406,19 @@ test("default merged-credit proof refuses plan-only foreign and removed credit w
 
 
 test("the default GitHub transport shells out to an owned offline executable", async t => {
-  const f = await fixture(t), bin = join(f.root, "bin"); mkdirSync(bin);
+  const f = await fixture(t);
   const list = JSON.stringify([{ number: 1200, url: `https://github.com/${f.repository}/pull/1200`, state: "MERGED", headRefName: `run-${TASK}-1234`, headRefOid: "a".repeat(40), mergeCommit: { oid: "b".repeat(40) }, body: `Remudero-Task: ${TASK}` }]);
-  writeFileSync(join(bin, "gh"), `#!/bin/sh\ncase "$1 $2" in\n  'pr list') printf '%s' '${list}' ;;;\n  'pr view') printf '%s' '{"files":[{"path":"src/lib/inbox.ts"}]}' ;;;\n  *) exit 7 ;;;\nesac\n`.replaceAll(";;;", ";;"), { mode: 0o755 });
+  const shim = ghShim([{ when: "pr list", stdout: list }, { when: "pr view", stdout: '{"files":[{"path":"src/lib/inbox.ts"}]}' }], { kind: "inbox-gardener-gh" });
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const names = ["PATH", "GH_TOKEN", "RMD_GH_TRANSPORT_FLOOR", "RMD_GH_CACHE_HOME"] as const;
   const old = Object.fromEntries(names.map(name => [name, process.env[name]]));
-  process.env.PATH = `${bin}:${process.env.PATH}`; process.env.GH_TOKEN = "offline-owned-executable";
+  process.env.PATH = `${shim.dir}:${process.env.PATH}`; process.env.GH_TOKEN = "offline-owned-executable";
   process.env.RMD_GH_TRANSPORT_FLOOR = "advisory"; process.env.RMD_GH_CACHE_HOME = join(f.state, "gh-cache");
   t.after(() => { for (const name of names) { if (old[name] === undefined) delete process.env[name]; else process.env[name] = old[name]; } });
   const ports = defaultInboxGardenerPorts({ stateDir: f.state, scope: f.scope, planPath: f.planPath, codeSha: "c".repeat(40) });
   const candidate = (await ports.capture()).candidates.find(c => c.proposal.id === ID)!;
   assert.equal((await ports.proof(candidate))?.kind, "merged-task");
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+  shim.addRoute({ when: "pr ", exit: 7 });
   await assert.rejects(ports.proof(candidate), /failed|exit|Command|7/);
 });
 
@@ -523,4 +525,12 @@ test("a real restore journal write failure is unknown and leaves the original ac
   } finally { rmSync(path, { recursive: true, force: true }); renameSync(saved, path); }
   assert.equal(f.store().events.length, 1, "failed write never replaces the authoritative retirement");
   const accepted = await f.restore(input); assert.equal(accepted.status, 200); assert.equal(f.store().events.length, 2);
+});
+
+
+test("the lifecycle lock records the caller Clock and releases its owned file", async t => {
+  const f = await fixture(t), lock = inboxGardenerPath(f.state) + ".lock", at = f.now() - 12345;
+  const observed = await withInboxGardenerLock(f.state, () => JSON.parse(readFileSync(lock, "utf8")), fixedClock(at));
+  assert.equal(observed.startedAt, fixedClock(at).iso()); assert.equal(observed.pid, process.pid); assert.equal(observed.host, hostname());
+  assert.equal(readdirSync(f.state).includes("inbox-gardener.json.lock"), false);
 });

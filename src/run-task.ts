@@ -1,4 +1,5 @@
-import { loadedHarnessRevision } from "./lib/benchmark-run.js";
+import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
+export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   checkProofCommand, checkProofTimeoutMs,
   CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
@@ -10,9 +11,8 @@ export {
   releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
 } from "./lib/check-proof.js";
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
-import { runInboxGardener, defaultInboxGardenerPorts } from "./lib/inbox-gardener.js";
+import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
-import { withReceiptIdentity } from "./lib/benchmark-run.js";
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
@@ -38755,28 +38755,6 @@ export function issueRevalidationRunTaskPorts(
 }
 
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
-export async function inboxGardenerRunTaskPorts(ctx: GardenBuildContext, seams: { spawn?: typeof spawnWorker; mount?: () => Mount; githubJson?: typeof ghJsonAsync; readCodeSha?: () => Promise<string> } = {}) {
-  const scope = { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${ctx.owner}/${ctx.repo}`, root: ctx.config.root };
-  let codeSha = ctx.codeSha ?? "unknown";
-  if (ctx.codeSha === undefined) {
-    try {
-      const pin = loadedHarnessRevision();
-      codeSha = seams.readCodeSha ? (await seams.readCodeSha()).trim() : pin && "revision" in pin ? pin.revision : "unknown";
-    }
-    catch (error) { ctx.log("inbox.gardener_source_unavailable", { reason: String(error) }); }
-  }
-  return { scope, ports: defaultInboxGardenerPorts({ stateDir: join(ctx.config.root, "state"), scope, planPath: resolveRepoLayout(ctx.repoRoot).planMonolith,
-    creditOverridePath: join(resolveRepoLayout(ctx.repoRoot).planDir, "credit-overrides.yaml"), codeSha, githubJson: seams.githubJson,
-    judge: async (prompt, candidate) => {
-      const mount = seams.mount?.() ?? resolveVerifyHumanJudgeMount(loadMounts(mountsPath(ctx.repoRoot)));
-      const spawn = seams.spawn ?? benchmarkNonDispatchSpawn("inbox-gardener");
-      const result = await spawn(withReceiptIdentity({ cwd: ctx.repoRoot, settingsFile: join(ctx.repoRoot, "settings", "worker.json"),
-        permissionMode: "bypassPermissions", prompt: `${prompt}\nRespond with only JSON: {"decision":"needs_triage"|"mechanical_followup","reason":"..."}.`,
-        model: mount.model, effort: mount.effort, maxTurns: 1, tools: [], ...(mount.provider ? { mountProvider: mount.provider } : {}) },
-      { taskId: "INBOX-GARDENER", runId: `inbox-gardener-${inboxSemanticDigest([candidate.proposal.id, prompt])}` }));
-      return JSON.parse(result.text);
-    } }) };
-}
 
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
