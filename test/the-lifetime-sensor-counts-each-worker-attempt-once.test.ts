@@ -11,7 +11,7 @@ import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
 import {
   auditedLifetimeTalliesFromArchives, breakerGateFor, MAX_LIFETIME_ARCHIVE_START_IDENTITIES,
   routeAdaptiveLifetimePressure,
-} from "../src/run-task.js";
+} from "./helpers/run-task-test.js"; // the shared run-task seam: the reach ratchet admits no new direct importer
 
 type Row = Record<string, unknown>;
 const taskId = "W1-T7837";
