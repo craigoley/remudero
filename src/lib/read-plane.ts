@@ -2,7 +2,7 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
-import { getCallSites } from "node:util";
+import { fileURLToPath } from "node:url";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { startLoopStallProfiler, type LoopLagReading, type LoopStallProfiler, type LoopStallProfilerOptions,
   type StallLog } from "./loop-stall-profiler.js";
@@ -112,16 +112,40 @@ function callerChain(callerLine: string, sites: readonly CallSite[]): string[] |
   return chain;
 }
 
+/** W1-T9720: this frame's callers as V8's raw call sites. A scoped `Error.prepareStackTrace` hands them over
+ *  unformatted, so Node never applies a source map: with maps on (tsx turns them on), formatting `.stack` parses
+ *  each frame's module map and keeps it for the life of the isolate (+134.5 MiB for 587 maps, W1-T9091). */
+function rawCallSites(): NodeJS.CallSite[] {
+  const prepare = Error.prepareStackTrace;
+  const limit = Error.stackTraceLimit;
+  Error.prepareStackTrace = (_error, sites) => sites;
+  Error.stackTraceLimit = 50;
+  let sites: NodeJS.CallSite[];
+  try { sites = new Error().stack as unknown as NodeJS.CallSite[]; }
+  finally { Error.prepareStackTrace = prepare; Error.stackTraceLimit = limit; }
+  return sites.slice(1); // this helper's own frame: the list begins at callerFrame, as `.stack` did
+}
+
+/** W1-T9720: one call site in the source-mapped formatter's shape (`Object.fn (/abs/path.ts:L:C)`, `<anonymous>`
+ *  for a nameless function) at the position node RUNS, not the TypeScript line: reading a mapped line would parse
+ *  the map. A site with no file (native, `Promise.all`) keeps V8's own text. */
+function siteText(site: NodeJS.CallSite): string {
+  const file = site.getFileName();
+  if (!file) return String(site);
+  const type = site.getTypeName();
+  const name = `${type !== null && type !== "global" ? `${type}.` : ""}${site.getFunctionName() ?? "<anonymous>"}`;
+  const path = file.startsWith("file:") ? fileURLToPath(file) : file;
+  return `${site.isAsync() ? "async " : ""}${site.isConstructor() ? "new " : ""}${name} `
+    + `(${path}:${site.getLineNumber()}:${site.getColumnNumber()})`;
+}
+
 /** The first frame outside read-plane, `node:` and the shared leaves; `leaf` is the OUTERMOST leaf frame, the one
  *  the caller called. With no frame outside the leaves the caller is that leaf and `callerIsLeaf` says so. */
 export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: true; chain?: string[] } {
-  const limit = Error.stackTraceLimit;
-  Error.stackTraceLimit = 50;
-  let stack: string;
-  try { stack = new Error().stack ?? ""; } finally { Error.stackTraceLimit = limit; }
-  const sites = getCallSites(50); // W1-T9577: index-aligned with `lines`: both begin at this frame
+  const raw = rawCallSites();
+  const sites = raw.map((site) => ({ functionName: site.getFunctionName() ?? "", scriptName: site.getFileName() ?? "" }));
   let leafLine: string | undefined;
-  const lines = stack.split("\n").slice(1);
+  const lines = raw.map((site) => `    at ${siteText(site)}`); // W1-T9577: index-aligned with `sites`: one capture
   for (const [index, line] of lines.entries()) {
     if (/read-plane\.[cm]?[jt]s/.test(line) || /node:/.test(line)) continue;
     if (SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
