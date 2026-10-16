@@ -150,11 +150,30 @@ export function inboxGardenerSource(proposals: RetirementProposal[], tasks: Read
   return { scope: owned, identity: inboxSemanticDigest([owned, facts]) };
 }
 
+/** Qualify and consume one owned descriptor; a path replacement cannot bypass the byte bound. */
+export function readInboxGardenerFile(path: string, maxBytes: number): string {
+  const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error("Inbox source is oversized or not a regular file");
+    const chunks: Buffer[] = []; let bytes = 0;
+    while (bytes <= maxBytes) {
+      const buffer = Buffer.alloc(Math.min(64 * 1024, maxBytes + 1 - bytes));
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (read === 0) break;
+      bytes += read;
+      if (bytes > maxBytes) throw new Error("Inbox source grew oversized while being read");
+      chunks.push(buffer.subarray(0, read));
+    }
+    if (fs.fstatSync(fd).size !== stat.size) throw new Error("Inbox source changed while being read");
+    return Buffer.concat(chunks, bytes).toString("utf8");
+  } finally { fs.closeSync(fd); }
+}
+
 export function readInboxGardenerStore(stateDir: string, scope?: InboxGardenerScope): InboxGardenerStoreRead {
   try {
     const path = inboxGardenerPath(stateDir);
-    if (fs.statSync(path).size > 8 * 1024 * 1024) throw new Error("lifecycle journal exceeds its verification backstop");
-    const s = JSON.parse(fs.readFileSync(path, "utf8"));
+    const s = JSON.parse(readInboxGardenerFile(path, 8 * 1024 * 1024));
     if (!record(s) || s.version !== 1 || !record(s.scope) || ![s.scope.repository, s.scope.instance, s.scope.root].every(x => typeof x === "string" && x) ||
       scope && !sameInboxGardenerScope({ repository: s.scope.repository, instance: s.scope.instance, root: s.scope.root }, scope) || !record(s.entries) || !Array.isArray(s.events) ||
       s.cursor !== undefined && (!record(s.cursor) || !hash(s.cursor.generation) || typeof s.cursor.after !== "string")) throw new Error("unverified lifecycle journal");

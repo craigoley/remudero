@@ -265,6 +265,12 @@ export function readAllThreads(
   } catch (err) {
     return { status: "unresolved", reason: String((err as Error)?.message ?? err) };
   }
+  return parseAllThreads(raw, deps.threadStorePath);
+}
+
+/** Parse already-qualified bytes without reopening the thread path. */
+export function parseAllThreads(raw: string, sourcePath: string): ReturnType<typeof readAllThreads> {
+  const threads = new Map<string, ThreadMessage[]>();
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -272,7 +278,7 @@ export function readAllThreads(
     try {
       parsed = JSON.parse(trimmed) as ThreadMessage;
     } catch {
-      return { status: "unresolved", reason: `unparseable line in ${deps.threadStorePath}` };
+      return { status: "unresolved", reason: `unparseable line in ${sourcePath}` };
     }
     const list = threads.get(parsed.threadId) ?? [];
     list.push(parsed);

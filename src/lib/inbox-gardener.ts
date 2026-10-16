@@ -7,7 +7,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { appendLedger } from "./ledger.js";
 import { readPersistedInbox } from "./fleet-lane.js";
 import { parseProposalRegistryResult, threadEventsForRow, recordRowThreadEvents, ledgerProposalVerdicts } from "./inbox.js";
-import { readAllThreads, inboxThreadId } from "./inbox-thread.js";
+import { parseAllThreads, inboxThreadId } from "./inbox-thread.js";
 import { loadPlan } from "./plan.js";
 import { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
 import { ghJsonAsync } from "./github-transport.js";
@@ -16,7 +16,7 @@ import { createLedgerProjector, openProjectorReadModel, type LedgerRowProjection
 import { acquireLease, releaseLease, withWriteTransaction } from "./read-model-db.js";
 import { parse as parseYaml } from "yaml";
 import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, validInboxTerminalProof, readInboxGardenerStore,
-  writeInboxGardenerStore, withInboxGardenerLock, type InboxGardenerScope, type InboxGardenerStore, type InboxLifecycleEvent,
+  writeInboxGardenerStore, withInboxGardenerLock, readInboxGardenerFile, type InboxGardenerScope, type InboxGardenerStore, type InboxLifecycleEvent,
   inboxOperatorIntent, inboxMechanicalTaskDigest, inboxGardenerSource, inboxGardenerTaskFact, inboxGardenerMode, type InboxGardenerMode, sameInboxGardenerScope, type InboxGardenerTaskFact, type InboxTerminalProof, type RetirementProposal } from "./inbox-retirement.js";
 
 export const INBOX_GARDENER_INTERVAL_MS = 15 * 60_000;
@@ -211,30 +211,30 @@ function hasLedgerMirror(stateDir: string, scope: InboxGardenerScope, id: string
   try { return !!db.prepare("SELECT id FROM inbox_gardener_mirrors WHERE id=?").get(id); }
   finally { db.close(); }
 }
-function boundedFile(path: string, maxBytes: number): string {
-  const stat = fs.statSync(path);
-  if (!stat.isFile() || stat.size > maxBytes) throw new Error("Inbox source is oversized or not a regular file");
-  return fs.readFileSync(path, "utf8");
+
+function optionalBoundedFile(path: string, maxBytes: number): string | undefined {
+  try { return readInboxGardenerFile(path, maxBytes); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
 export function defaultInboxGardenerPorts(options: { stateDir: string; scope: InboxGardenerScope; planPath: string; codeSha: string; creditOverridePath?: string;
   clock?: Clock; githubJson?: typeof ghJsonAsync; judge?: InboxGardenerPorts["judge"] }): InboxGardenerPorts {
   const clock = options.clock ?? systemClock, githubJson = options.githubJson ?? ghJsonAsync;
+  const threadPath = join(options.stateDir, "inbox-threads.jsonl");
   let plan: ReturnType<typeof loadPlan>;
   let retainedRows: Array<Record<string, any>> = [], overrides: Array<Record<string, any>> = [];
   const capture = async (): Promise<InboxGardenerPack> => {
-    const snapshot = readPersistedInbox(options.stateDir), raw = parseProposalRegistryResult(boundedFile(join(options.stateDir, "inbox-proposals.json"), INBOX_GARDENER_SOURCE_LIMITS.registryBytes));
+    const snapshot = readPersistedInbox(options.stateDir), raw = parseProposalRegistryResult(readInboxGardenerFile(join(options.stateDir, "inbox-proposals.json"), INBOX_GARDENER_SOURCE_LIMITS.registryBytes));
     const proposals = raw.kind === "ok" ? raw.proposals : [];
     if (proposals.length > INBOX_GARDENER_SOURCE_LIMITS.proposals) throw new Error("Inbox proposal population exceeds verification bound");
-    const threadPath = join(options.stateDir, "inbox-threads.jsonl");
-    if (fs.existsSync(threadPath)) boundedFile(threadPath, INBOX_GARDENER_SOURCE_LIMITS.threadBytes);
     plan = loadPlan(options.planPath);
-    const threads = readAllThreads({ threadStorePath: join(options.stateDir, "inbox-threads.jsonl") });
+    const threads = parseAllThreads(optionalBoundedFile(threadPath, INBOX_GARDENER_SOURCE_LIMITS.threadBytes) ?? "", threadPath);
     const ledger = readInboxGardenerLedger(options.stateDir, options.scope, proposals.map(p => p.id));
     retainedRows = ledger.rows;
     if (!fs.statSync(join(options.stateDir, LEDGER_FILENAME)).isFile()) throw new Error("live ledger unavailable");
     const overridePath = options.creditOverridePath ?? join(dirname(options.planPath), "credit-overrides.yaml");
-    const rawOverrides = fs.existsSync(overridePath) ? parseYaml(boundedFile(overridePath, INBOX_GARDENER_SOURCE_LIMITS.creditOverrideBytes)) : [];
+    const overrideText = optionalBoundedFile(overridePath, INBOX_GARDENER_SOURCE_LIMITS.creditOverrideBytes);
+    const rawOverrides = overrideText === undefined ? [] : parseYaml(overrideText);
     if (!Array.isArray(rawOverrides) || rawOverrides.some(o => !o || o.action !== "remove-credit" || typeof o.task !== "string" || !Number.isSafeInteger(o.pr) || o.pr < 1 || o.author_class !== "operator" || typeof o.reason !== "string" || !o.reason.trim())) throw new Error("credit override source unverified");
     overrides = rawOverrides;
     const verdicts = ledgerProposalVerdicts([...ledger.rows].sort((a, b) => Date.parse(String(a.ts)) - Date.parse(String(b.ts))));
@@ -311,7 +311,7 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
       if (!pack.ledgerEventIds.has(event.receipt.id) && !hasLedgerMirror(options.stateDir, options.scope, event.receipt.id)) { appendLedger(join(options.stateDir, LEDGER_FILENAME), row); pack.ledgerEventIds.add(event.receipt.id); }
       recordRowThreadEvents(row, undefined, { threadStorePath: join(options.stateDir, "inbox-threads.jsonl") }, () => {});
       // Unlike best-effort legacy mirrors, a missing mirror is explicitly retryable here.
-      const threads = readAllThreads({ threadStorePath: join(options.stateDir, "inbox-threads.jsonl") });
+      const threads = parseAllThreads(optionalBoundedFile(threadPath, INBOX_GARDENER_SOURCE_LIMITS.threadBytes) ?? "", threadPath);
       const expected = threadEventsForRow(row);
       if (threads.status !== "ok" || expected.some(e => threads.threads.get(inboxThreadId(e.proposalId))?.some(m => m.extra?.event?.key === e.event.key) !== true)) throw new Error("lifecycle thread mirror unavailable");
     } };

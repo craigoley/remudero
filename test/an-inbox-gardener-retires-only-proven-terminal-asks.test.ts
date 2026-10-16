@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import fs from "node:fs";
 import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { hostname } from "node:os";
@@ -533,4 +534,93 @@ test("the lifecycle lock records the caller Clock and releases its owned file", 
   const observed = await withInboxGardenerLock(f.state, () => JSON.parse(readFileSync(lock, "utf8")), fixedClock(at));
   assert.equal(observed.startedAt, fixedClock(at).iso()); assert.equal(observed.pid, process.pid); assert.equal(observed.host, hostname());
   assert.equal(readdirSync(f.state).includes("inbox-gardener.json.lock"), false);
+});
+
+
+/** Real files and descriptors; hooks interleave a filesystem change at the production stat seam. */
+function interceptBoundedFile(t: TestContext, path: string, afterStat: () => void, failRead = false) {
+  const real = { ...fs }, active = new Set<number>();
+  let fired = false, closed = 0, bytes = 0, flags = 0;
+  const fire = () => { if (!fired) { fired = true; afterStat(); } };
+  const mocks = [
+    t.mock.method(fs, "openSync", ((p, mode, permissions) => {
+      const fd = real.openSync(p, mode, permissions);
+      if (String(p) === path) { active.add(fd); flags = typeof mode === "number" ? mode : 0; }
+      return fd;
+    }) as typeof fs.openSync),
+    t.mock.method(fs, "statSync", ((p, options) => { const stat = real.statSync(p, options); if (String(p) === path) fire(); return stat; }) as typeof fs.statSync),
+    t.mock.method(fs, "fstatSync", ((fd, options) => { const stat = real.fstatSync(fd, options); if (active.has(fd)) fire(); return stat; }) as typeof fs.fstatSync),
+    t.mock.method(fs, "readSync", ((fd, buffer, offset, length, position) => {
+      if (active.has(fd) && failRead) throw new Error("injected descriptor read failure");
+      const read = real.readSync(fd, buffer, offset, length, position); if (active.has(fd)) bytes += read; return read;
+    }) as typeof fs.readSync),
+    t.mock.method(fs, "closeSync", (fd: number) => { if (active.delete(fd)) closed++; return real.closeSync(fd); }),
+  ];
+  return { get fired() { return fired; }, get closed() { return closed; }, get bytes() { return bytes; }, get flags() { return flags; },
+    restore() { for (const mock of mocks) mock.mock.restore(); } };
+}
+
+test("the real gardener reads bounded sources and its journal from one opened file", async t => {
+  const f = await fixture(t); assert.equal((await f.run()).state, "complete");
+  const threads = join(f.state, "inbox-threads.jsonl"), policy = join(f.root, "plan", "credit-overrides.yaml"), journal = inboxGardenerPath(f.state);
+  for (const path of [f.registry, threads, policy, journal]) {
+    if (!fs.existsSync(path)) writeFileSync(path, path === policy ? "[]\n" : "");
+    const before = readFileSync(path, "utf8"), saved = path + ".original";
+    const hook = interceptBoundedFile(t, path, () => { renameSync(path, saved); writeFileSync(path, "{replacement is not original"); });
+    try {
+      if (path === journal) assert.equal(readInboxGardenerStore(f.state, f.scope).state, "observed");
+      else { const pack = await f.ports().capture(); assert.equal(pack.coverage.registry, "observed"); assert.equal(pack.coverage.threads, "observed"); }
+      assert.equal(hook.fired, true); assert.equal(hook.closed, 1); assert.ok(hook.bytes > 0 || before === "");
+      assert.ok((hook.flags & fs.constants.O_NOFOLLOW) !== 0); assert.ok((hook.flags & fs.constants.O_NONBLOCK) !== 0);
+    } finally { hook.restore(); rmSync(path); renameSync(saved, path); }
+  }
+});
+
+test("the real gardener refuses symlinked and growing lifecycle files before any effect", async t => {
+  const f = await fixture(t); assert.equal((await f.run()).state, "complete");
+  const journal = inboxGardenerPath(f.state), originalEvents = f.store().events.length;
+  const policy = join(f.root, "plan", "credit-overrides.yaml");
+  writeFileSync(policy, ""); await assert.rejects(f.ports().capture(), /credit override source unverified/, "a blank present policy is not a measured missing file");
+  writeFileSync(policy, "[]\n");
+  for (const [path, limit] of [[f.registry, INBOX_GARDENER_SOURCE_LIMITS.registryBytes],
+    [join(f.state, "inbox-threads.jsonl"), INBOX_GARDENER_SOURCE_LIMITS.threadBytes],
+    [policy, INBOX_GARDENER_SOURCE_LIMITS.creditOverrideBytes], [journal, 8 * 1024 * 1024]] as const) {
+    const before = readFileSync(path, "utf8"), saved = path + ".original";
+    renameSync(path, saved); fs.symlinkSync(saved, path);
+    try {
+      if (path === journal) assert.equal(readInboxGardenerStore(f.state, f.scope).state, "unavailable");
+      else await assert.rejects(f.ports().capture());
+    } finally { rmSync(path); renameSync(saved, path); }
+    const hook = interceptBoundedFile(t, path, () => appendFileSync(path, " ".repeat(limit + 1)));
+    try {
+      if (path === journal) assert.equal(readInboxGardenerStore(f.state, f.scope).state, "unavailable");
+      else await assert.rejects(f.ports().capture(), /oversized|changed/);
+      assert.equal(hook.fired, true); assert.equal(hook.closed, 1); assert.ok(hook.bytes <= limit + 1, "growth never becomes an unbounded read");
+    } finally { hook.restore(); writeFileSync(path, before); }
+    const smallGrowth = interceptBoundedFile(t, path, () => appendFileSync(path, "\n"));
+    try {
+      if (path === journal) assert.equal(readInboxGardenerStore(f.state, f.scope).state, "unavailable");
+      else await assert.rejects(f.ports().capture(), /changed/);
+      assert.equal(smallGrowth.closed, 1);
+    } finally { smallGrowth.restore(); writeFileSync(path, before); }
+    renameSync(path, saved); mkdirSync(path);
+    try {
+      if (path === journal) assert.equal(readInboxGardenerStore(f.state, f.scope).state, "unavailable");
+      else await assert.rejects(f.ports().capture(), /regular file/);
+    } finally { rmSync(path, { recursive: true }); renameSync(saved, path); }
+    assert.equal(f.store().events.length, originalEvents, "failed source reads cannot create a new lifecycle effect");
+  }
+});
+
+test("bounded lifecycle file reads close on read and stat failures", async t => {
+  const f = await fixture(t); assert.equal((await f.run()).state, "complete");
+  for (const path of [f.registry, inboxGardenerPath(f.state)]) for (const fail of ["read", "stat"]) {
+    const hook = interceptBoundedFile(t, path, () => { if (fail === "stat") throw new Error("injected descriptor stat failure"); }, fail === "read");
+    try {
+      if (path === f.registry) await assert.rejects(f.ports().capture(), /injected descriptor/);
+      else assert.equal(readInboxGardenerStore(f.state, f.scope).state, "unavailable");
+      assert.equal(hook.fired, true); assert.equal(hook.closed, 1, "the original owned descriptor closes in every failure arm");
+    } finally { hook.restore(); }
+  }
+  assert.equal(readInboxGardenerStore(f.state, f.scope).state, "observed", "restoring real reads preserves the authoritative receipt");
 });

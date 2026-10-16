@@ -33,7 +33,8 @@
     where it promised verify:auto-alone retirement; maintained release/census proofs now require
     positive exact evidence and preserve unanswered human asks. The assembled-route census includes
     the real registered retirement POST independently of OpenAPI; no route baseline is enlarged.
-    No host or daemon changes are included.
+    Registry, thread, policy and journal reads validate and consume one bounded regular-file descriptor,
+    reject symlinks and growth, and close on every outcome. No host or daemon changes are included.
   acceptance:
     - claim: "the daemon cadence reaches the bounded Inbox gardener"
       proof: 'grep: runInboxGardener( in src/run-task.ts'
