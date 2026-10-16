@@ -12,7 +12,7 @@
   origin: "2026-10-13 operator-approved follow-up; issue #9587"
   plan_refs: ["W1-T5025"]
   files: ["src/lib/now-view.ts","src/lib/status.ts","test/now-view.test.ts","src/lib/board.ts","src/lib/recent-projection.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/the-now-view-keeps-dispatch-telemetry-and-recent-run-evidence.test.ts"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Issue #9587 records the producer/consumer projection gap: Now keeps requested/served model but drops worker and recent correlation metadata. The operator approved splitting fields by update frequency rather than causing per-event Now ETag churn.

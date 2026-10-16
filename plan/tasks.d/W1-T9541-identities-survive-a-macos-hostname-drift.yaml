@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: refs/rmd-dispatch/W1-T8171 anchored `rmd-dispatch claim 21407@Craigs-Mac-mini 2026-10-14T19:18:21Z`; after a power-failure reboot `rmd claim W1-T8171 --drop` on the same Mac refused it as another host's"
   plan_refs: [W1-T396, W1-T978, W1-T2784, W1-T5047, W1-T5859, W1-T6261, W1-T8616, W1-T9161, W1-T9432]
   files: [src/lib/host-identity.ts, src/run-task.ts, src/lib/dispatch-claim.ts, src/lib/fs-race-safe.ts, src/lib/inflight-lock.ts, src/lib/ledger.ts, src/lib/report-commands.ts, src/lib/test-slot.ts, src/lib/auto-triage.ts, src/lib/heavy-build-reservation.ts, test/identities-survive-a-macos-hostname-drift.test.ts, "deploy/install-host-units.sh"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
