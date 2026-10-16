@@ -5,9 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Worker } from "node:worker_threads";
-import { runBenchmarkCohortPass, runBenchmarkCohortPassOffLoop, type BenchmarkCohortSnapshot } from "../src/lib/benchmark-cohort.js";
-import type { Config } from "../src/lib/config.js";
-import { buildBenchmarkCohortDaemonHooks } from "../src/run-task.js";
+import { benchmarkCohortDaemonPass, runBenchmarkCohortPass, runBenchmarkCohortPassOffLoop,
+  type BenchmarkCohortSnapshot } from "../src/lib/benchmark-cohort.js";
 
 const CHECKPOINT = "benchmark-cohort-v1.json";
 
@@ -45,11 +44,11 @@ test("W1-T9845: the daemon cohort pass never reads or writes its checkpoint on t
   const { root, stateDir } = cohortRoot();
   const recorder = recordCheckpointSyncCalls();
   try {
-    const hooks = buildBenchmarkCohortDaemonHooks({ config: { root } as Config });
-    const first = await hooks.runBenchmarkCohortPass();
+    // The hook's default run (run-task.ts buildBenchmarkCohortDaemonHooks); a new suite may not import run-task.
+    const first = await benchmarkCohortDaemonPass(stateDir);
     assert.equal(first.snapshot.sourceRows.assignments, 2, "the pass read the ledger");
     assert.ok((first.checkpointBytes ?? 0) > 0 && existsSync(join(stateDir, CHECKPOINT)), "the pass wrote its checkpoint");
-    const second = await hooks.runBenchmarkCohortPass();
+    const second = await benchmarkCohortDaemonPass(stateDir);
     assert.equal(second.state, "complete");
     assert.equal(second.scannedSources, 0, "the second pass answered from the checkpoint it read");
     assert.deepEqual(recorder.calls, [], "no checkpoint read or write ran on the daemon thread");

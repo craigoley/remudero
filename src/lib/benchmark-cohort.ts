@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isMainThread, parentPort, workerData, type Worker, type WorkerOptions } from "node:worker_threads";
+import { isMainThread, parentPort, SHARE_ENV, workerData, type Worker } from "node:worker_threads";
 import { startWorker } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
@@ -994,14 +994,14 @@ type CohortWorkerReply = { ok: true; result: BenchmarkCohortPassResult } | { ok:
  * the GC of its parsed graph, belong to the worker's isolate; the daemon thread only waits for one message. */
 export function runBenchmarkCohortPassOffLoop(
   stateDir: string, opts: CohortWorkerData["opts"] = {},
-  start: (options: WorkerOptions) => Worker = (options) => startWorker(import.meta.url, options),
+  start: (data: CohortWorkerData) => Worker = (data) => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }),
 ): Promise<BenchmarkCohortPassResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (finish: () => void): void => { if (!settled) { settled = true; finish(); } };
     let worker: Worker;
     try {
-      worker = start({ workerData: { kind: BENCHMARK_COHORT_WORKER_KIND, stateDir, opts } satisfies CohortWorkerData });
+      worker = start({ kind: BENCHMARK_COHORT_WORKER_KIND, stateDir, opts });
     } catch (error) {
       reject(new Error(`benchmark-cohort-worker-start-failed: ${String((error as Error)?.message ?? error)}`));
       return;
@@ -1013,6 +1013,10 @@ export function runBenchmarkCohortPassOffLoop(
     worker.once("exit", (code) => settle(() => reject(new Error(`benchmark-cohort-worker-exited-before-reporting: ${code}`))));
   });
 }
+
+/** W1-T9845: the pass the daemon hook runs by default, off the daemon loop. */
+export const benchmarkCohortDaemonPass = (stateDir: string): Promise<BenchmarkCohortPassResult> =>
+  runBenchmarkCohortPassOffLoop(stateDir, { maxSources: 4 });
 
 /** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */
 export async function runBenchmarkCohortIdlePass(
