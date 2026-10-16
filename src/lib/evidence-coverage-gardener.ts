@@ -10,7 +10,7 @@ import {
   type BenchmarkTerminalEvidence,
 } from "./benchmark-evidence.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { captureFeedback, feedbackEntryPath, feedbackEntryRepoPath, readFeedbackEntry } from "./feedback.js";
+import { feedbackEntryPath, feedbackEntryRepoPath, readFeedbackEntry, stageFeedbackCapture } from "./feedback.js";
 import { landFeedbackStatusContent, type LandFeedbackOpts } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -543,20 +543,21 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
       landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), stringifyYaml({ ...entry, raw: followup.raw }), land);
       return;
     }
-    captureFeedback(root, { raw: followup.raw, origin: "cli", id: followup.id, land });
+    stageFeedbackCapture(root, land.stateRoot, { raw: followup.raw, origin: "cli", id: followup.id });
   };
 }
 
 /** The daemon's deps (src/run-task.ts): the windowed ledger union, refused whole when any file in the
- *  window is unreadable, and feedback filed into the daemon's own checkout. */
-export function daemonEvidenceCoverageInput(input: { stateDir: string; root: string; log: EvidenceCoverageInput["log"] }): EvidenceCoverageInput {
+ *  window is unreadable, and feedback filed into the daemon's own checkout. W1-T9695: a status update
+ *  queues under `landingStateRoot` for the per-poll async sweep, so no plan-PR preflight runs on the loop. */
+export function daemonEvidenceCoverageInput(input: { stateDir: string; root: string; log: EvidenceCoverageInput["log"]; landingStateRoot?: string }): EvidenceCoverageInput {
   return {
     stateDir: input.stateDir,
     readRows: (sinceTs) => {
       const read = readLedgerUnionRecordsSync(input.stateDir, { sinceTs, step: EVIDENCE_STEPS, refuseIncomplete: true });
       return read.ok ? { ok: true, rows: read.rows } : { ok: false, reason: `ledger union incomplete: ${read.unread.length} unread` };
     },
-    file: feedbackEvidenceCoverageFiler(input.root),
+    file: feedbackEvidenceCoverageFiler(input.root, input.landingStateRoot === undefined ? {} : { stateRoot: input.landingStateRoot }),
     log: input.log,
   };
 }

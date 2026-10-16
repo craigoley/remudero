@@ -189,7 +189,8 @@ test("W1-T3798 production adapter posts reuse and routes discrimination through 
     await effects.postReview!(orphanedPr({ taskId: TASK }), { kind: "discriminate-only", judgedHeadSha: JUDGED_HEAD });
     assert.ok(calls.includes("fallback-review"), "base-only changes must run the existing reviewer fallback");
 
-    await effects.postReview!(orphanedPr({ taskId: undefined }), { kind: "reuse", judgedHeadSha: JUDGED_HEAD });
+    // W1-T9681: a PR with no task id finds its verdict by URL, so the unreadable case is a URL no verdict names.
+    await effects.postReview!(orphanedPr({ taskId: undefined, prNumber: 3705, prUrl: "https://github.com/craigoley/remudero/pull/3705" }), { kind: "reuse", judgedHeadSha: JUDGED_HEAD });
     assert.equal(calls.filter((step) => step === "fallback-review").length, 2, "unreadable evidence falls back too");
   } finally {
     process.env.PATH = oldPath;

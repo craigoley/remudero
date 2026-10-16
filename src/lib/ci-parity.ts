@@ -1893,6 +1893,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   { job: "coverage-ratchet-required", mirrored: false, reason: "GitHub-only LCOV artifact aggregator; the coverage-ratchet entry below evaluates the equivalent complete surface locally" },
   {
+    job: "coverage-ledger",
+    mirrored: false,
+    reason:
+      "W1-T9448 — GitHub-only immutable run artifact coordination; the local coverage-ratchet " +
+      "entry uses one local committed ledger, with no independent network choice per shard",
+  },
+  {
     job: "coverage-ratchet",
     mirrored: true,
     run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined) => {

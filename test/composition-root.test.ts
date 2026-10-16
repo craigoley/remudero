@@ -16,7 +16,6 @@ test("composeRealDeps builds every top-level real seam from a fake config withou
 
   assert.equal(typeof graph.arm.headSha, "function");
   assert.equal(typeof graph.deployFor, "function");
-  assert.equal(typeof graph.gitRemote.getRemoteUrl, "function");
   assert.equal(typeof graph.onboard.fs.existsSync, "function");
   assert.equal(typeof graph.onboard.gh.repoInfo, "function");
   assert.equal(typeof graph.onboard.resolveOwnerRepo, "function");

@@ -81,7 +81,9 @@ test("W1-T9708: a census red that recovers on retry still counts toward a flake 
 
 test("W1-T9708: a census red on a PR whose diff stays outside its walk still counts", async () => {
   const h = harness(REGISTRY_CENSUS, "");
-  for (const pr of [10354, 10368, 10491, 10500]) h.evidence(pr, "also_failed");
+  // One outside-walk retry recovers: a group no retry recovers is main-inherited (W1-T9551), never filed.
+  h.evidence(10354, "recovered");
+  for (const pr of [10368, 10491, 10500]) h.evidence(pr, "also_failed");
   // #10500 changes src/; the other three are plan-only and docs-only, outside the census's walk.
   const changed = (head: string) => (head === "head-10500" ? ["src/lib/read-model-worker.ts"]
     : head === "head-10368" ? ["docs/forensics/flake.md"] : ["plan/tasks.d/w1-t1-x.yaml"]);

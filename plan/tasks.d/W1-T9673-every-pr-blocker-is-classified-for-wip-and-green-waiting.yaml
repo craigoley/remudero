@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: found beside W1-T9633 (PR #12044), which adds two blockers its consumers do not read"
   plan_refs: [W1-T9633, W1-T8233]
   files: [src/lib/adaptive-wip.ts, src/lib/incident-invariants.ts, test/every-pr-blocker-is-classified-for-wip-and-green-waiting.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: #11936/#11910 sat green 2+ h behind a security refusal; after W1-T9633 that wait would not count as stuck or as green work waiting
   attempts: 0
   rationale: |

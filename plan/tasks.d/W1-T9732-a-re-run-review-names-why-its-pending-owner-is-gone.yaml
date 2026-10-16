@@ -1,0 +1,61 @@
+- id: W1-T9732
+  title: "'OWNER PROVEN DEAD' NAMES THREE DIFFERENT CAUSES — the sweep sets reviewPendingOwnerDead for a dead owner pid (assessPendingReviewOwner), for a freshness or host-gap refusal after the current pending post (refusedCurrentPending), and for an incomplete promise harvest (promiseHarvestRetryView), then writes one sentence for all three, so #12111 and #12115, refused 'materially behind' at post time, read 16 times as 'owner proven dead' and pointed the operator at the wrong defect"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the post-review reason names which of the three owner-gone causes fired; routing on reviewPendingOwnerDead is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 filing agent F4 lead 3: #12111 and #12115 sweep.disposed 'checks green, remudero-review owner proven dead' from 19:36Z; review.post_refused 'materially behind' 20:10:37Z and 20:14:32Z"
+  plan_refs: [W1-T913, W1-T2844, W1-T8088, W1-T9727, W1-T9001, W1-T100]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-re-run-review-names-why-its-pending-owner-is-gone.test.ts
+  status: queued
+  priority: 2  # the cause decides the remedy: a dead pid is a restart, a post-time refusal is W1-T9727's freshness, a harvest is the promise corpus
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf (2026-10-15):
+    - src/run-task.ts `openPrViewSteps`: `reviewPendingOwnerDead = currentPendingRecord &&
+      assessPendingOwner(currentPendingRecord) === "dead" ? true : undefined`. `assessPendingReviewOwner`
+      (src/lib/review.ts) returns `dead` only when `isHolderStale` proves the recorded pid/host/start gone.
+    - src/lib/sweep.ts `runSweep`: `refusedCurrentPending` (a `reviewFreshnessRefusals` or `reviewHostGapRefusals`
+      entry attempted at or after `reviewPendingSince`) sets `{ ...pr, reviewPendingOwnerDead: true }`; otherwise
+      `promiseHarvestRetryView` sets the same flag when `incompletePromiseHarvestFromLedger` holds.
+    - The `post-review` disposition rule's reason reads only the flag: `checks green, remudero-review owner proven
+      dead — re-running the review lane on #<n>`. Nothing downstream can tell the three apart.
+    - Core ledger 2026-10-15: 16 `sweep.disposed` rows for #12111 and #12115 read "owner proven dead";
+      `review.post_refused` "materially behind" for #12111 at 20:10:37Z and #12115 at 20:14:32Z. Their owners
+      finished and were refused; none died.
+    - W1-T9727 (plan-file-1792096382293, open filing; build on run-W1-T9727-1792097307322) fixes that refusal's
+      cause and leaves "the sweep's owner-dead routing" unchanged by its own design. This task only names the cause,
+      so it does not wait on it.
+    - W1-T100 shares sweep.ts and run-task.ts as a broad routing task. This task changes only the post-review
+      reason and one disposed-row field.
+  design: |
+    1. One field replaces the boolean's meaning: `reviewPendingOwnerGone?: "owner-pid-dead" |
+       "refused-after-pending" | "promise-harvest-incomplete"`, set where each of the three sets the flag today.
+       `reviewPendingOwnerDead` stays as it is, so every rule that reads it routes exactly as before.
+    2. The `post-review` reason names the cause:
+       - owner-pid-dead: today's sentence;
+       - refused-after-pending: "the pending review's post was refused after it began (<freshness or host-gap
+         reason, bounded>)";
+       - promise-harvest-incomplete: "its promise harvest did not complete".
+       Each still ends "re-running the review lane on #<n>".
+    3. The `sweep.disposed` row carries `owner_gone_cause` with the same value, so a ledger count separates them.
+    4. sweep.ts sits at its comment ceiling: no new comment lines there.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below): one per cause, each asserting the reason
+       and `owner_gone_cause`; and a dead-pid case that still reads "owner proven dead" (positive control).
+  acceptance:
+    - claim: "a pending review refused after it was posted is re-run under a reason naming the refusal, not a dead owner"
+      proof: 'grep: test("W1-T9732: a refusal after the pending post is named, not owner proven dead" in test/a-re-run-review-names-why-its-pending-owner-is-gone.test.ts'
+    - claim: "an incomplete promise harvest is named as such"
+      proof: 'grep: test("W1-T9732: an incomplete promise harvest is named as its own cause" in test/a-re-run-review-names-why-its-pending-owner-is-gone.test.ts'
+    - claim: "a dead owner pid still reads owner proven dead, and every cause rides the disposed row"
+      proof: 'grep: test("W1-T9732: a dead owner pid still reads owner proven dead" in test/a-re-run-review-names-why-its-pending-owner-is-gone.test.ts'
+  falsifier: |
+    At origin/main, runSweep over a green PR whose pending review has a freshness refusal attempted after
+    reviewPendingSince writes the reason "checks green, remudero-review owner proven dead", so the first test fails.

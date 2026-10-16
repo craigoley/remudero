@@ -871,12 +871,12 @@ test("W1-T3512: claims, containment-probe and assertion-discrimination are NOT w
   }
 });
 
-test("W1-T3512: five ci.yml jobs consult scripts/diff-class.mjs directly (three pre-existing, mutation-ratchet, and the shared commitlint job), and ten steps inside commitlint additionally consult its shared output", () => {
+test("W1-T3512: six ci.yml jobs consult scripts/diff-class.mjs directly (three pre-existing, mutation-ratchet, shared commitlint, and coverage-ledger), and ten steps inside commitlint additionally consult its shared output", () => {
   const doc = parseYaml(CI_YML) as { jobs: Record<string, { steps?: Array<{ run?: string }> }> };
   const consulting = Object.entries(doc.jobs)
     .filter(([, job]) => (job.steps ?? []).some((s) => /diff-class\.mjs/.test(s.run ?? "")))
     .map(([id]) => id);
-  const expectedJobs = ["ci", "test-slow-shard", "coverage-ratchet", MUTATION_RATCHET_OWN_JOB, "commitlint"];
+  const expectedJobs = ["ci", "test-slow-shard", "coverage-ratchet", MUTATION_RATCHET_OWN_JOB, "commitlint", "coverage-ledger"];
   assert.equal(consulting.length, expectedJobs.length, `expected ${expectedJobs.length} jobs consulting diff-class.mjs, got ${consulting.length}: ${consulting.join(", ")}`);
   for (const jobId of expectedJobs) {
     assert.ok(consulting.includes(jobId), `expected ${jobId} among the jobs consulting diff-class.mjs`);

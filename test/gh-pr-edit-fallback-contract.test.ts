@@ -1,3 +1,4 @@
+// @census-reads: src/run-task.ts src/lib/prompt-render.ts
 // @source-text-subject: the third test pins that the fallback is prompt text only — no run-task.ts call site, one REST-write builder.
 /**
  * W1-T4268 — a worker's own `gh pr edit` can fail on the Projects-Classic GraphQL query; the shared

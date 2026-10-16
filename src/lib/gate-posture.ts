@@ -523,6 +523,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "ci:commitlint": repair(true, "the PR title is mechanically rewriteable"),
   "ci:comment-load-ratchet": repair(true, "comment-load prints the reviewed baseline line when growth is intended"),
   "ci:containment-probe": close(true, "containment is a harm boundary for sandbox and environment changes"),
+  "ci:coverage-ledger": repair(true, "run-ledger resolution and download failures are computable coverage repairs"),
   "ci:coverage-ratchet": repair(true, "coverage gaps are repaired by tests or reviewed coverage data"),
   "ci:coverage-ratchet-required": repair(true, "coverage aggregation reflects repairable child coverage checks"),
   "ci:depcruise": repair(true, "dependency violations name the forbidden edge"),

@@ -11,7 +11,7 @@
   origin: "operator queue restoration request 2026-10-15: audit of all open PRs and current core fix/review receipts"
   plan_refs: [W1-T5919, W1-T5932, W1-T4077, W1-T9618]
   files: [src/run-task.ts, test/run-task.test.ts, test/console-pr-nudges.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

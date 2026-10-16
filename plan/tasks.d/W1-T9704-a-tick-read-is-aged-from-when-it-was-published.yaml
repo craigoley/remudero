@@ -1,0 +1,72 @@
+- id: W1-T9704
+  title: "A TICK READ IS AGED FROM WHEN IT WAS PUBLISHED, NOT FROM WHEN ITS READ BEGAN — on 2026-10-15 at 17:02:18Z the full sweep refused generation 2 at age 454,974 ms four milliseconds after the tick published it, because its read began at 16:54:43Z and took 7.6 min, and the sweep then paid the whole read again inside a 22-minute window with no progress row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the instant a served tick-read generation is aged from
+  band_meaning: span
+  origin: "operator session 2026-10-15: fan-out lead F3-2, the 16:52:41Z-17:14:51Z progress gap (read-only on the host)"
+  plan_refs: [W1-T5762, W1-T5761, W1-T4075, W1-T9564, W1-T7734, W1-T9563]
+  files: [src/lib/read-plane.ts, test/a-tick-read-is-aged-from-when-it-was-published.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only, niced, streamed to the Mac), DAEMON-1792080586993, archive
+    ledger.2026-10-15T17-18-26-253Z and the live ledger:
+    - 16:52:41Z review.posted (#12020) is the last progress row. The next is a light pass's sweep.pass at 17:14:51Z.
+    - 16:54:32Z daemon.tick. 16:54:43.3Z daemon.freshness_not_stale. From then until 17:02:18Z the daemon wrote only
+      daemon.pulse and board_gateway rows. The pulses show the loop was not frozen.
+    - 17:02:18.453Z daemon.sweep.started (bound 559,000 ms). 17:02:18.457Z tick_read.stale_refused: consumer
+      full_sweep, generation 2, age_ms 454,974, max_age_ms 300,000. 17:02:19.712Z: the same for board_items.
+      17:02:18.457Z minus 454,974 ms is 16:54:43.483Z, which is when the tick's read began.
+    - 17:05:05Z daemon.tick_phases: ms_to_admission 632,780, which is 16:54:32Z plus 10.5 min.
+    - 17:10:56Z sweep.post_fix_reverification.summary (total 31), the first row of the full pass after its own read.
+      17:12:44Z daemon.sweep.abandoned (elapsed 626,457). 17:19:37Z sweep.pass enumerated 31.
+    - So the gap is the tick's own 7.6 min read (16:54:43Z to 17:02:18Z), then up to 8.6 min more: the read the
+      refusal forced, main health and escalation answers, up to 17:10:56Z. Then the rest of the prelude until the
+      bound abandoned the pass.
+    - The same thing on the next daemon, DAEMON-1792085514136: 17:38:32.945Z daemon.sweep.started, then 1 ms later
+      full_sweep refused generation 1 at 334,637 ms. A census of the 29 archives from 10-14 and 10-15 plus the live
+      ledger finds 89 refusals, 19 of them by full_sweep, aged 322,076 to 2,454,457 ms. The age field cannot tell a
+      generation that really waited from a read that was born past the bound.
+    READ at origin/main 1902d67a4:
+    - startReadPlane's read (src/lib/read-plane.ts) stamps `publishedAtMs = now()` BEFORE the worker request, and
+      again before the inline fallback. The ReadGeneration doc says so: "When the read that produced `facts` began".
+    - freshReadGeneration ages `now - publishedAtMs` against TICK_READ_MAX_AGE_MS (5 min, a BACKSTOP: W1-T5762,
+      added because a 22:08Z generation reached a consumer at 23:35Z). onePassPerGeneration falls back to
+      `read(input())`, a NEW read-plane read, when the bound refuses.
+    - buildDaemonReadRefresher (src/run-task.ts) publishes only after the read resolves. So a read longer than the bound
+      is refused by its first consumer, the full sweep, the moment it is published. The re-read takes as long, so the
+      consumer's facts are no fresher when it gets them. It only pays the read twice.
+    - This bound fires on a healthy condition (doctrine investigation-discipline/healthy-condition-bound): a slow but
+      unused read. The 5-minute bound itself is right for the population it was made for: a generation left unused.
+    RELATED, NOT OVERLAPPING:
+    - W1-T9564 (#11992, merged 5c566c2ec) times the full pass's prelude, and runs the tick read beside triage evidence,
+      main health and escalation answers. It keeps the refusal, so a slow-born generation is still read twice. Its
+      `tick_read_source` field will show `own_read` for each such pass.
+    - Why the tick read takes 5.6-7.6 min is not this task. W1-T9564's stage timers measure it.
+  design: |
+    1. A ReadGeneration also records `settledAtMs`: the plane's clock when the read's facts arrived, on the worker
+       path and the inline path. `publishedAtMs` keeps its meaning, the read's start. servedTickRead and
+       snapshot_age_ms (W1-T7734) still date the facts by it.
+    2. freshReadGeneration ages a generation from `settledAtMs` when it is present, else from `publishedAtMs`, as
+       today. It answers how long the generation has sat unused. TICK_READ_MAX_AGE_MS keeps its value and its
+       meaning. No bound is raised or added.
+    3. A refusal row also carries `read_ms` (settled minus began) when the generation has a settle time. Then the
+       ledger can tell a slow read from a generation that was left unused.
+  acceptance:
+    - claim: "a generation whose read took longer than the bound is served to the consumer that asks as it is published, and one left unused past the bound after publication is still refused, with its read time on the row"
+      proof: "unit test: test/a-tick-read-is-aged-from-when-it-was-published.test.ts"
+    - claim: "the suite names the slow-born generation in a test title"
+      proof: "grep: W1-T9704: a generation whose read took longer than the bound is served in test/a-tick-read-is-aged-from-when-it-was-published.test.ts"
+    - claim: "the suite names the unused-generation refusal in a test title"
+      proof: "grep: W1-T9704: a generation that sat unused past the bound after it was published is still refused in test/a-tick-read-is-aged-from-when-it-was-published.test.ts"
+    - claim: "the read plane records when each read settled"
+      proof: "grep: settledAtMs in src/lib/read-plane.ts"
+  falsifier: |
+    At origin/main, a plane whose inline read advances the clock 454,974 ms publishes a generation that
+    freshReadGeneration refuses at once, so the first test fails.
