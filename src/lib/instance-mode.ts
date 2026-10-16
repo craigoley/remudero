@@ -88,7 +88,7 @@ async function bindMode(ownerRepo: string, name: string | undefined, input: Regi
 /** Optional observation only: preserve the independent legacy effect, not selected permission. */
 export function createSelectedModeQualification(
   settings: SelectedModeSettings | undefined, ownerRepo: string, input: SelectedModeInput,
-  record: (step: string, fields: Record<string, unknown>) => void | Promise<void>, io: RegistryFileIO = registryFileIO,
+  record: (step: string, fields: Record<string, unknown>) => void, io: RegistryFileIO = registryFileIO,
   reading: "async" | "sync" = "async",
 ): SelectedModeQualification | undefined {
   let initial: Promise<BoundMode>;
@@ -154,7 +154,7 @@ export function createSelectedModeQualification(
     const key = JSON.stringify(fields);
     if (key === lastKey) return;
     try {
-      const pending = record("instance_mode.shadow_observed", fields);
+      const pending: unknown = record("instance_mode.shadow_observed", fields);
       lastKey = key; recordFailureReported = false;
       if (pending !== undefined) void Promise.resolve(pending).catch(() => {
         if (lastKey === key) lastKey = undefined;

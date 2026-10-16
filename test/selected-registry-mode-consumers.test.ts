@@ -341,7 +341,7 @@ test("selected mode unknown catches and sinks preserve the exact independent ope
       assert.equal(rows.at(-1)?.legacy_outcome, "threw");
     });
     await t.test("rejected async sink", async () => {
-      const errors: unknown[][] = [], consoleSpy = t.mock.method(console, "error", (...values) => { errors.push(values); });
+      const errors: unknown[][] = [], consoleSpy = t.mock.method(console, "error", (...values: unknown[]) => { errors.push(values); });
       try {
         const q = createSelectedModeQualification(fx.settings, "owner/repo", {}, async () => { throw new Error(fx.root); })!;
         assert.equal(await q.observe("arm", () => "armed", pr.prUrl), "armed");
