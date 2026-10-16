@@ -78,8 +78,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   `mergeable_state: dirty` — check mergeability before waiting on CI.**
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
   the ours-side block yourself; esbuild says only `Unexpected end of file`.**
-- **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
-  nothing.**
+- **A RETITLE ALONE re-runs the title lint — `pr-title-lint.yml` fires on `edited`; push no sha to
+  clear a title red.**
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
   recycle, not at merge — confirm with `docker inspect` before calling it shipped.**
 - **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet
