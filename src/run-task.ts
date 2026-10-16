@@ -1433,6 +1433,9 @@ import {
   realRiskJudge,
   resolveRiskJudgeMount,
   riskJudgeDiffInputBudget,
+  riskJudgePlanContext,
+  riskJudgePlanContextDigest,
+  riskJudgePlanContextDigestFor,
   riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
@@ -3021,7 +3024,8 @@ export function handedOffHeadRiskJudge(
       input: {
         change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
         gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
-        planContext: { taskId: pr.taskId, taskType: task?.type },
+        planContext: riskJudgePlanContext(pr.taskId, task),
+        planContextDigest: riskJudgePlanContextDigest(task),
       },
       config: (() => {
         const riskPolicy = readRiskPolicy(policyPath(repoRoot));
@@ -3331,7 +3335,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
-import { taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -14376,7 +14380,8 @@ export async function runFixRung(opts: {
         reason: green ? "flake-confirmed" : "flake claim refuted" };
     }
     if (fixAction.kind === "hand-off") {
-      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha });
+      const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
+      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }
@@ -22076,7 +22081,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { taskId: task.id, taskType: task.type },
+      planContext: { ...riskJudgePlanContext(task.id, task) },
+      planContextDigest: riskJudgePlanContextDigest(task),
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
@@ -44135,7 +44141,9 @@ function* openPrViewSteps(
     repo,
     raw
       .filter((pr) => emitterPlanFilings.get(pr.number) !== true)
-      .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid })),
+      .map((pr) => ({
+        number: pr.number, headRefOid: pr.headRefOid, nominated: resolveOpenPrTaskId(pr, false) === undefined,
+      })),
     fetch,
     deps.planFilingFileCache ?? createPlanFilingFileCache(),
     { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
@@ -47349,6 +47357,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       behindMainByPr,
       baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+      planContextDigestFor: riskJudgePlanContextDigestFor(plan),
       handedOffHeadJudgments,
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
@@ -48744,6 +48753,7 @@ export function buildSweepHook(
           baseChangedFilesByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+          planContextDigestFor: riskJudgePlanContextDigestFor(plan),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
@@ -49135,6 +49145,7 @@ export function buildSweepLightHook(
                 readMainPlan: resolvedReadMainPlan },
             }),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
+            planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest

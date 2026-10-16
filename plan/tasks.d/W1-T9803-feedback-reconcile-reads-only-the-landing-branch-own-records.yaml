@@ -1,0 +1,62 @@
+- id: W1-T9803
+  title: "FEEDBACK RECONCILE READS ONLY WHAT THE LANDING BRANCH ITSELF CHANGED — listBranchFeedbackIds still lists every path on origin/feedback-landing with `ls-tree -r` and reads every plan/feedback record there, including the copies the branch only inherited from main, the same over-wide read W1-T9753 removed from the landing; an inherited copy of a record main has since deleted reads as missing-upstream, which `--apply` would re-land"
+  repo: remudero
+  depends_on: [W1-T9753]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which landing-branch records the reconcile manifest counts as a source; --apply can re-add a record main deleted
+  band_meaning: blast-radius
+  origin: 'W1-T9753 builder report (PR 12271), follow-up (b); coordinator brief batch1016 item 3b'
+  plan_refs: [W1-T9753, W1-T3562, W1-T3561, W1-T3888]
+  files:
+    - src/lib/feedback-reconcile.ts
+    - test/feedback-reconcile-reads-only-the-landing-branch-own-records.test.ts
+    - test/feedback-landing-reconcile.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED by W1-T9753 (commit af07bd799, PR 12271): on 2026-10-15, three live landing branches held 119 stale
+    copies of records beside 14 of their own.
+    READ at origin/main ec0eb2ce2, src/lib/feedback-reconcile.ts (symbols, not lines):
+    - listBranchFeedbackIds runs `ls-tree -r --name-only origin/feedback-landing`, which lists EVERY path in the
+      branch's tree, then filters to top-level plan/feedback/*.yaml. It then runs one `git show
+      origin/feedback-landing:<path>` per record, up to MAX_RECORDS_PER_SOURCE (2,000). Every record the branch
+      inherited from main is read and counted as a "feedback-landing" source.
+    - The manifest builder adds that map as the `feedback-landing` source beside the enrolled roots. pickBest
+      chooses among the sources, and classify compares the best copy with origin/main's bytes.
+    - W1-T9753 replaced the same shape in feedback-landing.ts: readBranchPending's pending set is now one
+      `diff --raw -z --no-abbrev --no-renames origin/main...<tip> -- <ownedDir>` (from the merge base) plus one
+      `ls-tree -r -z <tip> -- <ownedDir>` for the blobs.
+    INFERRED from the code, not reproduced: suppose main deleted a record after the landing branch was cut, and no
+    enrolled root still holds it. classify sees `originBytes === undefined`, so the inherited copy is
+    `missing-upstream`. `rmd feedback-reconcile --apply` stages bestById through landFeedbackStatusContent as a new
+    path. W1-T9753's carry rule does not cover that path, so it would re-add the deleted record. An inherited copy
+    also inflates `foundIn` and `byteCount`.
+  design: |
+    1. The landing source is the branch's OWN records: the paths
+       `diff --raw origin/main...origin/feedback-landing -- plan/feedback` names (from the merge base, as W1-T9753
+       reads them), with their blobs from one path-scoped `ls-tree` of the tip. Reuse W1-T9753's helpers
+       (rawDiffBases, lsTreeBlobs) or a shared extraction. Never use `ls-tree -r` of the whole tree, and never one
+       `git show` per inherited record.
+    2. A record the branch deleted is not a candidate. A branch that was never pushed still reads as empty, as
+       today.
+    3. The manifest reports what it read for the landing source (records and bytes) in its existing byteCount, so
+       the saving shows on every run.
+    4. No new constant; MAX_RECORDS_PER_SOURCE is unchanged.
+    Tests go in test/feedback-reconcile-reads-only-the-landing-branch-own-records.test.ts, titled verbatim as in the
+    proofs. Use a real git fixture: a bare origin, main, and a landing branch cut from an older main.
+  acceptance:
+    - claim: "a record the landing branch only inherited from main is not a feedback-landing source in the manifest"
+      proof: 'grep: test("W1-T9803: an inherited landing-branch record is not a reconcile source" in test/feedback-reconcile-reads-only-the-landing-branch-own-records.test.ts'
+    - claim: "an inherited copy of a record main deleted is not classified missing-upstream, and --apply does not re-land it"
+      proof: 'grep: test("W1-T9803: a record main deleted is not re-landed from an inherited copy" in test/feedback-reconcile-reads-only-the-landing-branch-own-records.test.ts'
+    - claim: "a record the landing branch itself added or changed is still a source and still classified"
+      proof: 'grep: test("W1-T9803: the landing branch own record is still reconciled" in test/feedback-reconcile-reads-only-the-landing-branch-own-records.test.ts'
+  falsifier: |
+    On origin/main, cut a landing branch from an older main holding record A, add record B on the branch, then delete
+    A on main. The manifest lists A with foundIn ["feedback-landing"] and classification missing-upstream, so the
+    first two tests fail. The third test passes on main and at head, because B is reconciled both times. It guards
+    against a fix that drops the landing source entirely.

@@ -111,7 +111,16 @@ test("W1-T8667: compact and legacy spend sources agree across rotation", async t
     assert.ok(compact.compact);
     assert.ok(compact.receipts === undefined);
     const spend = foldGardenerSpend(compact, repository, materializedAt);
-    assert.deepEqual(spend, foldGardenerSpend(legacy, repository, materializedAt));
+    const { workerCalls, ...money } = spend;
+    const { workerCalls: legacyCalls, ...legacyMoney } = foldGardenerSpend(legacy, repository, materializedAt);
+    assert.deepEqual(money, legacyMoney);
+    assert.ok(workerCalls && legacyCalls);
+    assert.equal(workerCalls?.state, "complete");
+    assert.equal(workerCalls.counts.assignments, 0);
+    assert.equal(workerCalls.counts.matched, 0);
+    assert.equal(legacyCalls?.state, "not_collected");
+    assert.equal(legacyCalls.reason, "missing_capture");
+    assert.equal(legacyCalls.counts.matched, null);
     assert.deepEqual(spend.counts, { priced: 2, unpriced: 1, unlinked: 0 });
     assert.equal(spend.pricedSubtotalUsd, 4);
     assert.equal(spend.totalUsd, null);
@@ -181,7 +190,9 @@ test("compact source serialization can overflow independently of its pass accumu
   assert.equal(control.spend.gardens.length, 32);
   assert.ok(control.source.compact);
   const width = Buffer.byteLength(JSON.stringify(control.source.compact.passes[0])) + 1;
-  const overhead = Buffer.byteLength(JSON.stringify(control.source)) - width;
+  const { workerCalls, ...moneySource } = control.source;
+  assert.ok(workerCalls && workerCalls !== "over_budget");
+  const overhead = Buffer.byteLength(JSON.stringify(moneySource)) - width;
   const population = Math.floor((GARDENER_SPEND_MAX_BYTES - overhead) / width) + 1;
   assert.ok(population * width < GARDENER_SPEND_MAX_BYTES,
     "pass evidence fits; runtime and source metadata cause the serialization overflow");
@@ -189,7 +200,14 @@ test("compact source serialization can overflow independently of its pass accumu
     passId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}` }));
   const costs = (rows: typeof parents) => rows.flatMap(row => [row, priced(row)]);
   assert.equal((await capture(t, costs(parents), inventory)).source.reason, "over_budget");
-  assert.equal((await capture(t, costs(parents.slice(0, -1)), inventory)).source.reason, undefined);
+  const fits = await capture(t, costs(parents.slice(0, -1)), inventory);
+  assert.equal(fits.source.reason, undefined);
+  assert.equal(fits.spend.pricedSubtotalUsd, (population - 1) * 2);
+  assert.equal(fits.spend.totalUsd, null, "the other gardens have no complete price evidence");
+  assert.ok(fits.source.workerCalls === undefined || fits.source.workerCalls === "over_budget");
+  assert.ok(fits.spend.workerCalls);
+  assert.equal(fits.spend.workerCalls?.state, "not_collected");
+  assert.equal(fits.spend.workerCalls.counts.matched, null);
 });
 
 async function retainedCostCorpus(t: { after(fn: () => void): void }) {

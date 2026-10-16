@@ -14,6 +14,9 @@ After=docker.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=75min
+KillMode=control-group
+SendSIGKILL=yes
 User=craigoleyagent
 Group=craigoleyagent
 ExecStart=/home/craigoleyagent/rmd-relaunch.sh

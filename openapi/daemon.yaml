@@ -7800,6 +7800,103 @@ components:
         value: {type: [number, "null"]}
         notCollectedReason: {type: string}
 
+    GardenerWorkerCallCounts:
+      type: object
+      additionalProperties: false
+      required: [assignments, matched, missing, orphan, conflicting, invalid]
+      properties:
+        assignments: {type: [integer, "null"], minimum: 0}
+        matched: {type: [integer, "null"], minimum: 0}
+        missing: {type: [integer, "null"], minimum: 0}
+        orphan: {type: [integer, "null"], minimum: 0}
+        conflicting: {type: [integer, "null"], minimum: 0}
+        invalid: {type: [integer, "null"], minimum: 0}
+
+    GardenerWorkerBillingModes:
+      type: object
+      additionalProperties: false
+      required: [api, subscription, unknown]
+      properties:
+        api: {type: [integer, "null"], minimum: 0}
+        subscription: {type: [integer, "null"], minimum: 0}
+        unknown: {type: [integer, "null"], minimum: 0}
+
+    GardenerWorkerPriceCoverage:
+      type: object
+      additionalProperties: false
+      required: [reported, unreported]
+      properties:
+        reported: {type: [integer, "null"], minimum: 0}
+        unreported: {type: [integer, "null"], minimum: 0}
+
+    GardenerWorkerCalls:
+      type: object
+      additionalProperties: false
+      description: >
+        Optional gardener-worker-calls-v1 evidence from the existing off-loop ledger union
+        capture, served from cached Analytics without a GET-time ledger scan. Global counters
+        aggregate only repository-scoped gardens; host and fleet gardens are excluded.
+        A match requires the exact validated origin, gardener name and parent pass in the
+        same repository and daemon generation, the same immutable assignment ID, and the
+        same nonempty run and task. Optional raw repository/generation fields must agree.
+        Identical semantic assignment/attempt replays count once even when timestamps differ;
+        conflicting restatements quarantine the identity and cannot create a matched call.
+        Missing parents, assignments or terminal attempts, unobserved assignments, malformed
+        attributed rows and incomplete retained evidence remain gaps. Call observation is
+        neither task success nor proof that a running or interrupted parent completed.
+        These counters never sum dollars or make worker.attempt a canonical monetary producer.
+        Null means unknown. A complete newly captured empty corpus can observe zero; an old
+        source without worker-call capture reports not_collected/missing_capture with null
+        counters and clocks. Optional evidence failure or overflow preserves independent
+        monetary subtotals and ordinary Analytics while refusing complete usage coverage.
+        No raw identities, prompts, tokens, worker envelopes or credentials are public.
+      required: [version, state, reason, observedAt, window, counts, billingModes, priceCoverage, gardens]
+      properties:
+        version: {type: string, enum: [gardener-worker-calls-v1]}
+        state: {type: string, enum: [not_collected, partial, complete]}
+        reason:
+          type: string
+          enum: [missing_capture, invalid_capture, scope_mismatch, over_budget, incomplete_evidence, observed]
+        observedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Source capture clock, independent of the evidence window and GardenerSpend.materializedAt.
+        window:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [from, through]
+          properties:
+            from: {type: string, format: date-time}
+            through: {type: string, format: date-time}
+        counts:
+          $ref: "#/components/schemas/GardenerWorkerCallCounts"
+        billingModes:
+          description: Matched calls with exactly api or subscription billing_mode; every other value is unknown. These are not billed amounts.
+          $ref: "#/components/schemas/GardenerWorkerBillingModes"
+        priceCoverage:
+          description: >
+            Matched attempts with their own explicit finite nonnegative numeric total_cost_usd
+            are reported, including an explicit zero. Absent, invalid, inherited or differently
+            named prices are unreported. Field presence is neither billed spend nor an invoice;
+            API reported estimates and subscription notional prices remain distinct concepts.
+          $ref: "#/components/schemas/GardenerWorkerPriceCoverage"
+        gardens:
+          type: array
+          maxItems: 32
+          description: Only repository-scoped registered gardens, with bounded public names and no raw join identities.
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, counts, billingModes, priceCoverage]
+            properties:
+              name: {type: string, maxLength: 64}
+              counts:
+                $ref: "#/components/schemas/GardenerWorkerCallCounts"
+              billingModes:
+                $ref: "#/components/schemas/GardenerWorkerBillingModes"
+              priceCoverage:
+                $ref: "#/components/schemas/GardenerWorkerPriceCoverage"
+
     GardenerSpend:
       type: object
       description: >
@@ -7849,6 +7946,8 @@ components:
               scope: {type: string, enum: [repository, host, fleet]}
               totalUsd: {type: [number, "null"], minimum: 0}
               pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
+        workerCalls:
+          $ref: "#/components/schemas/GardenerWorkerCalls"
     RepositoryFlowBucket:
       type: object
       additionalProperties: false
