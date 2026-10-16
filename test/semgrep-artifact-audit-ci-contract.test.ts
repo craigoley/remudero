@@ -14,7 +14,7 @@ test('Semgrep policy changes require pinned audit controls before every candidat
  const flow=parse(readFileSync(workflow,'utf8')),job=flow.jobs['runtime-compatibility'];
  const scope=job.steps.find((s:any)=>s.id==='scope');
  for(const path of ['requirements.txt','build-requirements.txt','runtime-compatibility-audit.py',
-  'runtime_audit_test_fixtures.py','test_runtime_compatibility_audit.py'])assert.ok(scope.run.includes('.github/semgrep/'+path));
+  'runtime_audit_test_fixtures.py','test_runtime_compatibility_audit.py','runtime_audit_metadata_tests.py'])assert.ok(scope.run.includes('.github/semgrep/'+path));
  assert.ok(scope.run.includes('.github/workflows/semgrep-runtime-compatibility.yml'));
  assert.ok(scope.run.includes('test-policy=true'));assert.ok(scope.run.includes('test-policy=false'));
  assert.equal(flow.on.pull_request.paths,undefined);assert.equal(flow.on.pull_request['paths-ignore'],undefined);
@@ -52,7 +52,7 @@ test('Semgrep Python audit has its own CodeQL language without importing candida
 
 test('Semgrep unit receipt rejects incomplete inventory source drift skips and qualification transfer',()=>{
  // Pure receipt/controller fixtures only: these claims are synthetic, NOT an
- // execution of Python 3.12.15 or of the 121 native artifact-audit controls.
+ // execution of Python 3.12.15 or of the 140 native artifact-audit controls.
  const script=String.raw`
 import ast, copy, hashlib, json, pathlib, sys, tempfile, types
 source=pathlib.Path(sys.argv[1]); raw=source.read_bytes()
@@ -65,7 +65,7 @@ expected=dict(p.AUDIT_TEST_SOURCES);expected[source.name]=p.digest(raw)
 for name, value in p.AUDIT_TEST_SOURCES.items():
     assert p.digest(source.with_name(name).read_bytes()) == value
 r={"schema":"semgrep-audit-unit-controls/v1","state":"SOURCE_MODULE_CONTROLS_PASS",
-   **{k:121 for k in ("selected","executed","pass")},
+   **{k:140 for k in ("selected","executed","pass")},
    **{k:0 for k in ("fail","error","skipped","unrun","expectedFailures","unexpectedSuccesses")},
    **{k:True for k in ("complete","successful","inventoryClosed","successfulInventoryClosed","isolated","noSite","exactTargetPatchObserved")},
    **{k:False for k in ("qualified","linuxQualification","pinnedRuntimeQualified","runnerQualified")},
@@ -111,6 +111,6 @@ print(json.dumps({"positive":1,"refusedMutants":blocked,"inventory":len(ids)}))
  const run=spawnSync('python3',['-I','-S','-',auditor.pathname,cases.pathname],
   {input:script,encoding:'utf8',timeout:10000,maxBuffer:1<<20});
  assert.equal(run.error,undefined);assert.equal(run.signal,null);assert.equal(run.status,0,run.stderr);
- const result=JSON.parse(run.stdout);assert.equal(result.positive,1);assert.equal(result.inventory,121);
+ const result=JSON.parse(run.stdout);assert.equal(result.positive,1);assert.equal(result.inventory,140);
  assert.ok(result.refusedMutants>=90);
 });

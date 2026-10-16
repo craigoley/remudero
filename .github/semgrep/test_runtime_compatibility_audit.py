@@ -8,7 +8,7 @@ Linux Python 3.12 only; the real patch is reported. No download/install/build,
 candidate import, production target-loader call or observed-host fallback.
 The reviewed auditor digest is mandatory and has no environment/default value.
 
-No selection/filter: require exclusive JSON, exit 0, literal inventory=121,
+No selection/filter: require exclusive JSON, exit 0, literal inventory=140,
 zero other outcomes, source/tool hashes and invariantErrors=[]. Node wrappers
 are separate cases. Historical failed receipts remain immutable.
 """
@@ -32,6 +32,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 
+METADATA_TESTS_SHA256 = "6b0fd1ca518efa3fba8773b4398194eeb7e2e55bb53143fbd7e341103b50caa7"
 FIXTURES_SHA256 = "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d"
 APPROVED_PIP_SHA = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
 RAW_CONFIGURATION_NAMES = (
@@ -137,44 +138,6 @@ class AuditSyntheticModuleTests(unittest.TestCase):
 
     def test_missing_default_dependency_blocks(self):
         self.blocked("DEPENDENCY_CLOSURE", H.wheel("semgrep", "1.180.0", ["mcp==1.29.0"]))
-
-    def test_wheel_dynamic_dependency_is_final_and_original_bytes_are_preserved(self):
-        raw = H.metadata("semgrep", "1.180.0", ["mcp==1.29.0"]).replace(
-            b"Metadata-Version: 2.4\n", b"Metadata-Version: 2.4\nDynamic: Requires-Dist\n")
-        self.assertIn(b"Dynamic: Requires-Dist\n", raw)
-        fixture = H.wheel("semgrep", "1.180.0", metadata_bytes=raw)
-        self.assertEqual(H.scan(self.c, fixture)["metadata"], raw)
-        self.positive(fixture, H.wheel("mcp", "1.29.0"))
-        self.blocked("DEPENDENCY_CLOSURE", fixture, H.wheel("mcp", "1.30.0"))
-        self.assertEqual(H.scan(self.c, fixture)["metadata"], raw)
-
-    def test_wheel_dynamic_python_still_enforces_final_requires_python(self):
-        raw = H.metadata("attack", "1.0").replace(
-            b"Requires-Python: >=3.12\n", b"Dynamic: Requires-Python\nRequires-Python: >=99\n")
-        self.assertIn(b"Dynamic: Requires-Python\n", raw)
-        self.blocked("REQUIRES_PYTHON", H.wheel("attack", metadata_bytes=raw))
-
-    def test_sdist_dynamic_dependencies_remain_blocked_before_build(self):
-        for field in ("Requires-Dist", "Requires-Python"):
-            raw = H.metadata("attack", "1.0").replace(
-                b"Metadata-Version: 2.4\n", ("Metadata-Version: 2.4\nDynamic: " + field + "\n").encode())
-            self.assertIn(("Dynamic: " + field + "\n").encode(), raw)
-            with self.assertRaises(self.p.AuditBlocked) as raised:
-                self.p.metadata_distribution(raw, b"", "attack", "1.0", self.api, source_kind="sdist")
-            self.assertEqual(raised.exception.code, "DYNAMIC_METADATA")
-
-    def test_dynamic_identity_fields_and_unknown_origin_remain_blocked(self):
-        for field in ("Name", "Version", "Metadata-Version"):
-            raw = H.metadata("attack", "1.0").replace(
-                b"Metadata-Version: 2.4\n", ("Metadata-Version: 2.4\nDynamic: " + field + "\n").encode())
-            self.assertIn(("Dynamic: " + field + "\n").encode(), raw)
-            for kind in ("wheel", "sdist"):
-                with self.assertRaises(self.p.AuditBlocked) as raised:
-                    self.p.metadata_distribution(raw, b"", "attack", "1.0", self.api, source_kind=kind)
-                self.assertEqual(raised.exception.code, "DYNAMIC_METADATA")
-        with self.assertRaises(self.p.AuditBlocked) as raised:
-            self.p.metadata_distribution(H.metadata("attack", "1.0"), b"", "attack", "1.0", self.api, source_kind="unknown")
-        self.assertEqual(raised.exception.code, "METADATA_ORIGIN")
 
     def test_inactive_extra_uses_actual_pip_marker_filter(self):
         fixture = H.wheel("semgrep", "1.180.0", ['missing-extra==1.0; extra == "unused"'])
@@ -849,6 +812,9 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_archive_parent_traversal_blocks",
     "AuditSyntheticModuleTests.test_archive_symbolic_link_is_not_an_installable_regular_file",
     "AuditSyntheticModuleTests.test_case_alias_destination_collision_blocks",
+    "AuditSyntheticModuleTests.test_cross_project_exclusive_import_cannot_shadow_namespace",
+    "AuditSyntheticModuleTests.test_cross_project_exclusive_import_claims_cannot_collide",
+    "AuditSyntheticModuleTests.test_cross_project_exclusive_import_prefixes_cannot_shadow",
     "AuditSyntheticModuleTests.test_default_namespace_inventory_is_two_roots_and_twelve_versioned_artifacts",
     "AuditSyntheticModuleTests.test_default_special_inventory_is_bounded_nested_and_digest_bound",
     "AuditSyntheticModuleTests.test_direct_url_dependency_is_rejected_without_fetch",
@@ -856,17 +822,29 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_dynamic_identity_fields_and_unknown_origin_remain_blocked",
     "AuditSyntheticModuleTests.test_empty_population_is_not_positive_evidence",
     "AuditSyntheticModuleTests.test_exact_setuptools_pth_policy_tuple_positive_is_not_artifact_proof",
+    "AuditSyntheticModuleTests.test_exclusive_namespace_child_can_coexist_with_shared_parent_metadata",
     "AuditSyntheticModuleTests.test_foreign_generated_semgrep_entrypoint_blocks",
     "AuditSyntheticModuleTests.test_foreign_package_cannot_add_file_to_semgrep_owned_root",
     "AuditSyntheticModuleTests.test_foreign_package_cannot_overwrite_pip_check_module",
     "AuditSyntheticModuleTests.test_foreign_package_cannot_shadow_stdlib_email",
     "AuditSyntheticModuleTests.test_generated_entrypoint_collision_between_packages_blocks",
+    "AuditSyntheticModuleTests.test_import_declaration_work_is_bounded_per_project_and_whole_set",
+    "AuditSyntheticModuleTests.test_import_declarations_require_the_reviewed_metadata_version",
+    "AuditSyntheticModuleTests.test_import_metadata_does_not_waive_tool_namespace_protection",
+    "AuditSyntheticModuleTests.test_import_parser_accepts_private_unicode_and_dotted_names_as_data",
+    "AuditSyntheticModuleTests.test_import_parser_distinguishes_empty_exclusive_and_namespace_fields",
+    "AuditSyntheticModuleTests.test_import_parser_refuses_invalid_names_and_private_markers",
     "AuditSyntheticModuleTests.test_inactive_extra_uses_actual_pip_marker_filter",
     "AuditSyntheticModuleTests.test_malformed_requires_dist_raises_real_pip_invalid_requirement",
     "AuditSyntheticModuleTests.test_mcp_mutant_preserves_exact_original_semgrep_metadata_bytes",
+    "AuditSyntheticModuleTests.test_metadata25_final_dependency_closure_still_blocks",
+    "AuditSyntheticModuleTests.test_metadata25_final_requires_python_still_blocks",
+    "AuditSyntheticModuleTests.test_metadata25_preserves_raw_bytes_and_final_import_declarations",
     "AuditSyntheticModuleTests.test_metadata_name_cannot_disagree_with_filename",
+    "AuditSyntheticModuleTests.test_metadata_unsupported_versions_remain_explicit_refusals",
     "AuditSyntheticModuleTests.test_metadata_version_cannot_disagree_with_filename",
     "AuditSyntheticModuleTests.test_missing_default_dependency_blocks",
+    "AuditSyntheticModuleTests.test_namespace_metadata_does_not_waive_actual_archive_ownership",
     "AuditSyntheticModuleTests.test_ordinary_candidate_module_payload_is_never_imported",
     "AuditSyntheticModuleTests.test_original_mcp_129_dependency_accepts_129_positive",
     "AuditSyntheticModuleTests.test_original_mcp_129_dependency_rejects_130_negative",
@@ -883,7 +861,10 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_reviewed_namespace_tuples_are_exact_lower_seam_not_artifact_evidence",
     "AuditSyntheticModuleTests.test_root_pth_marker_is_rejected_without_execution",
     "AuditSyntheticModuleTests.test_same_package_root_and_data_alias_destination_collides",
+    "AuditSyntheticModuleTests.test_same_project_exclusive_parent_and_namespace_child_are_not_ambiguous",
+    "AuditSyntheticModuleTests.test_same_project_import_name_namespace_ambiguity_blocks",
     "AuditSyntheticModuleTests.test_sdist_dynamic_dependencies_remain_blocked_before_build",
+    "AuditSyntheticModuleTests.test_sdist_dynamic_import_fields_remain_blocked_before_build",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_data_path_alias",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_actual_digest",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_owner",
@@ -900,9 +881,10 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_unreviewed_shared_namespace_remains_blocked_not_waived",
     "AuditSyntheticModuleTests.test_usercustomize_marker_is_rejected_without_execution",
     "AuditSyntheticModuleTests.test_wheel_dynamic_dependency_is_final_and_original_bytes_are_preserved",
+    "AuditSyntheticModuleTests.test_wheel_dynamic_import_field_still_enforces_final_syntax",
     "AuditSyntheticModuleTests.test_wheel_dynamic_python_still_enforces_final_requires_python",
 )
-EXPECTED_TEST_COUNT = 121
+EXPECTED_TEST_COUNT = 140
 
 
 def canonical_id(test):
@@ -921,8 +903,8 @@ def build_suite():
     first = unittest.defaultTestLoader.loadTestsFromTestCase(AuditSyntheticModuleTests)
     second = additionalCases(H, CONTEXT)
     third = unittest.defaultTestLoader.loadTestsFromTestCase(AuditLoaderMarkerRegressions)
-    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (58, 55, 8):
-        raise AssertionError("58+55+8 exact-layout/Dynamic inventory changed")
+    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (77, 55, 8):
+        raise AssertionError("77+55+8 exact-layout/metadata inventory changed")
     suite = unittest.TestSuite([first, second, third])
     actual = tuple(sorted(canonical_id(test) for test in flatten_suite(suite)))
     if len(EXPECTED_TEST_IDS) != EXPECTED_TEST_COUNT or len(set(EXPECTED_TEST_IDS)) != EXPECTED_TEST_COUNT:
@@ -971,7 +953,7 @@ def json_once(path, value):
 
 def main():
     global H, CONTEXT
-    parser = argparse.ArgumentParser(description="121 literal-inventory source-module controls; no runtime qualification")
+    parser = argparse.ArgumentParser(description="140 literal-inventory source-module controls; no runtime qualification")
     parser.add_argument("--pip-wheel", required=True, type=pathlib.Path)
     parser.add_argument("--auditor-sha256", required=True, help="reviewed workflow/controller literal, never computed as an approval")
     parser.add_argument("--receipt", required=True, type=pathlib.Path, help="new JSON in an existing private neutral directory")
@@ -990,12 +972,13 @@ def main():
     path = pathlib.Path(__file__).absolute()
     fixture_path = path.with_name("runtime_audit_test_fixtures.py")
     auditor_path = path.with_name("runtime-compatibility-audit.py")
+    metadata_tests_path = path.with_name("runtime_audit_metadata_tests.py")
     try:
         if not (sys.flags.isolated and sys.flags.no_site and sys.platform == "linux" and sys.version_info[:2] == (3, 12)):
             raise AssertionError("actual Linux Python 3.12 -I -S required; no substituted runtime")
         if re.fullmatch(r"[a-f0-9]{64}", args.auditor_sha256) is None:
             raise AssertionError("explicit reviewed auditor SHA-256 required")
-        for source, limit in ((path, 262144), (fixture_path, 65536), (auditor_path, 65536)):
+        for source, limit in ((path, 262144), (fixture_path, 65536), (auditor_path, 65536), (metadata_tests_path, 65536)):
             snapshots[source] = read_regular(source, limit)
         raw = snapshots[fixture_path]
         if digest(raw) != FIXTURES_SHA256:
@@ -1004,6 +987,13 @@ def main():
         H.__file__ = str(fixture_path)
         exec(compile(raw, str(fixture_path), "exec", dont_inherit=True), H.__dict__)
         CONTEXT = H.load_context(args.pip_wheel, args.auditor_sha256, parent, receipt.name + ".candidate-must-not-execute")
+        raw_cases = snapshots[metadata_tests_path]
+        if digest(raw_cases) != METADATA_TESTS_SHA256:
+            raise AssertionError("repo metadata test source SHA-256 mismatch")
+        metadata_cases = types.ModuleType("_repo_semgrep_metadata_controls")
+        metadata_cases.__file__ = str(metadata_tests_path)
+        exec(compile(raw_cases, str(metadata_tests_path), "exec", dont_inherit=True), metadata_cases.__dict__)
+        metadata_cases.attach_metadata_cases(AuditSyntheticModuleTests, H)
         suite = build_suite()
         result = unittest.TextTestRunner(verbosity=2, resultclass=InventoryResult).run(suite)
     except Exception as error:

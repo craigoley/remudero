@@ -160,10 +160,11 @@ APPROVED_SPECIAL_MEMBERS = {
     },
 }
 AUDIT_TEST_SOURCES = {
+    "runtime_audit_metadata_tests.py": "6b0fd1ca518efa3fba8773b4398194eeb7e2e55bb53143fbd7e341103b50caa7",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "f60924048b15416a87ec20d92acf79de25b1bd30feed6a675103ec1b05a40939",
+    "test_runtime_compatibility_audit.py": "1196af6510b7f798a31a73207762e55abf51bfa2e380697f2fa88f933dacd5c8",
 }
-AUDIT_TEST_INVENTORY = "c01d30b972030556e1d7a597344ef70151999007a032bb869faf5321feb9d2ca"
+AUDIT_TEST_INVENTORY = "7fd8140e720e6909c40f191ad4f147abbbc598724224deb80f1ba0a2e111a190"
 
 
 class AuditBlocked(ValueError):
@@ -677,7 +678,7 @@ def _bootstrap_pip(root):
 def verify_unit_receipt(report, expected_sources):
     need(report.get("schema") == "semgrep-audit-unit-controls/v1" and
          report.get("state") == "SOURCE_MODULE_CONTROLS_PASS", "UNIT_RESULT", "wrong result type")
-    need(all(type(report.get(k)) is int and report[k] == 121 for k in ("selected", "executed", "pass")) and
+    need(all(type(report.get(k)) is int and report[k] == 140 for k in ("selected", "executed", "pass")) and
          all(type(report.get(k)) is int and report[k] == 0 for k in
              ("fail", "error", "skipped", "unrun", "expectedFailures", "unexpectedSuccesses")),
          "UNIT_COUNTS", "exact complete non-skipped inventory required")
@@ -686,8 +687,8 @@ def verify_unit_receipt(report, expected_sources):
          report.get("invariantErrors") == [] and report.get("failures") == [] and report.get("errors") == [],
          "UNIT_CLOSURE", "incomplete or failed source controls")
     ids = report.get("literalInventory")
-    need(isinstance(ids, list) and len(ids) == 121 and all(isinstance(v, str) for v in ids) and
-         len(set(ids)) == 121 and ids == sorted(ids) and
+    need(isinstance(ids, list) and len(ids) == 140 and all(isinstance(v, str) for v in ids) and
+         len(set(ids)) == 140 and ids == sorted(ids) and
          digest(("\n".join(ids) + "\n").encode()) == AUDIT_TEST_INVENTORY and
          report.get("inventorySha256") == AUDIT_TEST_INVENTORY and
          sorted(report.get("executedIds", [])) == ids and sorted(report.get("successfulIds", [])) == ids,
@@ -722,7 +723,7 @@ def phase_unit(root, workspace, head):
     report = json.loads(_regular(receipt, 65536))
     verify_unit_receipt(report, expected)
     summary = {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
-               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 121,
+               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 140,
                "pythonVersion": report["pythonVersion"], "productionLoader": production_loader.provenance,
                "runnerQualified": False}
     _json_once(root / "unit-audit.json", summary)

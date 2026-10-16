@@ -20,7 +20,7 @@ jobs:
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       # Trusted workflow literal binds committed auditor bytes without extra API reads.
-      AUDITOR_SHA256: 6cd4e0bc4565ca38b6a4cbf11501f00fec2496ff1d9523ede3a0e18619a91b69
+      AUDITOR_SHA256: 51e36c69a60c6ff8e3dd66143b869175cf727946a2c15d255449a4a0c99a2c12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +50,7 @@ jobs:
             "$BASE_SHA...$HEAD_SHA" -- .github/semgrep/requirements.txt \
             .github/semgrep/build-requirements.txt .github/semgrep/runtime-compatibility-audit.py \
             .github/semgrep/runtime_audit_test_fixtures.py .github/semgrep/test_runtime_compatibility_audit.py \
+            .github/semgrep/runtime_audit_metadata_tests.py \
             .github/workflows/semgrep-runtime-compatibility.yml > "$RUNNER_TEMP/runtime-policy-changes"
           if test -s "$RUNNER_TEMP/runtime-policy-changes"; then
             echo 'test-policy=true' >> "$GITHUB_OUTPUT"
