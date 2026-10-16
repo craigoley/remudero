@@ -44140,7 +44140,9 @@ function* openPrViewSteps(
     repo,
     raw
       .filter((pr) => emitterPlanFilings.get(pr.number) !== true)
-      .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid })),
+      .map((pr) => ({
+        number: pr.number, headRefOid: pr.headRefOid, nominated: resolveOpenPrTaskId(pr, false) === undefined,
+      })),
     fetch,
     deps.planFilingFileCache ?? createPlanFilingFileCache(),
     { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
