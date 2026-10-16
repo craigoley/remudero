@@ -21,7 +21,7 @@
     - test/a-run-childs-memory-is-reserved-on-its-own-root.test.ts
     - test/a-test-run-inside-a-worker-tree-reserves-its-own-memory.test.ts
     - test/test-fan-out-is-sized-by-learned-per-file-peaks.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

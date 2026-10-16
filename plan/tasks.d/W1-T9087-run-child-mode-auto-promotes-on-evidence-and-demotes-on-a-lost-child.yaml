@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T8472, W1-T9082, W1-T9085, W1-T9086, W1-T9080, W1-T9105, W1-T9102]
   files: [src/lib/run-child-mode.ts, src/lib/run-child.ts, src/run-task.ts, plan/policy.yaml, test/run-child-mode-auto-promotes-on-evidence.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

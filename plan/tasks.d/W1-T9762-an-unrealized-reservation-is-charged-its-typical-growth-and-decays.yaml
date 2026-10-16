@@ -14,7 +14,7 @@
     - src/lib/host-memory-shadow.ts
     - src/lib/host-memory-learning.ts
     - test/an-unrealized-reservation-is-charged-its-typical-growth-and-decays.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: the top deferral reason, and 44% of deferrals had no real pressure behind them
   attempts: 0
   rationale: |

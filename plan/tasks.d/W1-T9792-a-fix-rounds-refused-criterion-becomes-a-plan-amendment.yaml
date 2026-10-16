@@ -15,7 +15,7 @@
     - src/lib/prompt-render.ts
     - src/run-task.ts
     - test/a-fix-rounds-refused-criterion-becomes-a-plan-amendment.test.ts
-  status: queued
+  status: merged
   priority: 2  # each case holds a PR for hours, spends fix rounds and judge calls at every refreshed head, and ends in a hand amendment
   attempts: 0
   rationale: |

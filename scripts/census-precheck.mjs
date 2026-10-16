@@ -19,7 +19,7 @@
  * preflight` ran them, which no worker has run since W1-T464. A diff joining one's `walks` population
  * now RUNS those suites in a `node --test` child with every GIT_* variable stripped (the
  * W1-T3224 mechanism behind the damage W1-T3225 recorded), bounded, and read from its TAP. They run
- * on head; failing suites run again in a detached merge-base worktree borrowing node_modules.
+ * on head; failing suites run again in a private merge-base checkout borrowing node_modules.
  * Only head-red/base-green refuses; an unrunnable base is not measured (W1-T5663).
  *
  * ONLY GROWTH THIS BRANCH CAUSES REFUSES. Each count is taken twice, on this tree and on the merge
@@ -1012,12 +1012,20 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
   if (failing.length === 0) return [];
   const temporary = mkdtempSync(join(tmpdir(), "rmd-census-base-"));
   const baseRoot = join(temporary, "tree");
-  // Hook GIT_* variables must not redirect worktree administration to the pushing checkout.
+  // Hook GIT_* variables must not redirect the private checkout into the pushing checkout.
   const options = { env: Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])) };
-  let added = false;
   try {
-    gitOut(root, ["worktree", "add", "--detach", baseRoot, mergeBase], options);
-    added = true;
+    mkdirSync(baseRoot);
+    gitOut(baseRoot, ["init", "--quiet"], options);
+    const objects = gitOut(root, ["rev-parse", "--path-format=absolute", "--git-path", "objects"], options).trim();
+    writeFileSync(join(baseRoot, ".git", "objects", "info", "alternates"), `${objects}\n`);
+    writeFileSync(join(baseRoot, ".git", "packed-refs"), gitOut(root, ["for-each-ref", "--format=%(objectname) %(refname)"], options));
+    writeFileSync(join(baseRoot, ".git", "HEAD"), `${mergeBase}\n`);
+    // Census children need the base index, HEAD and refs for baseline comparisons. checkout-index
+    // uses the source repo's checkout settings and keeps export-ignore/export-subst files intact.
+    options.env.GIT_INDEX_FILE = join(baseRoot, ".git", "index");
+    gitOut(root, ["-c", "core.sparseCheckout=false", "-c", "core.splitIndex=false", "read-tree", mergeBase], options);
+    gitOut(root, ["--work-tree", baseRoot, "checkout-index", "--all"], options);
     if (!existsSync(join(baseRoot, "node_modules"))) {
       symlinkSync(join(existsSync(join(root, "node_modules")) ? root : SCRIPT_REPO, "node_modules"), join(baseRoot, "node_modules"), "dir");
     }
@@ -1029,11 +1037,7 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
   } catch (e) {
     throw new Error(`merge-base census run could not be measured: ${String(e?.message ?? e)}`);
   } finally {
-    try {
-      if (added) gitOut(root, ["worktree", "remove", "--force", baseRoot], options);
-    } finally {
-      rmSync(temporary, { recursive: true, force: true });
-    }
+    rmSync(temporary, { recursive: true, force: true });
   }
 }
 
