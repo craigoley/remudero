@@ -73,7 +73,7 @@ test("a checkout with no doctrine/ has no doctrine sections, so lint-plan cites 
   const { doctrineCitationFactsAt } = await import("../src/lib/doctrine-citation-facts.js");
   await withTempDir("no-doctrine", (root) => {
     const facts = doctrineCitationFactsAt(root);
-    assert.equal(facts.sections.size, 0);
+    assert.deepEqual([...facts.sections], [], "no doctrine/ means no section a path could cite");
     assert.deepEqual(lintTask(task(), { doctrineCitations: facts }).violations.filter((v) => v.check === "doctrine-citation-unresolved"), []);
   });
 });
