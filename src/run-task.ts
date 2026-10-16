@@ -39943,7 +39943,7 @@ export async function daemonCommand(
   const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const adoptedRunIds = new Set<string>();
   const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["run_child.settled"], refuseIncomplete: true,
+    step: ["run_child.settled"], pattern: /"step":"run_child\.settled"/, refuseIncomplete: true,
   }) : undefined;
   if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
   const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
