@@ -109,7 +109,7 @@ test("selected serve composition forwards one shadow context to the real registr
     selectedRegistryObservation: { ...f.options, input: { signal: controller.signal } },
   } as unknown as ServeDeps;
   const routes = buildServeRoutes(deps);
-  for (const [path, expectedStatus] of [["/v1/registry", 200], ["/v1/onboarding/readiness", 200], ["/v1/repos/summary", 200], ["/v1/views/repositories", 503]] as const) {
+  for (const [path, expectedStatus] of [["/v1/registry", 200], ["/v1/onboarding/readiness", 200], ["/v1/repos/summary", 200], ["/v1/views/repositories", 404]] as const) {
     const route = routes.find(route => route.path === path); assert.ok(route, path);
     let raw = "", code = 0;
     await route.handler({ url: path + "?repo=owner/repo" } as never,
@@ -263,20 +263,21 @@ test("selected real serve CLI forwards loaded opt-in but environment alone never
 });
 
 test("selected trusted-worker intent snapshots data without carrying ports or granting authority", async (t) => {
-  const f = fixture(t), capture = Reflect.get(registryConsumers, "captureSelectedRegistryIntent");
-  assert.equal(typeof capture, "function");
+  const f = fixture(t), capturePort = Reflect.get(registryConsumers, "captureSelectedRegistryIntent");
+  assert.equal(typeof capturePort, "function");
+  const capture = (value: unknown) => Reflect.apply(capturePort, undefined, [value]) as ReturnType<typeof registryConsumers.captureSelectedRegistryIntent>;
   const caps = ["identity"], options = { ...f.options, settings: { ...f.options.settings }, input: { requiredCapabilities: caps } };
-  const intent = capture(options) as { kind: string; version: number; input: { configuredPath: string; requiredCapabilities: string[] } };
+  const intent = capture(options); assert.ok(intent && intent.kind === "shadow");
   options.settings.registryPath = join(f.root, "wrong.yaml"); caps[0] = "unsupported";
   assert.equal(intent.kind, "shadow"); assert.equal(intent.version, 1);
   assert.equal(intent.input.configuredPath, f.path); assert.deepEqual(intent.input.requiredCapabilities, ["identity"]);
   assert.deepEqual(structuredClone(intent), intent, "a data-only trusted-worker contract, not an object carrying closures");
   assert.equal(Object.isFrozen(intent.input.requiredCapabilities), true);
   assert.equal(capture(undefined), undefined);
-  assert.equal(capture({ ...f.options, io: registryFileIO }).kind, "unknown", "custom ports must never silently become defaults in another thread");
-  assert.equal(capture({ ...f.options, input: { signal: new AbortController().signal } }).kind, "unknown");
-  assert.equal(capture({ ...f.options, input: { configuredPath: (() => "invalid") as unknown as string } }).kind, "unknown");
-  assert.equal(capture({ ...f.options, settings: { get mode() { throw new Error("private-config-sentinel"); } } }).kind, "unknown");
+  assert.equal(capture({ ...f.options, io: registryFileIO })!.kind, "unknown", "custom ports must never silently become defaults in another thread");
+  assert.equal(capture({ ...f.options, input: { signal: new AbortController().signal } })!.kind, "unknown");
+  assert.equal(capture({ ...f.options, input: { configuredPath: (() => "invalid") as unknown as string } })!.kind, "unknown");
+  assert.equal(capture({ ...f.options, settings: { get mode() { throw new Error("private-config-sentinel"); } } })!.kind, "unknown");
   const restore = Reflect.get(registryConsumers, "selectedRegistryObserverFromIntent"); assert.equal(typeof restore, "function");
   const observer = restore(structuredClone(intent), f.options.record) as NonNullable<ReturnType<typeof createSelectedRegistryObserver>>;
   t.after(() => observer.close());
@@ -284,11 +285,20 @@ test("selected trusted-worker intent snapshots data without carrying ports or gr
   await observer.settled(); assert.equal(f.rows.at(-1)?.fields.selected_state, "ready", "restored data uses the real bounded async reader");
   assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
   for (const invalid of [{ ...intent, version: 999 }, { ...intent, input: null }, { kind: "unknown", version: 1 }, { get kind() { throw new Error("private-intent-sentinel"); } }]) {
-    const unknown = restore(invalid, f.options.record) as typeof observer; t.after(() => unknown.close());
+    const unknown = Reflect.apply(restore, undefined, [invalid, f.options.record]) as typeof observer; t.after(() => unknown.close());
     await unknown.observe("repositories-view", { instanceName: "fixture" }, () => "legacy"); await unknown.settled();
     assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown"); assert.equal(f.rows.at(-1)?.fields.reason, "transport_unavailable");
     assert.ok(!JSON.stringify(f.rows.at(-1)).includes("private-intent-sentinel"));
   }
+});
+
+test("selected trusted intent reads accessor-backed input once before the worker boundary", (t) => {
+  const f = fixture(t); let reads = 0;
+  const intent = Reflect.apply(registryConsumers.copySelectedRegistryIntent, undefined, [{ kind: "shadow", version: 1, instanceName: "fixture",
+    get input() { reads++; return { configuredPath: reads === 1 ? f.path : join(f.root, "wrong.yaml") }; },
+  }]) as registryConsumers.SelectedRegistryIntent;
+  assert.equal(reads, 1, "the transport must capture ONE original input, not validate one and send another");
+  assert.equal(intent.kind, "shadow"); if (intent.kind === "shadow") assert.equal(intent.input.configuredPath, f.path);
 });
 
 test("selected repositories factory observes real synchronous materialization without changing its body", (t) => {
