@@ -377,7 +377,7 @@ function failureHold(i: TriggerInputs): { hold: boolean; why: string } {
 
 /** The quantile of the observed run lengths a lane is expected to finish within. A statistical level, not a duration. */
 export const DRAIN_WAIT_QUANTILE = 0.95;
-/** The drain's poll granularity in seconds (the script's default `RMD_RECYCLE_POLL_S`): a wait is never shorter. */
+/** The drain's poll granularity in seconds (the script's default poll interval): a wait is never shorter. */
 export const DRAIN_WAIT_GRANULARITY_S = 5;
 /** What the script waits when nothing supplies a wait; labelled `no_history_fallback` wherever it is used. */
 export const DRAIN_WAIT_FALLBACK_S = 3000;
@@ -2658,8 +2658,10 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // W1-T8138: the drain wait comes from the lanes in flight, not a constant. With no run history to read
       // (or an operator's own RMD_RECYCLE_WAIT_S) the script keeps its labelled fallback.
       const derived = deriveWaitFromState();
-      if (derived && derived.source !== "no_history_fallback" && !process.env.RMD_RECYCLE_WAIT_S) {
-        exec("env", [`RMD_RECYCLE_WAIT_S=${derived.waitS}`, "bash", ...script]);
+      if (derived && derived.source !== "no_history_fallback") {
+        // The derived wait is a DEFAULT: a RMD_RECYCLE_WAIT_S already in the supervisor's environment (an
+        // operator's explicit choice) wins, decided by the shell so this file reads no environment itself.
+        exec("bash", ["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script]);
         return;
       }
       exec("bash", script);

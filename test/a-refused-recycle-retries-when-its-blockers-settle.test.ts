@@ -404,11 +404,6 @@ test("W1-T8138: the shipped backend derives its wait from the ledger and passes 
   );
   const rows: Array<{ step: string; data: Record<string, unknown> }> = [];
   const execs: Array<{ cmd: string; args: string[] }> = [];
-  const previous = process.env.RMD_RECYCLE_WAIT_S;
-  delete process.env.RMD_RECYCLE_WAIT_S;
-  t.after(() => {
-    if (previous !== undefined) process.env.RMD_RECYCLE_WAIT_S = previous;
-  });
   const deps = realDeployDeps({
     installPath: root,
     stateRoot: root,
@@ -429,20 +424,21 @@ test("W1-T8138: the shipped backend derives its wait from the ledger and passes 
   const derived = rows.find((r) => r.step === "deploy.recycle_wait_derived");
   assert.equal(derived?.data.source, "observed");
   assert.equal(derived?.data.samples, 20);
-  const call = execs.find((e) => e.cmd === "env")!;
-  assert.match(call.args[0]!, /^RMD_RECYCLE_WAIT_S=\d+$/);
-  assert.equal(call.args[1], "bash");
+  const call = execs.find((e) => e.cmd === "bash" && e.args[0] === "-c")!;
+  assert.match(call.args[1]!, /RMD_RECYCLE_WAIT_S:-\$1/, "an operator's own RMD_RECYCLE_WAIT_S wins over the derived default");
+  assert.match(call.args[3]!, /^\d+$/, "the derived wait is passed as an argument");
+  assert.equal(call.args[4], join(root, "deploy", "recycle-container.sh"));
   // No history: the script keeps its labelled fallback, so no override is passed.
   writeFileSync(ledger, "");
   execs.length = 0;
   backend.restart();
-  assert.equal(execs.some((e) => e.cmd === "env"), false);
-  assert.equal(execs.at(-1)?.cmd, "bash");
+  assert.equal(execs.some((e) => e.args[0] === "-c"), false);
+  assert.equal(execs.at(-1)?.args[0], join(root, "deploy", "recycle-container.sh"));
   assert.equal(rows.filter((r) => r.step === "deploy.recycle_wait_derived").at(-1)?.data.source, "no_history_fallback");
   // An unreadable ledger is reported, and the fallback applies.
   rmSync(ledger);
   execs.length = 0;
   backend.restart();
   assert.ok(rows.some((r) => r.step === "deploy.recycle_wait_derive_failed"));
-  assert.equal(execs.at(-1)?.cmd, "bash");
+  assert.equal(execs.at(-1)?.args[0], join(root, "deploy", "recycle-container.sh"));
 });
