@@ -41,10 +41,11 @@ def attach_metadata_cases(case, H):
 
         def test_import_parser_accepts_private_unicode_and_dotted_names_as_data(self):
             raw = self.metadata25(fields=["Import-Name: ns.child ; private", "Import-Name: _élan", "Import-Namespace: ns"])
-            msg = self.p.BytesParser().parsebytes(raw)
+            msg = self.p.BytesParser(policy=self.p.email.policy.default.clone(raise_on_defect=True)).parsebytes(raw)
             exclusive, namespaces = self.p.declared_imports(msg, "attack")
             self.assertEqual(exclusive, {"ns.child", "_élan"})
             self.assertEqual(namespaces, {"ns"})
+            self.positive(H.wheel("attack", metadata_bytes=raw))
 
         def test_import_parser_refuses_invalid_names_and_private_markers(self):
             for value in ("../pip", "a/b", "a..b", ".a", "a.", "1a", "class", "a b", "a; public", "a;private;private"):

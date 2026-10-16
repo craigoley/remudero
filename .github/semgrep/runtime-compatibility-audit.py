@@ -161,9 +161,9 @@ APPROVED_SPECIAL_MEMBERS = {
     },
 }
 AUDIT_TEST_SOURCES = {
-    "runtime_audit_metadata_tests.py": "6b0fd1ca518efa3fba8773b4398194eeb7e2e55bb53143fbd7e341103b50caa7",
+    "runtime_audit_metadata_tests.py": "c4653a510f37e3da5cf9f2431fa8ec99d73d295006378190606e8d6acd386c8b",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "1196af6510b7f798a31a73207762e55abf51bfa2e380697f2fa88f933dacd5c8",
+    "test_runtime_compatibility_audit.py": "cb9096bc59de52c2b8881604b9344eff6d8f496696933b5cce4c539f2fd14dda",
 }
 AUDIT_TEST_INVENTORY = "7fd8140e720e6909c40f191ad4f147abbbc598724224deb80f1ba0a2e111a190"
 
