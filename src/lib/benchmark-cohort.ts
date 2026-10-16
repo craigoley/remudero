@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isMainThread, parentPort, workerData, type Worker, type WorkerOptions } from "node:worker_threads";
+import { startWorker } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import { joinVerifiedTaskOutcomes, type BenchmarkVerifiedOutcome, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
@@ -983,6 +985,35 @@ export async function runBenchmarkCohortPass(
     snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
 }
 
+const BENCHMARK_COHORT_WORKER_KIND = "benchmark-cohort-pass-v1" as const;
+type CohortWorkerData = { kind: typeof BENCHMARK_COHORT_WORKER_KIND; stateDir: string;
+  opts: { maxSources?: number; nowIso?: string } };
+type CohortWorkerReply = { ok: true; result: BenchmarkCohortPassResult } | { ok: false; error: string };
+
+/** W1-T9845: the daemon's pass runs in a one-shot worker. The checkpoint's read, parse, stringify and write, and
+ * the GC of its parsed graph, belong to the worker's isolate; the daemon thread only waits for one message. */
+export function runBenchmarkCohortPassOffLoop(
+  stateDir: string, opts: CohortWorkerData["opts"] = {},
+  start: (options: WorkerOptions) => Worker = (options) => startWorker(import.meta.url, options),
+): Promise<BenchmarkCohortPassResult> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (finish: () => void): void => { if (!settled) { settled = true; finish(); } };
+    let worker: Worker;
+    try {
+      worker = start({ workerData: { kind: BENCHMARK_COHORT_WORKER_KIND, stateDir, opts } satisfies CohortWorkerData });
+    } catch (error) {
+      reject(new Error(`benchmark-cohort-worker-start-failed: ${String((error as Error)?.message ?? error)}`));
+      return;
+    }
+    worker.once("message", (reply: CohortWorkerReply) => settle(() => reply.ok ? resolve(reply.result)
+      : reject(new Error(`benchmark-cohort-worker-failed: ${reply.error}`))));
+    worker.once("error", (error) => settle(() => reject(new Error(`benchmark-cohort-worker-error: ${error.message}`))));
+    // An exit with no message is a pass that never reported, never a success.
+    worker.once("exit", (code) => settle(() => reject(new Error(`benchmark-cohort-worker-exited-before-reporting: ${code}`))));
+  });
+}
+
 /** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */
 export async function runBenchmarkCohortIdlePass(
   stateDir: string, run: typeof runBenchmarkCohortPass = runBenchmarkCohortPass,
@@ -1048,6 +1079,14 @@ export async function runBenchmarkVerifiedOverlayPass(
       reason: "snapshot-unavailable", error_class: errorClass }));
     return 1;
   }
+}
+
+if (!isMainThread && parentPort && (workerData as Partial<CohortWorkerData> | null)?.kind === BENCHMARK_COHORT_WORKER_KIND) {
+  const port = parentPort;
+  const data = workerData as CohortWorkerData;
+  void runBenchmarkCohortPass(data.stateDir, data.opts).then(
+    (result) => port.postMessage({ ok: true, result } satisfies CohortWorkerReply),
+    (error: unknown) => port.postMessage({ ok: false, error: String((error as Error)?.message ?? error) } satisfies CohortWorkerReply));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

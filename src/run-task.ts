@@ -1176,7 +1176,7 @@ const workerBoundaryStack: BenchmarkStackEvidence & { loadedModule?: import("./l
 };
 workerBoundaryStack.loadedModule = captureImportedModule(fileURLToPath(import.meta.url), workerBoundaryStack.harnessRevision);
 const ciRemedyComponent = captureCiRemedyComponent(workerBoundaryStack.loadedModule, ciLogNamedSourcePaths, existsSync, join);
-import { runBenchmarkCohortPass, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
+import { runBenchmarkCohortPassOffLoop, type BenchmarkCohortPassResult } from "./lib/benchmark-cohort.js";
 import { benchmarkAaCommand, buildBenchmarkAaReport } from "./lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/benchmark-paid-pilot.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
@@ -32101,7 +32101,7 @@ export function buildBenchmarkCohortDaemonHooks(deps: BenchmarkCohortHookDeps = 
       lastStartedAt = current;
       return true;
     },
-    runBenchmarkCohortPass: () => (deps.run ?? ((stateDir) => runBenchmarkCohortPass(stateDir, { maxSources: 4 })))
+    runBenchmarkCohortPass: () => (deps.run ?? ((stateDir) => runBenchmarkCohortPassOffLoop(stateDir, { maxSources: 4 })))
       (dirname(ledgerPathFor(deps.config ?? loadConfig()))),
   };
 }
