@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: read-only investigation of serve's heavy views thread, 02:51-03:16Z (coordinator brief, third record of this filing)"
   plan_refs: [W1-T9436, W1-T6016, W1-T6253, W1-T2323]
   files: [src/lib/board-projection.ts, test/a-board-index-extends-its-step-buckets.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

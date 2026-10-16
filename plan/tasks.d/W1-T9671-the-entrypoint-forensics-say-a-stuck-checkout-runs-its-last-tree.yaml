@@ -1,0 +1,33 @@
+- id: W1-T9671
+  title: "THE ENTRYPOINT FORENSICS STILL SAY A CHECKOUT THAT CANNOT PROCEED DIES — once W1-T9631 (#12041) merges, a boot that cannot advance runs the tree that last booted and names a STALE BOOT, so docs/forensics/entrypoint.md's 'NOTHING IS SILENCED' paragraph describes behaviour main no longer has"
+  repo: remudero
+  depends_on: [W1-T9631]
+  type: implement
+  verify: auto
+  principles: {tdd: off}
+  budget_usd: 1.50
+  risk: low  # one concern — one forensics paragraph follows the boot behaviour W1-T9631 shipped
+  origin: "operator session 2026-10-15: found reviewing #12041, which changes deploy/entrypoint.sh and leaves its forensics doc as written"
+  plan_refs: [W1-T9631, W1-T9623]
+  files: [docs/forensics/entrypoint.md]
+  status: merged
+  priority: 2  # a stale forensics doc misleads the next outage reader; no runtime effect
+  attempts: 0
+  rationale: |
+    READ at origin/main cd482d436: docs/forensics/entrypoint.md, in the checkout_target section, says "NOTHING IS
+    SILENCED. A checkout that cannot proceed DIES, loudly, rather than continuing on whatever HEAD happened to be.
+    Proceeding is the expensive direction ...".
+    #12041 (W1-T9631, open, head 89aaeb84d) changes deploy/entrypoint.sh, src/lib/daemon.ts and src/lib/config-schema.ts
+    so that a boot which cannot advance its checkout runs the tree that last booted and says so (a STALE BOOT). Its
+    files do not include docs/forensics/entrypoint.md, so the paragraph is stale the moment it merges.
+  design: |
+    Rewrite that paragraph, dropping the "cannot proceed DIES" sentence, under a W1-T9631 note like the W1-T9623
+    one. State W1-T9631's behaviour from its merged code, not from its PR body:
+    - what the boot runs when the checkout cannot advance;
+    - what it logs and ledgers, and how the daemon names a STALE BOOT;
+    - when it still exits, if any case does.
+    Cite symbols, not line numbers. Keep the reason the old text gave (a stale tree costs a run against old code) as
+    the trade-off W1-T9631 accepted, with the 2026-10-15 2 h 6 m outage as the reason the trade went the other way.
+  acceptance:
+    - claim: "the entrypoint forensics describe W1-T9631's boot that runs its last tree"
+      proof: 'grep: W1-T9631 in docs/forensics/entrypoint.md'

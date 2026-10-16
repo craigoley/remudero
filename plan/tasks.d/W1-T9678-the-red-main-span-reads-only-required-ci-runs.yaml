@@ -1,0 +1,53 @@
+- id: W1-T9678
+  title: "THE RED-MAIN SPAN COUNTS ANY WORKFLOW'S RUN AS A CI VERDICT — spanOf passes main's whole push-run history to mainHealthUnattributedSpan, so a CodeQL or other non-required run that completed on a commit whose CI was cancelled removes it from the span; on 2026-10-15 the span came back empty and the lane named plan-only 037a58d8f by first-red-run instead of probing 131248633"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — which runs count as a verdict when the red-main span is built; the probe, the boundary and the fix ladder are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: main.repair.located named 037a58d8f by first-red-run while 131248633 had no completed CI run"
+  plan_refs: [W1-T7760, W1-T6403, W1-T5806]
+  files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, test/the-red-main-span-reads-only-required-ci-runs.test.ts]
+  status: merged
+  priority: 1  # operator-2026-10-15: naming the wrong merge sent three fix rounds after a commit that could not be the cause
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger, read-only):
+    - main.repair.located 13:34:38Z: offending_sha 037a58d8f (#12006, two plan/tasks.d files), method first-red-run.
+    - main.repair.revert_withheld 13:57:34Z: "its first parent 131248633 has no completed run carrying the required
+      checks (cancelled, or outside the run-history window)".
+    - There is no main.repair.bisecting row and no main.repair.span_unread row. So the span was read and was EMPTY;
+      it was not unread.
+    READ at origin/main cd482d436:
+    - src/lib/sweep.ts mainHealthFirstRedCommitFromRunHistory finds the boundary from REQUIRED workflows only:
+      "Only a workflow that carries required checks can say a commit is green or red: CodeQL going green on a commit
+      whose CI was cancelled is not a green main." enrichMainHealthObservation calls it with requiredWorkflows and no
+      firstParentOrder, so `first.span` is undefined.
+    - src/lib/main-health-rung.ts spanOf then walks the first-parent chain and calls
+      mainHealthUnattributedSpan(order, first, history). Here `history` is locateOffender's
+      `ctx.evidence?.runHistory`: the UNFILTERED push-run history (repairEvidence = { runHistory, required }).
+    - mainHealthUnattributedSpan drops every commit with any `mainRunIsVerdict` run, whatever its workflow. So a
+      completed codeql.yml, main-tripwire.yml or security-merge-policy.yml run on 131248633 hides it from the span.
+      Those workflows are outside ci.yml's cancel-pending concurrency group.
+    - This is not a regression of W1-T7760. The unfiltered read shipped in W1-T7760's own PR #10948 (beb99d013,
+      2026-10-11), against its design point 1 ("It reads only runs of workflows that carry required checks").
+    - locatedWriterRefusal (design point 6) did not catch it either: 037a58d8f really had a completed red run.
+  design: |
+    1. The span counts only runs from the workflows that carry required checks: the same set the boundary uses
+       (workflowEvidence.carries / requiredWorkflows). Thread that set into locateOffender and filter `history` in
+       mainHealthUnattributedSpan, or pass it in. A run with no workflowName keeps today's treatment.
+    2. With that set unknown, the span treats no run as a verdict and every commit between G and R is
+       unattributed. The probe ladder (W1-T7760) then decides. It never falls back to first-red-run.
+    3. Test: replay 2026-10-15's shape. G is a green CI run; 131248633 has a cancelled CI run and a completed CodeQL
+       run; 037a58d8f has a red CI run. The span must be [131248633] and the lane must probe it, not name 037a58d8f.
+  acceptance:
+    - claim: "a commit whose only completed run is a non-required workflow stays in the red-main span"
+      proof: 'unit test: test/the-red-main-span-reads-only-required-ci-runs.test.ts'
+    - claim: "a codeql run on a cancelled-ci commit does not make the lane name the next red by first-red-run"
+      proof: 'grep: test("W1-T9678: a codeql run on a cancelled ci commit keeps it in the span, so the lane probes it" in test/the-red-main-span-reads-only-required-ci-runs.test.ts'
+  falsifier: |
+    At origin/main, mainHealthUnattributedSpan over [037a58d8f, 131248633, G], with a completed CodeQL run on
+    131248633, returns [], so locateOffender names 037a58d8f by first-red-run and the second test fails.

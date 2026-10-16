@@ -99,6 +99,19 @@ function cleanup(...paths: string[]): void {
 const IDLE_8_CORES = () => ({ cores: 8, load1: 0 });
 const NO_PRIORITY_BINARIES = () => false;
 
+test("private NOT_RUN prevents coverage shards and cannot be reported as a passing coverage run", async () => {
+  const root = fixtureRoot(), dir = slotDir();
+  const { acquireTestSlot } = await testSlotModule();
+  const holder = acquireTestSlot("private fixture", { dir, slots: 1, ownershipProtocol: "private-capacity-v1", log: () => {} });
+  const { calls, spawn } = coverageSpawn();
+  try {
+    assert.equal(holder.outcome, "acquired");
+    const result = runCoverage(root, spawn, { dir, slots: 1, waitBoundMs: 0, log: () => {} });
+    assert.equal(result.ok, false); assert.match(result.detail, /NOT_RUN/);
+    assert.equal(calls.filter(isShard).length, 0);
+  } finally { holder.release(); cleanup(root, dir, ciParity.coverageScratchDir(root)); }
+});
+
 test("coverage shard argv carries an explicit --test-concurrency below the host core count", () => {
   const root = fixtureRoot();
   const dir = slotDir();

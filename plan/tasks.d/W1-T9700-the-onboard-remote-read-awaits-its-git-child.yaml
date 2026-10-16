@@ -1,0 +1,54 @@
+- id: W1-T9700
+  title: "THE ONBOARD AND RECON REMOTE READ IS A SYNCHRONOUS git CHILD THE CENSUS REACHES FROM THE DAEMON — realGitRemoteDeps.getRemoteUrl runs execFileSync(git config --get remote.origin.url), and composeRealDeps hands it over as both `gitRemote` and onboard.resolveOwnerRepo's default, so W1-T9660 recorded it as a daemon-reachable row (daemonCommand > realDeps > composeRealDeps) with no conversion filed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — how the onboard and recon verbs read a target checkout's origin url; the parse and the owner/repo result are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: W1-T9660 (#12081, fcfaeb5d4) census row realGitRemoteDeps"
+  plan_refs: [W1-T9660, W1-T5689]
+  files:
+    - src/lib/onboard/inventory.ts
+    - src/lib/composition-root.ts
+    - src/run-task.ts
+    - test/the-onboard-remote-read-awaits-its-git-child.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: merged
+  priority: 3  # census hygiene: only the onboard and recon verbs call it; the row keeps the name-based census exact
+  attempts: 0
+  rationale: |
+    READ at origin/main 03269ad67 (2026-10-15):
+    - src/lib/onboard/inventory.ts: `realGitRemoteDeps: GitRemoteDeps = { getRemoteUrl: (targetDir) =>
+      execFileSync("git", ["-C", targetDir, "config", "--get", "remote.origin.url"], ...).trim() }`.
+      `resolveTargetOwnerRepo(targetDir, deps = realGitRemoteDeps)` is synchronous.
+    - src/lib/composition-root.ts `composeRealDeps` puts it on the graph twice: `gitRemote: realGitRemoteDeps`,
+      and `onboard.resolveOwnerRepo: (targetDir, deps = realGitRemoteDeps) => resolveTargetOwnerRepo(...)`.
+      Nothing reads `gitRemote`; a fixed-string grep of src/ finds no `.gitRemote`.
+    - The only callers of `onboard.resolveOwnerRepo` are run-task.ts's onboard verb and `reconCommand`, both
+      `rmd` verbs. The daemon builds `realDeps()` for other fields, so the census's name-based walk reaches the
+      literal. The row reads `realGitRemoteDeps: 1` with "daemonCommand > realDeps > composeRealDeps; no
+      conversion filed".
+    So the daemon never runs this child today. The cost is a row the census must hold. A future daemon reader
+    of `gitRemote` would also get a synchronous one.
+  design: |
+    1. `GitRemoteDeps.getRemoteUrl` returns a promise, and the real one runs git as an awaited child (the async
+       execFile the repo's other git seams use). `resolveTargetOwnerRepo` becomes async and keeps its contract:
+       undefined, never guessed, on a failed read or an unparseable url. The onboard verb and `reconCommand` are
+       already async and await it.
+    2. Drop the unread `gitRemote` field from ComposedRealGraph. A grep shows no reader.
+    3. Delete the `realGitRemoteDeps` census row, and drop the name from W1-T9660's OBJECT_LITERAL_SPAWNERS.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - resolveTargetOwnerRepo over a real git fixture (gitRepo(), with a local identity) with an origin url
+         resolves owner/repo through the REAL default. This covers the seam's default, which no fake reaches;
+       - a fixture with no origin resolves undefined.
+  acceptance:
+    - claim: "the onboard remote read resolves owner and repo through an awaited git child"
+      proof: 'unit test: test/the-onboard-remote-read-awaits-its-git-child.test.ts'
+    - claim: "resolveTargetOwnerRepo's real default reads a fixture's origin url asynchronously"
+      proof: 'grep: test("W1-T9700: the real remote read resolves a fixture origin through an awaited child" in test/the-onboard-remote-read-awaits-its-git-child.test.ts'
+  falsifier: |
+    At origin/main, resolveTargetOwnerRepo returns a plain object, not a promise, and its default runs
+    execFileSync. A test asserting the result is a promise that resolves to owner/repo fails.

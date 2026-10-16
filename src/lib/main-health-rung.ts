@@ -9,7 +9,10 @@ import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-r
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readLedgerLines } from "./status.js";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { baseReproductionFiles } from "./base-reproduction.js";
+import { selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { judgeFixProgress, type FixProgressInput, type FixProgressJudge, type FixProgressVerdict } from "./fix-progress-judge.js";
 import {
   CHECK_REQUEUE_STEP,
@@ -243,6 +246,8 @@ export interface MainHealthRungDeps {
   mergeReader?: MainHealthMergeReader;
   /** W1-T5806: one PR's changed paths; defaults to its `pulls/N/files` list over `fetch`. */
   readPrFiles?: (prNumber: number) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+  /** W1-T9665: the affected-suites input for a merge's changed files. Absent, a merge's reach is unknown. */
+  readAffectedInput?: (changed: readonly string[]) => Awaitable<AffectedSuitesInput>;
   /** W1-T6403: the PR openers of the red-main repair lane. Absent, a red main only escalates. */
   repair?: MainRepairLane;
   /** One failing check's job log, reduced by {@link mainCeilingLogReducer}; undefined when unread. */
@@ -275,6 +280,99 @@ export interface MainRepairFixRequest {
   readonly testFiles: readonly string[];
   readonly logExcerpt: string;
   readonly reason: string;
+  /** W1-T9665: every first-parent merge since the last green main, so a two-PR collision is visible. */
+  readonly mergesSinceGreen?: MainRepairMergesSinceGreen;
+}
+
+/** W1-T9665 — one merge since the last green main. `reachesFailingTests` is undefined when unknown. */
+export interface MainRepairMerge {
+  readonly sha: string;
+  readonly pr?: number;
+  readonly subject: string;
+  readonly files: readonly string[];
+  readonly diffStat: string;
+  readonly reachesFailingTests?: boolean;
+  readonly reached?: readonly string[];
+  readonly reachUnknown?: string;
+  /** A reaching merge's unified diff. */
+  readonly diff?: string;
+}
+
+export interface MainRepairMergesSinceGreen {
+  readonly afterGreenSha?: string;
+  /** Oldest first. */
+  readonly merges: readonly MainRepairMerge[];
+  readonly unreadable?: string;
+}
+
+const short = (sha: string): string => sha.slice(0, 12);
+
+const mainRepairMergeName = (merge: MainRepairMerge): string => `\`${short(merge.sha)}\`${merge.pr !== undefined ? ` (#${merge.pr})` : ""}`;
+
+/** W1-T9665 — the fix brief's merges-since-green lines and its "Fix EXACTLY ONE thing" line: the merges
+ *  reaching the failing tests are the ones to repair, and two of them are a collision. */
+export function mainRepairMergesBrief(request: Pick<MainRepairFixRequest, "offendingSha" | "mergesSinceGreen">): { lines: string[]; fixLine: string } {
+  const reaching = (request.mergesSinceGreen?.merges ?? []).filter((merge) => merge.reachesFailingTests === true);
+  const names = reaching.map(mainRepairMergeName).join(", ");
+  const locatedMisses = request.mergesSinceGreen?.merges.find((merge) => merge.sha === request.offendingSha)?.reachesFailingTests === false;
+  return {
+    lines: [
+      renderMainRepairMergesSinceGreen(request.mergesSinceGreen),
+      ...(reaching.length >= 2 ? [`The red may be a COLLISION of ${names}: each was green on its own base, and they fail only together. Repair their INTERACTION.`] : []),
+    ],
+    fixLine:
+      locatedMisses && reaching.length > 0
+        ? `Fix EXACTLY ONE thing: make main green again by REPAIRING the defect that ${names} introduced: they reach the failing tests, and the located merge reaches none of them.`
+        : "Fix EXACTLY ONE thing: make main green again by REPAIRING the defect the merge above introduced.",
+  };
+}
+
+/** Lines of `text` from its head that fit `chars`, then how many were cut. */
+function headWithOmission(text: string, chars: number): string {
+  if (text.length <= chars) return text;
+  const lines = text.split("\n");
+  const shown: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 > chars) break;
+    shown.push(line);
+    used += line.length + 1;
+  }
+  return [...shown, `(${lines.length - shown.length} more diff lines omitted)`].join("\n");
+}
+
+/** W1-T9665 — the brief's "Merges since the last green main" section: reaching merges first with their
+ *  diffs, the rest with their diff stat. Past `budget`, whole non-reaching merges are cut first (newest
+ *  last-ranked first), then each reaching diff keeps its head; every cut is counted. */
+export function renderMainRepairMergesSinceGreen(since: MainRepairMergesSinceGreen | undefined, budget = MAIN_REPAIR_LOG_EXCERPT_CHARS): string {
+  if (!since) return "Merges since the last green main: not read for this brief.";
+  const title = `Merges since the last green main${since.afterGreenSha ? ` \`${short(since.afterGreenSha)}\`` : ""}:`;
+  if (since.unreadable !== undefined) return `${title} unread (${since.unreadable}). Nothing here says the merge above is the only candidate.`;
+  const rank = (merge: MainRepairMerge) => (merge.reachesFailingTests === true ? 0 : merge.reachesFailingTests === undefined ? 1 : 2);
+  const ordered = [...since.merges].sort((a, b) => rank(a) - rank(b));
+  const head = (merge: MainRepairMerge): string => {
+    const reach =
+      merge.reachesFailingTests === true
+        ? `REACHES the failing test(s) ${(merge.reached ?? []).join(", ")}`
+        : merge.reachesFailingTests === false
+          ? "reaches none of the failing tests"
+          : `reach UNKNOWN: ${merge.reachUnknown ?? "not read"}`;
+    return `- ${mainRepairMergeName(merge)} ${merge.subject} — ${reach}\n  files: ${merge.files.join(", ") || "(none listed)"}`;
+  };
+  const sum = (texts: readonly string[]) => texts.reduce((total, text) => total + text.length + 1, 0);
+  const reaching = ordered.filter((merge) => merge.reachesFailingTests === true);
+  const rest = ordered.filter((merge) => merge.reachesFailingTests !== true).map((merge) => ({ sha: merge.sha, text: `${head(merge)}\n${merge.diffStat}` }));
+  const fixed = title.length + 1 + sum(reaching.map(head));
+  const diffs = sum(reaching.map((merge) => merge.diff ?? merge.diffStat));
+  const omitted: string[] = [];
+  while (rest.length > 0 && fixed + diffs + sum(rest.map((entry) => entry.text)) > budget) omitted.push(short(rest.pop()!.sha));
+  const perDiff = Math.floor(Math.max(0, budget - fixed - sum(rest.map((entry) => entry.text))) / Math.max(1, reaching.length));
+  return [
+    title,
+    ...reaching.map((merge) => `${head(merge)}\n${headWithOmission(merge.diff ?? merge.diffStat, perDiff)}`),
+    ...rest.map((entry) => entry.text),
+    ...(omitted.length > 0 ? [`(${omitted.length} more merge(s) omitted to fit the brief, none reaching a failing test: ${omitted.join(", ")})`] : []),
+  ].join("\n");
 }
 
 /** W1-T6403 — the one revert PR of the offending merge, opened once its fix PR was not enough. */
@@ -847,6 +945,14 @@ interface RestCommit {
   parents?: ReadonlyArray<{ sha?: unknown }>;
 }
 
+type RestCommitFile = { filename?: unknown; additions?: unknown; deletions?: unknown; patch?: unknown };
+type RestCommitRead = RestCommit & { files?: ReadonlyArray<RestCommitFile> };
+
+function diffStatLines(files: ReadonlyArray<RestCommitFile>): string {
+  const lines = files.map((f) => ` ${String(f.filename)} | +${Number(f.additions ?? 0)} -${Number(f.deletions ?? 0)}`);
+  return lines.length > 0 ? lines.join("\n") : "(GitHub's commit read listed no files)";
+}
+
 /** The production {@link MainHealthMergeReader}: GitHub's commit, PR and compare reads over the same
  *  awaited `fetch` the rung already uses. Main squash-merges, so a `(#N)` subject names the PR. */
 function restMergeReader(owner: string, repo: string, fetch: GhApiFetcher): MainHealthMergeReader {
@@ -919,6 +1025,29 @@ function metPrFields(lookup: MetPrLookup | undefined): Record<string, unknown> {
     return { red_pr: lookup.met.redPr, met_prs: lookup.met.metPrs, shared_paths: lookup.met.sharedPaths };
   }
   return lookup?.unreadable ? { met_prs_unreadable: lookup.unreadable } : {};
+}
+
+interface WorkflowEvidence {
+  readonly required: string;
+  readonly carries: Set<string>;
+  readonly carriesNone: Set<string>;
+}
+
+/** W1-T9690 — the one learner the walk back and a red head share: true when the run's jobs hold a
+ *  required check; a completed run with jobs but none required marks its workflow as carrying none. */
+function learnWorkflow(
+  learned: WorkflowEvidence,
+  run: MainHealthRunHistoryEntry,
+  jobs: readonly RollupCheckEntry[],
+  required: ReadonlySet<string>,
+): boolean {
+  const workflow = run.workflowName;
+  if (judgedRollup(jobs, required).length > 0) {
+    if (workflow !== undefined) learned.carries.add(workflow);
+    return true;
+  }
+  if (!mainRunIsInProgress(run) && workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
+  return false;
 }
 
 /** W1-T7757: a job that reached a conclusion (or a terminal status), as opposed to one still queued or running. */
@@ -1135,6 +1264,8 @@ export function escalationFor(observation: MainHealthObservation, branch: string
 interface RepairEvidence {
   readonly runHistory?: readonly MainHealthRunHistoryEntry[];
   readonly required: ReadonlySet<string>;
+  /** W1-T9678: the workflows learned to carry the required checks, as the first-red boundary reads them. */
+  readonly requiredWorkflows?: ReadonlySet<string>;
 }
 
 /** One red observation, as the repair lane acts on it. */
@@ -1146,6 +1277,97 @@ interface RepairContext {
   readonly atMs: number;
   readonly red: MainRedSignature;
   readonly evidence?: RepairEvidence;
+}
+
+/** The flake-incident gardener's FLAKE_INCIDENT_MAIN_INHERITED_STEP, spelled here so this module (imported by
+ *  sweep.ts) never loads the gardener's filing graph; a test pins the two equal. */
+export const MAIN_INHERITED_HINT_SOURCE_STEP = "flake_incident.main_inherited";
+const FLAKE_INCIDENT_MAIN_INHERITED_STEP = MAIN_INHERITED_HINT_SOURCE_STEP;
+
+/** W1-T9551: a `flake_incident.main_inherited` row — a red no retry recovered — that this rung has not answered. */
+export interface MainInheritedHint {
+  origin: string;
+  file: string;
+  title: string;
+  prs: number[];
+  prsCount: number;
+}
+
+/** The rows that answer a hint, each once per PR count: covered by a repair, main green on it, or main still red on it. */
+export const MAIN_INHERITED_HINT_STEPS = Object.freeze({
+  covered: "main.health.inherited_hint_covered",
+  resolved: "main.health.inherited_hint_resolved",
+  confirmed: "main.health.inherited_hint_confirmed",
+});
+
+/** Reads only the bytes appended since its last call and parses only hint and answer lines, so a pass
+ *  every two minutes never re-parses the ledger. A file that shrank (compaction) is re-read from 0. */
+export function mainInheritedHintReader(ledgerPath: string): () => { pending: MainInheritedHint[]; torn: number } {
+  let offset = 0;
+  let decoder = new StringDecoder("utf8");
+  let carry = "";
+  let torn = 0;
+  const latest = new Map<string, MainInheritedHint>();
+  const answered = new Map<string, number>();
+  const take = (line: string): void => {
+    if (!line.includes(FLAKE_INCIDENT_MAIN_INHERITED_STEP) && !line.includes("main.health.inherited_hint_")) return;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch (error) {
+      torn++; // counted and returned: a torn line is not an absent one
+      void error;
+      return;
+    }
+    const prsCount = typeof row.prs_count === "number" ? row.prs_count : 0;
+    if (typeof row.origin !== "string") return;
+    if (row.step === FLAKE_INCIDENT_MAIN_INHERITED_STEP && typeof row.file === "string") {
+      if ((latest.get(row.origin)?.prsCount ?? -1) > prsCount) return;
+      const prs = Array.isArray(row.prs) ? row.prs.filter((n): n is number => typeof n === "number") : [];
+      latest.set(row.origin, { origin: row.origin, file: row.file, title: typeof row.title === "string" ? row.title : "", prs, prsCount });
+    } else if (typeof row.step === "string" && row.step.startsWith("main.health.inherited_hint_")) {
+      answered.set(row.origin, Math.max(answered.get(row.origin) ?? -1, prsCount));
+    }
+  };
+  return () => {
+    // Size the descriptor it reads, never the path (CodeQL js/file-system-race): the ledger rotates under the daemon.
+    let fd: number | undefined;
+    try { fd = openSync(ledgerPath, "r"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    try {
+      const size = fd === undefined ? 0 : fstatSync(fd).size;
+      if (size < offset) {
+        offset = 0;
+        decoder = new StringDecoder("utf8");
+        carry = "";
+        latest.clear();
+        answered.clear();
+      }
+      const chunk = Buffer.alloc(fd !== undefined && size > offset ? 1 << 20 : 0);
+      while (fd !== undefined && offset < size) {
+        const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset), offset);
+        if (n <= 0) break;
+        offset += n;
+        const lines = (carry + decoder.write(chunk.subarray(0, n))).split("\n");
+        carry = lines.pop() ?? "";
+        for (const line of lines) take(line);
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    return { pending: [...latest.values()].filter((h) => (answered.get(h.origin) ?? -1) < h.prsCount), torn };
+  };
+}
+
+/** Whether a repair's red names the hint's test: its `not ok <title>` line, or for a file-level hint, the file. */
+function repairCoversHint(record: MainRepairRecord, hint: MainInheritedHint): boolean {
+  if (hint.title !== "") return record.red?.detail?.includes(`not ok ${hint.title}`) === true;
+  return record.inherited?.testFiles.includes(hint.file) === true;
+}
+
+/** Whether main's own red, read this pass, still fails the hint's test. */
+function redNamesHint(red: MainRedSignature, failures: readonly CiFailure[], hint: MainInheritedHint): boolean {
+  if (hint.title !== "") return red.detail?.includes(`not ok ${hint.title}`) === true;
+  return failures.some((failure) => failure.logTail.includes(hint.file));
 }
 
 function isMainHealthIssue(issue: OpenIssue): boolean {
@@ -1176,7 +1398,23 @@ export function buildMainHealthRung(
   // they crowd the newest completed history, and each one read costs a jobs read. A workflow is
   // passed over only once a run of it with jobs held no required check, and never once one did.
   // Keyed by the required set, so a changed ci-gate list relearns from scratch.
-  let workflowEvidence: { required: string; carries: Set<string>; carriesNone: Set<string> } | undefined;
+  let workflowEvidence: WorkflowEvidence | undefined;
+  const learnedFor = (required: ReadonlySet<string>): WorkflowEvidence => {
+    const key = [...required].sort().join(",");
+    if (workflowEvidence?.required !== key) workflowEvidence = { required: key, carries: new Set(), carriesNone: new Set() };
+    return workflowEvidence;
+  };
+  /** One run's jobs through the per-head cache; a running run is cached only once its required jobs concluded (W1-T7757). */
+  const jobsOf = async (run: MainHealthRunHistoryEntry, required: ReadonlySet<string>): Promise<RollupCheckEntry[]> => {
+    const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
+    const cached = runHistoryCache?.jobsByRunId.get(jobsKey);
+    if (cached) return cached;
+    const jobs = rollupFromJobs(
+      (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
+    );
+    if (!mainRunIsInProgress(run) || judgedRollup(jobs, required).every(jobConcluded)) runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+    return jobs;
+  };
   const mergeReader = deps.mergeReader ?? restMergeReader(owner, repo, deps.fetch);
   const readPrFiles =
     deps.readPrFiles ??
@@ -1206,6 +1444,29 @@ export function buildMainHealthRung(
   let ratchetPrUrl: string | undefined;
   let ratchetDeclinedSignature: string | undefined;
   const ratchetOpened = new Set<string>();
+  const readHints = mainInheritedHintReader(deps.ledgerPath);
+  const hintFields = (hint: MainInheritedHint): Record<string, unknown> =>
+    ({ origin: hint.origin, file: hint.file, title: hint.title, prs: hint.prs, prs_count: hint.prsCount });
+  /** W1-T9551: answer each pending main-inherited hint once. A repair whose red names it covers it; on a
+   *  green main it is resolved; on a red main that still fails it, the red path below repairs it. */
+  const answerHints = (sha: string, state: string, red?: { signature: MainRedSignature; failures: readonly CiFailure[] }): void => {
+    const { pending, torn } = readHints();
+    if (torn > 0 && pending.length > 0) deps.log("main.health.inherited_hint_torn", { torn });
+    if (pending.length === 0) return;
+    const records = [...mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath)).values()];
+    for (const hint of pending) {
+      const covering = records.find((record) => repairCoversHint(record, hint));
+      if (covering) {
+        deps.log(MAIN_INHERITED_HINT_STEPS.covered, {
+          ...hintFields(hint), offending_sha: covering.offendingSha, fix_pr_url: covering.fixPrUrl ?? null, repair_resolved: covering.resolved,
+        });
+      } else if (state === "green") {
+        deps.log(MAIN_INHERITED_HINT_STEPS.resolved, { ...hintFields(hint), head_sha: sha });
+      } else if (red && redNamesHint(red.signature, red.failures, hint)) {
+        deps.log(MAIN_INHERITED_HINT_STEPS.confirmed, { ...hintFields(hint), head_sha: sha, red_signature: describeMainRed(red.signature) });
+      }
+    }
+  };
   const repairRow = (step: string, fields: Record<string, unknown>): void => {
     appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: MAIN_HEALTH_TASK_ID, step, surface: "main", ...fields });
     repairsMayBeActive = true;
@@ -1235,14 +1496,65 @@ export function buildMainHealthRung(
   };
   const diffStatOf = async (sha: string): Promise<string> => {
     try {
-      const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${sha}`])) as {
-        files?: ReadonlyArray<{ filename?: unknown; additions?: unknown; deletions?: unknown }>;
-      };
-      const lines = (commit?.files ?? []).map((f) => ` ${String(f.filename)} | +${Number(f.additions ?? 0)} -${Number(f.deletions ?? 0)}`);
-      return lines.length > 0 ? lines.join("\n") : "(GitHub's commit read listed no files)";
+      return diffStatLines(((await deps.fetch(["api", `repos/${owner}/${repo}/commits/${sha}`])) as RestCommitRead)?.files ?? []);
     } catch (error) {
       return `(diff stat unreadable: ${String((error as Error)?.message ?? error)})`;
     }
+  };
+  /** W1-T9665 — whether `files` select a failing test file through the affected-suites import graph. */
+  const reachOf = async (files: readonly string[], testFiles: readonly string[]): Promise<Pick<MainRepairMerge, "reachesFailingTests" | "reached" | "reachUnknown">> => {
+    if (testFiles.length === 0) return { reachUnknown: "no failing test file was parsed from the log" };
+    const direct = testFiles.filter((path) => files.includes(path));
+    const unless = (why: string) => (direct.length > 0 ? { reachesFailingTests: true, reached: direct } : { reachUnknown: why });
+    if (!deps.readAffectedInput) return unless("no affected-suites input is wired");
+    let input: AffectedSuitesInput;
+    try {
+      input = await deps.readAffectedInput(files);
+    } catch (error) {
+      return unless(`the affected-suites input is unreadable: ${String((error as Error)?.message ?? error)}`);
+    }
+    const selection = selectAffectedSuites(files, input);
+    if (selection.fullRun) return unless(selection.reasons[0] ?? "the selector does not model this merge");
+    const reached = testFiles.filter((path) => direct.includes(path) || selection.suites.includes(path));
+    if (reached.length > 0) return { reachesFailingTests: true, reached };
+    const absent = testFiles.filter((path) => !input.files.has(path));
+    if (absent.length > 0) return { reachUnknown: `the import graph was read from a tree without ${absent.join(", ")}` };
+    return { reachesFailingTests: false };
+  };
+  /** W1-T9665 — every first-parent merge after the last green main up to `headSha`, oldest first. */
+  const mergesSinceGreenOf = async (first: MainHealthFirstRedCommit | undefined, headSha: string, testFiles: readonly string[]): Promise<MainRepairMergesSinceGreen> => {
+    if (!first) return { merges: [], unreadable: "this observation read no last green main" };
+    const read: Array<{ sha: string; commit: RestCommitRead }> = [];
+    try {
+      for (let at = headSha; at !== first.afterGreenSha; ) {
+        if (read.some((entry) => entry.sha === at)) throw new Error(`the first-parent chain from ${headSha} loops at ${at}`);
+        const commit = (await deps.fetch(["api", `repos/${owner}/${repo}/commits/${at}`])) as RestCommitRead;
+        read.unshift({ sha: at, commit });
+        const parent = commit?.parents?.[0]?.sha;
+        if (typeof parent !== "string") throw new Error(`the first-parent chain from ${headSha} ends at ${at}, short of ${first.afterGreenSha}`);
+        at = parent;
+      }
+    } catch (error) {
+      return { afterGreenSha: first.afterGreenSha, merges: [], unreadable: String((error as Error)?.message ?? error) };
+    }
+    const merges: MainRepairMerge[] = [];
+    for (const { sha, commit } of read) {
+      const files = (commit.files ?? []).filter((file) => typeof file.filename === "string");
+      const paths = files.map((file) => String(file.filename));
+      const reach = await reachOf(paths, testFiles);
+      const pr = squashPrNumber(commit.commit?.message);
+      const diff = files.map((file) => `diff --git a/${file.filename} b/${file.filename}\n${typeof file.patch === "string" ? file.patch : "(no patch: binary or too large)"}`);
+      merges.push({
+        sha,
+        ...(pr !== undefined ? { pr } : {}),
+        subject: String(commit.commit?.message ?? "").split("\n")[0] ?? "",
+        files: paths,
+        diffStat: diffStatLines(files),
+        ...reach,
+        ...(reach.reachesFailingTests ? { diff: headWithOmission(diff.join("\n"), MAIN_REPAIR_LOG_EXCERPT_CHARS) } : {}),
+      });
+    }
+    return { afterGreenSha: first.afterGreenSha, merges };
   };
   /** The fix worker runs for minutes, so it is never awaited here: its outcome lands as a ledger row. */
   const dispatchFix = (lane: MainRepairLane, request: MainRepairFixRequest, red?: MainRedSignature): void => {
@@ -1275,18 +1587,22 @@ export function buildMainHealthRung(
     offendingPr: number | undefined,
     failures: readonly CiFailure[],
     reason: string,
-  ): Promise<MainRepairFixRequest> => ({
-    branch,
-    headSha: sha,
-    offendingSha,
-    ...(offendingPr !== undefined ? { offendingPr } : {}),
-    diffStat: await diffStatOf(offendingSha),
-    failingChecks: [...observation.failingChecks],
-    failingTestTitles: [...(observation.failingTestTitles ?? [])],
-    testFiles: baseReproductionFiles(failures),
-    logExcerpt: logExcerptOf(failures, [...observation.failingChecks, ...failures.map((failure) => failure.name)]),
-    reason,
-  });
+  ): Promise<MainRepairFixRequest> => {
+    const testFiles = baseReproductionFiles(failures);
+    return {
+      branch,
+      headSha: sha,
+      offendingSha,
+      ...(offendingPr !== undefined ? { offendingPr } : {}),
+      diffStat: await diffStatOf(offendingSha),
+      failingChecks: [...observation.failingChecks],
+      failingTestTitles: [...(observation.failingTestTitles ?? [])],
+      testFiles,
+      logExcerpt: logExcerptOf(failures, [...observation.failingChecks, ...failures.map((failure) => failure.name)]),
+      reason,
+      mergesSinceGreen: await mergesSinceGreenOf(observation.firstRedCommit, sha, testFiles),
+    };
+  };
   /** W1-T8042 — the fix request for a red the sweep handed over, built from the PR evidence it carried. */
   const inheritedFixRequest = async (
     record: MainRepairRecord,
@@ -1294,6 +1610,7 @@ export function buildMainHealthRung(
     sha: string,
     branch: string,
     why: string,
+    first: MainHealthFirstRedCommit | undefined,
   ): Promise<MainRepairFixRequest> => ({
     branch,
     headSha: sha,
@@ -1306,13 +1623,14 @@ export function buildMainHealthRung(
     reason:
       `${why}; the same red is on open PRs ${inherited.prs.map((n) => `#${n}`).join(", ")}, whose own diffs touch none of ` +
       `the files it names, and ${record.offendingSha.slice(0, 12)} is in every one's merge base and no green PR's (W1-T8042)`,
+    mergesSinceGreen: await mergesSinceGreenOf(first, sha, inherited.testFiles),
   });
   /** W1-T8042 — main's own runs concluded nothing, so a red the sweep handed over is this lane's only
    *  evidence: dispatch its first fix. Once dispatched, the record advances like any other. */
   const repairInheritedReds = async (lane: MainRepairLane, observation: MainHealthObservation, sha: string, branch: string): Promise<void> => {
     for (const record of mainRepairRecordsFromLedger(readLedgerLines(deps.ledgerPath)).values()) {
       if (record.resolved || !record.inherited || record.fixDispatched || fixInFlight.has(record.offendingSha)) continue;
-      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, observation.reason), record.red);
+      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, observation.reason, observation.firstRedCommit), record.red);
     }
   };
   /** A stall reason once the same fix-PR marker has held for the tick and time windows, else undefined. */
@@ -1465,7 +1783,7 @@ export function buildMainHealthRung(
     if (record.revertPrUrl) return (await readRepairPr(record.revertPrUrl))?.state !== "closed";
     if (fixInFlight.has(record.offendingSha)) return true;
     if (record.inherited && !record.fixDispatched) {
-      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, ctx.observation.reason), record.red ?? ctx.red);
+      dispatchFix(lane, await inheritedFixRequest(record, record.inherited, sha, branch, ctx.observation.reason, ctx.observation.firstRedCommit), record.red ?? ctx.red);
       return true;
     }
     let stalled: string | undefined;
@@ -1538,9 +1856,9 @@ export function buildMainHealthRung(
   const spanCache = new Map<string, readonly string[] | null>();
   /** The unattributed commits between the first red's last green and it, newest first; undefined when
    *  main's first-parent chain could not be read between them (named in the log, never guessed). */
-  const spanOf = async (first: MainHealthFirstRedCommit, history: readonly MainHealthRunHistoryEntry[]): Promise<readonly string[] | undefined> => {
+  const spanOf = async (first: MainHealthFirstRedCommit, history: readonly MainHealthRunHistoryEntry[], verdictKey: string): Promise<readonly string[] | undefined> => {
     if (first.span) return first.span;
-    const key = `${first.headSha}..${first.afterGreenSha}:${history.length}`;
+    const key = `${first.headSha}..${first.afterGreenSha}:${history.length}:${verdictKey}`;
     const cached = spanCache.get(key);
     if (cached !== undefined) return cached ?? undefined;
     try {
@@ -1586,7 +1904,10 @@ export function buildMainHealthRung(
       fields: {},
       probeVerdicts: new Map<string, MainProbeVerdict>(),
     };
-    const span = await spanOf(first, history);
+    // W1-T9678: only a run of a workflow carrying the required checks is a verdict; with that set unknown, none is.
+    const workflows = ctx.evidence?.requiredWorkflows;
+    const verdictRuns = workflows ? history.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName)) : [];
+    const span = await spanOf(first, verdictRuns, workflows ? [...workflows].sort().join(",") : "unknown");
     if (span === undefined || span.length === 0) return asFirstRed;
     const probes = lane.probes ?? (restProbes ??= restMainProbes(owner, repo, deps.fetch));
     const state = mainBisectionFromLedger(lines, first.headSha);
@@ -1991,9 +2312,7 @@ export function buildMainHealthRung(
       let walkedPast = 0;
       const headReason = observation.reason;
       if (runHistory && recentShas && mainHealthHeadInconclusive(observation)) {
-        const requiredKey = [...required].sort().join(",");
-        if (workflowEvidence?.required !== requiredKey) workflowEvidence = { required: requiredKey, carries: new Set(), carriesNone: new Set() };
-        const learned = workflowEvidence;
+        const learned = learnedFor(required);
         const { runs, skipped } = mainHealthWalkRuns(runHistory, recentShas);
         let decidedBy: MainHealthRunHistoryEntry | undefined;
         // W1-T7757: the newest commit passed over because a required check of it is still running.
@@ -2001,17 +2320,10 @@ export function buildMainHealthRung(
         for (const run of runs) {
           const workflow = run.workflowName;
           if (workflow !== undefined && learned.carriesNone.has(workflow) && !learned.carries.has(workflow)) continue;
-          const jobsKey = `${run.runId}#${run.runAttempt ?? 1}`;
           const running = mainRunIsInProgress(run);
           let jobs: RollupCheckEntry[];
           try {
-            jobs =
-              runHistoryCache?.jobsByRunId.get(jobsKey) ??
-              rollupFromJobs(
-                (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
-              );
-            // W1-T7757: only a run whose required jobs have all concluded is cached; a pending run is read again.
-            if (!running || judgedRollup(jobs, required).every(jobConcluded)) runHistoryCache?.jobsByRunId.set(jobsKey, jobs);
+            jobs = await jobsOf(run, required);
           } catch (error) {
             deps.log("main.health.completed_run_unreadable", {
               branch,
@@ -2022,16 +2334,14 @@ export function buildMainHealthRung(
             });
             break;
           }
-          if (judgedRollup(jobs, required).length === 0) {
+          if (!learnWorkflow(learned, run, jobs, required)) {
             // A running run's required jobs may simply not have registered yet: that proves nothing
             // about the workflow, unless it is already known to carry required checks (then it is pending).
-            if (running && workflow !== undefined && learned.carries.has(workflow)) {
-              if (run.headSha !== sha) pendingCommit ??= { sha: run.headSha, checks: [] };
+            if (running && workflow !== undefined && learned.carries.has(workflow) && run.headSha !== sha) {
+              pendingCommit ??= { sha: run.headSha, checks: [] };
             }
-            else if (!running && workflow !== undefined && jobs.length > 0) learned.carriesNone.add(workflow);
             continue;
           }
-          if (workflow !== undefined) learned.carries.add(workflow);
           const fallback = mainHealthFromRollup(sha, jobs, judgedAgainst, undefined, judging);
           if (fallback.state === "undetermined") {
             // A running commit with a required check still going decides nothing YET: remembered, and the
@@ -2116,6 +2426,26 @@ export function buildMainHealthRung(
           failingChecks: [...observation.failingChecks, ...guardNames.filter((name) => !observation.failingChecks.includes(name))],
         };
       }
+      // W1-T9690: a red head never walked back, so its own completed runs teach the set the boundary reads.
+      const learned = observation.state === "red" && runHistory ? learnedFor(required) : undefined;
+      if (learned && learned.carries.size === 0) {
+        for (const run of runHistory!) {
+          const workflow = run.workflowName;
+          if (run.headSha !== decidedBySha || workflow === undefined || mainRunIsInProgress(run) || learned.carriesNone.has(workflow)) continue;
+          try {
+            learnWorkflow(learned, run, await jobsOf(run, required), required);
+          } catch (error) {
+            deps.log("main.health.completed_run_unreadable", {
+              branch,
+              sha,
+              run_sha: run.headSha,
+              run_id: run.runId,
+              error: String((error as Error)?.message ?? error),
+            });
+            break;
+          }
+        }
+      }
       // EVERY check on the deciding run, judged alike: the advisory list and `decideBaseRed`'s census.
       const everyCheck = mainHealthFromRollup(decidedBySha, evidenceRollup, undefined, undefined, judging);
       const advisoryFailing =
@@ -2151,7 +2481,11 @@ export function buildMainHealthRung(
         metPrCache = { sha: decidedBySha, lookup };
       }
       const metLookup = observation.state === "red" ? metPrCache?.lookup : undefined;
-      repairEvidence = { ...(runHistory ? { runHistory } : {}), required };
+      repairEvidence = {
+        ...(runHistory ? { runHistory } : {}),
+        required,
+        ...(workflowEvidence && workflowEvidence.carries.size > 0 ? { requiredWorkflows: workflowEvidence.carries } : {}),
+      };
       deps.log("main.health.observed", {
         branch,
         sha,
@@ -2177,6 +2511,7 @@ export function buildMainHealthRung(
         ...(advisoryFailing.length > 0 ? { advisory_failing_checks: [...advisoryFailing].sort() } : {}),
         ...metPrFields(metLookup),
       });
+      if (observation.state !== "red") answerHints(sha, observation.state);
 
       if (observation.state === "red") {
         resolvedSignature = undefined;
@@ -2226,7 +2561,8 @@ export function buildMainHealthRung(
           });
         }
         observation = enrichMainHealthObservation(observation, {
-          ...(workflowEvidence && workflowEvidence.carries.size > 0 ? { requiredWorkflows: workflowEvidence.carries } : {}),
+          // W1-T9690: always passed, so an empty (unknown) set names no green rather than reading every workflow.
+          requiredWorkflows: workflowEvidence?.carries ?? new Set<string>(),
           ...(failures ? { ciFailures: failures } : {}),
           ...(ciFailuresUnavailable ? { ciFailuresUnavailable } : {}),
           ...(runHistory ? { runHistory } : {}),
@@ -2330,6 +2666,7 @@ export function buildMainHealthRung(
             shards.length > 0 && shardFailures.length > 0 ? shardFailures : failures,
           );
         }
+        answerHints(sha, "red", { signature: mainRedSignature([...observation.failingChecks], repairFailures), failures: repairFailures });
         if (deps.repair && (await repairRedMain(deps.repair, observation, sha, branch, repairFailures, startedAtMs))) {
           repairedSignature = signature;
           lastSuccessfulObservationAtMs = startedAtMs;

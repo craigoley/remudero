@@ -9,7 +9,7 @@
  * container-local /tmp, so two checkouts — or host and container — never saw each other;
  * (3) nothing lowered a test child's priority (only `childGardenPassSpawn` used nice).
  *
- * TIERED, SELF-HEALING — never a refusal:
+ * LEGACY tiered fallback (private v1 coordination instead requires an admitted lease):
  *   free slot        → run at {@link testRunConcurrency}, niced;
  *   all slots live   → wait (and say so), re-checking every poll;
  *   memory short     → a run that names its peak waits while the host's memory headroom cannot hold it plus the live
@@ -21,7 +21,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fchmodSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -30,6 +30,9 @@ import { systemClock, type Clock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "./test-slot-capacity.js";
+import { acquireSlotMutation, slotMutationPending } from "./test-slot-mutation.js";
+import { observeTestSlotParent } from "./test-slot-parent.js";
 
 /** Names the slot directory every container and the host share (the scratch mount's bind). */
 export const TEST_SLOT_DIR_ENV = "RMD_TEST_SLOT_DIR";
@@ -256,6 +259,9 @@ export interface TestSlotHolder {
   /** The peak the holder's run named ({@link TestSlotOptions.memoryBytes}); a later costed run reserves room for it. */
   memoryBytes?: number;
   filePeaks?: readonly TestFileSize[];
+  ownershipProtocol?: "private-capacity-v1";
+  /** A private owner has finished its work; same-uid recovery need not wait for its long-lived parent to exit. */
+  releaseRequestedAt?: string;
 }
 
 /** Kernel-derived start identity and parent, including on hosts without /proc. */
@@ -293,7 +299,7 @@ export function testSlotHasAncestor(pid: number, childPid = process.pid, factsFo
   return false;
 }
 
-function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: string } {
+function inheritedTestSlot(dir: string, requirePrivate = false): { lease?: TestSlotLease; rejected?: string } {
   const raw = process.env[TEST_SLOT_PARENT_ENV];
   if (!raw || process.env.NODE_TEST_CONTEXT) return {};
   try {
@@ -303,14 +309,15 @@ function inheritedTestSlot(dir: string): { lease?: TestSlotLease; rejected?: str
         !/^slot-[1-9][0-9]*\.json$/.test(claim.path.split("/").at(-1) ?? "")) return { rejected: "malformed-claim" };
     if (realpathSync(join(claim.path, "..")) !== realpathSync(dir)) return { rejected: "different-slot-directory" };
     const held = parseTestSlotHolder(readFileSync(claim.path, "utf8"));
-    if (!held || held.pid !== claim.pid || held.ownerNonce !== claim.nonce ||
+    if (!held || held.releaseRequestedAt !== undefined || held.pid !== claim.pid || held.ownerNonce !== claim.nonce ||
         held.processStart !== claim.start || held.host !== hostname() ||
         held.concurrency !== claim.concurrency || !Number.isSafeInteger(held.concurrency) || held.concurrency! < 1) return { rejected: "different-holder" };
+    if (requirePrivate && held.ownershipProtocol !== "private-capacity-v1") return { rejected: "private-protocol-required" };
     if (testSlotProcessFacts(held.pid)?.start !== held.processStart) return { rejected: "dead-or-reused-owner" };
     if (!testSlotHasAncestor(held.pid)) return { rejected: "owner-is-not-an-ancestor" };
     const verifyParent = () => {
       const current = parseTestSlotHolder(readFileSync(claim.path, "utf8"));
-      if (!current || current.pid !== held.pid || current.ownerNonce !== held.ownerNonce ||
+      if (!current || (requirePrivate && current.ownershipProtocol !== "private-capacity-v1") || current.releaseRequestedAt !== undefined || current.pid !== held.pid || current.ownerNonce !== held.ownerNonce ||
           current.processStart !== held.processStart || testSlotProcessFacts(held.pid)?.start !== held.processStart) {
         throw new Error("inherited parent test slot lost its live owner; nested completion refused");
       }
@@ -357,9 +364,90 @@ function parseTestSlotHolder(raw: string): TestSlotHolder | null {
   }
 }
 
+/** Open first, refuse links/devices, and read only the bounded original descriptor. */
+function readTestSlotHolder(path: string, expected?: { dev: number; ino: number }): TestSlotHolder | null {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const before = fstatSync(fd);
+    if (expected && (before.dev !== expected.dev || before.ino !== expected.ino)) return null;
+    if (!before.isFile() || before.size < 1 || before.size > 1024 * 1024) return null;
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const n = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (n < 1) return null;
+      offset += n;
+    }
+    const after = fstatSync(fd), current = lstatSync(path);
+    if (!current.isFile() || before.dev !== current.dev || before.ino !== current.ino ||
+        before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) return null;
+    return parseTestSlotHolder(bytes.toString("utf8"));
+  } finally { closeSync(fd); }
+}
+
+/** Harden EVERY reopen in the shared identity/bytes reclaimer, not just a prior inspection.
+ * A private replacement never inherits the old inode's deletion authority, even with identical JSON.
+ */
+function reclaimPrivateTestSlot(path: string, expected: { dev: number; ino: number; uid: number },
+  isStale: (holder: TestSlotHolder) => boolean, onReclaim: () => void, unpublishedCreation = false) {
+  const same = (st: Stats): boolean => st.isFile() && st.dev === expected.dev &&
+    st.ino === expected.ino && st.uid === expected.uid && st.uid === process.getuid?.() && (st.mode & 0o077) === 0;
+  const boundedRead = (fd: number): string => {
+    const before = fstatSync(fd);
+    if (!same(before) || (before.size < 1 && !unpublishedCreation) || before.size > 1024 * 1024) throw new Error("private reservation identity or bound changed");
+    const bytes = Buffer.alloc(before.size); let offset = 0;
+    while (offset < bytes.length) {
+      const n = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (n < 1) throw new Error("private reservation truncated during recovery");
+      offset += n;
+    }
+    const after = fstatSync(fd);
+    if (!same(after) || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error("private reservation changed during recovery");
+    return bytes.toString("utf8");
+  };
+  const safeOpen = (name: Parameters<typeof openSync>[0]): number => {
+    if (!Number.isInteger(constants.O_NOFOLLOW) || !Number.isInteger(constants.O_NONBLOCK)) throw new Error("safe private recovery flags unavailable");
+    const fd = openSync(name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try { if (!same(fstatSync(fd))) throw new Error("private reservation inode replaced before recovery"); }
+    catch (error) { closeSync(fd); throw error; }
+    return fd;
+  };
+  let authorizedBytes: string | undefined;
+  return reclaimStaleLock(path, {
+    // Null is reclaimable in the shared helper: wrap it so private UNKNOWN is never free.
+    parseHolder: raw => ({ holder: parseTestSlotHolder(raw), raw }),
+    isStale: current => {
+      const allowed = current.holder !== null ? isStale(current.holder) : unpublishedCreation;
+      if (allowed) authorizedBytes = current.raw;
+      return allowed;
+    },
+    onReclaim, onLostReclaim: () => {},
+  }, {
+    openSync: safeOpen,
+    // The shared reclaimer calls this seam only as readFileSync(fd, "utf8"); it never requests a Buffer.
+    readFileSync: boundedRead as unknown as typeof readFileSync, closeSync, fstatSync, statSync: lstatSync,
+    unlinkSync: name => {
+      // The generic audit callback ran BEFORE this final check. The mutation guard
+      // serializes cooperating writers; POSIX still supplies no arbitrary-actor inode CAS.
+      const fd = safeOpen(name);
+      try { if (boundedRead(fd) !== authorizedBytes) throw new Error("private reservation bytes replaced before unlink"); }
+      finally { closeSync(fd); }
+      if (!same(lstatSync(name))) throw new Error("private reservation replaced before unlink");
+      unlinkSync(name);
+    },
+  });
+}
+
 /** Seams for {@link acquireTestSlot}; every field defaults to the real host. */
 export interface TestSlotOptions {
   dir?: string;
+  /** Source-only opt-in. Default writers remain legacy until reader-first fleet qualification. */
+  ownershipProtocol?: "private-capacity-v1";
+  /** Required coordination remains fail-closed even when a directory cannot be inspected. */
+  privateCoordinationRequired?: boolean;
+  /** Default-off mode-bit entry protection check. Requires an explicit dir, private writer and an existing
+   * parent; never creates or widens it. Not an ACL/ancestor audit or a live adoption switch. */
+  privateParentPolicy?: "require-entry-protection";
   slots?: number;
   waitBoundMs?: number;
   pollMs?: number;
@@ -369,6 +457,8 @@ export interface TestSlotOptions {
   bootId?: () => string | undefined;
   isPidAlive?: (pid: number) => boolean;
   pidNamespace?: () => string | undefined;
+  /** Native default; explicit Linux fixtures must not turn two missing namespaces into a local pid proof. */
+  platform?: NodeJS.Platform;
   pid?: number;
   load?: () => HostLoad;
   log?: (line: string) => void;
@@ -390,6 +480,8 @@ export interface TestSlotOptions {
 /** A held slot (or the named reason none is held), plus the concurrency the run should use. */
 export interface TestSlotLease {
   outcome: "acquired" | "wait_bound_exceeded" | "slot_unavailable";
+  /** False is NOT_RUN, never permission to use the legacy unslotted fallback. */
+  executionAllowed?: boolean;
   concurrency: number;
   waitedMs: number;
   /** One line for the step detail: the run says whether it waited, and on whom. */
@@ -398,6 +490,11 @@ export interface TestSlotLease {
   childEnvironment?: Record<string, string>;
   refresh(): void;
   release(): void;
+}
+
+/** Legacy never-refusing leases are compatible; an explicit private NOT_RUN must survive every launch boundary. */
+export function testSlotExecutionAllowed(lease: TestSlotLease): boolean {
+  return lease.executionAllowed !== false;
 }
 
 function sleepSync(ms: number): void {
@@ -424,7 +521,8 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
 
 /**
  * Take one of the host-wide slots for a test-suite run, waiting (bounded) while all are live.
- * Never throws and never refuses: every outcome runs the suite, at the concurrency it names.
+ * Legacy-only outcomes retain fallback. Private-required failures are explicit NOT_RUN;
+ * callers must honor executionAllowed before starting work or recording admission.
  */
 export function acquireTestSlot(label: string, opts: TestSlotOptions = {}): TestSlotLease {
   const acquisition = testSlotAcquisition(label, opts);
@@ -456,9 +554,41 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
+  const privateWriter = opts.ownershipProtocol === "private-capacity-v1";
+  const parentPolicy = opts.privateParentPolicy === "require-entry-protection";
+  let privateRequired = privateWriter || opts.privateCoordinationRequired === true || parentPolicy;
+  const privateStale = (held: TestSlotHolder): boolean => {
+    if (held.ownershipProtocol !== "private-capacity-v1") return false;
+    if (held.releaseRequestedAt !== undefined && Number.isFinite(Date.parse(held.releaseRequestedAt)) && Date.parse(held.releaseRequestedAt) <= clock.now()) return true;
+    const mine = bootId();
+    if (held.bootId !== undefined && mine !== undefined && held.bootId !== mine) return true;
+    const mineNs = pidNamespace();
+    if ((held.pidNs === undefined) !== (mineNs === undefined)) return false;
+    if ((opts.platform ?? process.platform) === "linux" && (held.pidNs === undefined || mineNs === undefined)) return false;
+    // A private owner's age never proves death across an identity boundary. The legacy
+    // heartbeat fallback can reclaim a healthy long-running peer; leave it to its owner lane.
+    if (held.pidNs !== mineNs || held.host !== host()) return false;
+    return isHolderStale(held, { hostname: host, isPidAlive });
+  };
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const cleanupLog = (row: Record<string, unknown>): void => {
+    try { log(JSON.stringify(row)); }
+    catch (error) {
+      try { process.stderr.write(`${JSON.stringify({ step: "test_slot.cleanup_diagnostic_failed", event: row.step, error: String(error) })}\n`); }
+      catch { /* Failed telemetry must never bypass descriptor cleanup or grant execution. */ }
+    }
+  };
+  const finishMutation = (mutation: Extract<ReturnType<typeof acquireSlotMutation>, { state: "acquired" }>): boolean => {
+    try { mutation.release(); return true; }
+    catch (error) {
+      privateRequired = true;
+      cleanupLog({ step: "test_slot.mutation_cleanup_incomplete", label, ownerRecoveryRequired: true, error: String(error) });
+      return false;
+    }
+  };
   const load = opts.load ?? readHostLoad;
-  const { dir, scope } = opts.dir !== undefined ? { dir: opts.dir, scope: "configured" as const } : resolveTestSlotDir();
+  // An opted-in policy must not reach the test resolver's mkdir side effect before inspection.
+  const { dir, scope } = opts.dir !== undefined || parentPolicy ? { dir: opts.dir ?? "", scope: "configured" as const } : resolveTestSlotDir();
   const slots = opts.slots ?? defaultTestSlots(load().cores);
   const waitBoundMs = opts.waitBoundMs ?? TEST_SLOT_WAIT_BOUND_MS;
   const pollMs = opts.pollMs ?? TEST_SLOT_POLL_MS;
@@ -477,15 +607,25 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     return Math.min(cpu, peaks?.length ?? cpu, memoryTestConcurrency(headroom === undefined ? undefined : headroom - reservedBytes, perFile) ?? cpu);
   };
   const unslotted = (outcome: TestSlotLease["outcome"], concurrency: number, note: string): TestSlotLease => ({
-    outcome, concurrency, waitedMs: clock.now() - startedAt, note: note + basisNote, refresh: () => {}, release: () => {},
+    outcome, concurrency, executionAllowed: !privateRequired, waitedMs: clock.now() - startedAt,
+    note: (privateRequired ? `NOT_RUN: private coordination requires an admitted lease (${outcome}); ${note.replace(/; ran unslotted.*$/i, "")}` : note) + basisNote,
+    refresh: () => {}, release: () => {},
   });
-  const inherited = inheritedTestSlot(dir);
+  if (parentPolicy) {
+    if (opts.dir === undefined) return unslotted("slot_unavailable", 1, "parent policy requires an explicit existing directory");
+    if (!privateWriter) return unslotted("slot_unavailable", 1, "parent policy requires the gated private writer");
+    const parent = observeTestSlotParent(dir);
+    if (parent.state !== "SAFE") return unslotted("slot_unavailable", 1, `parent entry protection ${parent.state}: ${parent.reason}`);
+  }
+  const inherited = inheritedTestSlot(dir, parentPolicy);
   if (inherited.lease) return inherited.lease;
   if (inherited.rejected) log(JSON.stringify({ step: "test_slot.parent_rejected", label, reason: inherited.rejected }));
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o777 });
-    // Every container user and the host operator reclaim each other's records: umask must not narrow it.
-    if ((statSync(dir).mode & 0o777) !== 0o777 && statSync(dir).uid === process.getuid?.()) chmodSync(dir, 0o777);
+    if (!parentPolicy) {
+      mkdirSync(dir, { recursive: true, mode: 0o777 });
+      // Legacy preparation only: explicit parent policy must never widen a protected directory.
+      if ((statSync(dir).mode & 0o777) !== 0o777 && statSync(dir).uid === process.getuid?.()) chmodSync(dir, 0o777);
+    }
   } catch (error) {
     // Uncoordinated is still a run: the named slot_unavailable outcome, never a refusal.
     const concurrency = sized();
@@ -502,29 +642,52 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
     heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency, pidNs: pidNamespace(),
     ...(ownPeak() === undefined ? {} : { memoryBytes: ownPeak() }),
-    ...(files ? { filePeaks: files } : {}),
+    ...(files ? { filePeaks: files } : {}), ...(privateWriter ? { ownershipProtocol: "private-capacity-v1" as const } : {}),
   });
   const mib = (bytes: number): number => Math.round(bytes / 1024 ** 2);
+  const recoverPrivateSlot = (path: string, slot: number, st: Stats): boolean => {
+    if (!privateWriter || !st.isFile() || (st.mode & 0o077) !== 0 || st.uid !== process.getuid?.()) return false;
+    const held = readTestSlotHolder(path, st);
+    if (!held || !privateStale(held)) return false;
+    // Keep the canonical occupied anchor if projection cleanup cannot complete.
+    retireOwnedSlotCapacity(path, slot, held, st);
+    const reclaimed = reclaimPrivateTestSlot(path, st,
+      current => JSON.stringify(current) === JSON.stringify(held) && privateStale(current),
+      () => log(JSON.stringify({ step: "test_slot.owner_recovery_intent", slot })));
+    if (reclaimed.outcome !== "reclaimed") return false;
+    log(JSON.stringify({ step: "test_slot.owner_recovery", slot }));
+    return true;
+  };
   /** The other slots' records (slot `slot`'s own never counted). */
-  const othersThan = (slot: number): (TestSlotHolder | null)[] => {
-    const others: (TestSlotHolder | null)[] = [];
+  const othersThan = (slot: number): { memoryBytes?: number; unknown?: boolean }[] => {
+    const others: { memoryBytes?: number; unknown?: boolean }[] = [];
     for (let j = 1; j <= slots; j += 1) {
       if (j === slot) continue;
       try {
-        others.push(parseTestSlotHolder(readFileSync(join(dir, `slot-${j}.json`), "utf8")));
-      } catch {
-        // No record in slot j: nobody there to make room for.
+        const path = join(dir, `slot-${j}.json`);
+        if (slotMutationPending(path)) { privateRequired = true; others.push({ unknown: true }); continue; }
+        const st = lstatSync(path);
+        if (st.isFile() && (st.mode & 0o077) === 0) {
+          privateRequired = true;
+          const observation = observeSlotCapacity(path, j);
+          if (observation.state !== "missing") others.push(observation.state === "observed" ? observation.capacity : { unknown: true });
+        } else others.push(st.isFile() ? readTestSlotHolder(path) ?? { unknown: true } : { unknown: true });
+      } catch (error) {
+        // Only an absent peer is omitted; failed inspection still reserves UNKNOWN capacity.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") others.push({ unknown: true });
       }
     }
     return others;
   };
-  const namedPeaks = (others: (TestSlotHolder | null)[]): number => others.reduce((sum, held) => sum + (held?.memoryBytes ?? 0), 0);
+  const namedPeaks = (others: { memoryBytes?: number }[]): number => others.reduce((sum, held) => sum + (held.memoryBytes ?? 0), 0);
   /** Why slot `slot` stays closed to this run on memory (its own record not counted), or undefined when it may take it. */
   const memoryShort = (slot: number): string | undefined => {
+    const others = othersThan(slot);
+    if (privateRequired && !privateWriter) return "private coordination encountered; private writer remains gated";
+    if (others.some(held => held.unknown)) return "peer capacity UNKNOWN; reservation is occupied, not free";
     // A sized test run needs room for one file: it shrinks its concurrency to whatever more the headroom holds.
     const own = opts.memoryBytes ?? peaks?.[0] ?? files?.[0]?.bytes ?? opts.perFileBytes;
     if (own === undefined) return undefined;
-    const others = othersThan(slot);
     if (others.length === 0) return undefined;
     const headroom = headroomOf();
     const need = namedPeaks(others) + own;
@@ -542,10 +705,34 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   }
   function* waitForSlot(): Generator<number, TestSlotLease> {
     for (;;) {
+      // Recover only our own, privately inspected dead holders BEFORE calculating memory.
+      // Otherwise a dead peer closes the free slot beside it, or its old projection collides
+      // with the replacement. Public metadata alone never authorizes foreign recovery.
+      for (let i = 1; i <= slots; i += 1) {
+        const path = join(dir, `slot-${i}.json`);
+        try {
+          const st = lstatSync(path);
+          if (st.isFile() && (st.mode & 0o077) === 0) privateRequired = true;
+          if (!privateWriter) continue;
+          const mutation = acquireSlotMutation(path);
+          if (mutation.state !== "acquired") continue;
+          try { recoverPrivateSlot(path, i, st); } finally { finishMutation(mutation); }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") log(JSON.stringify({ step: "test_slot.owner_recovery_refused", slot: i, error: String(error) }));
+        }
+      }
       const holders: string[] = [];
       for (let i = 1; i <= slots; i += 1) {
         const path = join(dir, `slot-${i}.json`);
         for (let attempt = 0; attempt < 2; attempt += 1) {
+          const mutation = acquireSlotMutation(path);
+          if (mutation.state !== "acquired") {
+            // The usable shared parent was inspected already; failed guard acquisition
+            // cannot prove no private coordination exists, including after guard creation.
+            privateRequired = true; holders.push(`slot ${i}: mutation pending; coordination UNKNOWN`); break;
+          }
+          let admittedLease: TestSlotLease | undefined;
+          try {
           // Memory first, with no existence check: a slot's own record never counts against it, so whenever reclaiming
           // a dead holder there could open a slot, this passes and the reclaim below runs.
           const short = memoryShort(i);
@@ -554,12 +741,19 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             break;
           }
           let openedFd: number | undefined;
+          let removeCapacity: (() => void) | undefined;
+          let createdRecord: TestSlotHolder | undefined;
+          let writeOwnedRecord: ((body: string) => void) | undefined;
           try {
             concurrency = perFile === undefined ? testRunConcurrency(load(), slots) : sized(namedPeaks(othersThan(i)));
-            // Created owner-only, then widened on the descriptor to peer-READ: other accounts parse the holder, only
-            // the creating account may rewrite it. The exclusive descriptor stays the heartbeat target, never the path.
+            const ownedRecord = structuredClone(record()), body = JSON.stringify(ownedRecord);
+            if (privateWriter && (Buffer.byteLength(body) > 1024 * 1024 ||
+              [concurrency, ownPeak() ?? 0].some(n => !Number.isSafeInteger(n) || n < 0))) throw new Error("private slot record or capacity exceeds its bound");
+            createdRecord = ownedRecord;
+            // Ownership bytes (including nonce, labels and paths) are private through EVERY hard link.
+            // Peers observe only the capacity projection's bounded name and inode metadata.
             const fd = openSync(path, "wx+", 0o600); openedFd = fd;
-            fchmodSync(fd, 0o644); // Like the 0o777 dir, a caller umask must not narrow cross-account coordination.
+            if (!privateWriter) fchmodSync(fd, 0o644); // Legacy writer only; private v1 is never widened.
             const writeRecord = (body: string): void => {
               const bytes = Buffer.from(body); let offset = 0;
               while (offset < bytes.length) {
@@ -568,13 +762,20 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                 offset += written;
               }
               ftruncateSync(fd, bytes.length);
+              futimesSync(fd, clock.date(), clock.date());
             };
-            writeRecord(JSON.stringify(record()));
+            writeOwnedRecord = writeRecord;
+            writeRecord(body);
+            removeCapacity = privateWriter ? publishSlotCapacity(path, fd, i, ownedRecord) : undefined;
             const waitedMs = clock.now() - startedAt;
             if (announced) log(JSON.stringify({ step: "test_slot.acquired", label, slot: i, waitedMs, dir }));
             let held = true;
             let closed = false;
-            const close = (): void => { if (!closed) { closed = true; closeSync(fd); } };
+            const close = (): void => {
+              if (closed) return;
+              closed = true;
+              closeSync(fd);
+            };
             const stillOwnsRecord = (): boolean => {
               const open = fstatSync(fd), current = lstatSync(path);
               if (!current.isFile() || current.isSymbolicLink() || current.dev !== open.dev || current.ino !== open.ino || open.size < 1 || open.size > 1024 * 1024) return false;
@@ -583,8 +784,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
               const holder = parseTestSlotHolder(bytes.toString("utf8"));
               return holder?.ownerNonce === ownerNonce && holder.pid === (opts.pid ?? process.pid) && holder.host === host();
             };
-            return {
-              outcome: "acquired", concurrency, waitedMs,
+            return admittedLease = {
+              outcome: "acquired", executionAllowed: true, concurrency, waitedMs,
               ...((opts.pid ?? process.pid) === process.pid && host() === hostname() && processStart ? {
                 childEnvironment: { [TEST_SLOT_PARENT_ENV]: JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency }),
                   [TEST_SLOT_DIR_ENV]: dir },
@@ -593,34 +794,101 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                 `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced${basisNote}`,
               refresh: () => {
                 if (!held) return;
-                try {
-                  if (!stillOwnsRecord()) { held = false; close(); log(JSON.stringify({ step: "test_slot.refresh_lost", label, path })); return; }
-                  writeRecord(JSON.stringify({ ...record(), heartbeatAt: clock.iso() }));
-                } catch (error) {
-                  held = false; close(); log(JSON.stringify({ step: "test_slot.refresh_failed", label, path, error: String(error) }));
+                const refreshMutation = acquireSlotMutation(path);
+                if (refreshMutation.state !== "acquired") {
+                  log(JSON.stringify({ step: "test_slot.refresh_deferred", label, path })); return;
                 }
+                try {
+                  if (!stillOwnsRecord()) { held = false; close(); cleanupLog({ step: "test_slot.refresh_lost", label, path }); return; }
+                  writeRecord(JSON.stringify({ ...ownedRecord, heartbeatAt: clock.iso() }));
+                } catch (error) {
+                  held = false; close(); cleanupLog({ step: "test_slot.refresh_failed", label, path, error: String(error) });
+                } finally { finishMutation(refreshMutation); }
               },
               release: () => {
                 if (!held) return;
-                held = false;
-                // Only OUR record, compared by bytes+inode at the unlink: a reclaimer's replacement survives.
+                let lastError: unknown;
+                // BACKSTOP: three immediate attempts cover a transient read/unlink failure, never an unbounded wait.
+                for (let n = 0; n < 3; n += 1) {
+                  const releaseMutation = acquireSlotMutation(path);
+                  if (releaseMutation.state !== "acquired") { lastError = new Error("slot mutation pending during release"); continue; }
+                  try {
+                    if (!stillOwnsRecord()) {
+                      held = false; close();
+                      cleanupLog({ step: privateWriter ? "test_slot.release_lost" : "test_slot.release_failed", label, path,
+                        reason: "owner identity no longer matches; replacement preserved" });
+                      return;
+                    }
+                    // Metadata first: on failure the canonical anchor remains occupied/recoverable.
+                    removeCapacity?.();
+                    const ours = (h: TestSlotHolder) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce;
+                    const result = privateWriter ? reclaimPrivateTestSlot(path, fstatSync(fd), ours, () => {})
+                      : reclaimStaleLock(path, { parseHolder: parseTestSlotHolder, isStale: ours, onReclaim: () => {}, onLostReclaim: () => {} });
+                    held = false; close();
+                    if (result.outcome !== "reclaimed" && result.outcome !== "missing") cleanupLog({ step: "test_slot.release_lost", label, path });
+                    return;
+                  } catch (error) {
+                    // Preserve the latest failure for the bounded terminal cleanup receipt.
+                    lastError = error;
+                  }
+                  finally { finishMutation(releaseMutation); }
+                }
+                const terminalMutation = acquireSlotMutation(path);
                 try {
-                  reclaimStaleLock(path, {
-                    parseHolder: parseTestSlotHolder,
-                    isStale: (h) => h.pid === (opts.pid ?? process.pid) && h.host === host() && h.ownerNonce === ownerNonce,
-                    onReclaim: () => {},
-                    onLostReclaim: () => {},
-                  });
+                  if (terminalMutation.state === "acquired" && privateWriter && stillOwnsRecord()) {
+                    writeRecord(JSON.stringify({ ...ownedRecord, heartbeatAt: clock.iso(), releaseRequestedAt: clock.iso() }));
+                  }
                 } catch (error) {
-                  // The run's verdict stands; a record we could not remove ages out by its lease.
-                  log(JSON.stringify({ step: "test_slot.release_failed", label, path, error: String(error) }));
-                } finally { close(); }
+                  // A failed terminal write stays occupied and is named in cleanup_incomplete below.
+                  lastError = error;
+                }
+                finally {
+                  if (terminalMutation.state === "acquired") finishMutation(terminalMutation);
+                  held = false; close();
+                }
+                cleanupLog({ step: "test_slot.cleanup_incomplete", label, path, ownerRecoveryRequired: true, error: String(lastError) });
               },
             };
           } catch (error) {
-            if (openedFd !== undefined) closeSync(openedFd);
+            if (openedFd !== undefined) {
+              try {
+                let metadataRemoved = !(error instanceof SlotCapacityCleanupError);
+                try { removeCapacity?.(); }
+                catch (cleanupError) {
+                  metadataRemoved = false;
+                  cleanupLog({ step: "test_slot.capacity_rollback_incomplete", label, path, error: String(cleanupError) });
+                }
+                if (metadataRemoved && privateWriter) {
+                  // Exclusive creation + pinned original fd authorizes OUR empty/partial unpublished rollback.
+                  reclaimPrivateTestSlot(path, fstatSync(openedFd), h => h.ownerNonce === ownerNonce, () => {}, true);
+                } else if (privateWriter && createdRecord && writeOwnedRecord) {
+                  writeOwnedRecord(JSON.stringify({ ...createdRecord, heartbeatAt: clock.iso(), releaseRequestedAt: clock.iso() }));
+                }
+              }
+              finally { closeSync(openedFd); }
+            }
             // Only "someone holds it" is a slot answer; anything else is the outer slot_unavailable.
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          }
+          const capacity = observeSlotCapacity(path, i);
+          const currentStat = (() => {
+            try { return lstatSync(path); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; return undefined; }
+          })();
+          if (currentStat?.isDirectory()) throw new Error("test slot path is a directory, not a reservation file");
+          if (currentStat && !currentStat.isFile()) { holders.push(`slot ${i}: non-file reservation UNKNOWN`); break; }
+          const privateRecord = currentStat !== undefined && (currentStat.mode & 0o077) === 0;
+          if (privateRecord) privateRequired = true;
+          // Cross-account observers cannot inspect private authority. Never infer permission to delete it
+          // from public metadata, even if its heartbeat is old. Owner-lane release/recovery is required.
+          if (privateRecord && (capacity.state !== "observed" || currentStat!.uid !== process.getuid?.())) {
+            holders.push(`slot ${i}: private owner; ${capacity.state === "observed" ? "peer capacity observed" : "capacity UNKNOWN"}; owner-lane release required`);
+            break;
+          }
+          if (privateRecord) {
+            if (recoverPrivateSlot(path, i, currentStat!)) continue;
+            holders.push(`slot ${i}: private owner still occupied; owner-lane release required`);
+            break;
           }
           const reclaim = reclaimStaleLock(path, {
             parseHolder: parseTestSlotHolder,
@@ -630,6 +898,13 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
           if (reclaim.outcome === "live") {
             holders.push(`slot ${i}: pid ${reclaim.holder.pid} on ${reclaim.holder.host} (${reclaim.holder.label})`);
             break;
+          }
+          } finally {
+            if (!finishMutation(mutation) && admittedLease) {
+              admittedLease.executionAllowed = false;
+              admittedLease.note = "NOT_RUN: slot mutation guard cleanup is incomplete; owner-lane recovery required";
+              admittedLease.release();
+            }
           }
         }
       }

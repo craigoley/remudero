@@ -1,0 +1,46 @@
+- id: W1-T9683
+  title: "`rmd next-task-id` RESERVES ONE ID PER OPEN-PR READ, SO A FILING OF N TASKS COSTS N GITHUB READ SLOTS — a --count N reserves N consecutive free ids from ONE open-PR read and one history scan, and prints every id it holds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — how many ids one next-task-id call reserves; how an id is judged free and how a reservation is pushed are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: a 9-task filing spent 9 GitHub read slots, about an hour at the shared 180 s floor plus the slot left free"
+  plan_refs: [W1-T1055, W1-T3091, W1-T4414]
+  files: [src/run-task.ts, src/lib/task-id-reservation.ts, test/next-task-id-reserves-several-ids-with-one-open-pr-read.test.ts]
+  status: merged
+  priority: 2  # operator session friction, not fleet flow: the fleet's own minters reserve one id at a time
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (this filing session, gh read log): plan-file-1792078375710 reserved W1-T9669, W1-T9670,
+    W1-T9671, W1-T9672, W1-T9673, W1-T9674, W1-T9678, W1-T9679, W1-T9680, W1-T9681 and W1-T9683 with eleven `rmd next-task-id --branch` calls
+    between 15:48:43Z and 16:55:02Z. Each call needs its own read slot under the deny-floor hook's 180 s floor, and
+    the standing rule leaves the next slot free for other sessions. The walk also skipped W1-T9675..W1-T9677, held by
+    a triage run, so the minted ids are not consecutive.
+    READ at origin/main ee1cf822d: src/run-task.ts nextTaskIdCommand takes the maximum across tasks.yaml, every shard,
+    the ids open plan PRs minted (the GitHub read), the remote plan and the plan history. It then calls
+    reserveTaskIdRemote (src/lib/task-id-reservation.ts) for ONE id, advancing on contention up to maxScan. No flag
+    asks for more than one.
+  design: |
+    1. `--count N` (N >= 1; the default 1 keeps today's output byte for byte) makes ONE open-PR read and ONE history
+       scan. It then reserves N ids by calling the existing reserveTaskIdRemote once per id, each starting above the
+       last id it got, so contention advances exactly as it does today.
+    2. It prints one `RESERVED <id>` line per id it holds, then a final line listing all of them. A partial result
+       (origin unreachable after k of N) prints the k it holds and exits non-zero, naming how many it could not
+       reserve. It never prints an id it does not hold.
+    3. `--count` is refused beside --offline, --no-reserve, --audit and --prefix, as --reserve is today.
+    4. Every reservation records the same holder (`--branch` or the current branch), so review's ownership check
+       (W1-T4414) passes each id in one filing PR.
+  acceptance:
+    - claim: "next-task-id --count 3 reserves three ids with one open-PR read"
+      proof: 'unit test: test/next-task-id-reserves-several-ids-with-one-open-pr-read.test.ts'
+    - claim: "a contested id is skipped and the count is still met, every id holding the same branch"
+      proof: 'grep: test("W1-T9683: a contested id is skipped and --count is still met under one holder" in test/next-task-id-reserves-several-ids-with-one-open-pr-read.test.ts'
+    - claim: "a partial reservation prints only the ids it holds and exits non-zero"
+      proof: 'grep: test("W1-T9683: a partial --count prints only the ids it holds and exits non-zero" in test/next-task-id-reserves-several-ids-with-one-open-pr-read.test.ts'
+  falsifier: |
+    At origin/main nextTaskIdCommand has no --count: called with `--count 3` it never reserves three ids, so the first
+    test fails.

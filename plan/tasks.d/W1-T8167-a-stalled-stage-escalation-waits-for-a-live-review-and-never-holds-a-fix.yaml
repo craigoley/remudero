@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11 (\"go with your recommendations\"): the W1-T8088 note's separate finding (PR #10848, issue #10874)"
   plan_refs: [W1-T5900, W1-T8088, W1-T195, W1-T2799, W1-T3579, W1-T913, W1-T2844]
   files: [src/lib/sweep.ts, src/lib/escalate.ts, test/a-stalled-stage-escalation-waits-for-a-live-review-and-never-holds-a-fix.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

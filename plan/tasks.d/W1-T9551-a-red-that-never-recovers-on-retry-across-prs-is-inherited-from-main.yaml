@@ -11,7 +11,7 @@
   origin: "operator 2026-10-14: W1-T9532 (#11790) filed a deterministic main red as a flake incident"
   plan_refs: [W1-T6406, W1-T9532, W1-T8042, W1-T5350, W1-T6403]
   files: [src/lib/flake-incident-gardener.ts, src/lib/garden-registry.ts, src/lib/main-health-rung.ts, test/a-red-that-never-recovers-on-retry-across-prs-is-inherited-from-main.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-14: a deterministic main red filed as a flake sends the fleet to "pin the cause of an intermittent failure" that does not exist, after main-repair already fixed it (W1-T9532, retired in the same PR)
   attempts: 0
   rationale: |

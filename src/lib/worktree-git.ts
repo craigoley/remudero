@@ -1,9 +1,9 @@
-import { execFile, execFileSync, type ExecFileOptionsWithStringEncoding } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { loopAvailableDeadline, systemClock } from "./clock.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /**
@@ -37,17 +37,9 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 const execFilePromise = promisify(execFile);
 
-/** A host git child bounded by LOOP-AVAILABLE time. execFile's own `timeout` is a plain timer: after a held loop it
- *  fires ahead of an exit already waiting, destroys the unread stdout, and the call RESOLVES with what it had read. On
- *  2026-10-15 that turned `git config --list` into an empty listing, and three pushes ran with no credential helper. */
-export function execFileLoopBounded(file: string, args: readonly string[], opts: ExecFileOptionsWithStringEncoding) {
-  const { timeout, killSignal, ...rest } = opts;
-  const command = execFilePromise(file, [...args], rest);
-  if (timeout === undefined || timeout <= 0) return command;
-  const cancel = loopAvailableDeadline(systemClock, timeout, () => command.child.kill(killSignal ?? "SIGTERM"));
-  command.then(cancel, cancel);
-  return command;
-}
+/** A host git child bounded by LOOP-AVAILABLE time (W1-T9651 moved it to loop-bounded-child.ts; re-exported so
+ *  worktree-git's callers do not change). */
+export { execFileLoopBounded } from "./loop-bounded-child.js";
 
 /** The harness's own code root (this module lives in `src/lib/`). */
 const HARNESS_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");

@@ -21,6 +21,7 @@ const BASE_PROMPT = "You are the fix-rung worker. Read the failing proof and rep
 function transcript(overrides: Partial<FixTranscript> & { taskId: string }): FixTranscript {
   return {
     taskShape: "fix",
+    model: "claude-sonnet-5",
     commitRefusedReason: "diff touched a file outside the declared scope",
     excerpt: "the diff edited src/lib/unrelated.ts, which is not in files:",
     ...overrides,
@@ -114,12 +115,12 @@ test("W1-T4665: candidates are proposed from recorded fix transcripts and scored
   // The optional fields are refused individually too, not only when a required field is missing --
   // an out-of-bounds commitRefusedReason or reviewerVerdict is never silently accepted.
   assert.equal(
-    validateFixTranscript({ taskId: "y", taskShape: "fix", excerpt: "ok", commitRefusedReason: "" }),
+    validateFixTranscript({ taskId: "y", taskShape: "fix", model: "m", excerpt: "ok", commitRefusedReason: "" }),
     null,
     "an empty commitRefusedReason must be refused",
   );
   assert.equal(
-    validateFixTranscript({ taskId: "z", taskShape: "fix", excerpt: "ok", reviewerVerdict: "v".repeat(400) }),
+    validateFixTranscript({ taskId: "z", taskShape: "fix", model: "m", excerpt: "ok", reviewerVerdict: "v".repeat(400) }),
     null,
     "an over-long reviewerVerdict must be refused",
   );
@@ -127,6 +128,7 @@ test("W1-T4665: candidates are proposed from recorded fix transcripts and scored
   const withVerdict = validateFixTranscript({
     taskId: "verdict-only",
     taskShape: "fix",
+    model: "m",
     excerpt: "ok",
     reviewerVerdict: "changes requested: scope violation",
   });
@@ -136,7 +138,7 @@ test("W1-T4665: candidates are proposed from recorded fix transcripts and scored
   // counted on either side of the split.
   const withDuplicatesAndJunk = [
     ...corpus,
-    { taskId: "scope-0", taskShape: "fix", excerpt: "duplicate of an already-seen taskId" },
+    { taskId: "scope-0", taskShape: "fix", model: "claude-sonnet-5", excerpt: "duplicate of an already-seen taskId" },
     "not-an-object",
     { taskId: "bad" },
   ];
@@ -158,6 +160,7 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
     basePrompt: BASE_PROMPT,
     transcripts: corpus,
     seed: "fix-rung-prompt-v1",
+    model: "claude-sonnet-5",
     baseline: "fix-rung-prompt-v0",
     scope: { repo: "owner/repo", policyScope: "fix-rung-prompt", taskType: "fix" },
     comparisonPopulation: "owner/repo fix-rung tasks on main",
@@ -169,6 +172,8 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
     expiresAt: "2026-10-02T10:00:00.000Z",
     createdAt: "2026-09-28T10:00:00.000Z",
     rollback: { plan: "Revert to fix-rung-prompt-v0.", reason: "Rollback if commit_refused_rate regresses." },
+    // The base never resolves a failure; any reflected candidate does (W1-T9639).
+    runFixRung: (candidate) => (candidate.parentIds.length === 0 ? "fail" : "pass"),
   };
 
   const outcome = proposePromptEvolutionPromotion(input);
@@ -179,6 +184,7 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
   // so it must still be advanced through experiment-promotion's own guarded state machine.
   assert.equal(outcome.promotion?.state, "proposed");
   assert.equal(outcome.promotion?.candidate, outcome.winner?.id);
+  assert.notEqual(outcome.winner?.id, "base", "the unmodified base is the baseline, never the promoted candidate");
   assert.equal(outcome.promotion?.baseline, input.baseline);
 
   // Proposing from an empty corpus yields only the unmodified base candidate (id "base"). Naming
@@ -186,7 +192,8 @@ test("W1-T4665: no candidate reaches production except through experiment-promot
   // refuses outright — so a candidate identical to its own baseline never smuggles a promotion
   // through unguarded; the guard is `validatePromotionRecord` itself, not a special case here.
   const emptyOutcome = proposePromptEvolutionPromotion({ ...input, transcripts: [], baseline: "base" });
-  assert.equal(emptyOutcome.winner?.id, "base");
+  assert.equal(emptyOutcome.candidates[0]?.id, "base");
+  assert.equal(emptyOutcome.winner, undefined);
   assert.equal(emptyOutcome.promotion, null, "a candidate identical to its own baseline must never validate as a promotion");
 
   // An invalid basePrompt proposes no candidates at all, so there is no winner and therefore no

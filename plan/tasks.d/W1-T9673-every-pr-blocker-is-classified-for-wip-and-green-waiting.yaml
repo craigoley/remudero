@@ -1,0 +1,51 @@
+- id: W1-T9673
+  title: "W1-T9633'S SECURITY HOLDS ARE INVISIBLE TO THE WIP BOUND AND TO THE GREEN-WORK-WAITING INCIDENT — adaptive-wip.ts classifies blockers from two hand-kept sets that will never name security-alert-hold or security-unknown-hold, and incident-invariants.ts counts green work waiting only at awaiting-arm, so a PR moved off awaiting-arm onto a security hold stops counting as stuck and as green-waiting at the same moment"
+  repo: remudero
+  depends_on: [W1-T9633]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — how a PR blocker is classified by the WIP bound and the green-waiting incident; the blockers themselves are W1-T9633's
+  band_meaning: span
+  origin: "operator session 2026-10-15: found beside W1-T9633 (PR #12044), which adds two blockers its consumers do not read"
+  plan_refs: [W1-T9633, W1-T8233]
+  files: [src/lib/adaptive-wip.ts, src/lib/incident-invariants.ts, test/every-pr-blocker-is-classified-for-wip-and-green-waiting.test.ts]
+  status: merged
+  priority: 1  # operator-2026-10-15: #11936/#11910 sat green 2+ h behind a security refusal; after W1-T9633 that wait would not count as stuck or as green work waiting
+  attempts: 0
+  rationale: |
+    READ at origin/main cd482d436 and #12044's head b8352d322 (W1-T9633, open):
+    - src/lib/adaptive-wip.ts: stuckOwnedCount reads each owned PR's newest sweep.disposed `blocker`. It counts it
+      stuck when the blocker is in PARKED_BLOCKERS ("strikes-exhausted", "escalated", "operator-hold",
+      "plan-proof-unrunnable", "held-draft", "stale-reviewer-withheld"), or in AGEING_BLOCKERS ("own-red",
+      "review-failed", "conflict", "base-red", "other") and past BLOCKER_SLO_MS. Any other blocker is never stuck.
+    - src/lib/incident-invariants.ts: the W1-T8233 green-work-waiting rule reads sweep.disposed rows whose blocker is
+      AWAITING_ARM_BLOCKER = "awaiting-arm".
+    - #12044 adds "security-alert-hold" (owner fix-lane) and "security-unknown-hold" (owner security-policy) to
+      src/lib/pr-blocker.ts. finalBlocker returns them for a mergeable, unarmed PR whose arm the security policy
+      refused, which is exactly the case that read awaiting-arm before. It gives both a 30-minute BACKSTOP in
+      src/lib/sweep.ts, and changes neither consumer.
+    - So after #12044 merges, such a PR is neither stuck (the WIP bound keeps it in the owned count) nor green work
+      waiting (the incident rule stops seeing it).
+    ROOT: the two consumers keep their own copies of the blocker vocabulary, so the next blocker added to pr-blocker.ts
+    silently counts as "not stuck, not waiting" too.
+  design: |
+    1. adaptive-wip.ts classifies both security holds as ageing: they are stuck once past their blocker SLO, the
+       30 minutes W1-T9633 set. That matches their owners: the fix lane and the security policy are each moving
+       them, until they are not.
+    2. The green-work-waiting rule counts a green PR held at awaiting-arm, security-alert-hold or
+       security-unknown-hold. Its message names the blocker, so a security wait is told apart from an unarmed one.
+    3. A census test walks pr-blocker.ts's exported blocker list and fails for any blocker that adaptive-wip.ts
+       neither classifies (parked, ageing, or an explicit "moving, never stuck" set that names awaiting-arm and the
+       rest) nor names in that set. A new blocker must then be placed on purpose.
+  acceptance:
+    - claim: "every blocker pr-blocker.ts can return is classified by the adaptive WIP bound"
+      proof: 'unit test: test/every-pr-blocker-is-classified-for-wip-and-green-waiting.test.ts'
+    - claim: "a PR held at a security hold past its SLO counts as stuck in the WIP bound"
+      proof: 'grep: test("W1-T9673: a security hold past its slo counts as a stuck owned pr" in test/every-pr-blocker-is-classified-for-wip-and-green-waiting.test.ts'
+    - claim: "the green-work-waiting incident counts a green PR held at a security hold and names the blocker"
+      proof: 'grep: test("W1-T9673: green work waiting counts a security-held pr and names its blocker" in test/every-pr-blocker-is-classified-for-wip-and-green-waiting.test.ts'
+  falsifier: |
+    At W1-T9633's merge, a sweep.disposed row with blocker security-alert-hold and an age past BLOCKER_SLO_MS makes
+    stuckOwnedCount return 0, so the second test fails.

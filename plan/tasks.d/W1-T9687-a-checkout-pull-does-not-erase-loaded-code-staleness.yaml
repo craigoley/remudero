@@ -1,0 +1,75 @@
+- id: W1-T9687
+  title: "A CHECKOUT PULL DOES NOT ERASE THE DAEMON'S LOADED-CODE STALENESS — the async freshness reader compares HEAD with origin/main, so the host advancing the bind mount consumes the restart signal while the process keeps its old modules; #12045 merged and reached disk while the daemon repeatedly reported up_to_date on its older boot"
+  repo: remudero
+  depends_on: [W1-T5282, W1-T5746]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the immutable source baseline of the daemon's freshness assessment
+  band_meaning: span
+  origin: "operator approval 2026-10-15: verify #12030 adoption and follow #12045 through normal runtime adoption"
+  plan_refs: [W1-T79, W1-T3245, W1-T3694, W1-T3756, W1-T3581, W1-T5282, W1-T5746, W1-T9092, W1-T9637]
+  files: [src/lib/self-sync.ts, src/run-task.ts, test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts, test/daemon-freshness.test.ts, test/daemon-external-wait-freshness.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15, not an explanation of event-loop stalls:
+    - #12030 merged as a9e12139cbdce3b10bf1978c4199914c14d5500e at 15:57:32Z and boot-adopted at 16:10:28Z.
+      Host dbbbbdc60d7f / PID 711957 / DAEMON-1792080586993 / startTicks 256298987 loaded
+      3ecb3bde30cc80282feea6e70671cb2938c89eae. Its SRE capture stages feedback.
+    - #12045 merged as 006ba347fd5b4437bbe470d1befb29da5ce609bb at 16:29:19Z. At 17:03:46Z the SAME generation
+      still loaded 3ecb3bde30cc, which lacks that merge and the awaited suspect reader. Disk HEAD e0977181faab contains
+      both merges and both source bindings. Read-only git ancestry and git-show checks established these independently.
+    - At 16:42:31Z the daemon read stale 3ecb3bde..e7f3003a, weight 21, and coalesced for ten minutes. At 16:54:43Z
+      and 17:05:46Z it reported daemon.freshness_not_stale arm up_to_date while still running the older boot.
+    - Host deploy.skip rows independently name stale_running_daemon and leave mount-source reloads to the daemon under
+      W1-T3245. This task preserves that ownership; adding a second restart actor is not the remedy.
+    READ on main e0977181faab476dfa11f5c0968ce0fa3ade40a5 (and the immutable loaded 3ecb tree):
+    - assessFetchedServiceAsync resolves oldSha from git rev-parse HEAD, returns behind:null when HEAD == origin/main,
+      and daemonFreshnessFromService maps that to up_to_date.
+    - daemonFreshnessReads passes no loaded-code identity. daemonCommand already captures daemonLoadedCodeSha once for
+      reviewer recovery, but the daemon freshness wiring does not use it.
+    - decideFreshness/coalesce only run on a stale reading. A coalesced defer is not a latched restart; latchRestart
+      retains only a decision that already reached restart. No later age/quiet release can act on an up_to_date input.
+    REPRODUCED with real local Git, stripped global/system config and fixture-local author identity:
+    - A checkout at loaded commit A sees the material src/lib/sre-lane.ts repair B: stale:true, oldSha A, newSha B.
+    - Another actor fast-forwards that checkout to B while the recorded loaded identity remains A.
+    - The same async reader answers assessed/behind:null and stale:false/up_to_date. No live checkout or runtime changed.
+    Census: main and all 31 open PR heads at 17:04:30Z, advertised 420 branch heads. Existing reviewer-recovery, serve,
+    diagnostic-arm and closure-materiality tasks address other decisions; none repairs this daemon baseline.
+    W1-T79 covers the operator CLI's entry-time checkout sync. This task preserves that behavior and repairs the
+    long-lived daemon's loaded-code baseline after another actor has already advanced the checkout.
+    Durable raw receipts and reproduction are in task-receipts-20261015-runtime-health/adoption-and-repair-20261015.
+  design: |
+    1. The daemon's assessment baseline is its immutable loaded-code SHA, captured once from the module checkout at boot.
+       Carry it explicitly through daemonFreshnessReads into the awaited assessment; do not re-read mutable HEAD as the
+       baseline of the running process. Reuse daemonLoadedCodeSha rather than introducing a second independently timed
+       capture. Compute changedPaths, commits and touched declarations from that baseline to freshly fetched origin/main.
+    2. Other service/CLI callers retain their existing checkout-HEAD semantics. An explicit missing, malformed or unreadable
+       daemon baseline yields an unassessed/degraded answer with a reason; it never silently substitutes disk HEAD or
+       starts an automatic restart. Keep all local Git awaited on the daemon path.
+    3. Preserve tracked-dirty refusal, materiality, restart scoring, age pressure, quiet coalescing, lane holdouts, drain,
+       STOP/PAUSE and existing host ownership. A material loaded-code advance remains visible after a disk pull and reaches
+       those same guards; this does not command an immediate restart or change any timing/threshold.
+    4. Exercise the real Git default in a private fixture: capture A, advance origin to B, fast-forward the checkout to B,
+       retain loaded A, and prove the assessment still names A..B. Also prove loaded B is fresh, immaterial changes remain
+       immaterial, dirty trees remain refused, and bad/unavailable baseline evidence remains named uncertainty.
+       Assert real daemon wiring passes the once-captured SHA; an isolated helper test alone does not prove adoption.
+    5. Include the existing freshness and caller/census suites this diff joins. A self-sync.ts change is a baked runtime
+       input: after normal merge/build/recycle, separately verify image identity, boot-source ancestry and a natural
+       freshness decision. Do not manually restart, deploy or bypass gates as part of this task.
+  acceptance:
+    - claim: "the loaded-code freshness regression suite runs and passes"
+      proof: 'unit test: test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts'
+    - claim: "advancing the checkout cannot make a daemon running older material code appear up to date"
+      proof: 'grep: test("W1-T9687: a checkout pull does not erase loaded code staleness" in test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts'
+    - claim: "the daemon passes its immutable boot identity to its awaited freshness reader"
+      proof: 'grep: test("W1-T9687: daemon freshness uses the once captured loaded code sha" in test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts'
+    - claim: "dirty, immaterial and unavailable evidence retain their existing guarded outcomes"
+      proof: 'grep: test("W1-T9687: loaded code freshness preserves guarded outcomes" in test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts'
+  falsifier: |
+    Remove the immutable-baseline change while retaining the regression: the real-Git A-to-B checkout-pull case reports
+    stale:false/up_to_date and fails. Restore the change: it reports stale:true with oldSha A and newSha B. Record both
+    executable TAP summaries on the committed tree; a disk-HEAD ancestry check alone is not adoption evidence.

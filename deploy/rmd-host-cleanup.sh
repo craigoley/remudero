@@ -56,6 +56,7 @@
 #   RMD_CLEANUP_WORKTREE_ROOTS  colon-separated roots whose immediate Git worktrees are swept
 #   RMD_CLEANUP_LIVE_CHECKOUTS  live checkouts kept while judging only untracked immediate clones
 #   RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS  exact checkout paths excluded from those scans
+#                               (plus each ${RMD_SCRATCH_ROOT:-/mnt/scratch}/rmd/*/remudero|serve-repo, W1-T9617)
 #   RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT  durable location for unpublished clean HEAD bundles
 #   RMD_CLEANUP_COVERAGE_PATHS   colon-separated exact regenerable coverage cache paths
 #   RMD_CLEANUP_TMP_ROOTS       colon-separated scratch roots
@@ -133,6 +134,13 @@ CLEAN_HOME="${RMD_CLEANUP_HOME:-${HOME:-/}}"
 WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees}"  # 2026-10-01 coordinator: $HOME trees are live checkouts (rmd-mint, rmd-op); never swept
 LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-$CLEAN_HOME/rmd-mint:$CLEAN_HOME/rmd-op}"
 PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd-serve-repo}"
+# W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), each daemon's own checkout
+# and serve's code dir live at <scratch>/rmd/<key>/remudero and .../serve-repo. They are live
+# checkouts, so each one present is protected exactly like rmd-serve-repo, whatever the list says.
+for scratch_checkout in "${RMD_SCRATCH_ROOT:-/mnt/scratch}"/rmd/*/remudero "${RMD_SCRATCH_ROOT:-/mnt/scratch}"/rmd/*/serve-repo; do
+  [ -d "$scratch_checkout" ] && [ ! -L "$scratch_checkout" ] || continue
+  PROTECTED_WORKTREE_ROOTS="${PROTECTED_WORKTREE_ROOTS:+$PROTECTED_WORKTREE_ROOTS:}$scratch_checkout"
+done
 WORKTREE_ARCHIVE_ROOT="${RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-worktree-archive}"
 COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS-$CLEAN_HOME/.remudero-coverage}"
 TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS-/tmp}"                                # [UNVERIFIED]

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: #11194 repaired by hand with a trailer commit; operator ruling the same day (trailer commit, drop the replacement PR)"
   plan_refs: [W1-T7448, W1-T3388, W1-T3745]
   files: [src/lib/head-rehome.ts, src/lib/sweep.ts, src/lib/ledger.ts, src/lib/authority.ts, test/a-head-identity-red-is-rehomed-onto-a-conforming-branch.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

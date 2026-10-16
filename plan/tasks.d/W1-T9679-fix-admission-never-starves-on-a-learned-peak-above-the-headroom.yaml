@@ -1,0 +1,61 @@
+- id: W1-T9679
+  title: "FIX ADMISSION DEADLOCKS WHEN ONE FIX'S LEARNED PEAK OUTGROWS THE HOST — the learned fix estimate rose 1,051 -> 2,048 -> 3,196 MiB on 2026-10-15, above the whole headroom (2.2-3.9 GB), so createSweepFixAdmissionController's fits = floor(left / estimate) is 0 even with 0 active workers; fix_admissions_available read 0 in 93-100% of sweep.fix_capacity rows from 12Z and the red share rose from 25.8% to 42.3%"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — how many fixes the sweep admits when one learned peak exceeds the headroom; the estimate learner and the review side are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-15/RESULTS.txt section 5 and finding 1): a W1-T9498 follow-up"
+  plan_refs: [W1-T9498, W1-T9582, W1-T9595]
+  files: [src/lib/sweep.ts, test/fix-admission-never-starves-on-a-learned-peak-above-the-headroom.test.ts]
+  status: merged
+  priority: 1  # operator-2026-10-15: the most urgent lead; a red PR no fix can be admitted for stays red, and the red board grew 64% in one day
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger union, read-only; ~/Remudero-notes/flow-remeasure-2026-10-15/fixcap-detail.txt):
+    - sweep.fix_capacity fix_estimate_mib: 1,051 at 04:15Z, 1,293 at 07:16Z, 2,048 at 08:04Z, 3,196 from 11:42Z on
+      (fix_estimate_source "measured").
+    - headroom_mib (MemAvailable minus the 3,072 MiB floor) in the same rows: 1,692-3,898.
+    - 16:01:37Z, full pass: queue_depth 3, active_workers 0, headroom 2,994, review_charge 3,660 (3 review
+      reservations at 1,220), fix_charge 0, estimate 3,196, pressure_tier "fits": fix_admissions_available 0.
+    - 15:44:50Z, full pass: active_workers 0, headroom 3,730, review_charge 1,199, estimate 3,196: available 0.
+    - Minutes with available 0 and a repair queued: light 72%, full 99% (10-14: 57% / 66%). fixes_refused 73, 76, 75
+      and 253 an hour for 12-15Z.
+    READ at origin/main ee1cf822d, src/lib/sweep.ts createSweepFixAdmissionController compute():
+    - `fits = Math.floor(Math.max(0, left) / Math.max(1, fix.estimateMib))`, where left = headroom - reviewCharge -
+      fixCharge.
+    - The one escape, `available = pressure.tier === "nothing-to-wait-for" && charged() + reservations === 0 ?
+      Math.max(1, fits) : fits`, never fires here. The tier is chosen in fixHostPressure against
+      DEFAULT_ESTIMATE_MIB.implement, so a headroom above that unit reads "fits" while the LEARNED fix estimate
+      does not fit. And a review reservation counts as charged even when no worker is live.
+    DOCTRINE (investigation-discipline/healthy-condition-bound): this bound fires on a healthy host. An idle fleet
+    with 3 GB free is the population it should admit, and it admits nothing.
+  design: |
+    Graded, with no new fixed floor (the operator's no-hard-thresholds ruling):
+    1. RUNG 1. When fits is 0 and no fix is live or reserved, admit ONE fix whenever the headroom is above the class's
+       TYPICAL peak (classTypical in src/lib/host-memory-learning.ts, which host-memory-shadow.ts already reads). The learned
+       classEstimate stays what the reservation charges once it is admitted, so the next admission sees the real charge.
+    2. RUNG 2. When even the typical peak exceeds the headroom, and nothing at all is live (no fix, no review worker,
+       no reservation whose worker started), admit one fix, as pressureWorkers' nothing-to-wait-for rule already
+       does for workers. The host-memory guard at spawn stays the hard stop. A spawn refused there is recorded,
+       not retried in a loop.
+    3. The tier test reads the learned estimate, not DEFAULT_ESTIMATE_MIB.implement, so "fits" means the fix
+       fits.
+    4. sweep.fix_capacity rows name the rung that admitted (`admission_rung`: fits | typical | nothing-live | none)
+       and the typical and learned estimates they compared, so the next re-measure can tell a starving bound from a full host.
+    5. A review reservation with no live worker is charged as W1-T9498 charges unread residency. Whether it should
+       count as "something live" for rung 2 is decided from that same residency reading, never from the
+       reservation count alone.
+  acceptance:
+    - claim: "a fix is admitted when the learned estimate exceeds the headroom but the typical peak fits and nothing else is charged"
+      proof: 'unit test: test/fix-admission-never-starves-on-a-learned-peak-above-the-headroom.test.ts'
+    - claim: "the 16:01Z shape (0 active workers, headroom 2,994, estimate 3,196) admits one fix on a named rung"
+      proof: 'grep: test("W1-T9679: an idle fleet whose learned fix peak exceeds the headroom still admits one fix" in test/fix-admission-never-starves-on-a-learned-peak-above-the-headroom.test.ts'
+    - claim: "a second fix is not admitted on the typical rung while the first is still charged at its learned estimate"
+      proof: 'grep: test("W1-T9679: the typical rung admits one fix and charges it at its learned estimate" in test/fix-admission-never-starves-on-a-learned-peak-above-the-headroom.test.ts'
+  falsifier: |
+    At origin/main, a controller with headroom 2,994 MiB, a measured fix estimate of 3,196 MiB, 0 active workers and
+    no fix reservation returns fix_admissions_available 0, so the second test fails.
