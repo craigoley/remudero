@@ -27,6 +27,7 @@ import {
   CONVENTIONAL_TITLE_PREFIX_RE,
 } from "../src/lib/dep-review.js";
 import { reviewInputDigest } from "../src/lib/review.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 // ── Recorded fixtures (acceptance #1, the FALSIFIER) ────────────────────────
 // These are RECORDED, not invented: live Dependabot PRs #80 (patch, grouped) and
@@ -739,6 +740,80 @@ test("W1-T9689 dep review holds current red pending and unread evidence", async 
       assert.equal(r.armCalls.length, item.code === 0 ? 1 : 0);
       assert.equal(r.mutations.closes.length, 0);
     } finally { rmSync(r.tmp, { recursive: true, force: true }); }
+  });
+});
+
+test("W1-T9689 the default dep review reader binds checks to the selected head", async (t) => {
+  const sha = "a".repeat(40), url = "https://github.com/craigoley/remudero/pull/3654";
+  const pull = { id: 7000, number: 3654, html_url: url, state: "open", merged: false, head: { sha },
+    base: { repo: { id: 55, full_name: "craigoley/remudero" } }, body: PR80_BODY };
+  const check = (id: number, run: number, conclusion: string, hour: string) => ({ id, name: "ci-gate", head_sha: sha,
+    status: "completed", conclusion, external_id: `run:${run}:1:job:${id + 100}`, details_url: `https://github.com/craigoley/remudero/runs/${id}`,
+    check_suite: { id: run + 490 }, app: { slug: "github-actions" }, started_at: `2026-10-15T${hour}:00:00Z`, completed_at: `2026-10-15T${hour}:01:00Z` });
+  const green = check(102, 11, "success", "11"), oldLate = check(103, 10, "failure", "12");
+  const runs = { total_count: 2, check_runs: [green, oldLate] };
+  const statuses = { sha, total_count: 1, statuses: [{ id: 300, context: "coverage-ratchet", state: "success",
+    created_at: "2026-10-15T11:00:00Z", updated_at: "2026-10-15T11:01:00Z" }] };
+  const workflows = { total_count: 2, workflow_runs: [10, 11].map(id => ({ id, workflow_id: 5, check_suite_id: id + 490, head_sha: sha, run_attempt: 1 })) };
+  const cases = [
+    { label: "real async child, late older-run red, and commit status", code: 0 },
+    { label: "current red", code: 1, checks: { total_count: 1, check_runs: [{ ...green, conclusion: "failure" }] } },
+    { label: "pending", code: 1, checks: { total_count: 1, check_runs: [{ ...green, status: "in_progress", conclusion: null }] } },
+    { label: "transport outage", code: 1, exit: 1 },
+    { label: "malformed JSON", code: 1, stdout: "not-json" },
+    { label: "missing check corpus", code: 1, checks: {} },
+    { label: "truncated check corpus", code: 1, checks: { ...runs, total_count: 101 } },
+    { label: "wrong check head", code: 1, checks: { total_count: 1, check_runs: [{ ...green, head_sha: "b".repeat(40) }] } },
+    { label: "missing check identity", code: 1, checks: { total_count: 1, check_runs: [{ ...green, id: undefined }] } },
+    { label: "check-run URL is not workflow identity", code: 1, checks: { total_count: 1, check_runs: [{ ...green, external_id: undefined, check_suite: undefined }] } },
+    { label: "unmapped real workflow", code: 1, workflows: { total_count: 0, workflow_runs: [] } },
+    { label: "wrong workflow head", code: 1, workflows: { ...workflows, workflow_runs: workflows.workflow_runs.map(r => ({ ...r, head_sha: "b".repeat(40) })) } },
+    { label: "truncated statuses", code: 1, statuses: { ...statuses, total_count: 2 } },
+    { label: "current status red", code: 1, statuses: { ...statuses, statuses: [{ ...statuses.statuses[0], state: "failure" }] } },
+    { label: "empty evidence", code: 1, checks: { total_count: 0, check_runs: [] }, statuses: { sha, total_count: 0, statuses: [] } },
+    { label: "selected head changes during async read", code: 1, finalPull: { ...pull, head: { sha: "b".repeat(40) } } },
+    { label: "numeric repository changes during async read", code: 1, finalPull: { ...pull, base: { repo: { id: 56, full_name: "craigoley/remudero" } } } },
+    { label: "selected content changes during async read", code: 1, finalPull: { ...pull, body: "changed" } },
+  ];
+  for (const row of cases) await t.test(row.label, async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "rmd-dep-current-")), ledgerPath = join(tmp, "state", "ledger.ndjson");
+    const shim = ghShim([
+      { when: "pr view", stdout: JSON.stringify({ number: 3654, url, title: PR80_TITLE, body: PR80_BODY, headRefOid: sha,
+        author: DEPENDABOT_GRAPHQL_AUTHOR, statusCheckRollup: GREEN_CHECKS }) },
+      { when: "/pulls/3654", stdout: JSON.stringify(pull) },
+      { when: "/check-runs", delaySeconds: 0.15, stdout: row.stdout ?? JSON.stringify(row.checks ?? runs), exit: row.exit },
+      { when: "/status", stdout: JSON.stringify(row.statuses ?? statuses) },
+      { when: "/actions/runs?", delaySeconds: 0.05, stdout: JSON.stringify(row.workflows ?? workflows) },
+    ]);
+    const savedPath = process.env.PATH, savedLog = console.log;
+    let duringCheck = false, finalChanged = false, posted = 0, armed = 0;
+    process.env.PATH = `${shim.dir}:${savedPath}`; console.log = () => undefined;
+    const pulse = setInterval(() => {
+      const events = shim.events();
+      if (events.some(e => e.phase === "start" && e.args.some(a => a.includes("/check-runs")) && !events.some(end => end.id === e.id && end.phase === "end"))) duringCheck = true;
+      if (row.finalPull && !finalChanged && events.some(e => e.phase === "start" && e.args.some(a => a.includes("/actions/runs?")))) {
+        shim.addRoute({ when: "/pulls/3654", stdout: JSON.stringify(row.finalPull) }); finalChanged = true;
+      }
+    }, 5);
+    try {
+      const { depReviewCommand } = await import("../src/run-task.js");
+      const code = await depReviewCommand("3654", ["--repo", "craigoley/remudero"], {
+        config: { root: tmp, ledger: ledgerPath } as never, prDiff: () => PR80_DIFF,
+        postStatus: (async () => { posted++; return { posted: true }; }) as never,
+        arm: () => { armed++; return "armed"; },
+        issues: { create: () => { assert.fail("no issue publication in a check-reader test"); }, ensureLabel: () => true } as never,
+        captureMigrationFeedback: () => { assert.fail("no feedback publication for a confined patch"); },
+        prMutations: { comment: () => { assert.fail("no comment"); }, close: () => { assert.fail("no closure"); } },
+      });
+      assert.equal(code, row.code);
+      assert.equal(posted, row.code === 0 ? 1 : 0); assert.equal(armed, row.code === 0 ? 1 : 0);
+      assert.ok(shim.calls().some(c => c.includes(`/commits/${sha}/check-runs?`) && c.includes("filter=all")), "actual head-bound all-attempt REST read");
+      assert.ok(duringCheck, "the real default child is in flight while the event loop remains responsive");
+      if (row.code === 1) assert.ok(readLedgerObjects(ledgerPath).some(r => r.step === "dep-review.decided" && r.decision === "hold"));
+    } finally {
+      clearInterval(pulse); process.env.PATH = savedPath; console.log = savedLog;
+      rmSync(tmp, { recursive: true, force: true }); rmSync(shim.dir, { recursive: true, force: true });
+    }
   });
 });
 
