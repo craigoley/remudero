@@ -248,7 +248,7 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
         const messages = threads.status === "ok" ? threads.threads.get(inboxThreadId(proposal.id)) ?? [] : [];
         const last = messages.at(-1);
         return { proposal, ...(task ? { task: inboxGardenerTaskFact(task) } : {}),
-          sourcePolicy: inboxSemanticDigest(overrides),
+          sourcePolicy: inboxSemanticDigest(overrides.filter(o => o.task === taskId)),
           ...(/^proof-debt:[^:]+:\d+$/.test(proposal.id) ? { successor: { proposal: proposals.find(p => p.id === proposal.id.replace(/:\d+$/, ""))!,
             open: proposals.some(p => p.id === proposal.id.replace(/:\d+$/, "") && !verdicts.isRatified(p.id) && verdicts.isDeclined(p.id) === undefined && snapshot?.classifications.find(c => c.proposalId === p.id)?.state !== "retired") } } : {}),
           ...(task ? { dependencies: task.depends_on.flatMap(id => plan.byId.has(id) ? [inboxGardenerTaskFact(plan.byId.get(id)!)] : []),

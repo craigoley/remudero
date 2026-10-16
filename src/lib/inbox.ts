@@ -1356,7 +1356,7 @@ export function classifyProposal(
   const taskIdForProtection = deriveTaskReferent(proposal.id) ?? mechanicalAskPurpose(proposal)?.taskId;
   const held = taskIdForProtection === "W1-T216" || (taskIdForProtection && ctx.plan.byId.get(taskIdForProtection)?.dispatch_hold === true);
   const purpose = mechanicalAskPurpose(proposal), purposeTask = purpose && ctx.plan.byId.get(purpose.taskId);
-  if (purpose && (!purposeTask || purpose.taskDigest !== inboxMechanicalTaskDigest(purposeTask)))
+  if (proposal.automaticRetirement && !purpose || purpose && (!purposeTask || purpose.taskDigest !== inboxMechanicalTaskDigest(purposeTask)))
     return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: mechanical producer task facts changed" }], needsTriageReason: "Mechanical purpose no longer matches current task ownership or criteria" };
   const lifecycle = ctx.retirement?.(proposal);
   if (lifecycle && !held) {

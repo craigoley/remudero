@@ -99,9 +99,9 @@ export const sameInboxGardenerScope = (a: InboxGardenerScope, b: InboxGardenerSc
 export function mechanicalAskPurpose(p: RetirementProposal): MechanicalAskPurpose | undefined {
   const purpose = p.automaticRetirement;
   return purpose?.producer === "proof-queue-audit-v1" && purpose.kind === "mechanical-task" &&
-    purpose.taskId.length <= 160 && /^W\d+-T[A-Za-z0-9]+$/.test(purpose.taskId) &&
-    new RegExp(`^proof-debt:${purpose.taskId}(?::\\d+)?$`).test(p.id) && p.evidenceAnchors.length > 0 &&
-    hash(purpose.taskDigest) && purpose.criteriaDigest === inboxSemanticDigest(p.evidenceAnchors) ? purpose : undefined;
+    typeof purpose.taskId === "string" && purpose.taskId.length <= 160 && /^W\d+-T[A-Za-z0-9]+$/.test(purpose.taskId) &&
+    typeof p.id === "string" && new RegExp(`^proof-debt:${purpose.taskId}(?::\\d+)?$`).test(p.id) && Array.isArray(p.evidenceAnchors) && p.evidenceAnchors.length > 0 &&
+    hash(purpose.taskDigest) && hash(purpose.criteriaDigest) && purpose.criteriaDigest === inboxSemanticDigest(p.evidenceAnchors) ? purpose : undefined;
 }
 export function validInboxTerminalProof(proof: InboxTerminalProof | undefined, scope: InboxGardenerScope, p: RetirementProposal): proof is InboxTerminalProof {
   const purpose = mechanicalAskPurpose(p);
@@ -141,7 +141,8 @@ export function inboxGardenerSource(proposals: RetirementProposal[], tasks: Read
   const facts = proposals.map(p => { const id = mechanicalAskPurpose(p)?.taskId, task = id ? tasks.get(id) : undefined;
     return [p.id, inboxProposalRevision(p), task ? inboxGardenerTaskFact(task) : null,
       task?.depends_on.map(dep => tasks.get(dep) ? inboxGardenerTaskFact(tasks.get(dep)!) : null) ?? [], operatorIntents.get(p.id) ?? inboxSemanticDigest([])]; });
-  return { scope, identity: inboxSemanticDigest([scope, facts]) };
+  const owned = { repository: scope.repository, instance: scope.instance, root: scope.root };
+  return { scope: owned, identity: inboxSemanticDigest([owned, facts]) };
 }
 
 export function readInboxGardenerStore(stateDir: string, scope?: InboxGardenerScope): InboxGardenerStoreRead {

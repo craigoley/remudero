@@ -17,6 +17,7 @@ import { buildInboxDismissalAudit } from "../src/lib/inbox-dismissal-audit.js";
 import { buildInboxAttentionCensusRoute, inboxLanes } from "../src/lib/panel-graph.js";
 import { inboxThreadId, appendThreadMessage, inboxThreadIdentity, readThread } from "../src/lib/inbox-thread.js";
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
+import { defaultInstanceInboxSources } from "../src/lib/instance-gateway.js";
 import { createService } from "../src/lib/service.js";
 import { world } from "./helpers/why-me-world.js";
 import { loadPlan } from "../src/lib/plan.js";
@@ -24,8 +25,8 @@ import { fakeGitHub } from "./helpers/fake-github.js";
 
 type T = Parameters<typeof world>[0];
 const TASK = "W1-T1200", ID = `proof-debt:${TASK}`;
-async function fixture(t: T, count = 1) {
-  const w = await world(t);
+async function fixture(t: T, count = 1, native = false) {
+  const w = await world(t, { native });
   let now = Date.now();
   const scope: InboxGardenerScope = { repository: w.repository, instance: w.instance, root: w.root };
   const ids = Array.from({ length: count }, (_, i) => `W1-T${1200 + i}`);
@@ -49,9 +50,14 @@ async function fixture(t: T, count = 1) {
   const run = (custom: Partial<InboxGardenerPorts> = {}, mode: "off" | "shadow" | "act" = "act") => runInboxGardener({ stateDir: w.state, scope, ports: { ...ports(), ...custom }, mode, clock: fixedClock(now) });
   const store = () => { const s = readInboxGardenerStore(w.state, scope); assert.equal(s.state, "observed"); return s.state === "observed" ? s.store : assert.fail(); };
   const source = () => readPersistedInbox(w.state)!;
+  let mismatchQualifier = false;
+  const restoreSources = native ? defaultInstanceInboxSources({ instance: w.instance, root: w.root, planPath: w.planPath, ledgerPath: w.ledgerPath }, w.repository, fakeGitHub()) : [buildInboxAttentionCensusRoute({ ...w.deps, inboxFromSlowLane: true })];
+  const restoreCensus = restoreSources.find(r => r.path === "/v1/inbox/attention-census")!;
+  const qualify = restoreCensus.cacheQualification!;
+  restoreCensus.cacheQualification = req => { const result = qualify(req); return mismatchQualifier && result && !("status" in result) ? { ...result, key: "f".repeat(64) } : result; };
   const restoreServer = createService({ tokens: { read: "read", write: "shared" }, providers: [{ name: "operator", grant: () => undefined,
     authorize(req) { return req.headers.authorization === "Bearer alice" ? { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:alice" } : undefined; } }],
-    routes: mountInstanceInboxRoutes({ instance: w.instance, repository: w.repository, stateDir: w.state, routes: [buildInboxAttentionCensusRoute({ ...w.deps, inboxFromSlowLane: true })] }) });
+    routes: mountInstanceInboxRoutes({ instance: w.instance, repository: w.repository, stateDir: w.state, routes: restoreSources }) });
   await new Promise<void>(resolve => restoreServer.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>(resolve => restoreServer.close(() => resolve())));
   const restore = async (input: Record<string, unknown>, token = "alice") => {
@@ -59,7 +65,7 @@ async function fixture(t: T, count = 1) {
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(input) });
     return { status: res.status, body: await res.json() as any };
   };
-  return { ...w, scope, ids, mergedIds, ports, run, store, source, githubCalls, restore, advance: () => { now += 1000; }, now: () => now };
+  return { ...w, scope, ids, mergedIds, ports, run, store, source, githubCalls, restore, mismatch: (value: boolean) => { mismatchQualifier = value; }, advance: () => { now += 1000; }, now: () => now };
 }
 
 test("the inbox gardener retires a proven terminal ask once and can restore it", async t => {
@@ -227,6 +233,12 @@ test("default dependency merge evidence reopens one judgment without unrelated-m
   await f.run({ proof: async () => undefined, judge }); await f.run({ proof: async () => undefined, judge }); assert.equal(calls, 2);
   f.deps.inboxMainSha = () => "d".repeat(40); await f.refresh();
   await f.run({ proof: async () => undefined, judge }); assert.equal(calls, 2, "unrelated main advance is outside the semantic input");
+  const overridePath = join(f.root, "plan", "credit-overrides.yaml");
+  writeFileSync(overridePath, JSON.stringify([{ action: "remove-credit", task: "W1-T9999", pr: 99, author_class: "operator", reason: "unrelated correction" }]));
+  await f.run({ proof: async () => undefined, judge }); assert.equal(calls, 2, "unrelated credit override cannot reopen this judgment");
+  writeFileSync(overridePath, JSON.stringify([{ action: "remove-credit", task: TASK, pr: 1200, author_class: "operator", reason: "current task correction" }]));
+  await f.run({ proof: async () => undefined, judge }); await f.run({ proof: async () => undefined, judge }); assert.equal(calls, 3, "same-task credit policy is relevant once");
+
 });
 
 test("a residual mechanical followup reaches the existing fleet gates and durable dedup", async t => {
@@ -317,4 +329,33 @@ test("the real committed plan-retirement proof refuses a dirty blob and accepts 
   const proof = await ports.proof(candidate); assert.equal(proof?.kind, "plan-retirement");
   assert.equal(validInboxTerminalProof(proof, scope, candidate.proposal), true);
   appendFileSync(path, "# dirty change\n"); await assert.rejects(ports.proof(candidate), /authoritative committed blob/);
+});
+
+
+test("malformed persisted mechanical purpose is unverified while an unrelated real ask still retires", async t => {
+  const f = await fixture(t);
+  for (const broken of [{}, { taskId: 123 }, { taskId: TASK, criteriaDigest: {} }, { taskId: TASK, taskDigest: "x" }]) {
+    const purpose = { producer: "proof-queue-audit-v1", kind: "mechanical-task", ...broken };
+    assert.equal(mechanicalAskPurpose({ id: ID, summary: "bad", evidenceAnchors: [], automaticRetirement: purpose } as any), undefined);
+  }
+  const proposals = parseProposalRegistry(readFileSync(f.registry, "utf8"));
+  proposals.push({ id: "proof-debt:W1-T9999", summary: "Malformed persisted purpose", evidenceAnchors: [],
+    automaticRetirement: { producer: "proof-queue-audit-v1", kind: "mechanical-task" } as any });
+  writeFileSync(f.registry, JSON.stringify({ proposals })); await f.refresh();
+  assert.match(f.source().classifications.find(c => c.proposalId === "proof-debt:W1-T9999")?.needsTriageReason ?? "", /purpose|ownership|criteria/);
+  f.advance(); const result = await f.run(); assert.equal("retired" in result && result.retired, 1);
+  assert.equal(f.store().events.some(e => e.receipt.scope.proposalId === "proof-debt:W1-T9999"), false);
+});
+
+
+test("the real default instance source admits only a same-key restore and replays its original receipt", async t => {
+  const f = await fixture(t, 1, true); f.advance();
+  const result = await f.run(); assert.equal("retired" in result && result.retired, 1, JSON.stringify(result));
+  await f.refresh(); const retired = f.store().events[0]!.receipt;
+  const input = { repository: f.repository, instance: f.instance, proposalId: ID, threadId: inboxThreadId(ID), intentId: "native-restore-001",
+    taskId: TASK, retirementId: retired.id, snapshotKey: retired.snapshotKey, reason: "Review owned native ask" };
+  f.mismatch(true); const refused = await f.restore(input); assert.equal(refused.status, 503); assert.equal(f.store().events.length, 1);
+  f.mismatch(false); const accepted = await f.restore(input); assert.equal(accepted.status, 200);
+  f.mismatch(true); const replay = await f.restore(input); assert.equal(replay.status, 200); assert.deepEqual(replay.body.receipt, accepted.body.receipt);
+  await f.refresh(); assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.retirement?.state, "restored_for_review");
 });
