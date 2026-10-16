@@ -24076,13 +24076,19 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
   }
 
-  const result = decideDepReview({
+  const selectedChecks = dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []);
+  let result = decideDepReview({
     author: { login: view.author?.login ?? "" },
     title: view.title ?? "",
     body: view.body ?? "",
     diff,
-    checks: dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []),
+    checks: selectedChecks,
   });
+  if (result.decision === "arm") {
+    const selectedState = checksStateFromRollup(selectedChecks, undefined);
+    if (selectedState !== "green") result = { ...result, decision: "hold",
+      reason: `selected check evidence is ${selectedState}; no success or arm without current green evidence` };
+  }
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
