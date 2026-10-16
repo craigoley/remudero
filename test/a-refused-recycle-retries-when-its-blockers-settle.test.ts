@@ -389,6 +389,49 @@ test("W1-T8138: the shipped deps read a lock blocker's settling off the lock and
   assert.equal(deps.blockerSettled!({ ...REVIEW, pid: 78, ageS: 5000 }, record), true);
 });
 
+test("W1-T8138: the shipped deps round-trip the refusal record, report a marker that cannot be removed, and hold on unreadable evidence", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}refusal-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const inflight = join(root, "state", "inflight");
+  mkdirSync(inflight, { recursive: true });
+  const ledger = join(root, "state", "ledger.ndjson");
+  const rows: Array<{ step: string; data: Record<string, unknown> }> = [];
+  const deps = realDeployDeps({
+    installPath: root,
+    stateRoot: root,
+    daemonLabel: "com.remudero.daemon",
+    serveLabel: "com.remudero.serve",
+    servePort: 4317,
+    uid: 501,
+    ledgerPath: ledger,
+    log: (step, data) => rows.push({ step, data: data ?? {} }),
+    sleep: () => {},
+    execFile: () => "",
+  });
+  const marker = join(root, "state", "DEPLOY_DRAIN_REFUSAL");
+
+  // A stored, well-formed record reads back exactly as written; a malformed one reads as none.
+  const record: DrainRefusalRecord = { atMs: NOW, toHead: HEAD, blockers: [LOCK, REVIEW] };
+  deps.setDrainRefusal!(record);
+  assert.deepEqual(deps.drainRefusal!(), record);
+  writeFileSync(marker, JSON.stringify({ atMs: "soon", toHead: HEAD, blockers: [] }));
+  assert.equal(deps.drainRefusal!(), undefined);
+
+  // Clearing an absent marker is silent; one that cannot be removed is reported, not swallowed.
+  rmSync(marker);
+  deps.setDrainRefusal!(undefined);
+  assert.equal(rows.some((r) => r.step === "deploy.failure_retraction_failed"), false);
+  mkdirSync(join(marker, "held"), { recursive: true });
+  deps.setDrainRefusal!(undefined);
+  const failed = rows.find((r) => r.step === "deploy.failure_retraction_failed");
+  assert.equal(failed?.data.marker, "DEPLOY_DRAIN_REFUSAL");
+  assert.match(String(failed?.data.error), /EISDIR|EPERM|EACCES/);
+
+  // A held lock whose ledger cannot be read is not proof of settling: undefined, which holds the retry.
+  writeFileSync(join(inflight, "W1-T9001.lock"), JSON.stringify({ pid: 1, run_id: "run-9001", host: "h", startedAt: "2026-10-11T16:00:00Z" }));
+  assert.equal(deps.blockerSettled!(LOCK, record), undefined);
+});
+
 test("W1-T8138: the shipped backend derives its wait from the ledger and passes it to the script", (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}derive-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
