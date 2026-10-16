@@ -8,6 +8,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import { registryInstanceRoots } from "../src/lib/benchmark-aa-readiness.js";
 import { knownPlanRepos, lintDraftedFragment, fileRatificationDraft, fileRatificationBatch } from "../src/lib/inbox.js";
 import { repoSummarySync } from "../src/lib/repo-dashboard-route.js";
+import { GoLiveError } from "../src/lib/onboarding-golive.js";
 import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -481,6 +482,37 @@ test("selected consumer reads an explicit configured path exactly once", async (
 });
 
 describe("selected serve qualification keeps private material out of public consumers", () => {
+test("selected source outage preserves verified owner and configured-human flow without granting private publication", async (t) => {
+  const f = fixture(t, false); writeFileSync(f.legacy, selectedText("core"));
+  for (const actor of [undefined, "owner", "configured-human"]) {
+    const answers: Array<{ code: number; body: string; calls: number }> = [];
+    for (const enabled of [false, true]) {
+      f.rows.length = 0; let calls = 0, code = 0, body = "";
+      const deps = { ledgerPath: join(f.root, "ledger.ndjson"), questionsRoot: f.root, log: () => {},
+        instances: { registryPath: f.legacy }, selectedRegistryObservation: enabled ? f.options : undefined,
+        onboardingGoLive: { registryRepository: "owner/repo", api: async (method: string) => {
+          assert.equal(method, "GET", "qualification never permits a publication write"); calls++;
+          throw new GoLiveError("github_unavailable", 502);
+        } },
+      } as unknown as ServeDeps;
+      const route = buildOnboardingGoLiveRoutes(deps).find(route => route.method === "POST"); assert.ok(route);
+      assert.equal(route.scope, "write"); assert.equal(route.tier, "high");
+      await route.handler({ url: route.path, [Symbol.for("remudero.service.rawBody")]: "{}",
+        ...(actor === undefined ? {} : { [Symbol.for("remudero.service.verifiedActor")]: actor }) } as never,
+        { writeHead: (n: number) => { code = n; }, end: (text: string) => { body += text; } } as never, { params: {} });
+      answers.push({ code, body, calls });
+      assert.equal(calls, actor === undefined ? 0 : 1, "selected failure must not globally hold an admitted owner/human flow");
+      assert.equal(code, actor === undefined ? 403 : 502);
+      if (enabled) {
+        const row = await observed(f.rows); assert.ok(row);
+        assert.equal(row.selected_state, "unknown"); assert.equal(row.publication_permission, "not-granted");
+        assert.ok(!JSON.stringify(row).includes(f.path));
+      } else assert.deepEqual(f.rows, []);
+    }
+    assert.deepEqual(answers[1], answers[0], "SHADOW must retain the exact legacy response and effect trace");
+  }
+});
+
 test("selected go-live observation cannot replace the verified-owner refusal or authorize publication", async (t) => {
   const f = fixture(t); writeFileSync(f.legacy, selectedText("core")); writeFileSync(f.path, selectedText("core"));
   const deps = { ledgerPath: join(f.root, "ledger.ndjson"), questionsRoot: f.root, log: () => {},
