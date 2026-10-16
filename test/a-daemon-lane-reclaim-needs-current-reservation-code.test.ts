@@ -1,3 +1,4 @@
+// @census-reads: src/run-task.ts src/lib/sweep.ts
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";

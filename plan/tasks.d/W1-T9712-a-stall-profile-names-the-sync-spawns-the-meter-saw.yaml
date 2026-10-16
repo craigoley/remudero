@@ -1,0 +1,59 @@
+- id: W1-T9712
+  title: "A STALL PROFILE ROW NAMES THE SYNC SPAWNS THE METER SAW, NOT ONLY THEIR TOTAL — the profiler's takeSyncSpawnMs keeps `.sync_spawn_ms` of read-plane's takeLagInterval and drops its top spawn and by-caller breakdown, so a spawnSync begun before profiling starts (one bound into the stall) shows only as unprofiled_ms: ~64% of 2026-10-15's 2,721 s of profiled-stall lag was never profiled"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, what the stall row carries from the sync-spawn meter; when profiling starts is unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9361 (#12099) follow-up'
+  plan_refs: [W1-T9361, W1-T9577, W1-T7746, W1-T7745]
+  files:
+    - src/lib/loop-stall-profiler.ts
+    - src/lib/read-plane.ts
+    - test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/lib/read-plane.ts starts the profiler with
+      `takeSyncSpawnMs: () => sample.takeLagInterval(STALL_PROFILE_CONSUMER).sync_spawn_ms`. takeLagInterval
+      returns a LagIntervalReading: `top` (the longest spawn, with caller and first_arg), `sync_spawn_ms`, and,
+      when the window spawned, `by_caller` and `unnamed_ms` (W1-T9577). Only the number reaches the profiler.
+    - src/lib/loop-stall-profiler.ts beat() stores `{lagMs, syncSpawnMs}` per heartbeat; record() writes
+      daemon.loop_stall_profile with lag_ms, sync_spawn_ms, unattributed_ms, bound_ms, unprofiled_ms and the
+      fold's summary (W1-T9361: profiled_ms, top_frames, top_callers, sync_spawn_profiled_ms, sync_spawn_callers).
+      sync_spawn_callers come from the profile, so they cover only the profiled part of the stall.
+    - The watchdog starts profiling once the heartbeat has been still for one bound. A spawnSync that began
+      before that is in the meter's window but not in the profile.
+    OBSERVED, by the W1-T9361 builder from the core ledger, 2026-10-15 00:15-13:57Z: 18 daemon.loop_stall_profile
+    rows, 2,721 s of lag, 54% of it sync_spawn_ms; about 1,751 s (~64%) fell before profiling started.
+    The top self frame was `spawn` (native, no caller) at 20-70 s per stall. daemon.loop_lag rows for the same
+    stalls do carry sync_spawn_by_caller (W1-T9577), but in another consumer window and another row, so a profile
+    row cannot be read on its own.
+    INFERRED: with the meter's callers on the row, the unprofiled sync-spawn time of each stall is named by caller,
+    which is most of what the profile misses.
+  design: |
+    1. The profiler's option becomes a reading, not a number: takeSyncSpawnMs is replaced (or joined) by
+       `takeSyncSpawn: () => LagIntervalReading`. beat() keeps the reading per heartbeat, as it keeps syncSpawnMs.
+    2. record() adds, from the closing beat's reading, `sync_spawn_top` and `sync_spawn_by_caller` (with
+       `sync_spawn_unnamed_ms`), the same shapes daemon.loop_lag rows use, bounded the way namedShare bounds them.
+       sync_spawn_ms keeps its meaning. Absent a reading, the fields are absent.
+    3. NOT IN SCOPE, OPERATOR DECISION: starting the profile earlier than one bound (for example at a fraction of
+       the bound) would shrink unprofiled_ms itself, but needs a new constant and changes the profiler's cost on
+       healthy turns. This task does not add it; the PR states it as a pending operator decision.
+    Tests go in test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts, titled verbatim as in the
+    proofs, driving startLoopStallProfiler with its spawn seam and a fake meter.
+  acceptance:
+    - claim: "a stall row carries the meter's longest spawn and its spawn time by caller for the closing beat"
+      proof: 'grep: test("W1-T9712: a stall row carries the meter by-caller spawn time of its closing beat" in test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts'
+    - claim: "a beat with no spawn writes no by-caller fields"
+      proof: 'grep: test("W1-T9712: a stall with no sync spawn writes no by-caller fields" in test/a-stall-profile-names-the-sync-spawns-the-meter-saw.test.ts'
+  falsifier: |
+    On origin/main, start the profiler with a fake meter whose reading names one caller holding 30 s, post a
+    profile message for the stall, and read the row: it has sync_spawn_ms 30000 and no by-caller field, so the first
+    test fails. Take the by-caller list from the first beat of the stall instead of the closing one: the row names
+    an empty list and the first test fails again.

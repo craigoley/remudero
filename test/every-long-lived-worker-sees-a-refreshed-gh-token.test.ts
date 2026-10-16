@@ -1,3 +1,4 @@
+// @census-reads: src/
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";

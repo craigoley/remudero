@@ -1759,7 +1759,7 @@ export function taskAttributableLifetimeDispatches(
   const infrastructureRunIds = new Set<string>();
   for (const line of rows) {
     if (line.task_id === taskId && line.step === "verdict" &&
-        typeof line.run_id === "string" && lifetimeInfrastructureRefusal(line) !== undefined) {
+        typeof line.run_id === "string" && streakRefusal(line) !== undefined) {
       infrastructureRunIds.add(line.run_id);
     }
   }
