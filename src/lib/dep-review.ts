@@ -1079,7 +1079,7 @@ export const DEPENDABOT_REFRESH_CAUSES: readonly DependabotRefreshCause[] = ["ba
 export interface DependabotRefreshRecord {
   headSha: string;
   command: string;
-  cause: DependabotRefreshCause;
+  cause: DependabotRefreshCause | typeof DEPENDABOT_STALE_EVENT_CAUSE;
   requestedAtMs: number;
   /** False only between the write-ahead record and a comment that has not yet returned. */
   delivered: boolean;
@@ -1198,6 +1198,108 @@ export function reconcileDependabotRefresh(args: {
     pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
     edited_head: record.command === DEPENDABOT_RECREATE_COMMAND, red_checks: args.result.redChecks,
   });
+  return "requested";
+}
+
+
+export const DEPENDABOT_STALE_EVENT_CAUSE = "stale-event";
+
+export type DependabotStaleEventVerdict = { kind: "stale-event"; checks: string[] } | { kind: "none" };
+
+export function dependabotStaleEventVerdict(input: {
+  mergeStateStatus: string | undefined;
+  autoMergeArmed: boolean;
+  reviewPosted: boolean;
+  supersededReds: readonly string[];
+}): DependabotStaleEventVerdict {
+  if ((input.mergeStateStatus ?? "").toUpperCase() !== "BLOCKED" || !input.autoMergeArmed || !input.reviewPosted ||
+      input.supersededReds.length === 0) return { kind: "none" };
+  return { kind: "stale-event", checks: [...new Set(input.supersededReds)].sort() };
+}
+
+export function buildDepReviewStaleEventEscalation(args: {
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  headSha: string;
+  checks: readonly string[];
+}): Escalation {
+  return {
+    class: "MANUAL",
+    taskId: `dep-review-stale-event-PR${args.prNumber}`,
+    headSha: args.headSha,
+    summary: `Dependabot PR is armed but GitHub still blocks it on a superseded red, after a recreate: ${args.title}`,
+    detail: [
+      `${args.prUrl} passed dependency review and auto-merge is armed, but GitHub reports it BLOCKED while`,
+      `${args.checks.join(", ")} failed only in a run an older event started; the newest run of each passed.`,
+      `rmd already asked Dependabot to recreate an earlier head of this PR for the same block, so it will not ask again.`,
+      ``,
+      `Head: ${args.headSha}`,
+    ].join("\n"),
+    options: [
+      { label: "rerun", detail: `re-run the failed job of ${args.checks.join(", ")} at ${args.headSha.slice(0, 7)}, so its own check suite turns green` },
+      { label: "investigate", detail: "read why the recreated head inherited the block (a title or body edit after its CI started)" },
+    ],
+    recommendation: "rerun",
+  };
+}
+
+export type DependabotStaleEventOutcome = "observed" | "requested" | "awaiting-dependabot" | "escalated" | "failed";
+
+export function reconcileDependabotStaleEvent(args: {
+  statePath: string;
+  prNumber: number;
+  headSha: string;
+  checks: readonly string[];
+  nowMs: number;
+  comment: (body: string) => void;
+  escalate: () => string | null | undefined;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotStaleEventOutcome {
+  const state = readRefreshState(args.statePath, args.headSha) as DepReviewHoldState & {
+    staleEvent?: { headSha?: unknown; firstSeenMs?: unknown; issueUrl?: unknown };
+  };
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const at = { pr_number: args.prNumber, head_sha: args.headSha, stale_checks: args.checks };
+  const ours = (state.refreshes ?? []).filter((r) => r.cause === DEPENDABOT_STALE_EVENT_CAUSE && r.delivered);
+  if (ours.some((r) => r.headSha === args.headSha)) return "awaiting-dependabot";
+  if (state.staleEvent?.headSha !== args.headSha) {
+    state.staleEvent = { headSha: args.headSha, firstSeenMs: args.nowMs };
+    save();
+    args.log("dep-review.stale_event.observed", at);
+    return "observed";
+  }
+  if (ours.length > 0) {
+    if (typeof state.staleEvent.issueUrl === "string") return "escalated";
+    let issueUrl: string | null | undefined;
+    try {
+      issueUrl = args.escalate();
+    } catch (error) {
+      issueUrl = undefined;
+      args.log("dep-review.stale_event.failed", { ...at, action: "escalate", error: String((error as Error)?.message ?? error) });
+    }
+    if (!issueUrl) return "failed";
+    state.staleEvent.issueUrl = issueUrl;
+    save();
+    args.log("dep-review.stale_event.escalated", { ...at, issue_url: issueUrl });
+    return "escalated";
+  }
+  const record: DependabotRefreshRecord = {
+    headSha: args.headSha, command: DEPENDABOT_RECREATE_COMMAND, cause: DEPENDABOT_STALE_EVENT_CAUSE, requestedAtMs: args.nowMs, delivered: false,
+  };
+  state.refreshes = [...(state.refreshes ?? []), record];
+  save();
+  try {
+    args.comment(record.command);
+  } catch (error) {
+    state.refreshes = state.refreshes.filter((r) => r !== record);
+    save();
+    args.log("dep-review.stale_event.failed", { ...at, command: record.command, error: String((error as Error)?.message ?? error) });
+    return "failed";
+  }
+  record.delivered = true;
+  save();
+  args.log("dep-review.stale_event.recreate_requested", { ...at, command: record.command });
   return "requested";
 }
 
@@ -1352,7 +1454,7 @@ export function reconcileDependabotOwnRed(args: {
   if (args.result.decision !== "hold" || args.result.redChecks.length === 0 || args.signal === undefined) return "none";
   const state = readRefreshState(args.statePath, args.headSha) as DepReviewHoldState & { ownRed?: unknown };
   if (state.ownRed !== undefined && !isOwnRedRecord(state.ownRed)) throw new Error("invalid dependency own-red state; refusing to file a duplicate");
-  const survived = (state.refreshes ?? []).some((r) => r.delivered && r.headSha !== args.headSha);
+  const survived = (state.refreshes ?? []).some((r) => r.delivered && r.headSha !== args.headSha && r.cause !== DEPENDABOT_STALE_EVENT_CAUSE);
   const basis = args.signal === "main-passes" ? "main-passes" : survived ? "survived-refresh" : undefined;
   if (basis === undefined) return "none";
   const bumps = parseDependabotBumpFacts(args.title, args.body)

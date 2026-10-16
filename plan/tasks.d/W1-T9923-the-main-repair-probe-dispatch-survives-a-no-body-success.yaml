@@ -15,10 +15,35 @@
     - src/lib/main-health-rung.ts
     - src/run-task.ts
     - test/the-main-repair-probe-dispatch-survives-a-no-body-success.test.ts
-  status: queued
-  priority: 1  # every pass since 10-10 that needed a probe ended unlocated; main stays red for every PR until a human acts
+  status: blocked
+  retirement: withdrawn  # AMENDED 2026-10-16 (overlap): #12421 (75de061fd) and W1-T9927 cover it; see the rationale's first paragraph
   attempts: 0
   rationale: |
+    AMENDED 2026-10-16 (overlap): WITHDRAWN. #12421 (75de061fd, merged 20:14Z) and the queued W1-T9927 (filed in
+    #12414) cover this task. Both came before this shard's filing PR #12415 merged (21:13Z). Each design point, read
+    against #12421's diff at origin/main 6fb8ee06f:
+      - Point 1 (a no-body success) LANDED, at the only call sites that fail. `writeWithNoContent` in
+        src/lib/main-health-rung.ts treats the 204 empty body as success for `restMainProbes` `dispatch` (the
+        workflow dispatch POST) and `release` (the ref DELETE). The repo's other `/dispatches` callers in
+        src/lib/sweep.ts run through `ghRunImpl`, not the JSON fetcher, so no other caller has this defect.
+        Widening `ghJsonAsync` itself would change no observed outcome.
+      - Point 4 (unlocated as a named last resort) LANDED, in a stronger form. `locateOffender` no longer returns
+        unlocated when no probe can be dispatched. It names the first completed red with method
+        `first-red-unattributed`, records the unattributed span and the refusals, and dispatches the fix with its
+        revert withheld. The red is repaired, not left.
+      - Points 2 and 3 (deferral with backoff, and idempotent re-dispatch) have no failure left to answer. In the
+        core ledger (the 133 archives dated 2026-10-10 to 2026-10-16, plus the live file), all 9
+        `main.repair.probe_dispatch_failed` rows carry "gh api response body was unreadable", the 204 class that
+        #12421 fixed. None is a rate limit, a 5xx or a timeout. The control: 23 `main.repair.located` rows were read
+        from the same archives. A transient refusal now still reaches a fix through `first-red-unattributed`. A ref
+        left by an earlier probe is already reused by the "already exists" arm.
+      - Point 5 (the fallback) is W1-T9927. It bisects by running the red's failing test files locally at the
+        cancelled commits, before any CI probe. The no-green-boundary half of point 5 has no stuck case to answer:
+        across the same corpus, the 17 rows reading "names no first red merge after a green run" are the wait
+        before the first red's push run concludes. A `main.repair.located` row follows within about an hour where
+        the red persisted (for example 2026-10-13 16:00Z to 16:19Z, and 2026-10-14 19:30Z to 20:01Z).
+      - REFILE WHEN a `main.repair.probe_dispatch_failed` row carries any other error class, or when a
+        `first-red-unattributed` located row's `attribution_refused` names a transient failure.
     EVIDENCE, core ledger (host ~/rmd-state2/state, bounded niced zgrep), 2026-10-16:
       - 18:28:55Z `main.repair.unlocated` head bd42ca367, reason "main's push run history names no first red merge
         after a green run". The same reason recurs at 18:35:58Z and 18:37:01Z, and at 17:40:09Z for an earlier red.

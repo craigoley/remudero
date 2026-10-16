@@ -51,8 +51,8 @@ export function classifyCodeScanningMergePolicy(input) {
   const qualityOnly = summary.match(QUALITY_ONLY);
   const total = /^([1-9][0-9]*) new alerts?$/.exec(latest.output.title ?? '')?.[1];
   if (['success','failure'].includes(latest.conclusion) && qualityOnly?.[2] === link && total !== undefined) {
-    const rows = [...qualityOnly[1].matchAll(/ \* ([1-9][0-9]*) (error|warning|note)s?\n/g)];
-    if (Number.isSafeInteger(Number(total)) && rows.every(row => Number.isSafeInteger(Number(row[1]))) &&
+    const rows = [...qualityOnly[1].matchAll(/ \* ([1-9][0-9]*) (error|warning|note)(s?)\n/g)];
+    if (Number.isSafeInteger(Number(total)) && rows.every(row => Number.isSafeInteger(Number(row[1])) && (row[3] !== 's' || Number(row[1]) > 1)) &&
         new Set(rows.map(row => row[2])).size === rows.length &&
         rows.reduce((sum,row) => sum + Number(row[1]),0) === Number(total)) {
       return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};

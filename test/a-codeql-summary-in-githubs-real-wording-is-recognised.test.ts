@@ -41,6 +41,20 @@ test("W1-T9926: an Other Alerts summary with the too-large note is read, and a h
   assert.deepEqual(classify(run(12390, TITLE_12390, OTHER_12390.replace(' * 31 notes\n', ' * 31 notes\n * 2 critical\n'))), BLOCKED);
 });
 
+test("W1-T9926: the optional too-large note preserves quality plural count validation", () => {
+  for (const level of ['error', 'warning', 'note']) {
+    for (const conclusion of ['success', 'failure']) {
+      for (const paragraph of ['', TOO_LARGE + '\n\n']) {
+        const summary = PLURAL_12411.replace(' * 2 warnings\n * 1 note\n', ` * 1 ${level}s\n`)
+          .replace('See annotations', paragraph + 'See annotations');
+        assert.deepEqual(classify(run(12411, '1 new alert', summary, conclusion)), UNKNOWN, level);
+        assert.deepEqual(classify(run(12411, '1 new alert', summary.replace(`1 ${level}s`, `1 ${level}`), conclusion)), SAFE, level);
+        assert.deepEqual(classify(run(12411, '2 new alerts', summary.replace(`1 ${level}s`, `2 ${level}s`), conclusion)), SAFE, level);
+      }
+    }
+  }
+});
+
 test("W1-T9926: a real-wording summary with a wrong total, a foreign link or an unknown paragraph stays unknown", () => {
   for (const [pr, title, summary, why] of [
     [12411, '4 new alerts', PLURAL_12411, 'row sum 3 misses title total 4'],
