@@ -13774,7 +13774,7 @@ function priorActionsFromLedger(
         // SHA-KEYED, exactly like `fixed` below. Keyed by PR number alone this set had no expiry:
         // one `acted:true` line — including one recorded for an arm that never happened — deduped
         // that PR forever. A new head must re-earn the attempt.
-        if (line.arm_outcome !== "arm-error-ignored") {
+        if (line.arm_outcome !== "arm-error-ignored" && line.code_scanning_fix_dispatched !== true) {
           armed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
@@ -14419,6 +14419,10 @@ export function trackInFlightReview(work: Promise<void>): Promise<void> {
 
 export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
+}
+
+export function inFlightReviewRunsNow(): Promise<void>[] {
+  return [...inFlightReviewRuns];
 }
 
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
@@ -16635,7 +16639,7 @@ export async function runSweep(
     const securityHold = disposition === "mergeable" && !pr.autoMergeArmed && mergeHold === undefined
       ? securityArmRefusalAtHead(ledgerLines, pr.prNumber, pr.headSha) : undefined;
     const securityText = securityHold && securityHoldReason(securityHold,
-      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined);
+      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined, standDownReason ?? actionError);
     // #10551 (2026-10-10): a fix arm that dispatched nothing must never be ledgered as "dispatching".
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.

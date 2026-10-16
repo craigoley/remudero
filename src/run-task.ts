@@ -629,6 +629,7 @@ import {
   type RestRollupEntry,
   fetchBoardPrsRestAsync,
 } from "./lib/open-prs-rest.js";
+import { codeqlAlertsReadDue } from "./lib/pr-blocker.js";
 import {
   buildMainHealthRung,
   mainCeilingLogReducer,
@@ -44195,11 +44196,13 @@ function* openPrViewSteps(
 
   // W1-T5633: a head whose latest `CodeQL` check failed has its open high alerts read, unless its ledger
   // already holds a terminal code-scanning ruling for that head (a false positive, or a fix dispatched).
+  // W1-T9731: so does a head whose newest arm the security policy refused on a new high alert.
   const codeqlHeadAlerts = yield* hydrateCodeqlHeadAlertsSteps(
     owner,
     repo,
     raw
-      .filter((pr) => pr.isDraft !== true && codeqlCheckFailed(pr.statusCheckRollup) &&
+      .filter((pr) => pr.isDraft !== true &&
+        codeqlAlertsReadDue(ledger, pr.number, pr.headRefOid, codeqlCheckFailed(pr.statusCheckRollup)) &&
         !codeScanningHeadSettled(ledger, pr.number, pr.headRefOid))
       .map((pr) => ({ number: pr.number, headSha: pr.headRefOid })),
     fetch,
