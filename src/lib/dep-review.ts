@@ -165,7 +165,6 @@ export function parseDependabotBumpFacts(title: string, body: string): DepReview
       facts.push(fact);
     }
   }
-  // W1-T9828: a title fact elided by fitDependabotTitle folds into the body fact it abbreviates.
   return facts.filter((f) => !facts.some((g) => g !== f && g.fromVersion === f.fromVersion && g.toVersion === f.toVersion &&
     !g.dependency.includes(ELIDED_SEGMENT) && elidedDependencyMatches(f.dependency, g.dependency)));
 }
@@ -178,8 +177,6 @@ function elidedDependencyMatches(elided: string, full: string): boolean {
   const head = elided.slice(0, at + 1), tail = elided.slice(at + ELIDED_SEGMENT.length - 1);
   return full.length > head.length + tail.length && full.startsWith(head) && full.endsWith(tail);
 }
-
-// ── W1-T9828 — an over-long Dependabot title is fitted, never tail-cut ─────
 
 export type DependabotTitleFit =
   | { kind: "fits" }
@@ -195,7 +192,6 @@ export function overHeaderLimit(title: string): boolean {
   return checkCommitMessage(title).some((v) => v.rule === "header-max-length");
 }
 
-/** Dependabot's trailing clauses, in order, or undefined when the tail is not its grammar. */
 function titleClauses(tail: string): string[] | undefined {
   const clauses: string[] = [];
   TITLE_CLAUSE_RE.lastIndex = 0;
@@ -207,12 +203,6 @@ function titleClauses(tail: string): string[] | undefined {
   return clauses;
 }
 
-/**
- * Fit an over-long Dependabot title under commitlint's own header-max-length. Each step runs only
- * while still over: drop `across N directories`, then the group clause, then elide the dependency's
- * interior path segments, then drop `in /<dir>`; anything still over is refused, never tail-cut.
- * The fitted title must parse to the original's bump facts and semver level.
- */
 export function fitDependabotTitle(title: string, body: string): DependabotTitleFit {
   if (!overHeaderLimit(title)) return { kind: "fits" };
   const prefix = CONVENTIONAL_TITLE_PREFIX_RE.exec(title)?.[0] ?? "";
@@ -246,8 +236,6 @@ export function fitDependabotTitle(title: string, body: string): DependabotTitle
 
 export type DependabotRetitleOutcome = "fits" | "retitled" | "failed" | "refused";
 
-/** The title write fires `pull_request.edited`, so pr-title-lint re-runs on the new title with a fresh event.
- *  A refusal is ledgered once per head and title; the hold's escalation asks for it. */
 export async function reconcileDependabotTitle(args: {
   statePath: string;
   prNumber: number;
