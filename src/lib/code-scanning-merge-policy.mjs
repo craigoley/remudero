@@ -42,11 +42,11 @@ export function classifyCodeScanningMergePolicy(input) {
   }
   // GitHub omits the section heading for quality-only findings. Bind the exact layout,
   // PR link and total to the trusted check rather than treating any successful prose as safe.
-  const qualityOnly = summary.match(/^### New alerts in code changed by this pull request\n\n((?: \* [1-9][0-9]* (?:error|warning|note)\n)+)\nSee annotations below for details\.\n\n(\[View all branch alerts\].*)$/);
+  const qualityOnly = summary.match(/^### New alerts in code changed by this pull request\n\n((?: \* [1-9][0-9]* (?:error|warning|note)s?\n)+)\nSee annotations below for details\.\n\n(\[View all branch alerts\].*)$/);
   const total = /^([1-9][0-9]*) new alerts?$/.exec(latest.output.title ?? '')?.[1];
   if (['success','failure'].includes(latest.conclusion) && qualityOnly?.[2] === link && total !== undefined) {
-    const rows = [...qualityOnly[1].matchAll(/ \* ([1-9][0-9]*) (error|warning|note)\n/g)];
-    if (Number.isSafeInteger(Number(total)) && rows.every(row => Number.isSafeInteger(Number(row[1]))) &&
+    const rows = [...qualityOnly[1].matchAll(/ \* ([1-9][0-9]*) (error|warning|note)(s?)\n/g)];
+    if (Number.isSafeInteger(Number(total)) && rows.every(row => Number.isSafeInteger(Number(row[1])) && (row[3] !== 's' || Number(row[1]) > 1)) &&
         new Set(rows.map(row => row[2])).size === rows.length &&
         rows.reduce((sum,row) => sum + Number(row[1]),0) === Number(total)) {
       return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};
