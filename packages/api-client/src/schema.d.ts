@@ -153,6 +153,8 @@ export interface components {
       workerStateSince?: string;
       /** Bounded worker observability. It names the active role/provider/model and the current or last tool, but never carries prompts, tool arguments, or tool output. */
       workerTelemetry?: {
+        /** Proven by this task's current run start, never inferred from task id or another event. */
+        runId?: string;
         role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
         provider?: string;
         requestedModel?: string;
@@ -3072,6 +3074,47 @@ export interface components {
       value: number | null;
       notCollectedReason?: string;
     };
+    GardenerWorkerCallCounts: {
+      assignments: number | null;
+      matched: number | null;
+      missing: number | null;
+      orphan: number | null;
+      conflicting: number | null;
+      invalid: number | null;
+    };
+    GardenerWorkerBillingModes: {
+      api: number | null;
+      subscription: number | null;
+      unknown: number | null;
+    };
+    GardenerWorkerPriceCoverage: {
+      reported: number | null;
+      unreported: number | null;
+    };
+    /** Optional gardener-worker-calls-v1 evidence from the existing off-loop ledger union capture, served from cached Analytics without a GET-time ledger scan. Global counters aggregate only repository-scoped gardens; host and fleet gardens are excluded. A match requires the exact validated origin, gardener name and parent pass in the same repository and daemon generation, the same immutable assignment ID, and the same nonempty run and task. Optional raw repository/generation fields must agree. Identical semantic assignment/attempt replays count once even when timestamps differ; conflicting restatements quarantine the identity and cannot create a matched call. Missing parents, assignments or terminal attempts, unobserved assignments, malformed attributed rows and incomplete retained evidence remain gaps. Call observation is neither task success nor proof that a running or interrupted parent completed. These counters never sum dollars or make worker.attempt a canonical monetary producer. Null means unknown. A complete newly captured empty corpus can observe zero; an old source without worker-call capture reports not_collected/missing_capture with null counters and clocks. Optional evidence failure or overflow preserves independent monetary subtotals and ordinary Analytics while refusing complete usage coverage. No raw identities, prompts, tokens, worker envelopes or credentials are public. */
+    GardenerWorkerCalls: {
+      version: "gardener-worker-calls-v1";
+      state: "not_collected" | "partial" | "complete";
+      reason: "missing_capture" | "invalid_capture" | "scope_mismatch" | "over_budget" | "incomplete_evidence" | "observed";
+      /** Source capture clock, independent of the evidence window and GardenerSpend.materializedAt. */
+      observedAt: string | null;
+      window: {
+        from: string;
+        through: string;
+      } | null;
+      counts: GardenerWorkerCallCounts;
+      /** Matched calls with exactly api or subscription billing_mode; every other value is unknown. These are not billed amounts. */
+      billingModes: GardenerWorkerBillingModes;
+      /** Matched attempts with their own explicit finite nonnegative numeric total_cost_usd are reported, including an explicit zero. Absent, invalid, inherited or differently named prices are unreported. Field presence is neither billed spend nor an invoice; API reported estimates and subscription notional prices remain distinct concepts. */
+      priceCoverage: GardenerWorkerPriceCoverage;
+      /** Only repository-scoped registered gardens, with bounded public names and no raw join identities. */
+      gardens: ({
+        name: string;
+        counts: GardenerWorkerCallCounts;
+        billingModes: GardenerWorkerBillingModes;
+        priceCoverage: GardenerWorkerPriceCoverage;
+      })[];
+    };
     /** Optional cached gardener cost evidence (W1-T8484), scoped to the current daemon generation. Only exact parent passes admit canonical producer receipts. A priced subtotal is distinct from a complete total; absent correlation, prices or retained-corpus coverage stay unknown. Host and fleet gardeners contribute no repository cost. */
     GardenerSpend: {
       version: "gardener-spend-v1";
@@ -3101,6 +3144,7 @@ export interface components {
         totalUsd: number | null;
         pricedSubtotalUsd: number | null;
       })[];
+      workerCalls?: GardenerWorkerCalls;
     };
     RepositoryFlowBucket: {
       date: string;
@@ -4032,16 +4076,7 @@ export interface components {
         /** Blocked PRs and merge holds, most urgent tone first. */
         actions: (NowAction)[];
         recent: {
-          entries: ({
-            ts: string;
-            /** A RecentActivityEntry verb; a consumer renders an unknown one. */
-            verb: string;
-            taskId: string;
-            title: string;
-            detail?: string;
-            costUsd?: number;
-            prUrl?: string;
-          })[];
+          entries: (RecentActivityEntry)[];
           /** Exact merges today (UTC), one per task and pull request, over full history. */
           mergedToday: {
             count: number;
@@ -4212,7 +4247,13 @@ export interface components {
         unverified?: true;
         openedAt?: string;
       };
+      /** Stable current-dispatch identity; event timing and tool activity stay on recent entries. */
       worker?: {
+        /** Proven by this instance task's current run start; absent when no dispatch identity is evidenced. */
+        runId?: string;
+        role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+        provider?: string;
+        /** Only an explicit receipt from this run, never an assignment or requested model. */
         servedModel?: string;
         requestedModel?: string;
       };

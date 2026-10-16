@@ -6,7 +6,9 @@
   verify: human
   risk: high
   band_meaning: span
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=567c13e1edf56a3b
   attempts: 0
   files:
     - MASTER-PLAN.md
@@ -23,3 +25,11 @@
     follow-up harvest [research]: Reconcile W1-T5117 with W1-T5769, because the incident appears
     covered while stricter evidence requirements remain open. — from W1-T5117 (run
     W1-T5117-1791436776050)
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.91
+    reasons:
+      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filed task requires reconciling incident evidence requirements, but the supplied material includes neither task's requirements nor supporting incident evidence; the reconciliation cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for “evidence requirements” in MASTER-PLAN.md, which does not establish alignment between W1-T5117 and W1-T5769."
+    judged_at: "2026-10-16T15:57:18.212Z"
+    pin: "dd9742e4b883e0bdd8b911a008faa521f86d7a84a605b9ff2d520c6928c055a4"

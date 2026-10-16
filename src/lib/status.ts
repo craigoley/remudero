@@ -143,6 +143,8 @@ export type Phase = "recon" | "implement" | "review" | "fix-rung";
 export type WorkerRole = "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
 export type WorkerActivityKind = "working" | "tool-executing" | "message";
 export interface WorkerTelemetry {
+  /** Proven by this task's current run start, never inferred from task id or a later event. */
+  runId?: string;
   role?: WorkerRole;
   provider?: string;
   requestedModel?: string;
@@ -1724,21 +1726,6 @@ export function lifetimeDispatchTally(
   return { starts, capacityBlocked };
 }
 
-/** Combine independently-read archive and live tallies without making the live file immutable at
- * daemon boot. Exported so the command layer can discard an incomplete archive projection rather
- * than guessing from a partial corpus. */
-export function addLifetimeDispatchTallies(
-  ...tallies: readonly LifetimeDispatchTally[]
-): LifetimeDispatchTally {
-  let starts = 0;
-  let capacityBlocked = 0;
-  for (const tally of tallies) {
-    starts += tally.starts;
-    capacityBlocked += tally.capacityBlocked;
-  }
-  return { starts, capacityBlocked };
-}
-
 /** Capacity receipts cannot outnumber starts in a complete corpus. If they do, retain the old
  * all-starts count: a partial or malformed join must never make a task dispatchable. */
 export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): number {
@@ -3189,7 +3176,7 @@ function deriveRunState(
     const step = typeof rawStep === "string" ? rawStep : undefined;
     if (step !== undefined && LANE_START_STEPS.has(step)) {
       inFlight = true;
-      activeRunId = typeof line.run_id === "string" ? line.run_id : undefined;
+      activeRunId = typeof line.run_id === "string" && line.run_id.trim() !== "" ? line.run_id : undefined;
       activeFixRunId = undefined;
       phase = "recon";
       startedAt = typeof line.ts === "string" ? line.ts : undefined;
@@ -3202,6 +3189,7 @@ function deriveRunState(
       const mountRecord = mount && typeof mount === "object" ? (mount as Record<string, unknown>) : undefined;
       const role = roleForRunStart(line);
       workerTelemetry = {
+        ...(activeRunId ? { runId: activeRunId } : {}),
         ...(role ? { role } : {}),
         ...(typeof line.provider === "string" ? { provider: line.provider } : {}),
         ...(typeof mountRecord?.model === "string" ? { requestedModel: mountRecord.model } : {}),
@@ -3227,6 +3215,7 @@ function deriveRunState(
     // W1-T944: a worker-state row is only appended ON A TRANSITION, so its own `ts` doubles as the transition
     // time. The comparison reads the bare local, for the harvesting reason above.
     if (step === WORKER_STATE_STEP) {
+      if (!isOwnRunActivity) continue;
       const rawState = line.state;
       if (isWorkerState(rawState)) {
         workerState = rawState;
@@ -3235,6 +3224,7 @@ function deriveRunState(
       continue;
     }
     if (step === "worker.activity" || step === WORKER_ACTIVITY_STAND_IN_STEP) {
+      if (!isOwnRunActivity) continue;
       const eventAt = typeof line.event_at === "string" ? line.event_at : typeof line.ts === "string" ? line.ts : undefined;
       const eventKind = isWorkerActivityKind(line.event_kind) ? line.event_kind : undefined;
       if (eventAt && eventKind) {

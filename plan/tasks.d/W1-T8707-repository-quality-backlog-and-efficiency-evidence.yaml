@@ -68,17 +68,18 @@
     Validate OpenAPI/API-client parity and published-head discrimination before normal review/CI.
   acceptance:
     - claim: "first-pass success requires initial-head required-policy evidence and includes unknown and open cohorts"
-      proof: 'unit test: W1-T8707: first-pass quality requires complete initial-head evidence'
+      proof: 'grep: test("W1-T8707: first-pass quality requires complete initial-head evidence" in test/repository-flow-quality.test.ts'
     - claim: "repair latency closes only on required-current-head green and preserves censored episodes"
-      proof: 'unit test: W1-T8707: repair recovery uses verified head clocks and open censoring'
+      proof: 'grep: test("W1-T8707: repair recovery uses verified head clocks and open censoring" in test/repository-flow-quality.test.ts'
     - claim: "durable daily backlog samples survive restart without inventing missing historical inventories"
-      proof: 'unit test: W1-T8707: retained backlog preserves source samples overlapping reasons and gaps'
+      proof: 'grep: test("W1-T8707: retained backlog preserves source samples overlapping reasons and gaps" in test/repository-flow-history.test.ts'
     - claim: "delivered-work efficiency preserves exact producer joins and priced unpriced and shared-cost semantics"
-      proof: 'unit test: W1-T8707: delivered PR efficiency refuses incompatible cost cohorts'
+      proof: 'grep: test("W1-T8707: delivered PR efficiency refuses incompatible cost cohorts" in test/repository-flow-quality.test.ts'
     - claim: "default evidence collection reaches bounded cached graphs and failures preserve independent sections"
-      proof: 'unit test: W1-T8707: default quality collection survives restore and named source failure'
+      proof: 'grep: test("W1-T8707: default quality collection survives restore and named source failure" in test/repository-flow-quality-wiring.test.ts'
     - claim: "the production worker consumes the repository flow collector"
       proof: 'grep: captureRepositoryFlow( in src/lib/read-model-worker.ts'
+      satisfied_by: "#11180"
     - claim: "the existing production sweep records durable repository flow history"
       proof: 'grep: recordRepositoryFlowHistory( in src/lib/sweep.ts'
   falsifier: |
