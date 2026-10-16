@@ -14,7 +14,7 @@
   priority: 2.5
   budget_usd: 12.00
   plan_refs: [W1-T8484, W1-T8667, W1-T9494, W1-T4553, W1-T4578, W1-T4580, W1-T9109, W1-T9387, W1-T5073]
-  files: [src/lib/gardener-spend.ts, src/lib/analytics-view.ts, openapi/daemon.yaml, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts]
+  files: [src/lib/gardener-spend.ts, src/lib/analytics-view.ts, openapi/daemon.yaml, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts, test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts]
   note: |
     Machine-authored; the operator explicitly approved this exact telemetry scope
     in the parent chat on 2026-10-16: "Approve this exact telemetry scope".
@@ -33,6 +33,10 @@
     extra coverage exhausted the shared response budget. The USD 12 budget, high/span
     sizing, money values, 64-KiB limit, permissions, providers and service settings stay
     unchanged. The separate implementation must pass this regression and all gates.
+    The operator subsequently answered "Approve this test-only scope addition".
+    Add only the existing bounded-cost-summary fixture so monetary comparisons and
+    overflow populations exclude removable optional usage bytes. Preserve all money,
+    replay, overflow, unknown-price and CI assertions; add explicit usage controls.
   rationale: |
     The complete retained 2026-10-15T11:44:56.391Z through 13:14:15.420Z window has three
     machine-judge worker.attempt rows with valid gardener origin, observed assignment,
@@ -56,7 +60,7 @@
     reuses their adopted source without duplicate credit or new unbuilt dependencies.
   design: |
     Add optional bounded worker-call coverage inside the existing off-loop gardener
-    capture and cached Analytics/OpenAPI shape, using only these existing four files.
+    capture and cached Analytics/OpenAPI shape, using only the declared existing files.
     Reuse its ONE ledger union pass, validated origin, scoped parent and fingerprint
     deduplication. No new HTTP scan, full-corpus pass, timer, exporter or network call.
     Capture only bounded assignment/attempt metadata in the private join index. Match
@@ -125,5 +129,6 @@
       - "Approval preserves monetary totals and explicit unknown prices, permissions, providers, the USD 12 budget, service settings and all review/CI gates."
       - "The native model attempt was unavailable, not adverse. This is the actual operator decision, not a model verdict; rmd approve was not run and no live release state was written. This prepares filing only."
       - "The operator subsequently answered \"Approve this narrow aggregation-file addition\", authorizing only src/lib/analytics-view.ts to reserve monetary data before optional worker-call coverage, preserving the 64-KiB limit and all existing money, security, provider, service, budget and review/CI constraints."
-    judged_at: "2026-10-16T12:53:00.000Z"
-    pin: "f9a05bafd61c80b0f589c427eb1b91b4c6ed192ac22fc4e3d06a00a976f1c85e"
+      - "The operator subsequently answered \"Approve this test-only scope addition\", authorizing only test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts to separate optional usage from unchanged monetary comparisons and overflow sizing, preserving money, replay, overflow, unknown-price and CI assertions and adding explicit usage controls."
+    judged_at: "2026-10-16T13:32:03.990Z"
+    pin: "27a6e96ef6bfe26ea67b3cf07bbc83357d500ef7e8242c950555f9ce6af7ba4e"
