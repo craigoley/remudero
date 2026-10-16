@@ -41,6 +41,9 @@ test('Semgrep Python audit has its own CodeQL language without importing candida
  assert.equal(job.steps.find((step:any)=>step.name==='Perform CodeQL Analysis').with.category,'/language:${{ matrix.language }}');
  assert.equal(job.steps.some((step:any)=>/pip|semgrep|runtime-compatibility-audit/.test(step.run??'')),false);
  assert.equal(flow.on.pull_request['paths-ignore'].some((path:string)=>path.includes('.github')||path.includes('.py')),false);
+ const gate=parse(readFileSync(new URL('../.github/workflows/ci-gate.yml',import.meta.url),'utf8'));
+ assert.ok(JSON.parse(gate.jobs['ci-gate'].env.ADVISORY).includes('Analyze (python)'));
+ assert.equal(JSON.parse(gate.jobs['ci-gate'].env.REQUIRED).includes('Analyze (python)'),false);
 });
 
 test('Semgrep unit receipt rejects incomplete inventory source drift skips and qualification transfer',()=>{

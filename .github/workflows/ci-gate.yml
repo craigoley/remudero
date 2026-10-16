@@ -196,6 +196,7 @@ jobs:
         "coverage-shard (8/8)",
         "Analyze (javascript-typescript)",
         "Analyze (actions)",
+        "Analyze (python)",
         "Scan",
         "semgrep-runtime-compatibility",
         "Review",
