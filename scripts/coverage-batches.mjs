@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -17,6 +17,31 @@ import { assessWorkspaceDiskBudget, sampleWorkspaceUsage, workspaceUsageEvidence
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const MERGER = fileURLToPath(new URL('./coverage-merge-ratchet.mjs', import.meta.url));
 const GATE = fileURLToPath(new URL('./diff-coverage.mjs', import.meta.url));
+
+/** Inspect and hash one opened artifact, with fixed-size reads. A prior path stat cannot pin
+ * the file subsequently read; reject links, truncation, mutation and a replaced final path. */
+export function coverageArtifactDigest(path, { read = readSync } = {}) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 1) {
+      throw new Error('coverage artifact must be a non-empty regular file');
+    }
+    const digest = createHash('sha256'), bytes = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    while (offset < before.size) {
+      const length = Math.min(bytes.length, before.size - offset);
+      const count = read(fd, bytes, 0, length, offset);
+      if (!Number.isSafeInteger(count) || count < 1 || count > length) throw new Error('coverage artifact read is incomplete');
+      digest.update(bytes.subarray(0, count)); offset += count;
+    }
+    const after = fstatSync(fd), current = lstatSync(path);
+    if (!current.isFile() || current.isSymbolicLink() || current.dev !== before.dev || current.ino !== before.ino ||
+        current.uid !== before.uid || after.size !== before.size || after.mtimeMs !== before.mtimeMs ||
+        after.ctimeMs !== before.ctimeMs) throw new Error('coverage artifact changed while being hashed');
+    return digest.digest('hex');
+  } finally { closeSync(fd); }
+}
 
 /** Await actual child close, including its stdio. Forward only this runner's signals and retain
  * the original outcome; an interrupted child which reports zero cannot qualify a batch. */
@@ -182,23 +207,24 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
       const verdict = judgeRun(batch, { status: result.interrupted ? 1 : result.status, pool: false, root, ...evidence });
       Object.assign(record, { result, verdict }); save();
       if (verdict.status !== 0 || !verdict.complete) throw new Error(`coverage batch failed: ${verdict.problems.join('; ')}`);
-      if (statSync(batchLcov).size === 0) throw new Error('batch produced empty LCOV');
+      const batchDigest = coverageArtifactDigest(batchLcov);
       const compressed = await phase(['--expose-internals', MERGER, '--compact-output', packed, raw], { cwd: root, env });
       if (compressed.status !== 0 || compressed.interrupted) throw new Error('coverage batch compaction failed');
-      Object.assign(record, { state: 'complete', lcov: batchLcov, lcovSha256: hash(readFileSync(batchLcov)), compact: packed });
+      Object.assign(record, { state: 'complete', lcov: batchLcov, lcovSha256: batchDigest, compact: packed });
       if (!keepRaw) { rmSync(raw, { recursive: true, force: true }); record.rawDisposed = true; }
       samples.push(sampleWorkspaceUsage(root));
       compact.push(packed); lineLcov.push('--line-lcov', batchLcov); save();
     }
     const merged = await phase(['--expose-internals', MERGER, '--output', lcov, ...lineLcov, ...compact], { cwd: root, env });
-    if (merged.status !== 0 || merged.interrupted || statSync(lcov).size === 0) throw new Error('coverage aggregate failed');
+    if (merged.status !== 0 || merged.interrupted) throw new Error('coverage aggregate failed');
+    const aggregateDigest = coverageArtifactDigest(lcov);
     gitOrThrow(['diff', '--exit-code', 'HEAD', '--'], { cwd: root });
     if (gitOrThrow(['rev-parse', 'HEAD'], { cwd: root }).trim() !== head) throw new Error('head changed during coverage');
     const diff = join(output, 'head.diff');
     writeFileSync(diff, gitOrThrow(['diff', `${base}...${head}`], { cwd: root }));
     const gate = await phase([GATE, '--lcov', lcov, '--diff', diff], { cwd: root, env });
     receipt.state = gate.status === 0 && !gate.interrupted ? 'complete' : 'failed';
-    receipt.aggregateSha256 = hash(readFileSync(lcov)); receipt.gate = gate;
+    receipt.aggregateSha256 = aggregateDigest; receipt.gate = gate;
     check(); releaseCoverageLease(slot); released = true; save();
     return { status: receipt.state === 'complete' ? 0 : gate.status || 1, receiptPath };
   } catch (error) {

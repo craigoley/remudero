@@ -1,12 +1,44 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, fstatSync, mkdirSync, readFileSync, readSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { testSlotProcessFacts } from "../src/lib/test-slot.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 // @ts-expect-error Plain repository CLI exports are exercised through their real implementation.
-import { guardCoverageLease, releaseCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
+import { coverageArtifactDigest, guardCoverageLease, releaseCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
+
+test("coverage artifact hashing reads the opened regular file and refuses empty linked or replaced evidence", (t) => {
+  const { dir } = ownedFixtureDir(t, "batch-artifact"), file = join(dir, "lcov.info");
+  const bytes = Buffer.alloc(128 * 1024 + 7, "x"); writeFileSync(file, bytes);
+  assert.equal(coverageArtifactDigest(file), createHash("sha256").update(bytes).digest("hex"));
+  const link = join(dir, "linked.info"); symlinkSync(file, link);
+  assert.throws(() => coverageArtifactDigest(link));
+  assert.throws(() => coverageArtifactDigest(dir), /regular file/);
+  writeFileSync(join(dir, "empty.info"), "");
+  assert.throws(() => coverageArtifactDigest(join(dir, "empty.info")), /non-empty/);
+  let replaced = false;
+  assert.throws(() => coverageArtifactDigest(file, { read(fd: number, target: Buffer, offset: number, length: number, position: number) {
+    assert.ok(length <= 64 * 1024, "artifact reads keep a fixed memory bound");
+    const count = readSync(fd, target, offset, length, position);
+    if (!replaced) { replaced = true; renameSync(file, file + ".original"); writeFileSync(file, bytes); }
+    return count;
+  } }), /changed while/);
+  assert.equal(readFileSync(file, "utf8"), bytes.toString(), "replacement evidence is preserved");
+});
+
+test("coverage artifact hashing refuses in-place growth and closes its descriptor after a read failure", (t) => {
+  const { dir } = ownedFixtureDir(t, "batch-artifact-change"), file = join(dir, "lcov.info");
+  writeFileSync(file, "LCOV");
+  assert.throws(() => coverageArtifactDigest(file, { read(fd: number, target: Buffer, offset: number, length: number, position: number) {
+    const count = readSync(fd, target, offset, length, position); appendFileSync(file, "changed"); return count;
+  } }), /changed while/);
+  const original = new Error("actual read seam failed"); let opened = -1;
+  assert.throws(() => coverageArtifactDigest(file, { read(fd: number) { opened = fd; throw original; } }),
+    (error: unknown) => error === original);
+  assert.throws(() => fstatSync(opened), { code: "EBADF" });
+});
 
 function lease(dir: string) {
   const path = join(dir, "slot-1.json"), start = testSlotProcessFacts(process.pid)!.start;
