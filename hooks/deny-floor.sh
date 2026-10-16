@@ -15,6 +15,9 @@ input="$(cat)"
 # .claude/settings.json does not, so rule 14 below binds workers only.
 confine_file_tools=0
 case "${1:-}" in --confine-file-tools) confine_file_tools=1 ;; esac
+# W1-T9643: the same flag names the lane. Only settings/worker.json passes it, so `worker_lane=1` is a worker and
+# `worker_lane=0` an operator session. Rule 5 reads it: the operator ruled (2026-10-15) never to block a merge.
+worker_lane=$confine_file_tools
 
 # Pull the fields we police out of the tool-call JSON. Bash carries `command`;
 # Write/Edit/Read carry `file_path`. Fall back to raw input if jq is absent.
@@ -222,11 +225,12 @@ fi
 #    holding the ordinary GH_TOKEN could merge its own green PR without leaving the orchestrator's
 #    automerge receipts. Cover the CLI command and its two common `gh api` equivalents. This stays
 #    a tripwire, not a credential boundary: an indirectly assembled request can evade command-text
-#    matching, exactly as the file header documents.
-if printf '%s' "$cmd" | grep -Eq 'gh([[:space:]]+(-R|--repo)(=|[[:space:]])[^[:space:]]+)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+#    matching, exactly as the file header documents. W1-T9643: the worker lane only; an operator session's
+#    merge always passes (operator ruling 2026-10-15: never block merges).
+if [ "$worker_lane" -eq 1 ] && printf '%s' "$cmd" | grep -Eq 'gh([[:space:]]+(-R|--repo)(=|[[:space:]])[^[:space:]]+)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
   deny "a worker may author or repair a PR, but only the orchestrator may merge or arm it"
 fi
-if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api([[:space:]]|$)'; then
+if [ "$worker_lane" -eq 1 ] && printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api([[:space:]]|$)'; then
   if printf '%s' "$cmd" | grep -Eq '(-X|--method)(=|[[:space:]])PUT([[:space:]]|$)' &&
      printf '%s' "$cmd" | grep -Eq 'repos/[^[:space:]]+/pulls/[0-9]+/merge([?[:space:]]|$)'; then
     deny "gh api PUT to a pull-request merge endpoint"

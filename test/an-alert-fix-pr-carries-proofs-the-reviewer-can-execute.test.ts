@@ -239,13 +239,13 @@ test("W1-T8625: an unreadable opened body is ledgered as a check error, never as
   assert.equal(inertDefectRows(rows).length, 0, "a read failure is not a defect verdict");
 });
 
-test("W1-T8625: the real body reader reads the PR body over gh once", () => {
+test("W1-T8625: the real body reader reads the PR body over gh once", async () => {
   const calls: string[][] = [];
-  const body = readAlertFixPrBody(PR_URL, (args) => {
+  const body = await readAlertFixPrBody(PR_URL, (args) => {
     calls.push(args);
     return { body: "Acceptance:\n- a | b\n" };
   });
   assert.deepEqual(calls, [["pr", "view", PR_URL, "--json", "body"]]);
   assert.equal(body, "Acceptance:\n- a | b\n");
-  assert.equal(readAlertFixPrBody(PR_URL, () => ({})), "", "an absent body field reads as an empty body");
+  assert.equal(await readAlertFixPrBody(PR_URL, () => ({})), "", "an absent body field reads as an empty body");
 });

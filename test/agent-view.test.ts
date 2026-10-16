@@ -3,14 +3,14 @@
 // analytics, and the per-instance fold must spread a large panel fact delta over passes, resuming from its
 // committed position after a restart.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { AGENT_CLOCK_MS, AGENT_VIEW_PARTS, agentPartBodies, agentViewKey, createAgentView, type AgentProposalsBody, type AgentViewData, type AgentViewPart } from "../src/lib/agent-view.js";
 import { coldAnalyticsSnapshot, type AnalyticsSnapshot } from "../src/lib/analytics-route.js";
 import { analyticsSourceBodies } from "../src/lib/analytics-view.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { readLedgerUnionRecordsSync } from "../src/lib/ledger-union.js";
 import { createNavBadgeReadModelView, navBadgeView, type NavBadgeData } from "../src/lib/nav-badge-view.js";
@@ -27,11 +27,13 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, ledgerSource, type ReadModelInstanceState } from "../src/lib/read-model-worker.js";
+import { createReadModelTicker, ledgerSource, readModelLaneViews, type ReadModelInstanceState, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { createDemandBook } from "../src/lib/view-demand.js";
 import { renderView } from "../src/lib/views.js";
 import { corpus, get, listen, NOW } from "./helpers/operator-agent-corpus.js";
 import { SPEC, violations } from "./helpers/openapi-strict.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 const REPO = "owner/repo";
 const ANALYTICS_AS_OF = new Date(NOW - 60_000).toISOString();
@@ -499,4 +501,92 @@ test("an agent fold committed in another state version or past a shrunken store 
   assert.equal(folds.current({ instance: "core", db }).rows.length, 4);
   db.exec("DELETE FROM fact WHERE seq > 2");
   assert.equal(folds.current({ instance: "core", db }).rows.length, 2, "a store that shrank under the fold is folded again");
+});
+
+function repositoryUnitFixture(t: { after(run: () => void): void }) {
+  const stateDir = makeTempDir("agent-repository-units");
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const instances = ["core", "site", "console"].map((name) => {
+    const ledgerDir = join(stateDir, name);
+    mkdirSync(ledgerDir);
+    writeFileSync(join(ledgerDir, "ledger.ndjson"), "");
+    return { name, ledgerDir, repo: `owner/${name}` };
+  });
+  switchViewsOn(stateDir, ["agent"], "shadow");
+  let now = NOW;
+  const clock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+  const posts: ReadModelWorkerMessage[] = [];
+  const projector = createReadModelTicker({ stateDir, instances, views: [], holder: "agent-repository-units", clock,
+    oracle: "off", post: (msg) => void posts.push(msg) });
+  t.after(() => void projector.release());
+  projector.start();
+  projector.tick();
+  for (const instance of instances) assert.equal(projector.acceptSnapshot({ instance: instance.name, ok: true,
+    asOf: ANALYTICS_AS_OF, bodies: analyticsSourceBodies(busySnapshot(), instance.repo) }), true);
+  const observed = () => {
+    const last = posts.findLast((msg) => msg.type === "state");
+    assert.ok(last && last.type === "state");
+    return last.instances;
+  };
+  return { stateDir, instances, clock, projector, observed, advance: (by: number) => void (now += by) };
+}
+
+test("repository-scoped agent builds keep individually affordable repos off the heavy lane", (t) => {
+  const f = repositoryUnitFixture(t);
+  const spec = readModelLaneViews({ instances: f.instances }, f.clock, () => {}, createDemandBook({ clock: f.clock }))
+    .find((view) => view.name === "agent");
+  assert.ok(spec && "create" in spec);
+  const scopes: string[][] = [];
+  const posts: ReadModelWorkerMessage[] = [];
+  const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, holder: "agent-repository-units", clock: f.clock,
+    viewsOnly: true, lane: "fast", oracle: "off", passBudgetMs: 100, post: (msg) => void posts.push(msg),
+    views: [{ ...spec, create: () => {
+      const view = spec.create();
+      return { ...view, materialize(ctx) {
+        scopes.push(ctx.instances.map(({ state }) => state.instance));
+        const result = view.materialize(ctx);
+        // Controlled cost per repository: 30ms fits the native 40ms solo allowance;
+        // bundling three unrelated repositories is a 90ms overrun of that SAME bound.
+        f.advance(ctx.instances.length * 30);
+        return result;
+      } };
+    } }],
+  });
+  t.after(() => void ticker.release());
+  ticker.start();
+  for (let i = 0; i < 3; i++) {
+    ticker.observe(f.observed());
+    ticker.tick();
+    f.advance(100);
+  }
+  assert.ok(scopes.every((scope) => scope.length === 1), "each repository has its own measured cold build");
+  assert.deepEqual([...new Set(scopes.flat())].sort(), ["console", "core", "site"], "every repository gets a build");
+  assert.equal(posts.some((msg) => msg.type === "view_lane" && msg.heavy), false, "the sum of unrelated costs cannot promote every repo");
+  const proposals = posts.flatMap((msg) => msg.type === "body" && msg.entry.key.includes("part=proposals") ? [msg.entry.body.data as AgentViewData] : []);
+  assert.deepEqual([...new Set(proposals.map((proposal) => proposal.instance))].sort(), ["console", "core", "site"]);
+  for (const proposal of proposals) {
+    const body = proposal.body as AgentProposalsBody;
+    assert.ok(body.records && body.records.length > 0, "real shared-store analytics produces proposals for this repo");
+    assert.ok(body.records.every((record) => record.detail.state === "reported" && record.detail.repository === proposal.repository && record.detail.instanceId === proposal.instance));
+  }
+});
+
+test("repository-scoped agent builds retain home analytics and refuse foreign evidence", (t) => {
+  const f = repositoryUnitFixture(t);
+  const home = openProjectorReadModel(f.stateDir, "core"), site = openProjectorReadModel(f.stateDir, "site");
+  t.after(() => { site.close(); home.close(); });
+  const view = createAgentView({ instances: f.instances, ledgerSource });
+  const context = { now: NOW, sourceStore: home, instances: [{ state: state("site"), db: site }] };
+  assert.equal(view.prepare(context, () => true), true);
+  const read = () => view.materialize(context).find((body) => body.key === agentViewKey("site", "proposals"))!.data.body as AgentProposalsBody;
+  const positive = read();
+  assert.ok(positive.records && positive.records.length > 0, "a site-only unit still reads the home store's site snapshot");
+  assert.ok(positive.records.every((record) => record.detail.state === "reported" && record.detail.repository === "owner/site" && record.detail.instanceId === "site"));
+  const foreign = { ...busySnapshot(), asOf: new Date(NOW - 30_000).toISOString() };
+  assert.equal(f.projector.acceptSnapshot({ instance: "site", ok: true, asOf: foreign.asOf!,
+    bodies: analyticsSourceBodies(foreign, "owner/foreign") }), true);
+  const refused = read();
+  assert.ok(refused.records && refused.records.length > 0, "ranks remain visible without relabeling foreign evidence");
+  assert.ok(refused.records.every((record) => record.detail.state === "unavailable"));
+  assert.equal(refused.coverage?.complete, 0);
 });
