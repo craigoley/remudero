@@ -42,8 +42,19 @@ export interface ModelApproval {
   expiresAt?: string;
 }
 
+/** Configuration owns this data-only contract; it must not import an effect consumer. */
+export interface SelectedModeSettings {
+  mode: "shadow";
+  instanceName?: string;
+  registryPath?: string;
+  contractVersion?: number;
+  maxBytes?: number;
+  timeoutMs?: number;
+}
+
 export interface Config {
   contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
+  selectedRegistryMode?: SelectedModeSettings;
   claudeBin: string;
   root: string;
   diskArtifactScanRoots?: string[];
@@ -279,6 +290,16 @@ const workerProvidersShape: ValueSchema = {
 };
 
 export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
+  configField("selectedRegistryMode", "SelectedModeSettings", true, undefined, "config.json", "Opt-in SHADOW mode evidence only; never selected authority or publication permission.", {
+    kind: "object", fields: [
+      configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
+      configField("instanceName", "string", true, undefined, "config.json", "Explicit instance identity, not a default selection.", stringShape),
+      configField("registryPath", "string", true, undefined, "config.json", "Explicit selected source, never a private publication grant.", stringShape),
+      configField("contractVersion", "number", true, undefined, "config.json", "Selected reader contract version.", numberShape),
+      configField("maxBytes", "number", true, undefined, "config.json", "Selected reader allocation ceiling.", numberShape),
+      configField("timeoutMs", "number", true, undefined, "config.json", "Bounded asynchronous selected read.", numberShape),
+    ],
+  }),
   configField("contributorAdmission", "AdmissionSettings", true, undefined, "config.json", "Opt-in shadow contributor evaluation; no enforcement or production identity defaults.", {
     kind: "object", fields: [
       configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
@@ -435,8 +456,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
-  envEntry("RMD_INSTANCE_NAME", "Names this daemon's registry instance inside its container; set by deploy/recycle-container.sh --instance and the installed launcher, and preferred by the SRE lane over the state-root match (W1-T9500).", ["src/lib/sre-lane.ts"]),
-  envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts"]),
+  envEntry("RMD_INSTANCE_NAME", "Names this daemon's registry instance inside its container; set by deploy/recycle-container.sh --instance and the installed launcher, and preferred by the SRE lane over the state-root match (W1-T9500).", ["src/lib/sre-lane.ts", "src/lib/sweep.ts", "src/run-task.ts"]),
+  envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts", "src/lib/sweep.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_MEASUREMENT_CADENCE_CHILD_CONFIG", "Carries the daemon's Config as JSON to the measurement-cadence child so it measures the daemon's root, never $HOME's.", ["src/lib/measurement-cadence.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),

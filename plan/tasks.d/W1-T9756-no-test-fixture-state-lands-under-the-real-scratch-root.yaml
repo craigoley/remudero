@@ -1,0 +1,60 @@
+- id: W1-T9756
+  title: "A TEST NEVER CREATES STATE UNDER THE HOST'S REAL /mnt/scratch/rmd — a test that spawns serve-container.sh or recycle-container.sh with a hand-built env drops NODE_TEST_CONTEXT, so scratch_root_refused cannot fire and the script makes its scratch dirs under the real root; 104 fixture state dirs sit there now, the newest (rmd-serve-policy-*, 19 of them) from 2026-10-15T15:23Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, which scratch root a test-spawned deploy script may touch; the scripts' behaviour on a real host is unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): operator session 2026-10-15, found while checking W1-T9617 follow-up G'
+  plan_refs: [W1-T5631, W1-T9617, W1-T6030]
+  files:
+    - deploy/scratch-mounts.sh
+    - test/a-changed-serve-policy-reaches-the-running-console.test.ts
+    - test/a-test-process-never-plans-a-bind-under-the-real-scratch-root.test.ts
+    - test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 3ce249c80:
+    - deploy/scratch-mounts.sh scratch_root_refused() refuses the real root only when NODE_TEST_CONTEXT is set and
+      RMD_SCRATCH_ROOT is not. A test that runs a deploy script with an env it builds by hand (no NODE_TEST_CONTEXT)
+      passes the guard, and scratch_plan / scratch_prepare make `<scratch>/rmd/<basename of the state dir>/...`.
+    - test/a-changed-serve-policy-reaches-the-running-console.test.ts fixture() returns
+      `env: { PATH: process.env.PATH, RMD_MEMINFO_PATH: ... }` for a state dir made with mkdtemp
+      `${RMD_TMP_PREFIX}serve-policy-`, then runs serve-container.sh with it.
+    OBSERVED 2026-10-16 ~01:55Z on the Azure host (ls only), /mnt/scratch/rmd/ by name prefix, newest mtime:
+    - rmd-serve-policy-* 19 dirs, newest 2026-10-15T15:23Z (matches the test above; still leaking at main);
+    - recycle-state-* 68 (newest 10-06), rmd-reclaim-state-* 5 (10-14), rmd-recycle-bash3-capture-state-* 3 (10-13),
+      rmd-appauth-state-* 2 (10-13), and single dirs state, state_dir, state-root, site-state, target-state,
+      brand-new-host. Tests whose names match: test/recycle-container.test.ts, test/container-runtime-contract.test.ts,
+      test/a-lock-whose-container-is-gone-is-reclaimed-not-waited-on.test.ts,
+      test/app-auth-satisfies-the-recycle-credential-refusal.test.ts. The older groups may already be fixed; only the
+      serve-policy group is shown to leak after 10-14.
+    - Control: the real instances' dirs (rmd-state2, rmd-site-state, remudero-console-state) are there too and are not
+      fixtures; they are excluded from the count.
+    INFERRED: each leaked dir holds empty worktrees/tmp/repos/read-model subdirs on the shared NVMe and, if a test ever
+    lands a real path under one, a test could write where a live instance keeps worktrees.
+  design: |
+    1. Make the guard independent of the caller's env: scratch_root_refused also refuses when the state dir being
+       planned lies under the OS temp dir or an RMD_TMP_PREFIX temp root, unless RMD_SCRATCH_ROOT is set explicitly.
+       A real host's state dirs are never under tmp, so production is unchanged.
+    2. The serve-policy test passes NODE_TEST_CONTEXT (or an explicit RMD_SCRATCH_ROOT under its own temp dir) through
+       its hand-built env.
+    3. A census test: run each deploy-script fixture shape the suite uses with a fake scratch root mounted at a temp
+       path and the real-root path pointed at a sentinel, and fail if anything is created under the sentinel.
+    4. The existing leaked dirs are listed in the PR for the operator to remove; this task deletes nothing on the host.
+    No new constant.
+    Tests go in test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts, titled verbatim as in the proofs.
+  acceptance:
+    - claim: "a deploy script run with a hand-built env and a state dir under tmp never creates anything under the default scratch root"
+      proof: 'grep: test("W1-T9756: a hand-built env never plans scratch under the real root" in test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts'
+    - claim: "a state dir outside tmp with no override still plans under the scratch root, as on a real host"
+      proof: 'grep: test("W1-T9756: a real state dir still plans under the scratch root" in test/no-test-fixture-state-lands-under-the-real-scratch-root.test.ts'
+  falsifier: |
+    On origin/main, point the default scratch root at a sentinel dir (RMD_SCRATCH_MOUNTS_FILE listing it as mounted)
+    and run scratch_plan + scratch_prepare for an mkdtemp state dir with env { PATH } only: a `<sentinel>/rmd/<name>`
+    dir appears and the first test fails. Refuse every state dir instead of only tmp ones: the second test fails.

@@ -142,6 +142,7 @@ import {
   ArmSeamRequiredError,
   requireExplicitArmSeam,
   realArmDeps,
+  realArmDepsAsync,
   mergeDirectRefusalMayBeUnsettled,
   REST_MERGE_UNSETTLED_MAX_READS,
   REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS,
@@ -520,7 +521,8 @@ import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
-import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
+import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
 import {
@@ -17194,6 +17196,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   /** Test seam for the pre-open fast gate; production runs `runPreopenGate`, an injected spawn skips it. */
   preopenGate?: (worktreePath: string) => Promise<PreopenGateResult>;
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
+  selectedModeFileIO?: RegistryFileIO;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserverAsync;
@@ -18273,6 +18276,7 @@ async function runTask(
     prCreateExec?: Parameters<typeof runGhPrCreate>[4];
     prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
+    selectedModeFileIO?: RegistryFileIO;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
     /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
@@ -19512,6 +19516,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
   // Hold the instance mode for the run so a registry edit cannot flip its deferred arm decision.
   const shadowInstance = instanceMode(`${owner}/${task.repo}`, (opts.instanceRegistryTextImpl ?? readInstanceRegistryText)(repoRoot)) === "shadow";
+  const selectedModeQualification = createSelectedModeQualification(config.selectedRegistryMode, `${owner}/${task.repo}`,
+    { envPath: process.env.RMD_INSTANCE_REGISTRY, instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a
@@ -22244,11 +22250,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
     const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
-    const armOutcome: ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused" = !shadowArmDecision.armed
+    const armOutcome = await observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
+      selectedModeQualification, "run-arm", async () => !shadowArmDecision.armed
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
-        ? await armAutoMergeAtOpenAsync(prUrl, undefined, irreversible)
-        : "no-merge-boundary-refused";
+        ? await armAutoMergeAtOpenAsync(prUrl,
+          selectedModeQualification === undefined ? undefined : realArmDepsAsync(() => config, selectedModeQualification), irreversible)
+        : "no-merge-boundary-refused", prUrl);
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
     // population (the "run-task" lane, the deferred arm every normal implement-task PR takes).

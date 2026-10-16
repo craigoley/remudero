@@ -9,6 +9,7 @@
 //   (3) a non-rate-limit failure never reaches the fallback at all.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { stripComments } from "./helpers/daemon-loop-walk.js";
 
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
@@ -178,14 +179,18 @@ test("the real mergeDirect is guarded by the live-write boundary before it can t
   const src = await import("node:fs").then((fs) =>
     fs.readFileSync(new URL("../src/lib/arm-auto-merge.ts", import.meta.url), "utf8"),
   );
-  const i = src.indexOf("mergeDirect: (prUrl) => {");
-  assert.ok(i > 0, "the real dep is still defined");
-  const body = src.slice(i, i + 600);
-  assert.ok(
-    body.indexOf('assertLiveWriteAllowed("gh-pr-merge"') < body.indexOf("mergeDirectViaRest(prUrl)"),
-    "the guard must fire BEFORE the write, not after it",
-  );
-  assert.ok(body.includes("mergeDirectViaRest(prUrl)"), "the real dep delegates to the REST write");
+  const start = src.indexOf("export function realArmDeps("), end = src.indexOf("\nexport function realArmDepsAsync(", start);
+  assert.ok(start >= 0 && end > start, "the actual synchronous factory must exist");
+  const methods = [...stripComments(src.slice(start, end)).matchAll(/^    mergeDirect:\s*\(prUrl\)\s*=>\s*\{([\s\S]*?)^    \},/gm)];
+  assert.equal(methods.length, 1, "one actual returned mergeDirect method, not a textual byte window");
+  const body = methods[0]![1]!;
+  const guards = [...body.matchAll(/^      assertLiveWriteAllowed\(\s*["']gh-pr-merge["']\s*,/gm)];
+  const writes = [...body.matchAll(/^      mergeDirectViaRest\(\s*prUrl(?=\s*[,)])/gm)];
+  assert.equal(guards.length, 1, "a missing guard must never pass vacuously");
+  assert.equal(writes.length, 1, "the real REST call binds this PR, including optional qualification arguments");
+  const [guard] = guards, [write] = writes;
+  assert.ok(guard && write);
+  assert.ok(guard.index < write.index, "the guard must fire BEFORE the write, not after it");
   assert.equal(body.includes('["pr", "merge", prUrl, "--squash"]'), false, "the GraphQL form is gone");
 });
 
