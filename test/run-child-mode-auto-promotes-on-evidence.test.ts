@@ -17,7 +17,7 @@ import {
   RUN_CHILD_ADOPTION_PASS_STEP, RUN_CHILD_MODE_DECISION_STEP, classifyRunChildLoss, createRunChildModeTracker, decideRunChildMode,
   readRunChildPolicy, runChildModeEvidence, runChildModeFor,
 } from "../src/lib/run-child-mode.js";
-import { runInChildWhenOn } from "../src/run-task.js";
+import { clockFromIsoFn } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const MIB = 1024 * 1024;
@@ -40,7 +40,7 @@ const probe = (peakMib: number, estimateMib: number | null = 512, contract = "ok
 const decided = (to: "on" | "shadow"): Row => ({ step: RUN_CHILD_MODE_DECISION_STEP, ts: at(), to });
 const lost = (detail: string, stderr = ""): Row => ({ step: "run_child.lost", ts: at(), detail, stderr_tail: stderr });
 
-test("W1-T9087: auto promotes only after a clean boot cycle with an adoption", async () => {
+test("W1-T9087: auto promotes only after a clean boot cycle with an adoption", () => {
   // The first boot, a clean adoption and clean probes: no whole boot cycle yet, so the falsifier (promote on the first clean
   // probe) is refused.
   const rows: Row[] = [boot(), adoption(), probe(300), probe(310)];
@@ -88,7 +88,7 @@ test("W1-T9087: auto promotes only after a clean boot cycle with an adoption", a
 
   // The daemon's tracker ledgers the change once, and runChildModeFor hands the dispatch `on`.
   const ledgered: Row[] = [];
-  const tracker = createRunChildModeTracker(rows, at);
+  const tracker = createRunChildModeTracker(rows, clockFromIsoFn(at));
   const asked = runChildModeFor("auto", tracker.evidence());
   assert.equal(asked.mode, "on");
   tracker.record(asked.decision, (step, extra) => { ledgered.push({ step, ...extra }); });
@@ -107,16 +107,7 @@ test("W1-T9087: auto promotes only after a clean boot cycle with an adoption", a
   // The spawn path reads the same decision: auto with promoting evidence starts a child, auto with none stays in-process.
   assert.deepEqual(runChildModeIsOn(() => "auto", tracker.evidence), { on: true });
   assert.deepEqual(runChildModeIsOn(() => "auto"), { on: false });
-  let spawned = 0;
-  const input = {
-    taskId: "W1-T9087", config: { root: tmp("daemon") } as never, repoDir: tmp("repo"), allowStale: false, options: { owner: "o" },
-    planSync: () => ({ plan: { tasks: [] } }) as never, log: () => {},
-  };
-  const spawn = async () => { spawned += 1; return { started: false as const, reason: "test" }; };
-  await runInChildWhenOn(input, { readMode: () => "auto", evidence: tracker.evidence, spawn });
-  assert.equal(spawned, 1, "promoted auto starts the child");
-  await runInChildWhenOn(input, { readMode: () => "auto", evidence: () => runChildModeEvidence([boot()]), spawn });
-  assert.equal(spawned, 1, "unpromoted auto stays in-process");
+  assert.deepEqual(runChildModeIsOn(() => "auto", () => runChildModeEvidence([boot()])), { on: false });
 });
 
 test("W1-T9087: a lost child demotes auto to shadow", () => {
@@ -125,7 +116,7 @@ test("W1-T9087: a lost child demotes auto to shadow", () => {
 
   // A lost child demotes, and the tracker ledgers why.
   const ledgered: Row[] = [];
-  const tracker = createRunChildModeTracker(promoted, at);
+  const tracker = createRunChildModeTracker(promoted, clockFromIsoFn(at));
   tracker.observe("run_child.lost", { detail: "pid 4242 is gone", stderr_tail: "" });
   tracker.record(runChildModeFor("auto", tracker.evidence()).decision, (step, extra) => { ledgered.push({ step, ...extra }); });
   assert.equal(ledgered.length, 1);

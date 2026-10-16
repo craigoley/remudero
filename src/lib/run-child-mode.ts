@@ -9,6 +9,7 @@
 // container stop) is named as such and does not count against the contract; an OOM kill still holds promotion for its window.
 // There is no count and no cooldown: the window itself moves one boot at a time, so a re-promotion needs a fresh clean cycle.
 
+import { systemClock, type Clock } from "./clock.js";
 import type { RunChildMode } from "./policy.js";
 
 export const RUN_CHILD_MODE_DECISION_STEP = "run_child.mode_decision";
@@ -230,10 +231,10 @@ export interface RunChildModeTracker {
 }
 
 /** A daemon's running evidence, seeded from the ledger it booted with and fed every row it writes since. Holds counts, never rows. */
-export function createRunChildModeTracker(seed: Iterable<Record<string, unknown>>, clock: () => string = () => new Date().toISOString()): RunChildModeTracker {
+export function createRunChildModeTracker(seed: Iterable<Record<string, unknown>>, clock: Clock = systemClock): RunChildModeTracker {
   const evidence = runChildModeEvidence(seed);
   const observe = (step: string, extra: Record<string, unknown> = {}): void => {
-    if (RUN_CHILD_MODE_EVIDENCE_STEPS.has(step)) foldRunChildModeEvidence(evidence, { ts: clock(), ...extra, step });
+    if (RUN_CHILD_MODE_EVIDENCE_STEPS.has(step)) foldRunChildModeEvidence(evidence, { ts: clock.iso(), ...extra, step });
   };
   return {
     observe,
