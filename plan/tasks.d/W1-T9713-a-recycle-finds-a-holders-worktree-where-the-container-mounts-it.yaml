@@ -1,0 +1,65 @@
+- id: W1-T9713
+  title: "A RECYCLE FINDS A LOCK HOLDER'S WORKTREE WHERE THE CONTAINER MOUNTS IT — holder_worktrees and worker_lane in deploy/recycle-container.sh read ${STATE_DIR}/worktrees, but with scratch mounts on, the container's worktrees are bound from <scratch>/rmd/<key>/worktrees; on 2026-10-15 core's state-dir copy held 9 stale worktrees (newest 10-01) and the scratch dir 12 live ones, so lane attribution and the reclaim's reason file read the wrong directory"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which directory the recycle reads a lock holder's worktrees from; its verdicts and waits are unchanged
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9617 (#12096) follow-up G'
+  plan_refs: [W1-T9617, W1-T1046, W1-T3611, W1-T6597, W1-T8135, W1-T9410]
+  files:
+    - deploy/recycle-container.sh
+    - test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - deploy/recycle-container.sh holder_worktrees() walks "${STATE_DIR}/worktrees"/* for a lock's holder
+      (a `run-|sweep-<taskId>-*` name, or a fix-branch claim's checked-out ref). worker_lane() keeps only trees
+      under "${STATE_DIR}/worktrees/" and maps them to the container path with STATE_MOUNT_DEST, then matches a
+      worker's cwd against them. reclaim_frozen_daemon_holdings() writes holder_worktrees into each reclaimed
+      lock's `.reason`.
+    - deploy/scratch-mounts.sh scratch_plan() binds `${base}/worktrees` to /home/node/Remudero/worktrees when the
+      scratch mounts are on (RMD_SCRATCH=on or /etc/remudero/scratch-mounts.on); `base` comes from
+      scratch_base_for (<scratch>/rmd/<key>). The script records the bound dirs in <state-dir>/.scratch-mounts.
+    - recycle-container.sh sources scratch-mounts.sh, but only uses scratch_plan when it launches the new
+      container, after the drain has read the worktrees.
+    OBSERVED 2026-10-15 ~19:15Z on the Azure host (ls only): /etc/remudero/scratch-mounts.on exists;
+    /mnt/scratch/rmd/rmd-state2/worktrees holds 12 entries; /home/craigoleyagent/rmd-state2/worktrees holds 9, the
+    newest dated 2026-10-01 (run-W1-T5004, run-W1-T5005, sweep-W1-T4419 among them). The W1-T9617 builder saw
+    9 stale vs 10 live at ~14:30Z.
+    INFERRED effects (the builder confirms each on a fixture):
+    - every lane-holding worker reads `lane-less` in worker_lines, so the drain counts it both as a lock and as a
+      lane-less busy worker, the double count W1-T8135 removed;
+    - a frozen-daemon reclaim (W1-T6597) writes "worktree: none found" or a stale tree into the `.reason`, so the
+      operator is pointed at the wrong place to recover work;
+    - a stale state-dir tree whose name matches a reused task key can be named as the holder's.
+  design: |
+    1. One resolver for the live worktrees dir: the container's own bind for /home/node/Remudero/worktrees
+       (docker inspect .Mounts, already used for .Id/.State), falling back to the scratch plan for the state dir,
+       then to ${STATE_DIR}/worktrees. holder_worktrees and worker_lane read that dir, and worker_lane maps it to
+       the container path by the bind's destination.
+    2. Every read stays best-effort (W1-T9410): an unreadable bind or plan falls back as before and the reason
+       names which dir was read.
+    3. The `.reason` file and the drain's busy-worker lines name the dir they read.
+    4. No new switch or constant; with scratch off the behaviour is byte-identical.
+    Tests go in test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts, titled verbatim as
+    in the proofs, driving the script against a fixture state dir, a fixture scratch root (RMD_SCRATCH_ROOT) and a
+    fake docker on PATH, as the existing recycle-container tests do.
+  acceptance:
+    - claim: "with scratch mounts on, a task lock's holder worktree is found under the scratch worktrees dir and a stale state-dir tree of the same name is not named"
+      proof: 'grep: test("W1-T9713: a holder worktree is read from the scratch bind, not the stale state dir" in test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts'
+    - claim: "a worker whose cwd is in a lock holder's scratch worktree is attributed to that lane, not counted lane-less"
+      proof: 'grep: test("W1-T9713: a worker in a scratch worktree is attributed to its lock" in test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts'
+    - claim: "with scratch mounts off, the worktrees dir read is the state dir's, as before"
+      proof: 'grep: test("W1-T9713: with scratch off the state-dir worktrees are read as before" in test/a-recycle-finds-a-holders-worktree-where-the-container-mounts-it.test.ts'
+  falsifier: |
+    On origin/main, put a `run-W1-T1-<epoch>` worktree under the fixture scratch root's worktrees, a stale one of
+    the same name under the state dir, a lock for W1-T1, and a fake docker whose ps names a worker with its cwd in
+    the scratch tree: holder_worktrees names the state-dir tree and worker_lane prints lane-less, so the first two
+    tests fail. Resolve the dir from the scratch plan but map it to the container path with STATE_DIR: the cwd still
+    does not match and the second test fails.

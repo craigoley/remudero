@@ -1,0 +1,51 @@
+- id: W1-T9740
+  title: "CENSUS-PRECHECK MEASURES ITS BASE WITHOUT WRITING THE GIT COMMON DIR — it builds the merge-base tree with `git worktree add`, which writes <common>/worktrees; inside W1-T9619's pre-open sandbox the common dir is read-only, so every census-precheck there reports NOT MEASURED instead of judging the branch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, how census-precheck materializes its base tree; which suites it runs and its verdicts are unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9619/W1-T9602 builder report, item R'
+  plan_refs: [W1-T9619, W1-T5663, W1-T6124]
+  files:
+    - scripts/census-precheck.mjs
+    - test/the-merge-base-tree-is-built-without-writing-the-common-dir.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - scripts/census-precheck.mjs builds its base tree with `gitOut(root, ["worktree", "add", "--detach", baseRoot,
+      mergeBase])`. `git worktree add` writes the new worktree's admin dir under the repository's common dir
+      (`<common>/worktrees/<name>`).
+    - An unrunnable base is reported NOT MEASURED, never as a clean tree (W1-T5663), so a failure here is silent
+      lost coverage, not a red.
+    READ at W1-T9619's build head ad81f6cfd (open PR #12122): the pre-open gate runs inside proofSandboxArgv, where
+    the runtime and the git common dir are bound read-only. The worktree and its own gitdir stay writable.
+    OBSERVED by the W1-T9619 builder in a real local sandbox (bwrap 0.9.0): census-precheck inside the gate could not
+    build its merge-base worktree and its checks reported "not measured" instead of running.
+    INFERRED: once W1-T9619 merges, every sandboxed pre-open gate loses census-precheck's verdict; the push gate and
+    CI still run it, so a census red is found one stage later, after the PR opens.
+  design: |
+    1. census-precheck materializes the merge-base tree without writing the common dir: for example
+       `git archive <mergeBase> | tar -x -C <baseRoot>`, or a checkout with a private GIT_INDEX_FILE and
+       `--work-tree=<baseRoot>` under its own temp dir. The base tree's contents are byte-identical to today's
+       worktree checkout for every path the census suites read (node_modules is linked the same way).
+    2. The base is removed with the temp dir; no `git worktree prune` is needed.
+    3. A base that still cannot be built stays NOT MEASURED with its reason, as today.
+    4. No change to which suites run, their baselines, or the refusal rule.
+    Tests go in test/the-merge-base-tree-is-built-without-writing-the-common-dir.test.ts, titled verbatim as in
+    the proofs. One test makes the fixture repo's common dir read-only (chmod -R a-w on the .git dir; skipped as
+    root) and runs the real script.
+  acceptance:
+    - claim: "with the repository's common dir read-only, census-precheck still builds its base and measures the branch"
+      proof: 'grep: test("W1-T9740: census-precheck measures its base with a read-only common dir" in test/the-merge-base-tree-is-built-without-writing-the-common-dir.test.ts'
+    - claim: "the base tree census-precheck builds holds the same files as a worktree checkout of the merge base"
+      proof: 'grep: test("W1-T9740: the base tree equals a worktree checkout of the merge base" in test/the-merge-base-tree-is-built-without-writing-the-common-dir.test.ts'
+  falsifier: |
+    On origin/main, make a fixture repo's .git read-only and run census-precheck on a branch that grows a census
+    count: `git worktree add` fails, the result is NOT MEASURED, and the first test fails. Extract the base with
+    `git archive` but forget the files a .gitattributes export-ignore drops: the trees differ and the second test fails.

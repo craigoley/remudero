@@ -14,20 +14,30 @@ export const corpusDigest = value => digest(JSON.stringify(value));
 const git = (root, args) => execFileSync("git", args, { cwd: root, encoding: "utf8", timeout: 30000, maxBuffer: 8 << 20 }).trim();
 const safeSuite = name => typeof name === "string" && SUITE.test(name) && !name.split("/").some(x => x === "." || x === "..");
 
-/** One descriptor answers both the bound and the bytes, so nothing re-resolves the path between check and
- *  read (js/file-system-race); O_NOFOLLOW refuses a symlink and O_NONBLOCK keeps a FIFO from hanging the open. */
+/** One descriptor answers both the bound and the bytes. Observe changes to that inode, not pathname CAS
+ * or an atomic snapshot. O_NOFOLLOW refuses the final symlink; O_NONBLOCK keeps a FIFO open from hanging. */
 export function readCorpusBytes(path, maximumBytes = 4 * 1024 ** 2) {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 256 * 1024 ** 2)
+    throw RangeError("read-map corpus maximumBytes must be a positive safe integer <= 256 MiB");
+  const { O_NOFOLLOW, O_NONBLOCK } = constants;
+  if (![O_NOFOLLOW, O_NONBLOCK].every(flag => Number.isSafeInteger(flag) && flag > 0 && flag <= 0x7fffffff))
+    throw Error("read-map corpus no-follow/nonblocking file flags unavailable");
+  const observable = stat => Number.isSafeInteger(stat.dev) && stat.dev >= 0 &&
+    Number.isSafeInteger(stat.ino) && stat.ino >= 0 && Number.isSafeInteger(stat.size) &&
+    Number.isFinite(stat.mtimeMs) && Number.isFinite(stat.ctimeMs);
   let fd;
-  try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); }
+  try { fd = openSync(path, constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK); }
   catch (error) { throw error?.code === "ELOOP" ? Error("read-map corpus needs a bounded regular file") : error; }
   try {
     const before = fstatSync(fd);
-    if (!before.isFile() || before.size < 1 || before.size > maximumBytes) throw Error("read-map corpus needs a bounded regular file");
+    if (!observable(before) || !before.isFile() || before.size < 1 || before.size > maximumBytes) throw Error("read-map corpus needs a bounded regular file");
     const bytes = Buffer.alloc(before.size);
     let read = 0;
     for (let n = 1; read < bytes.length && n > 0; read += n) n = readSync(fd, bytes, read, bytes.length - read, read);
     const after = fstatSync(fd);
-    if (read !== before.size || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw Error("read-map corpus file changed during capture");
+    if (!observable(after) || !after.isFile() || read !== before.size || before.dev !== after.dev ||
+        before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs ||
+        before.ctimeMs !== after.ctimeMs) throw Error("read-map corpus file changed during capture");
     return { bytes, sha256: digest(bytes), modifiedMs: after.mtimeMs };
   } finally { closeSync(fd); }
 }

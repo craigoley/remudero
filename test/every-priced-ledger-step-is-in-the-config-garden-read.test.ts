@@ -1,3 +1,4 @@
+// @census-reads: src/
 // @source-text-subject: this census's subject is the ledger writes in src/ — it reads each source file's text
 // to find every step written with `pr_url` or `cost_usd`, the way the spend-role census finds cost rows.
 import assert from "node:assert/strict";

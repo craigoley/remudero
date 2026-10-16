@@ -1,3 +1,4 @@
+// @census-reads: src/
 // @source-text-subject: this census's subject is the ledger writes in src/ — it reads each source file's text
 // to find a writer for every step an incident rule reads, and an emitter for every runbook incident name.
 import assert from "node:assert/strict";

@@ -18,16 +18,17 @@ const summary = (finishedAt: string, steps: Array<{ name: string; ok: boolean }>
 
 test("a build whose tree fails a census step is reported failing with that census named", async () => {
   const run = fn<Gate>("runPreopenGate");
-  let read = "";
+  const reads: string[] = [];
+  // W1-T9619: the runner hands back the harness-owned summary's failing steps; the worktree's own file is never read.
   const result = await run("/wt", {
     clock: { now: () => Date.parse("2026-10-10T03:00:00Z") },
-    runGate: async () => ({ exitCode: 1 }),
+    runGate: async () => ({ exitCode: 1, summary: { failedSteps: ["env-registry"] } }),
     readFile: (p: string) => {
-      read = p;
-      return summary("2026-10-10T03:00:30Z", [{ name: "env-registry", ok: false }, { name: "depcruise", ok: true }]);
+      reads.push(p);
+      return summary("2026-10-10T03:00:30Z", [{ name: "depcruise", ok: true }]);
     },
   });
-  assert.equal(read, join("/wt", "coverage", "preflight-summary.json"));
+  assert.deepEqual(reads, [], "no summary inside the worktree is read");
   assert.equal(result.kind, "fail");
   assert.deepEqual(result.failedSteps, ["env-registry"]);
   const prompt = fn<(steps: readonly string[], h: boolean) => string>("renderPreopenGatePrompt")(["env-registry"], false);
@@ -38,12 +39,16 @@ test("a build whose tree fails a census step is reported failing with that censu
 test("a clean tree passes, and a stale or missing summary is unmeasured rather than a pass", async () => {
   const run = fn<Gate>("runPreopenGate");
   const clock = { now: () => Date.parse("2026-10-10T03:00:00Z") };
-  const clean = await run("/wt", { clock, runGate: async () => ({ exitCode: 0 }), readFile: () => summary("2026-10-10T03:01:00Z", [{ name: "depcruise", ok: true }]) });
+  const clean = await run("/wt", { clock, runGate: async () => ({ exitCode: 0 }) });
   assert.equal(clean.kind, "pass");
-  const stale = await run("/wt", { clock, runGate: async () => ({ exitCode: 0 }), readFile: () => summary("2026-10-10T02:00:00Z", [{ name: "depcruise", ok: true }]) });
+  const stale = await run("/wt", { clock, runGate: async () => ({ exitCode: 1, summary: { unreadable: "the preflight summary predates this gate run" } }) });
   assert.equal(stale.kind, "unmeasured");
-  const missing = await run("/wt", { clock, runGate: async () => ({ exitCode: 1 }), readFile: () => { throw new Error("ENOENT"); } });
+  const missing = await run("/wt", { clock, runGate: async () => ({ exitCode: 1 }) });
   assert.equal(missing.kind, "unmeasured");
-  const timedOut = await run("/wt", { clock, runGate: async () => ({ exitCode: null, error: "fast gate exceeded its backstop" }), readFile: () => "" });
+  const timedOut = await run("/wt", { clock, runGate: async () => ({ exitCode: null, error: "fast gate exceeded its backstop" }) });
   assert.equal(timedOut.kind, "unmeasured");
+  // The summary reader itself: a summary older than the run is never read as current.
+  const read = fn<(p: string, t: number, r: (p: string) => string) => { failedSteps?: string[]; unreadable?: string }>("readGateSummary");
+  assert.deepEqual(read("/h/s.json", Date.parse("2026-10-10T03:00:00Z"), () => summary("2026-10-10T02:00:00Z", [])), { unreadable: "the preflight summary predates this gate run" });
+  assert.deepEqual(read("/h/s.json", Date.parse("2026-10-10T03:00:00Z"), () => summary("2026-10-10T03:00:01Z", [{ name: "jscpd", ok: false }])), { failedSteps: ["jscpd"] });
 });

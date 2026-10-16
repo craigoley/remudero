@@ -1,0 +1,57 @@
+- id: W1-T9733
+  title: "A FIX ROUND CALLS A CENSUS RED ITS OWN PR CAUSED 'DIFF-CANNOT-REACH' — W1-T9561's redAttribution asks whether the diff reaches the failing test through its import closure, but a census walks the tree and imports none of it, so a PR that adds a site the census reports passes at main, reaches nothing it imports, and is rerouted as a flake; the fix.scope_rerouted row it writes then counts toward a flake incident, the blind spot W1-T9708 closes in the flake gardener"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  origin: "operator session 2026-10-15 filing agent F4 lead 5: the fix-round twin of W1-T9708 (#12153)"
+  plan_refs: [W1-T9561, W1-T9589, W1-T9708, W1-T6406]
+  files:
+    - src/lib/fix-outcome.ts
+    - test/a-tree-walk-red-a-pr-causes-is-never-diff-cannot-reach.test.ts
+  status: queued
+  priority: 2  # a PR-caused census red rerouted as a flake costs the PR its fix round and files evidence toward a false incident
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf (2026-10-15):
+    - src/lib/fix-outcome.ts `redAttribution`: `reached` is the changed paths inside the failing files' import
+      closure, harness paths, root files, or test/ helpers a closure file names. With none reached, every closure
+      read and every failing file `passes` at main, it answers `diff-cannot-reach`.
+    - A census suite (CENSUS_MEMBERSHIP_SUITES in src/lib/ci-parity.ts, or one the candidate recognizer finds)
+      walks a prefix of the tree with `git ls-files` or readdir and imports none of what it walks. A PR adding a site
+      it reports reds it, and the same census passes at main. Every condition above then holds, and the red is
+      rerouted.
+    - `readRedAttribution` feeds the fix round's NEEDS_SCOPE. A `diff-cannot-reach` writes `fix.scope_rerouted`
+      (`scopeReroutedFields`). The flake-incident gardener's `evidenceOf` treats a rerouted (task, head, file) as
+      clear, so the round's own red counts toward a flake incident (W1-T9589).
+    - W1-T9708 (filing plan-file-1792092476441; build run-W1-T9708-1792093620064) adds `censusWalksOf(testFile,
+      text)` to src/lib/ci-parity.ts and uses it for the flake gardener's selector-shadow rows only. Its diff leaves
+      fix-outcome.ts untouched.
+  design: |
+    0. ORDER. Build after W1-T9708 merges. Its filing (plan-file-1792092476441) was still open when this was filed, and a
+       `depends_on` naming an id that is not in the plan breaks plan load (src/lib/plan.ts), so this record names it
+       only in plan_refs. If `censusWalksOf` is not in src/lib/ci-parity.ts at the build's base, stop and report.
+       Never write a second census reader.
+    1. `RedAttributionInput` gains `censusWalks: ReadonlyMap<string, readonly string[]> | undefined`, each failing
+       file's `censusWalksOf` result. `readRedAttribution` reads each failing file's text at the head and computes it
+       with W1-T9708's `censusWalksOf`. It is never a second census reader.
+    2. A changed path under any failing file's walk prefix is `reached`. The answer is `diff-reaches`, and the reason
+       names the census and the path.
+    3. A failing file whose text could not be read answers `unknown`, today's scope amendment, never
+       `diff-cannot-reach`.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - a failing census suite whose walk covers a path the PR adds answers `diff-reaches`, naming that path;
+       - a failing ordinary suite with the same diff still answers `diff-cannot-reach` (positive control);
+       - an unread census text answers `unknown`.
+  acceptance:
+    - claim: "a census red on a PR whose diff enters the census's walk is diff-reaches"
+      proof: 'grep: test("W1-T9733: a census red the diff enters is diff-reaches" in test/a-tree-walk-red-a-pr-causes-is-never-diff-cannot-reach.test.ts'
+    - claim: "an ordinary red the diff cannot reach is still diff-cannot-reach"
+      proof: 'grep: test("W1-T9733: an ordinary red the diff cannot reach is unchanged" in test/a-tree-walk-red-a-pr-causes-is-never-diff-cannot-reach.test.ts'
+  falsifier: |
+    At origin/main, redAttribution with a failing file test/x-census.test.ts whose closure is itself, changedPaths
+    [src/lib/new-site.ts], baseOutcomes passes, and namedInClosure empty answers `diff-cannot-reach`. That census
+    walks src/, so the first test fails.

@@ -55,6 +55,10 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 
 ## Plan and task hygiene
 
+- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  worktree retirement to the harness.** → doctrine/plan-and-task-hygiene/finish-owned-work.md
+
 - **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
   `run-<taskId>-*` branch — never from ledger verdict lines.** → doctrine/plan-and-task-hygiene/derive-merged-tasks.md
 - **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`

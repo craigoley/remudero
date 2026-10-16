@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator approval 2026-10-11: file the recommended follow-ups (rmd next-task-id reads under the shared gh floor)"
   plan_refs: [W1-T3275, W1-T3297, W1-T4085, W1-T4970, W1-T6372, W1-T3091]
-  files: [src/lib/github-transport.ts, src/run-task.ts, test/next-task-id-waits-for-the-shared-read-floor.test.ts]
+  files: [src/lib/github-transport.ts, src/lib/config-schema.ts, src/run-task.ts, test/next-task-id-waits-for-the-shared-read-floor.test.ts]
   status: queued
   priority: 1
   attempts: 0

@@ -11,7 +11,8 @@
   origin: "operator session 2026-10-15: 'IDLE GATE: origin advancing DURING a dispatch never interrupts it' fails locally on origin/main"
   plan_refs: [W1-T9069, W1-T2965]
   files: [test/daemon-freshness-wiring.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired  # already fixed on main: W1-T9086 (#11939, e1c3db864, 2026-10-15T17:20Z) rewrote this file's escape hatches to count daemon.tick polls (`polls >= 4`), and the suite reads # tests 12 # fail 0 on main 6b938114d; the W1-T9672 build (run-W1-T9672-1792082085518) conflicts with it and is redundant
   priority: 2  # CI has not been seen red on it; every local preflight that selects the file goes red
   attempts: 0
   rationale: |

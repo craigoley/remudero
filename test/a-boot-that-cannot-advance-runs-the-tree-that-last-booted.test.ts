@@ -53,16 +53,17 @@ function advance(origin: GitRepo, file: string): string {
 }
 
 /** Run the real entrypoint; its command records the RMD_BOOT_CHECKOUT_BLOCKED the daemon would inherit. */
-function boot(home: string, origin: GitRepo, ref = "main") {
+function boot(home: string, origin: GitRepo, ref = "main", inheritedEnv: NodeJS.ProcessEnv = process.env) {
   const stubs = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}stale-boot-stub-`));
   writeFileSync(join(stubs, "npm"), '#!/usr/bin/env bash\nif [ "$1" = ci ]; then mkdir -p node_modules/.bin; printf "#!/bin/sh\\n" > node_modules/.bin/tsx; chmod 0755 node_modules/.bin/tsx; fi\n', { mode: 0o755 });
   chmodSync(join(stubs, "npm"), 0o755);
   const envFile = join(stubs, "blocked");
-  const ambient = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("RMD_") && !/^(GH_APP_|GH_TOKEN$|GITHUB_TOKEN$)/.test(k)));
+  const ambient = Object.fromEntries(Object.entries(inheritedEnv).filter(([k]) => !k.startsWith("RMD_") && !/^(GH_APP_|GH_TOKEN$|GITHUB_TOKEN$)/.test(k)));
   const r = spawnSync("bash", [SCRIPT, "bash", "-c", 'printf "%s" "${RMD_BOOT_CHECKOUT_BLOCKED-<unset>}" > "$0"', envFile], {
     encoding: "utf8",
     timeout: 60_000,
-    env: { ...ambient, PATH: `${stubs}:${process.env.PATH ?? ""}`, HOME: home, RMD_REPO_URL: origin.dir, RMD_REF: ref, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
+    // The entrypoint writes global config; inherited /dev/null or host paths must not receive it.
+    env: { ...ambient, PATH: `${stubs}:${process.env.PATH ?? ""}`, HOME: home, RMD_REPO_URL: origin.dir, RMD_REF: ref, GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
   });
   const blocked = existsSync(envFile) ? readFileSync(envFile, "utf8") : undefined;
   rmSync(stubs, { recursive: true, force: true });
@@ -85,8 +86,13 @@ test("W1-T9631: a boot that cannot advance runs the tree that last booted, names
   const home = freshHome(t);
   const origin = seededOrigin();
   t.after(() => origin.cleanup());
-  const first = boot(home, origin);
+  const hostConfig = join(home, "host.gitconfig");
+  const hostSentinel = "[fixture]\n\tmarker = untouched\n";
+  writeFileSync(hostConfig, hostSentinel);
+  const first = boot(home, origin, "main", { ...process.env, GIT_CONFIG_GLOBAL: hostConfig, GIT_CONFIG_SYSTEM: hostConfig });
   assert.equal(first.status, 0, first.stderr);
+  assert.equal(readFileSync(hostConfig, "utf8"), hostSentinel, "the inherited config sentinel is untouched");
+  assert.match(readFileSync(join(home, ".gitconfig"), "utf8"), /\[user\]/, "the entrypoint writes worker identity only to the fixture config");
   assert.equal(first.blocked, "<unset>", "a boot that reached its target tells the daemon nothing is blocked");
   const lastBooted = headOf(home);
   const target = advance(origin, "second.txt");
