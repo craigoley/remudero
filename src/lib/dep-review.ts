@@ -547,8 +547,6 @@ export type DepReviewChecksObservation =
   | { kind: "observed"; checks: ReturnType<typeof rollupFromRest> }
   | { kind: "unknown"; reason: string };
 
-/** W1-T9689: finite head-specific reads, over the caller's bounded async transport. A truncated
- * page is unresolved, not a partial green rollup. Selection policy stays in the shared selector. */
 export async function readSelectedDepReviewChecks(
   owner: string, repo: string, selected: DepReviewSelectedHead, read: GhApiFetcher,
 ): Promise<DepReviewChecksObservation> {
