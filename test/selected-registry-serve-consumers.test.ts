@@ -211,12 +211,13 @@ test("selected inbox discovery preserves real registered repo defaults and unkno
 });
 
 test("selected discovery scopes isolate concurrent nested absent and escaped invocations", async (t) => {
-  const f = fixture(t), other = fixture(t), ready = pendingValue<void>(), release = pendingValue<void>();
+  const f = fixture(t), other = fixture(t), ready = pendingValue<void>(), release = pendingValue<void>(), late = pendingValue<void>();
   const run = Reflect.get(registryConsumers, "withSelectedRegistryContext");
   const sync = Reflect.get(registryConsumers, "withSelectedRegistryContextSync");
   assert.equal(typeof run, "function"); assert.equal(typeof sync, "function");
   const first = createSelectedRegistryObserver(f.options), second = createSelectedRegistryObserver(other.options);
   let escaped!: () => ReadonlySet<string> | undefined;
+  let lateWork!: Promise<ReadonlySet<string> | undefined>;
   const expected = knownPlanRepos(f.root);
   const a = Reflect.apply(run, undefined, [first, async () => {
     ready.resolve(); await release.promise;
@@ -224,6 +225,7 @@ test("selected discovery scopes isolate concurrent nested absent and escaped inv
     assert.equal(f.rows.length, 0, "an absent nested invocation must mask the outer opt-in");
     assert.deepEqual(knownPlanRepos(f.root), expected);
     escaped = () => knownPlanRepos(other.root);
+    lateWork = (async () => { await late.promise; return knownPlanRepos(f.root); })();
     return "first-result";
   }]) as Promise<string>;
   await ready.promise;
@@ -235,7 +237,7 @@ test("selected discovery scopes isolate concurrent nested absent and escaped inv
   assert.equal(f.rows[0]?.fields.reason, "target_unavailable", "aggregate discovery cannot invent a configured single-instance target");
   assert.equal(f.rows[0]?.fields.target_instance, undefined);
   assert.equal(f.rows[0]?.fields.publication_permission, "not-granted");
-  const before = f.rows.length; escaped(); knownPlanRepos(f.root);
+  const before = f.rows.length; late.resolve(); await lateWork; escaped(); knownPlanRepos(f.root);
   assert.equal(f.rows.length, before, "neither an escaped nor a later no-config call inherits authority");
   const failure = new Error("private-operation-sentinel");
   await assert.rejects(Reflect.apply(run, undefined, [undefined, async () => { throw failure; }]), error => error === failure);
