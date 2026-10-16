@@ -2526,30 +2526,37 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
  * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
  * the card below, over the same write-token scope every write uses.
  */
+/** Read-only qualification of maintained source evidence; never starts classification or history IO. */
+function qualifyMaintainedInbox(deps: PanelGraphDeps): ReturnType<NonNullable<Route["cacheQualification"]>> {
+  if (!deps.inboxFromSlowLane) return undefined;
+  const planSource = deps.readPlanSource?.();
+  if (planSource?.state === "unavailable") return { status: 503, body: {
+    error: "plan_source_unavailable", detail: "Current plan evidence is unavailable.", planSource,
+  } };
+  if (planSource?.state === "stale") return { status: 503, body: {
+    error: "inbox_snapshot_stale", detail: "Current plan evidence is stale; wait for a qualified maintained classification.", planSource,
+  } };
+  const read = readSlowLaneInbox(deps);
+  if (!read) return { status: 503, body: { error: "inbox_not_ready", detail: "The slow lane has not persisted a classification yet." } };
+  if (!read.snapshotKey) return { status: 503, body: { error: "inbox_snapshot_pending", detail: "A keyed maintained classification is not available yet." } };
+  const age = systemClock.now() - Date.parse(read.classifiedAt ?? "");
+  if (!Number.isFinite(age) || age < 0 || age > INBOX_STALE_AFTER_MS) return {
+    status: 503, body: { error: "inbox_snapshot_stale", detail: "The maintained Inbox classification is not source-verified fresh." },
+  };
+  return { key: read.snapshotKey };
+}
+
 export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   const qualify: NonNullable<Route["cacheQualification"]> = (req) => {
-    if (!deps.inboxFromSlowLane) return undefined;
-    const planSource = deps.readPlanSource?.();
-    if (planSource?.state === "unavailable") return { status: 503, body: {
-      error: "plan_source_unavailable", detail: "Current plan evidence is unavailable.", planSource,
-    } };
-    if (planSource?.state === "stale") return { status: 503, body: {
-      error: "inbox_snapshot_stale", detail: "Current plan evidence is stale; wait for a qualified maintained classification.", planSource,
-    } };
-    const read = readSlowLaneInbox(deps);
-    if (!read) return { status: 503, body: { error: "inbox_not_ready", detail: "The slow lane has not persisted a classification yet." } };
-    if (!read.snapshotKey) return { status: 503, body: { error: "inbox_snapshot_pending", detail: "A keyed maintained classification is not available yet." } };
-    const age = systemClock.now() - Date.parse(read.classifiedAt ?? "");
-    if (!Number.isFinite(age) || age < 0 || age > INBOX_STALE_AFTER_MS) return {
-      status: 503, body: { error: "inbox_snapshot_stale", detail: "The maintained Inbox classification is not source-verified fresh." },
-    };
+    const source = qualifyMaintainedInbox(deps);
+    if (!source || "status" in source) return source;
     const shape = inboxShapeOf(req.url);
     if ("error" in shape) return { status: 400, body: { error: "invalid_request", detail: shape.error } };
     if (shape.section !== undefined && shape.section !== "needsYou") {
-      const cursor = readSnapshotCursor(shape.page.cursor, read.snapshotKey, shape.section);
+      const cursor = readSnapshotCursor(shape.page.cursor, source.key, shape.section);
       if ("error" in cursor) { const { status, ...body } = cursor; return { status, body }; }
     }
-    return { key: read.snapshotKey };
+    return source;
   };
   return {
     method: "GET",
@@ -2741,6 +2748,7 @@ export function materializeInboxAttentionCensus(deps: PanelGraphDeps, classified
 export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET", path: "/v1/inbox/attention-census", scope: "read",
+    cacheQualification: () => qualifyMaintainedInbox(deps),
     handler: async (_req, res) => {
       res.setHeader("cache-control", "private, no-store");
       if (refusePlanSourceUnavailable(deps, res)) return;
@@ -2768,6 +2776,7 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         }
         const builtAt = fixedClock(builtAtMs).iso();
         sendJson(res, 200, { ...classified.attentionCensus,
+          ...(classified.whyMeFeedback ? { whyMeFeedback: classified.whyMeFeedback } : {}),
           source: { state: "fresh", classifiedAt: classified.classifiedAt, builtAt, verifiedAt: builtAt, ageMs: builtAtMs - classifiedAtMs },
           ...withPlanSource(deps, {}) });
         return;
@@ -2871,6 +2880,7 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
 }
 
 interface InboxRead {
+  whyMeFeedback?: import("./inbox-why-me.js").WhyMeFeedback;
   snapshotKey?: string;
   attentionCensus?: import("./inbox-responder.js").AttentionCensus;
   dismissalAudit?: import("./inbox-dismissal-audit.js").InboxDismissalAudit;
@@ -2913,7 +2923,7 @@ function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowL
   let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
-    snapshotKey: persisted.snapshotKey, attentionCensus: persisted.attentionCensus,
+    snapshotKey: persisted.snapshotKey, attentionCensus: persisted.attentionCensus, whyMeFeedback: persisted.whyMeFeedback,
     attentionEvidence: persisted.attentionEvidence,
     dismissalAudit: persisted.dismissalAudit,
     mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
