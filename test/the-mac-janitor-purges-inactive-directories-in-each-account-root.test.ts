@@ -88,7 +88,7 @@ test("unversioned source, reports, history, credentials and dependency seeds sur
   const fx = setup();
   try {
     const base = roots(fx)[3]!;
-    const names = ["fix.py", "report.md", "summary.txt", "report.json", ".rmd-janitor-keep", "package.json", "ledger.ndjson", "backup.bundle", "source.tar", "source.zip", "credentials.pem", ".rmd-dependency-seed-root.json"];
+    const names = ["fix.py", "report.md", "summary.txt", "report.json", ".rmd-janitor-keep", "package.json", "ledger.ndjson", "backup.bundle", "source.tar", "source.zip", "credentials.pem", ".rmd-dependency-seed-root.json", "repair.patch", "repair.diff", "failed.rej", "backup.orig"];
     const held = names.map((file, i) => { const p = data(base, `held-${i}`); writeFileSync(join(p, file), "retain\n"); age(p, 8); return p; });
     const idle = data(base, "idle-sibling"); const r = sweep(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
@@ -157,6 +157,27 @@ test("a mounted descendant or unreadable mount inventory keeps the directory", (
       const r = sweep(fx); assert.equal(r.status, 0, r.stderr + r.stdout);
       assert.equal(existsSync(path), true, r.stdout);
       assert.match(r.stdout, fail ? /mount visibility unavailable/ : /directory contains a mount/);
+    } finally { rmSync(fx.root, { recursive: true, force: true }); }
+  }
+});
+
+test("an exited ancestor CWD probe does not hold idle siblings but a live or unreadable PID does", () => {
+  for (const kind of ["gone", "live", "warning", "unreadable", "wrong-pid", "empty-command"] as const) {
+    const fx = setup();
+    try {
+      const path = data(roots(fx)[3]!, "ancestor-pid-case");
+      writeFileSync(fx.lsofList, fx.home + "\n");
+      const result = kind === "gone" ? "exit 1"
+        : kind === "warning" ? 'echo "permission denied" >&2; exit 1'
+        : kind === "unreadable" ? "exit 2"
+        : kind === "wrong-pid" ? "printf '99 /bin/sh\\n'"
+        : kind === "empty-command" ? "printf '1 \\n'"
+        : "printf '1 node rmd-work/ancestor-pid-case/job.mjs\\n'";
+      writeFileSync(join(fx.root, "bin/ps"),
+        `#!/bin/bash\nif [ "$1" = -ww ]; then ${result}; else printf '2 /bin/sh\\n'; fi\n`, { mode: 0o755 });
+      const r = sweep(fx); assert.equal(r.status, 0, r.stderr + r.stdout);
+      assert.equal(existsSync(path), kind !== "gone", `${kind}: ${r.stdout}`);
+      if (kind !== "gone") assert.match(r.stdout, /working directory active or unknown/);
     } finally { rmSync(fx.root, { recursive: true, force: true }); }
   }
 });

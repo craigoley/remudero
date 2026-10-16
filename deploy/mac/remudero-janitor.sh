@@ -303,7 +303,7 @@ if [ "$HAS_LSOF" = "1" ]; then
   CWD_STATUS=$?
 fi
 is_cwd_in() {
-  local root="$1" line path cwd_pid="" relative command
+  local root="$1" line path cwd_pid="" relative command fresh fresh_rc fresh_pid
   [ "$HAS_LSOF" = "1" ] && [ "$CWD_STATUS" -le 1 ] || return 2
   while IFS= read -r line; do
     case "$line" in
@@ -316,8 +316,21 @@ is_cwd_in() {
       case "$root" in "$path"/*)
         relative=${root#"${path%/}"/}
         case "$cwd_pid" in ''|*[!0-9]*) return 2 ;; esac
-        [ "${PS_COMMANDS[cwd_pid]+present}" = present ] || return 2
-        command=${PS_COMMANDS[cwd_pid]}
+        if [ "${PS_COMMANDS[cwd_pid]+present}" = present ]; then
+          command=${PS_COMMANDS[cwd_pid]}
+        else
+          # lsof runs after the ps snapshot. Its short-lived parent/probe can
+          # appear here and already be gone, holding every sibling as unknown.
+          # Only ps's empty exit-1 (no selected PID) proves that stale record
+          # gone. Warnings, unreadable commands and malformed output still hold.
+          fresh=$(ps -ww -p "$cwd_pid" -o pid=,command= 2>&1)
+          fresh_rc=$?
+          if [ "$fresh_rc" = 1 ] && [ -z "$fresh" ]; then continue; fi
+          [ "$fresh_rc" = 0 ] || return 2
+          case "$fresh" in *$'\n'*) return 2 ;; esac
+          read -r fresh_pid command <<< "$fresh"
+          [ "$fresh_pid" = "$cwd_pid" ] && [ -n "$command" ] || return 2
+        fi
         case "$command" in *"$relative"*) return 0 ;; esac
         ;;
       esac
@@ -633,6 +646,7 @@ scratch_directory_risk() {
   # state/history, dependency seeds and coordination files. Do not follow links.
   found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects -o -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \
     -o -name '.rmd-janitor-keep' -o -name 'ledger*' -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
+    -o -iname '*.patch' -o -iname '*.diff' -o -iname '*.rej' -o -iname '*.orig' \
     -o -name '.env' -o -name '.env.*' -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' \
     -o -iname '*credential*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
     -o -name '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null) || {

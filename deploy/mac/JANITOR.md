@@ -5,6 +5,15 @@ script and installs both guards and the cache helper beside `~/bin/remudero-jani
 change schedules. Existing Craig launchd and agent cron jobs can use the same
 binary: account paths are derived from the account running it.
 
+For the shared cron entry point, run `bash deploy/mac/install-janitor.sh --shared`
+as an account allowed to write `/Users/Shared/remudero-mac`. This installs the
+same maintained janitor, both safety guards and cache helper there, and installs
+`/Users/Shared/remudero-mac-janitor.sh` beside it. The launcher never reaches into
+another user's private home. It preserves the caller's HOME and UID, existing
+six-hour guards, per-account locks and schedules. Do not widen home-directory
+permissions to make a cross-account launcher work. `--shared-root PATH` installs
+the identical layout under an alternate absolute root for testing.
+
 Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 
 The scan includes `~/Remudero`, nested disposable checkouts below the protected
@@ -25,6 +34,10 @@ that child through a relative path. PID/command visibility failures hold the
 candidate. Artifact cleanup uses its enclosing Git checkout as the activity
 scope, so an active repository retains its dependencies. Git-tracked nested directories and
 submodule/gitlink sources are never retired.
+An ancestor CWD record missing from the earlier process snapshot gets a fresh
+PID-specific read. Only an empty no-selected-PID result releases that stale
+record; live relative commands, unreadable probes, warnings and malformed
+output still hold the candidate. Direct CWDs inside a candidate remain holds.
 
 Every scheduled janitor pass also calls the installed helper in cache-only
 mode for its configured temporary roots, `~/Remudero` and `~/rmd-work`.
@@ -49,8 +62,10 @@ older Git without that control holds promisor repositories before reading their
 objects. The janitor does not fetch objects or update remote-tracking refs.
 
 Protected operator clones, seed stores, dirty/unpublished work, unknown ignored
-data, broken Git pointers and unreadable safety probes stay put. Mac standalone
-object stores remain conservatively held because borrowers can live in another
+data, broken Git pointers and unreadable safety probes stay put.
+Patch/diff files, rejected hunks and original-file backups are retained evidence,
+not generic data-only scratch, even when they are outside a Git checkout.
+Mac standalone object stores remain conservatively held because borrowers can live in another
 account. Azure also checks configured-root alternates and linked registrations;
 all local refs and reflog-only commits must be published before clone removal.
 
