@@ -311,7 +311,7 @@ export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interp
  *  because board-review.ts imports from this module and the cycle would close. */
 export interface BoardReferentState {
   status: "open" | "merged" | "dead";
-  unhandledEscalations: number;
+  unhandledEscalations?: number;
 }
 
 /** The ONE batched read of every board-review referent's state this pass. A referent id absent from `states` is
@@ -398,6 +398,7 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
   if (!read || read.kind === "unreadable") return { kind: "unreadable" };
   const state = read.states.get(referentId);
   if (!state) return { kind: "unreadable" };
+  if (state.status === "open" && proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === undefined) return { kind: "unreadable" };
   const referentResolved = boardReferentResolved(proposal, state);
   return referentResolved ? { kind: "resolved", referentId } : { kind: "live" };
 }

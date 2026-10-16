@@ -23,16 +23,23 @@
  * were each filed for a test main itself failed (0 of 3 and 0 of 9 retries recovered). Such a group is
  * MAIN-INHERITED: it files nothing and writes one `flake_incident.main_inherited` row the main-health
  * rung reads.
+ *
+ * W1-T9708: a census walks the tree and imports none of it, so a PR adding a site it reports reds it
+ * untouched (W1-T7532, W1-T7765). A retry that also failed, on a PR whose diff enters the census's
+ * walk ({@link censusWalksOf}), is that PR's own red; a recovered retry is timing and keeps the rule above.
  */
 import { dirname, join, normalize } from "node:path/posix";
+import { censusWalksOf } from "./ci-parity.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
+import { retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
 import {
   selectorShadowPlanTasksAsync, type SelectorShadowMainFailures, type SelectorShadowTaskIdMinter,
 } from "./selector-shadow-gardener.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
 
@@ -73,7 +80,7 @@ export const FLAKE_INCIDENT_POLICY = Object.freeze({
 
 export type FlakeIncidentPolicy = { -readonly [K in keyof typeof FLAKE_INCIDENT_POLICY]: number };
 
-type PlanTaskLite = { id: string; origin?: string; status?: string; retirement?: string };
+type PlanTaskLite = { id: string; origin?: string; status?: string; retirement?: string; superseded_by?: string };
 
 /** What the gardener reads beyond the ledger union: all injected, so a pass is testable without GitHub. */
 export interface FlakeIncidentSources {
@@ -86,6 +93,8 @@ export interface FlakeIncidentSources {
   readSource?: (file: string) => string | undefined;
   /** Test files main's own CI failed at a base sha; `undefined` is unread (W1-T9551). Absent: never read. */
   mainFailures?: SelectorShadowMainFailures;
+  /** Whether a superseding task has landed (W1-T9729). Absent: its `Remudero-Task:` trailer on the checkout's origin/main. */
+  isLanded?: (taskId: string) => boolean | Promise<boolean>;
   policy?: Partial<FlakeIncidentPolicy>;
 }
 
@@ -272,7 +281,10 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
 
   const evidenceOf = async (group: readonly FlakeObservation[]): Promise<Evidence> => {
     const { file } = group[0]!;
-    const own = new Set([file, ...testSourcePaths(file, readSource(file))]);
+    const source = readSource(file);
+    const own = new Set([file, ...testSourcePaths(file, source)]);
+    const walks = censusWalksOf(file, source);
+    const entersWalk = (paths: ReadonlySet<string>) => [...paths].some((p) => walks.some((w) => p.startsWith(w)));
     // A PR counts only when EVERY row it has in the group is clear of the test and its source.
     const verdict = new Map<number, boolean>();
     for (const o of group) {
@@ -281,7 +293,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
         clear = o.taskId !== undefined && o.headSha !== undefined && rerouted.has(JSON.stringify([o.taskId, o.headSha, o.file]));
       } else if (o.baseSha !== undefined && o.headSha !== undefined) {
         const paths = await changedPaths(o.baseSha, o.headSha);
-        clear = paths !== undefined && ![...own].some((p) => paths.has(p));
+        clear = paths !== undefined && ![...own].some((p) => paths.has(p)) && !(o.outcome === "also_failed" && entersWalk(paths));
       }
       for (const pr of o.prs) verdict.set(pr, (verdict.get(pr) ?? true) && clear);
     }
@@ -322,20 +334,26 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   let plan: PlanTaskLite[] | undefined;
   const planTasks = async (): Promise<PlanTaskLite[]> => (plan ??= await (sources.planTasks ?? (() => selectorShadowPlanTasksAsync(deps.repoRoot)))());
   const closed = new Set(["merged", "done"]);
-  /** The open task for an origin: in the plan and neither merged nor retired, or filed by this gardener
-   *  recently enough that its PR may not have landed. */
+  const isLanded = sources.isLanded ?? ((id: string) => taskLandedOnMain(id, (args) => hostWorktreeGitAsync(deps.repoRoot, args)));
+  /** Why an origin is already held, as the skip reason: a plan task neither merged nor retired, a retirement
+   *  whose superseding task has not landed (W1-T9729), or a recent filing whose PR may not have landed. */
   const openTaskFor = async (origin: string): Promise<string | undefined> => {
     const tasks = await planTasks();
     const file = flakeIncidentOriginFile(origin);
     const sameFile = (o: unknown) => typeof o === "string" && (o === origin || (file !== undefined && flakeIncidentOriginFile(o) === file));
     const open = tasks.find((t) => sameFile(t.origin) && !closed.has(t.status ?? "") && t.retirement === undefined);
-    if (open) return open.id;
+    if (open) return `open-task ${open.id}`;
+    for (const t of tasks) {
+      if (!sameFile(t.origin) || t.superseded_by === undefined) continue;
+      const landed = await isLanded(t.superseded_by);
+      if (retirementHoldsOrigin(t, () => landed)) return `superseded-by ${t.superseded_by}`;
+    }
     if (byStep(FLAKE_INCIDENT_MAIN_INHERITED_STEP).some((r) => sameFile(r.origin))) return MAIN_INHERITED_HANDLED;
-    if (file !== undefined && filedThisPass.has(file)) return filedThisPass.get(file);
+    if (file !== undefined && filedThisPass.has(file)) return `open-task ${filedThisPass.get(file)}`;
     const filed = byStep("flake_incident.filed").filter((r) => sameFile(r.origin) && typeof r.task_id === "string")
       .sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
     if (filed && !tasks.some((t) => t.id === filed.task_id) && nowMs - Date.parse(String(filed.ts)) < policy.pendingFilingHoldMs) {
-      return filed.task_id as string;
+      return `open-task ${filed.task_id as string}`;
     }
     return undefined;
   };
@@ -369,9 +387,8 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
       continue;
     }
     try {
-      const open = await openTaskFor(origin);
-      if (open !== undefined) {
-        const reason = open === MAIN_INHERITED_HANDLED ? MAIN_INHERITED_HANDLED : `open-task ${open}`;
+      const reason = await openTaskFor(origin);
+      if (reason !== undefined) {
         const said = byStep("flake_incident.skipped").some((r) => r.origin === origin && r.reason === reason);
         if (!said) deps.log("flake_incident.skipped", { origin, file, title, reason, prs: evidence.prs });
         continue;
@@ -390,7 +407,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
 
 type MainRedAtBase = boolean | "unread";
 
-/** What {@link runFlakeIncidentGardener}'s open-task read answers for an origin already routed to main-health. */
+/** The skip reason {@link runFlakeIncidentGardener}'s open-task read gives an origin already routed to main-health. */
 const MAIN_INHERITED_HANDLED = "main-inherited";
 
 /** The title of the test a flake incident's fix adds: both of its proofs name it. Plain words, so it is its own BRE. */

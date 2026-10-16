@@ -5856,9 +5856,10 @@ export function conflictRefusalCause(
   policy: Pick<SweepPolicy, "mergeConflictAdmissionEnabled">,
   generators: Readonly<Record<string, string>> = REGENERABLE_ARTIFACT_GENERATORS,
   evidence?: MergeConflictEvidence,
+  gap?: string,
 ): string {
   if (!hasCapturedMergeConflictEvidence(evidence ?? { files: [...files], oursLog: "", theirsLog: "" })) {
-    return "no valid conflicting-file evidence was captured";
+    return gap ? `no valid conflicting-file evidence was captured: ${gap}` : "no valid conflicting-file evidence was captured";
   }
   if (policy.mergeConflictAdmissionEnabled !== true) {
     return "conflict-repair admission is disabled (mergeConflictAdmissionEnabled)";
@@ -5871,6 +5872,13 @@ export function conflictRefusalCause(
   return undeclared.length > 0
     ? `conflict repair was not admitted for ${undeclared.join(", ")}`
     : "conflict repair was not admitted";
+}
+
+export function conflictEvidenceGap(pr: Pick<OpenPrView, "mergeConflict" | "mergeConflictGap">): string | undefined {
+  const files = pr.mergeConflict?.files;
+  if (files?.length === 0) return "GitHub's compare found no path changed on both sides since the merge base";
+  if (files !== undefined) return "the captured file list was malformed";
+  return pr.mergeConflictGap;
 }
 
 /** W1-T5908 — BACKSTOP: passes a dirty, evidence-less head may wait on `unknown` mergeability before
@@ -6484,6 +6492,7 @@ export interface OpenPrView {
    *  the merge base (W1-T94's new mode, design note iii). Populated when `mergeState === "dirty"`,
    *  mirroring how `ciFailures` is populated only when `checksState === "red"`. */
   mergeConflict?: MergeConflictEvidence;
+  mergeConflictGap?: string;
   /** What each recorded fix-rung strike TRIED for this PR's task, ledger ground truth only
    *  (W1-T78) — the clarification rung's input. `[]`/undefined when no strike is recorded, as for
    *  the terminal catch-all, which never dispatched a fix. */
@@ -8669,6 +8678,24 @@ export interface KnownMergeState {
   /** The ledger row's own `ts`, when present — carried into the inheriting pass's reason so a
    *  flapping read is legible rather than a silent override (W1-T4470 design (iv)). */
   observedAt?: string;
+  conflictFiles?: ConflictFileDiff[];
+}
+
+export function conflictEvidenceRowFields(
+  pr: Pick<OpenPrView, "mergeState" | "mergeConflict">,
+): { conflict_files?: Array<{ path: string; ours_deleted: number; theirs_deleted: number }> } {
+  if (pr.mergeState !== "dirty" || !hasCapturedMergeConflictEvidence(pr.mergeConflict)) return {};
+  return {
+    conflict_files: pr.mergeConflict!.files.map((f) => ({ path: f.path, ours_deleted: f.oursDeleted, theirs_deleted: f.theirsDeleted })),
+  };
+}
+
+function conflictFilesFromRow(value: unknown): ConflictFileDiff[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const files = value.map((f: { path?: unknown; ours_deleted?: unknown; theirs_deleted?: unknown } | null) => ({
+    path: f?.path, oursDeleted: f?.ours_deleted, theirsDeleted: f?.theirs_deleted,
+  })) as ConflictFileDiff[];
+  return hasCapturedMergeConflictEvidence({ files, oursLog: "", theirsLog: "" }) ? files : undefined;
 }
 
 /**
@@ -8695,7 +8722,8 @@ export function lastKnownMergeStateFromLedger(
     const state = line.merge_state;
     if (state !== "clean" && state !== "dirty" && state !== "behind") continue;
     // Ledger lines are append-ordered — the LAST match for this exact head is its most recent.
-    out = { state, ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}) };
+    const conflictFiles = state === "dirty" ? conflictFilesFromRow(line.conflict_files) : undefined;
+    out = { state, ...(typeof line.ts === "string" ? { observedAt: line.ts } : {}), ...(conflictFiles ? { conflictFiles } : {}) };
   }
   return out;
 }
@@ -8708,16 +8736,26 @@ export function lastKnownMergeStateFromLedger(
  * SAME `pr` object when nothing changes, so an unaffected PR costs nothing downstream. The returned
  * `pr` is used for EVERYTHING the rest of this PR's reconciliation reads — disposition, the
  * zero-check-run remedies, and the ledgered `sweep.disposed` row itself — so the inheritance is not
- * a second opinion layered on top of the ordinary path, it IS this pass's mergeability fact.
+ * a second opinion, it IS this pass's fact. W1-T9723: a dirty head also takes its last recorded conflict_files.
  */
 export function withInheritedMergeState(
   pr: OpenPrView,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
 ): { pr: OpenPrView; inherited?: KnownMergeState } {
-  if (pr.mergeState !== undefined) return { pr };
-  const inherited = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
-  if (!inherited) return { pr };
-  return { pr: { ...pr, mergeState: inherited.state }, inherited };
+  const captured = hasCapturedMergeConflictEvidence(pr.mergeConflict);
+  if (pr.mergeState !== undefined && (pr.mergeState !== "dirty" || captured)) return { pr };
+  const known = lastKnownMergeStateFromLedger(ledgerLines, pr.prNumber, pr.headSha);
+  const inherited = pr.mergeState === undefined ? known : undefined;
+  let next = inherited ? { ...pr, mergeState: inherited.state } : pr;
+  if (next.mergeState === "dirty" && !captured) {
+    const files = known?.state === "dirty" ? known.conflictFiles : undefined;
+    const gap = next.mergeConflictGap ?? (inherited
+      ? `mergeability was unread this pass, so no compare was read for this PR, and no prior pass recorded conflict files for head ${pr.headSha.slice(0, 7)}`
+      : undefined);
+    if (files) next = { ...next, mergeConflict: { files, oursLog: "", theirsLog: "" } };
+    else if (gap !== undefined && gap !== next.mergeConflictGap) next = { ...next, mergeConflictGap: gap };
+  }
+  return inherited ? { pr: next, inherited } : { pr: next };
 }
 
 /** W1-T2620 — AT MOST ONE base-caused PR released per pass, oldest activity first. THE RELEASE
@@ -10149,7 +10187,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         taskId !== undefined && fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId));
       const cause = !ownsExactRunBranch
         ? "head is not this PR task's rmd-owned run branch"
-        : conflictRefusalCause(files, policy, REGENERABLE_ARTIFACT_GENERATORS, evidence);
+        : conflictRefusalCause(files, policy, REGENERABLE_ARTIFACT_GENERATORS, evidence, conflictEvidenceGap(pr));
       return (
         `merge conflict (mergeState dirty) — ${cause} — not dispatched — ` +
         `files: ${files.length > 0 ? fileList : "none captured"} — escalating`
@@ -13753,7 +13791,7 @@ function priorActionsFromLedger(
         // SHA-KEYED, exactly like `fixed` below. Keyed by PR number alone this set had no expiry:
         // one `acted:true` line — including one recorded for an arm that never happened — deduped
         // that PR forever. A new head must re-earn the attempt.
-        if (line.arm_outcome !== "arm-error-ignored") {
+        if (line.arm_outcome !== "arm-error-ignored" && line.code_scanning_fix_dispatched !== true) {
           armed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
@@ -14398,6 +14436,10 @@ export function trackInFlightReview(work: Promise<void>): Promise<void> {
 
 export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
+}
+
+export function inFlightReviewRunsNow(): Promise<void>[] {
+  return [...inFlightReviewRuns];
 }
 
 /** Wait for the reviews in flight NOW to settle, bounded. Reviews admitted after the call are not
@@ -16637,7 +16679,7 @@ export async function runSweep(
     const securityHold = disposition === "mergeable" && !pr.autoMergeArmed && mergeHold === undefined
       ? securityArmRefusalAtHead(ledgerLines, pr.prNumber, pr.headSha) : undefined;
     const securityText = securityHold && securityHoldReason(securityHold,
-      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined);
+      pr.codeqlHeadAlerts?.headSha === pr.headSha ? pr.codeqlHeadAlerts.alerts : undefined, standDownReason ?? actionError);
     // #10551 (2026-10-10): a fix arm that dispatched nothing must never be ledgered as "dispatching".
     // The rule row's sentence predicts the dispatch; when this pass stood it down, say so and why —
     // and a backstop hold names itself on EVERY pass, the light pass included.
@@ -16750,6 +16792,7 @@ export async function runSweep(
         // across any number of consecutive `unknown` reads on the SAME head rather than
         // resetting the moment GitHub goes quiet again.
         ...(pr.mergeState !== undefined ? { merge_state: pr.mergeState } : {}),
+        ...conflictEvidenceRowFields(pr),
         ...(deduped ? { deduped: true } : {}),
         // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
         // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.

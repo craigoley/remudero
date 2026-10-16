@@ -1082,7 +1082,7 @@ export function* hydrateScannerBlockerObservationsSteps(
 }
 
 export const CODEQL_CHECK_NAME = "CodeQL";
-export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one REST read per failing-CodeQL head per pass
+export const CODEQL_HEAD_ALERT_HYDRATION_CAP = 3; // BACKSTOP: one merge-ref read per failing-CodeQL or refused head per pass
 export const CODEQL_HIGH_SEVERITIES: readonly string[] = ["critical", "high", "error"];
 
 export interface CodeqlHeadAlert {
@@ -1109,14 +1109,14 @@ export function codeqlCheckFailed(rollup: readonly RestRollupEntry[] | undefined
 }
 
 export function codeqlHeadAlertsRestArgs(owner: string, repo: string, prNumber: number): string[] {
-  return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/head&state=open&per_page=${SCANNER_PAGE_SIZE}`];
+  return ["api", `repos/${owner}/${repo}/code-scanning/alerts?ref=refs/pull/${prNumber}/merge&state=open&per_page=${SCANNER_PAGE_SIZE}`];
 }
 
 interface RestHeadAlert extends RestScannerAlert {
   rule?: { id?: unknown; severity?: unknown; security_severity_level?: unknown } | null;
 }
 
-export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): CodeqlHeadObservation | undefined {
+export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown, mergeRef?: string): CodeqlHeadObservation | undefined {
   if (!Array.isArray(alerts) || alerts.length >= SCANNER_PAGE_SIZE) return undefined;
   const found: CodeqlHeadAlert[] = [];
   for (const raw of alerts as RestHeadAlert[]) {
@@ -1130,7 +1130,7 @@ export function classifyCodeqlHeadAlerts(headSha: string, alerts: unknown): Code
       typeof raw.number !== "number" ||
       typeof raw.rule?.id !== "string" ||
       instance === undefined ||
-      instance.commit_sha !== headSha ||
+      (instance.commit_sha !== headSha && (mergeRef === undefined || instance.ref !== mergeRef)) ||
       typeof location?.path !== "string" ||
       typeof location.start_line !== "number"
     ) continue;
@@ -1176,7 +1176,7 @@ export function* hydrateCodeqlHeadAlertsSteps(
       onUnreadable(candidate.number, reason);
       continue;
     }
-    const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing);
+    const observed = classifyCodeqlHeadAlerts(candidate.headSha, listing, `refs/pull/${candidate.number}/merge`);
     if (observed !== undefined) out.set(candidate.number, observed);
   }
   return out;
@@ -1943,8 +1943,9 @@ export function hydrateMergeConflictEvidence(
   dirtyPrs: readonly { number: number; headRefOid: string }[],
   fetch: GhApiFetcher,
   cap: number = MERGE_STATE_HYDRATION_CAP,
+  gaps?: Map<number, string>,
 ): Map<number, MergeConflictEvidence> {
-  return runGhReadSteps(hydrateMergeConflictEvidenceSteps(owner, repo, targetBranch, dirtyPrs, fetch, cap));
+  return runGhReadSteps(hydrateMergeConflictEvidenceSteps(owner, repo, targetBranch, dirtyPrs, fetch, cap, gaps));
 }
 
 export function* hydrateMergeConflictEvidenceSteps(
@@ -1954,13 +1955,16 @@ export function* hydrateMergeConflictEvidenceSteps(
   dirtyPrs: readonly { number: number; headRefOid: string }[],
   fetch: GhApiFetcher,
   cap: number = MERGE_STATE_HYDRATION_CAP,
+  gaps?: Map<number, string>,
 ): GhReadSteps<Map<number, MergeConflictEvidence>> {
   const out = new Map<number, MergeConflictEvidence>();
+  for (const p of dirtyPrs.slice(cap)) gaps?.set(p.number, `over the ${cap}-PR conflict-evidence cap this pass`);
   for (const p of dirtyPrs.slice(0, cap)) {
     try {
       out.set(p.number, yield* mergeConflictEvidenceSteps(owner, repo, targetBranch, p.headRefOid, fetch));
-    } catch {
-      /* best-effort: this PR keeps the pre-existing undefined mergeConflict, the pass continues */
+    } catch (error) {
+      // W1-T9723: best-effort, but the failure is the evidence gap the escalation names.
+      gaps?.set(p.number, `the compare read failed: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
     }
   }
   return out;
