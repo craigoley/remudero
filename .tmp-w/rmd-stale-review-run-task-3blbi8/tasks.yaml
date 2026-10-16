@@ -1,0 +1,9 @@
+- id: W1-T3337
+  title: withhold stale terminal reviews
+  repo: remudero
+  type: implement
+  verify: auto
+  risk: high
+  files: [src/lib/review.ts]
+  origin: fixture
+  status: queued

@@ -1,0 +1,12 @@
+#!/bin/sh
+printf '%s\n' "$*" >> "/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/calls.log"
+printf 'start\t%s\t%s\n' "$$" "$*" >> "/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/events.log"
+trap 'printf "end\t%s\t%s\n" "$$" "$*" >> "/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/events.log"' EXIT
+case "$*" in
+  *"--json headRefName"*) cat '/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/route-0.out'; printf '\n'; exit 0 ;;
+  *"--json body"*) cat '/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/route-1.out'; printf '\n'; exit 0 ;;
+  *"api repos/acme/remudero/pulls/"*) cat '/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/route-2.out'; printf '\n'; exit 0 ;;
+  *"/check-runs"*) cat '/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/route-3.out'; printf '\n'; exit 0 ;;
+  *"/status"*) cat '/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-S3DCEk/route-4.out'; printf '\n'; exit 0 ;;
+  *) exit 0 ;;
+esac

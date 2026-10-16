@@ -1,0 +1,7 @@
+#!/bin/sh
+printf '%s\n' "$*" >> "/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-test-gh-refuse-47-4026532804-VxIlEd/refusals.log"
+echo "test setup REFUSED: a test shelled out to the real gh CLI with no stub of its own." 1>&2
+echo "  argv: gh $*" 1>&2
+echo "  FIX: give the test its own gh stub, prepended onto PATH ahead of this one" 1>&2
+echo "  (see test/helpers/gh-shim.ts) — no test should reach the real network." 1>&2
+exit 1

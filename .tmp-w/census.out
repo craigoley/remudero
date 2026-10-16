@@ -1,0 +1,234 @@
+Preparing worktree (new branch 'feature')
+✔ a validated trailered capped PR creates one proof-only plan amendment (2.888048ms)
+✔ an invalid or non-discriminating replacement opens no amendment (1.088187ms)
+✔ a duplicate proof-amendment identity resumes instead of creating another PR (0.331936ms)
+✔ a duplicate identity also resumes via a live probe when the identity was never recorded (0.199318ms)
+✔ a shard that drifted since the evidence was read is refused, never rewritten against a stale line (2.154381ms)
+✔ a merged amendment requests only an expected-head branch update (0.480829ms)
+✔ the live fix rung calls the proof-amendment parent rather than granting the worker direct write authority (24.00635ms)
+✔ buildProofAmendmentGitOps runs git add/commit through an injected spawn, never a real process (0.382873ms)
+✔ buildProofAmendmentWritePorts wires every write port through its own injected I/O, never a live process/network call (1.50525ms)
+✔ dispatchProofAmendmentWrite is the whole proof-discrimination arm, extracted out of runFixRung and exercisable without a live git/GitHub write (1.258702ms)
+✔ dispatchProofAmendmentWrite removes the merge-base worktree a unit-test proposal checked out, on the refusal and the throw path (0.539056ms)
+✔ a unit-test proposal leaves no merge-base worktree on disk or in the git worktree list after dispatchProofAmendmentWrite (423.151166ms)
+✔ renderFixPrompt gives a proof-discrimination worker a proposal grammar, not PR-body write instructions (3.814573ms)
+✔ checkProofCommand treats a grep target added on the head as discriminating despite base test materialisation (599.994413ms)
+✔ parseProofAmendmentProposal returns nothing for a report with no PROOF_AMENDMENT block (0.24085ms)
+✔ proofAmendmentIneligibleReason checks the five gates in order (0.220059ms)
+✔ validateProofAmendmentProposal refuses when an executor throws, not only when it returns fail (0.301811ms)
+✔ validateProofAmendmentProposal is the same gate requestProofAmendment uses internally (0.275732ms)
+✔ replaceProofScalar touches only the proof line under its own claim, never the claim text (0.134891ms)
+✔ proofAmendmentIdempotencyKey is keyed on the OLD-proof digest, not the proposed replacement (0.186408ms)
+✔ findTaskShard reads the plan/tasks.d shard by task-id prefix, matching dispatchPlanOnlyRepair's own convention (3.547463ms)
+✔ findTaskShard falls back to the plan monolith when the task declares no shard file (0.4613ms)
+diff-class: FAILED to enumerate the census suite set — ENOENT: no such file or directory, scandir '/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/no-such-directory-at-all/test'
+diff-class: printing NOTHING — a caller reading zero lines here must fail closed and run the full suite.
+✔ W1-T2680 (acceptance 1): the verb lists census suites for a changed-file set, enumerated from the TREE (4137.788553ms)
+✔ W1-T2680: the source holds NO hardcoded suite list — a census added tomorrow is found tomorrow (0.393859ms)
+✔ W1-T2680 (acceptance 2): config-reader-seams and mounts-wiring are BOTH listed, replayed over the REAL diffs that caught them (3490.222088ms)
+✔ W1-T2680: the three suites that went red in CI on 2026-09-05, after a caller sweep ran green over 45 files (2334.329597ms)
+✔ W1-T2680 (acceptance 3): an ordinary suite that merely IMPORTS a changed module is NOT listed (3544.880827ms)
+✔ W1-T2680: shelling git is not enough — a fixture repo is not a census (0.188852ms)
+✔ W1-T2680 (acceptance 4): a census suite ADDED to the tree is found, with no registry to edit (19.229895ms)
+✔ W1-T3602: a listed entry that ENOENTs on read — torn down by a concurrent suite between readdirSync and readFileSync — is skipped, never a crash, and a real sibling is still found (1.225422ms)
+✔ W1-T3602: a NON-ENOENT read failure (a genuinely unreadable file, not a torn-down one) still throws — this is a narrow TOCTOU tolerance, not a blanket swallow (1.366032ms)
+✔ W1-T2680 (acceptance 5): an empty changed-file set yields an EMPTY list, never every suite (0.406348ms)
+✔ W1-T2680: changedAreas names the directory AND its immediate subdirectory, and nothing for a root file (0.239338ms)
+✔ W1-T2680: an area named only in an IMPORT or a COMMENT is not a population (0.118377ms)
+✔ W1-T2680: sourceTextPathsRead reads paths from the CALL, not from fixture data elsewhere in the file (0.73599ms)
+✔ W1-T2680: the CLI FAILS CLOSED — an unreadable tree prints NOTHING and exits 1, never an empty list a caller could read as 'no suites matter' (198.872528ms)
+✔ W1-T2680 (wiring): the CLI verb prints the list on stdout, one path per line (1381.605617ms)
+✔ W1-T7728: the narrow check-proof entry never imports the run-task module (345.313495ms)
+✖ W1-T7728: the narrow entry and rmd check-proof agree on verdict and exit code (5266.084534ms)
+▶ test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts
+  ✔ triage: differs policy controls takeover and its durable row (5.478971ms)
+  ✔ triage: unprovable policy controls takeover and its durable row (0.678154ms)
+  ✔ triage: current policy controls takeover and its durable row (4.283324ms)
+  ✔ plan: differs policy controls takeover and its durable row (0.464825ms)
+  ✔ plan: unprovable policy controls takeover and its durable row (0.417454ms)
+  ✔ plan: current policy controls takeover and its durable row (1.098792ms)
+  ✔ approve: differs policy controls takeover and its durable row (1.181525ms)
+  ✔ approve: unprovable policy controls takeover and its durable row (0.424104ms)
+  ✔ approve: current policy controls takeover and its durable row (1.349428ms)
+  ✔ approve-batch: differs policy controls takeover and its durable row (0.444034ms)
+  ✔ approve-batch: unprovable policy controls takeover and its durable row (0.344295ms)
+  ✔ approve-batch: current policy controls takeover and its durable row (1.03731ms)
+  ✔ ci-learning: differs policy controls takeover and its durable row (0.28782ms)
+  ✔ ci-learning: unprovable policy controls takeover and its durable row (0.242011ms)
+  ✔ ci-learning: current policy controls takeover and its durable row (0.719585ms)
+  ✔ plan-repair: differs policy controls takeover and its durable row (0.229173ms)
+  ✔ plan-repair: unprovable policy controls takeover and its durable row (0.189033ms)
+  ✔ plan-repair: current policy controls takeover and its durable row (0.901498ms)
+  ✔ next-task-id-prefix: differs policy controls takeover and its durable row (0.313148ms)
+  ✔ next-task-id-prefix: unprovable policy controls takeover and its durable row (0.246869ms)
+  ✔ next-task-id-prefix: current policy controls takeover and its durable row (0.814257ms)
+  ✔ the default arm really checks the installed module with real git (87.676887ms)
+  ✔ fresh holders, free ids and failed takeover pushes emit no takeover row (1.619211ms)
+  ✔ --prefix uses the gate with differs policy (4.22446ms)
+  ✔ --prefix uses the gate with unprovable policy (0.40838ms)
+  ✔ --prefix uses the gate with current policy (0.334931ms)
+  ✔ --prefix default ledger sink with valid config (3.258051ms)
+  ✔ --prefix default ledger sink with unreadable config (4.331456ms)
+  ✔ the production construction census names any lane bypassing the factory (52.811371ms)
+✔ test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts (179.743941ms)
+✔ W1-T3359: ONE surviving row carries the true streak — the rotation reset is gone (7.443945ms)
+✔ W1-T3359 (falsifier): with the recorded streak ABSENT, one row reads 1 — the defect, reproduced (0.373038ms)
+✔ W1-T3359: the recount SURVIVES as the fallback, so a mid-migration corpus is not misread (1.260955ms)
+✔ W1-T3359: a recorded streak is preferred over the recount when the two disagree (0.157205ms)
+✔ W1-T3359: a NEW run still resets — a head change is not a continuing streak (0.163865ms)
+✔ W1-T3359: a junk recorded value is NOT a reading — it falls back to the recount (0.170415ms)
+✔ W1-T3359: `escalated` still derives from SURVIVING rows — W1-T2382's per-rotation re-arm is intact (0.159008ms)
+✔ W1-T3359: EVERY row still counts regardless of `acted` — the fold's own invariant (0.410964ms)
+✔ W1-T3359: the step is RETAINED, so a rotation leaves a row carrying the count (0.178767ms)
+✔ W1-T3359: the retention set is UNTOUCHED — the entry was already there and must not be doubled (3.066973ms)
+✔ W1-T3359: the RECOUNT's ceiling is what the bound could not see past, and it is arithmetic (0.195943ms)
+✔ W1-T3359: the REAL emitter writes `repeat_streak`, end to end through runSweep — not a mirror (82.33388ms)
+warning: You appear to have cloned an empty repository.
+
+### [T-GENERIC-REVIEW] run T-GENERIC-REVIEW-1792137757852 — target craigoley/remudero · mount sonnet/medium · 400 turns (review×medium×src)
+
+### [T-GENERIC-REVIEW] worker settings validated against pinned SandboxSettingsSchema
+
+### [T-GENERIC-REVIEW] binary pin UNKNOWN — claude --version emitted no recognisable version
+
+### [T-GENERIC-REVIEW] containment preflight PASSED — outside-cwd write OS-DENIED; inside-cwd write succeeded
+
+### [T-GENERIC-REVIEW] isolation preflight PASSED — worker reports 0 aliases and 0 functions inherited (alias=0, functions=0)
+✔ resolveGenericRouteToolBound returns each declared generic route's own explicit tool set, and generic routes require explicit tool bounds (1.871408ms)
+✔ generic openweight route refuses unsupported tools before transport (WebSearch or Bash, via the OpenWeight capability check) (7.653797ms)
+HEAD is now at 5ce52f5 seed
+Preparing worktree (new branch 'run-T-GENERIC-REVIEW-1792137757852')
+node_modules lockfile mismatch: worktree /home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-runtask-generic-route-root-HJ18Vy/worktrees/run-T-GENERIC-REVIEW-1792137757852 was cut from origin/main HEAD but its node_modules is symlinked from /home/node/Remudero/worktrees/run-W1-T9541-1792134266702 whose package.json/package-lock.json hash differs — a worker may see 'Cannot find module' or a resolved version its own diff never asked for (best-effort — see linkWorktreeNodeModules and recordCanonicalCheckoutDrift)
+
+### [T-GENERIC-REVIEW] recon worker
+
+### [T-GENERIC-REVIEW] prompt provenance-linted: clean
+
+### [T-GENERIC-REVIEW] implement worker
+
+### [T-GENERIC-REVIEW] verdict: no_pr — worker completed without opening a PR · 0 turns
+warning: You appear to have cloned an empty repository.
+
+### [T-GENERIC-MANUAL] run T-GENERIC-MANUAL-1792137759458 — target craigoley/remudero · mount haiku/medium · 400 turns (manual×medium×src)
+
+### [T-GENERIC-MANUAL] worker settings validated against pinned SandboxSettingsSchema
+
+### [T-GENERIC-MANUAL] binary pin UNKNOWN — claude --version emitted no recognisable version
+
+### [T-GENERIC-MANUAL] containment preflight PASSED — outside-cwd write OS-DENIED; inside-cwd write succeeded
+
+### [T-GENERIC-MANUAL] isolation preflight PASSED — worker reports 0 aliases and 0 functions inherited (alias=0, functions=0)
+✔ BEHAVIORAL: a real runTask review dispatch's generic spawn carries the declared review tool bound (1600.05935ms)
+HEAD is now at 8f0fdf3 seed
+Preparing worktree (new branch 'run-T-GENERIC-MANUAL-1792137759458')
+node_modules lockfile mismatch: worktree /home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-runtask-generic-route-root-fJLeRi/worktrees/run-T-GENERIC-MANUAL-1792137759458 was cut from origin/main HEAD but its node_modules is symlinked from /home/node/Remudero/worktrees/run-W1-T9541-1792134266702 whose package.json/package-lock.json hash differs — a worker may see 'Cannot find module' or a resolved version its own diff never asked for (best-effort — see linkWorktreeNodeModules and recordCanonicalCheckoutDrift)
+
+### [T-GENERIC-MANUAL] recon worker
+
+### [T-GENERIC-MANUAL] prompt provenance-linted: clean
+
+### [T-GENERIC-MANUAL] implement worker
+
+### [T-GENERIC-MANUAL] verdict: no_pr — worker completed without opening a PR · 0 turns
+warning: You appear to have cloned an empty repository.
+
+### [T-GENERIC-IMPLEMENT] run T-GENERIC-IMPLEMENT-1792137760931 — target craigoley/remudero · mount sonnet/high · 400 turns (implement×medium×src)
+
+### [T-GENERIC-IMPLEMENT] worker settings validated against pinned SandboxSettingsSchema
+
+### [T-GENERIC-IMPLEMENT] binary pin UNKNOWN — claude --version emitted no recognisable version
+
+### [T-GENERIC-IMPLEMENT] containment preflight PASSED — outside-cwd write OS-DENIED; inside-cwd write succeeded
+
+### [T-GENERIC-IMPLEMENT] isolation preflight PASSED — worker reports 0 aliases and 0 functions inherited (alias=0, functions=0)
+✔ BEHAVIORAL: a real runTask manual dispatch's generic spawn carries the declared manual tool bound (1335.472761ms)
+HEAD is now at 2671550 seed
+Preparing worktree (new branch 'run-T-GENERIC-IMPLEMENT-1792137760931')
+node_modules lockfile mismatch: worktree /home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-runtask-generic-route-root-Rh4uSn/worktrees/run-T-GENERIC-IMPLEMENT-1792137760931 was cut from origin/main HEAD but its node_modules is symlinked from /home/node/Remudero/worktrees/run-W1-T9541-1792134266702 whose package.json/package-lock.json hash differs — a worker may see 'Cannot find module' or a resolved version its own diff never asked for (best-effort — see linkWorktreeNodeModules and recordCanonicalCheckoutDrift)
+
+### [T-GENERIC-IMPLEMENT] recon worker
+
+### [T-GENERIC-IMPLEMENT] prompt provenance-linted: clean
+
+### [T-GENERIC-IMPLEMENT] implement worker
+
+### [T-GENERIC-IMPLEMENT] verdict: no_pr — worker completed without opening a PR · 0 turns
+✔ BEHAVIORAL: a real runTask implement dispatch carries implement's OWN declared bound, not review's (1631.882307ms)
+✔ every worker spawn declares an explicit tool bound (26.499702ms)
+✔ an undeclared lane refuses rather than inheriting unrestricted tools (0.591004ms)
+✔ W1-T5380: a check family named by a generic term locates no owner and escalates (3.443666ms)
+✔ W1-T5380: a distinctive refusal reason still locates its owning file (0.695079ms)
+✔ a failing-test signature outranks a family spanning more files regardless of hit counts (0.726446ms)
+✔ an unmatched signature preserves a distinctive family and a tied signature takes priority (0.490703ms)
+✔ whole-token search distinguishes no matches from search failures (1.273504ms)
+✔ refusal terms spanning more files contribute no owners (0.248952ms)
+verify-human-sweep: judged 1, 1 need you, 0 entered self-improvement, 0 stay in the backlog, 0 already settled, 0 deferred due.
+  NEEDS YOU: W1-T1 — staged as verify-human:W1-T1 in the inbox
+✔ the file a judge spawn names VALIDATES as worker settings, and the one it used to name does not (2.7817ms)
+✔ no judge spawn in run-task.ts names the interactive deny floor as its settings file (9.249618ms)
+✔ a staged proposal lands under the STATE root, the same root the ledger uses (83.50898ms)
+✔ ruleCommand resolves its ledger through ledgerPathFor, never a hardcoded filename (9.721344ms)
+✔ W1-T8533: every step a refresh decision reads is in the retention set (338.485221ms)
+✔ W1-T8533: the refresh census finds the four known steps and reports an unretained one (255.411756ms)
+✔ W1-T8533: a refresh row survives rotation and still refuses a second refresh on the same red (115.419545ms)
+✔ W1-T8533: a PR older than the live window reads its refresh history from the rotations (211.053149ms)
+✔ W1-T8533: an unreadable refresh history is named and never read as no prior refresh (124.569824ms)
+✔ W1-T8533: an unreadable history still uses the prefilter and a readable merged probe (125.688516ms)
+✔ W1-T8533: an archived refusal memo is reused without probing (33.354979ms)
+✔ W1-T8533: refresh history is read once per PR per pass and reused by the clearance (33.521331ms)
+✔ W1-T8533: the union restores the once-per-head refresh guard (32.920874ms)
+✔ W1-T8533: incomplete history cannot authorize a fileless, partial or failed probe refresh (0.68218ms)
+✔ W1-T8533: the base-red arm cannot refresh on an unreadable history without merge evidence (32.634656ms)
+✔ W1-T8533: unreadable history alone never becomes a settled refusal memo (0.34072ms)
+✔ W1-T8533: a complete live history preserves the unwired-probe fallback (66.129317ms)
+✔ W1-T8533: a complete history preserves the main-green base-red refresh (20.387052ms)
+✔ a src module that spawns src/run-task.ts by a joined path is an importer of it (4.449068ms)
+✔ a src module reading a src path with readFileSync keeps that edge (1.038462ms)
+✔ a src module that lists the same path in a data table is not an importer of it (2.752644ms)
+✔ the real spawn and read sites keep their edge to src/run-task.ts and the real tables do not (117.347034ms)
+gh read cadence (advisory, W1-T3297): a read 23s after the last on the core limiter, under the 180s floor. Set RMD_GH_TRANSPORT_FLOOR=enforce to refuse instead.
+✔ W1-T3337: the CLI self-reexec guard never suppresses the reviewer code probe (1.990846ms)
+✔ W1-T3337: an unreadable guarded diff withholds the terminal verdict (0.482791ms)
+✔ W1-T3337: every unreadable Git observation and a no-advance head have distinct freshness outcomes (0.482982ms)
+✔ W1-T3337: a material source advance withholds the stale reviewer's failure instead of publishing a binding verdict (2.508891ms)
+✔ W1-T3337: an immaterial advance still publishes and makes the reviewer's loaded code SHA visible on the verdict (1.7863ms)
+warning: You appear to have cloned an empty repository.
+To /home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-origin-hYkmC1
+ * [new branch]      main -> main
+
+### [W1-T3337] run W1-T3337-1785000000000 — target craigoley/remudero · mount sonnet/high · 400 turns (implement×high×src)
+
+### [W1-T3337] worker settings validated against pinned SandboxSettingsSchema
+
+### [W1-T3337] binary pin UNKNOWN — claude --version emitted no recognisable version
+
+### [W1-T3337] containment preflight PASSED — outside-cwd write OS-DENIED; inside-cwd write succeeded
+
+### [W1-T3337] isolation preflight PASSED — worker reports 0 aliases and 0 functions inherited (alias=0, functions=0)
+✔ W1-T3337: a throwing just-in-time reader is converted to an unreadable refusal before the review status can post (5295.540177ms)
+✔ W1-T3337: a withheld re-review stands the fix rung down without another worker strike (491.39403ms)
+✔ W1-T3337: rmd review exits non-zero and names a withheld terminal verdict (50.260557ms)
+HEAD is now at 8648c72 seed
+Preparing worktree (new branch 'run-W1-T3337-1785000000000')
+node_modules lockfile mismatch: worktree /home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-3blbi8/worktrees/run-W1-T3337-1785000000000 was cut from origin/main HEAD but its node_modules is symlinked from /home/node/Remudero/worktrees/run-W1-T9541-1792134266702 whose package.json/package-lock.json hash differs — a worker may see 'Cannot find module' or a resolved version its own diff never asked for (best-effort — see linkWorktreeNodeModules and recordCanonicalCheckoutDrift)
+
+### [W1-T3337] recon worker
+
+### [W1-T3337] prompt provenance-linted: clean
+
+### [W1-T3337] implement worker
+
+### [W1-T3337] fallback push firing for run-W1-T3337-1785000000000 — cause: push_not_attempted (no "git push" invocation appears anywhere in the worker's own transcript)
+
+### [W1-T3337] fallback: pushing branch from orchestrator (outside sandbox)
+rule15-precheck: OK -- no criterion field added or edited in the plan
+rule25-precheck: OK -- no instrument path rides with a src/ product path
+ci-control-plane-precheck: SKIP -- this diff does not change a control-plane or capability-snapshot input
+test-tier-manifest: OK — every row in scripts/test-tier-manifest.json names an existing test file (0 test file(s) on disk).
+census-precheck: OK — 0 changed file(s) checked against origin/main
+head-identity-gate: OK — identified via its run-shaped head ref (run-W1-T3337-1785000000000)
+worker-branch-shape: OK — no self-crediting plan filing
+proof-resolve-precheck: SKIP -- W1-T3337 resolves no acceptance criteria at HEAD
+pre-push: lint-plan-precheck runs the branch's own package.json lint argv; the host gate runs no worktree code: ENOENT: no such file or directory, open '/home/node/Remudero/worktrees/run-W1-T9541-1792134266702/.tmp-w/rmd-stale-review-run-task-3blbi8/worktrees/run-W1-T3337-1785000000000/package.json': skipped, NOT passed (CI runs it)
+pre-push: lint-plan-precheck could not run the lint — not blocking on an unreadable check
+fatal: path 'plan/tasks.yaml' does not exist in '8648c720a126379daf75f90408bb1f91252f15be'
