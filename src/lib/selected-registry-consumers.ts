@@ -72,8 +72,13 @@ export function createSelectedRegistryObserver(options: SelectedRegistryConsumer
   const captured = capture(options);
   if (captured.kind === "off") return undefined;
   const controller = new AbortController();
-  const signal = captured.kind === "selected" && captured.input.signal
-    ? AbortSignal.any([controller.signal, captured.input.signal]) : controller.signal;
+  let signal = controller.signal, invalidCancellation = false;
+  try {
+    if (captured.kind === "selected" && captured.input.signal) signal = AbortSignal.any([controller.signal, captured.input.signal]);
+  } catch {
+    // Invalid cancellation evidence is unknown, not a constructor failure that blocks the legacy consumer.
+    invalidCancellation = true;
+  }
   let closed = false, diagnosticSent = false, sinkPending = 0;
   const pending = new Set<Promise<void>>(), keys = new Set<string>();
   const unavailable = (): void => {
@@ -85,6 +90,7 @@ export function createSelectedRegistryObserver(options: SelectedRegistryConsumer
     }
   };
   const read = async (): Promise<Bound> => {
+    if (invalidCancellation) return { kind: "unknown", reason: "invalid_cancellation" };
     if (captured.kind !== "selected") return { kind: "unknown", reason: "input_unreadable" };
     try {
       const result = await readSelectedInstanceRegistry({ ...captured.input, signal }, captured.io);
