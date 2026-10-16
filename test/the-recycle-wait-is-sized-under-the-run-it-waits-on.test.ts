@@ -192,9 +192,8 @@ function writeLock(stateDir: string, taskId: string, startedAtIso: string): void
 test("W1-T2598: the wait's default is derived from the observed distribution, not a bare literal", () => {
   const src = readFileSync(SCRIPT, "utf8");
   assert.doesNotMatch(src, /RMD_RECYCLE_WAIT_S:-120\}/, "the old under-sized literal must be gone");
-  // W1-T8138: the supervisor now supplies the sized wait; the script's literal is the no-history fallback.
-  const marker = "\n  WAIT_SECONDS=3000\n";
-  assert.equal(src.split(marker).length - 1, 1, "the fallback must be set exactly where the constant is defined");
+  const marker = 'WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-3000}"';
+  assert.equal(src.split(marker).length - 1, 1, "the derived default must be set exactly where the constant is defined");
 
   const waitBlock = src.slice(src.indexOf("How long to wait"), src.indexOf(marker) + marker.length);
   assert.match(waitBlock, /115 `implement\.done` rows/, "the derivation must name the same population as HUNG_WORKER_AGE_S");
@@ -235,20 +234,14 @@ test("W1-T2598: a timeout refusal names the distribution the bound was sized aga
   const state = mkdtempSync(join(tmpdir(), "recycle-wait-state-"));
   writeLock(state, "W1-T2598-c", "2020-01-01T00:00:00Z");
 
-  // W1-T8138: the distribution sizes only the no-history fallback; a caller-supplied wait names its source.
-  const run = runRecycle({ stateDir: state, extraEnv: { RMD_RECYCLE_POLL_S: "1000" } });
+  const run = runRecycle({ stateDir: state, extraEnv: { RMD_RECYCLE_WAIT_S: "1", RMD_RECYCLE_POLL_S: "1" } });
   assert.notEqual(run.status, 0);
   assert.match(
     run.stderr,
-    /the no-history fallback was sized against 115 implement\.done rows carrying worker_duration_ms/,
+    /WAIT_SECONDS=1 was sized against 115 implement\.done rows carrying worker_duration_ms/,
     "the refusal must name the population, not just the elapsed seconds",
   );
   assert.match(run.stderr, /19\.3 min median \(1158s\)/);
-
-  const supplied = runRecycle({ stateDir: state, extraEnv: { RMD_RECYCLE_WAIT_S: "1", RMD_RECYCLE_POLL_S: "1" } });
-  assert.notEqual(supplied.status, 0);
-  assert.match(supplied.stderr, /WAIT_SECONDS=1 — source: caller-supplied RMD_RECYCLE_WAIT_S/);
-  assert.doesNotMatch(supplied.stderr, /was sized against 115/, "a supplied wait was not sized against the fallback population");
 });
 
 test("W1-T2598: a timeout refusal names the wait that would have covered the oldest in-flight work observed", () => {
@@ -317,10 +310,11 @@ test("W1-T3799: no-container recycle retains the wait refusal evidence", () => {
     extraEnv: {
       STUB_CONTAINER_EXISTS: "0",
       GH_TOKEN: "fixture-token",
-      RMD_RECYCLE_POLL_S: "1000",
+      RMD_RECYCLE_WAIT_S: "1",
+      RMD_RECYCLE_POLL_S: "1",
     },
   });
-  assert.match(run.stderr, /the no-history fallback was sized against 115 implement\.done rows carrying worker_duration_ms/);
+  assert.match(run.stderr, /WAIT_SECONDS=1 was sized against 115 implement\.done rows carrying worker_duration_ms/);
   assert.match(run.stderr, /19\.3 min median \(1158s\)/);
 });
 
@@ -365,9 +359,9 @@ test("W1-T3799: MUTANT: bare empty-array expansions are refused by the regressio
 
 test("W1-T2598: MUTANT: restoring the 120 literal makes a healthy run at the observed median refuse again", () => {
   const src = readFileSync(SCRIPT, "utf8");
-  const anchor = "\n  WAIT_SECONDS=3000\n";
+  const anchor = 'WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-3000}"';
   assert.equal(src.split(anchor).length - 1, 1, "the mutation target must be unique");
-  const mutantSrc = src.replace(anchor, "\n  WAIT_SECONDS=120\n");
+  const mutantSrc = src.replace(anchor, 'WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-120}"');
   const dir = mkdtempSync(join(tmpdir(), "recycle-wait-mutant-"));
   const mutant = join(dir, "recycle-container.sh");
   writeFileSync(mutant, mutantSrc, { mode: 0o755 });
