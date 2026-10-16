@@ -1147,7 +1147,7 @@ export type DaemonFreshnessNotStale =
   | { arm: "dirty"; oldSha?: string; newSha?: string; behind?: boolean; dirty_paths?: readonly string[];
       changes?: readonly DeployWorthChange[] }
   | { arm: "up_to_date" }
-  | { arm: "immaterial"; oldSha: string; newSha: string };
+  | { arm: "immaterial"; oldSha: string; newSha: string; basis?: "closure" | "prefix"; outsideClosure?: number; closureUnreadable?: string };
 
 /** The result of comparing this process's own boot sha against origin/main (W1-T126). `stale` carries the sha pair, so
  * the caller and the ledger line it drives name exactly what advanced. `installNeeded` means the pull also changed
@@ -4176,6 +4176,10 @@ export async function runDaemon(
       ...(outcome.arm === "dirty" && outcome.dirty_paths ? { dirty_paths: outcome.dirty_paths } : {}),
       ...pressureEvidence,
       ...(outcome.arm === "immaterial" ? { old_sha: outcome.oldSha, new_sha: outcome.newSha } : {}),
+      // W1-T9092: which list judged the advance, and how much of it lay outside the process closure (or why unread).
+      ...(outcome.arm === "immaterial" && outcome.basis ? { basis: outcome.basis } : {}),
+      ...(outcome.arm === "immaterial" && outcome.outsideClosure !== undefined ? { outside_closure: outcome.outsideClosure } : {}),
+      ...(outcome.arm === "immaterial" && outcome.closureUnreadable ? { closure_unreadable: outcome.closureUnreadable } : {}),
     });
   };
 
