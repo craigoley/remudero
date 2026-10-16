@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# memory-high-tuner — a self-tuning memory.high for one fleet daemon container, run by the watchdog
+# memory-high-tuner — a self-tuning memory.high for one fleet container, run by the watchdog
 # tick (deploy/install-host-units.sh's rmd-relaunch) once per healthy tick.
 #
 #   deploy/memory-high-tuner.sh --container <name> --state-dir <config.root>
@@ -154,7 +154,12 @@ mht_cgroup_dir() {
 
 # The policy value (the floor) for container $1, from the same file the launchers apply.
 mht_policy_mib() {
-  resource_policy_build_args "$1" >/dev/null 2>&1
+  # Serve's hard ceiling differs from the host-sized build ceiling. Read the same
+  # role-specific floor its launcher applies, including that policy's soft cap.
+  case "$1" in
+    "${RMD_SERVE_CONTAINER_NAME:-remudero-serve}") resource_policy_serve_args >/dev/null 2>&1 ;;
+    *) resource_policy_build_args "$1" >/dev/null 2>&1 ;;
+  esac
   [ -n "${RP_HIGH_POLICY:-}" ] || return 1
   printf '%s' "${RP_HIGH_POLICY}"
 }
