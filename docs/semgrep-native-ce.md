@@ -133,7 +133,7 @@ References: [pip secure installs](https://pip.pypa.io/en/stable/topics/secure-in
 [Peewee's supported source-build switch](https://github.com/coleifer/peewee/blob/3.18.3/setup.py),
 and [Semgrep licensing](https://semgrep.dev/docs/licensing/).
 
-## Deadline-aware native author validation
+## Inert metadata declaration policy
 
 The inert artifact auditor supports metadata 2.5 import declarations as untrusted
 data, never as a namespace or installation permission. It checks identifier/private
@@ -150,6 +150,8 @@ literal test identity is retained, and source staging, policy-change detection a
 receipt verification include the module. No source-size limit is increased.
 References: [core metadata](https://packaging.python.org/en/latest/specifications/core-metadata/)
 and [PEP 794](https://peps.python.org/pep-0794/).
+
+## Deadline-aware native author validation
 
 The local author gate still runs its verified affected selection (including full fallback)
 and all default static checks. It does not replace hosted coverage, security, review or merge.
