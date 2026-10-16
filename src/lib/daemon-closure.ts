@@ -11,17 +11,17 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, relative, sep } from "node:path";
 import { buildAffectedSuitesGraph } from "./affected-suites.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import type { AdvanceClosure, ServiceFreshness } from "./self-sync.js";
 
 /** A text git read at a sha. Production passes a loop-bounded async child, so the daemon loop never waits on it. */
 export type ClosureGit = (args: string[]) => Promise<string>;
 
-/** The production {@link ClosureGit}: an async child bounded by LOOP-AVAILABLE time (loop-bounded-child.ts) at the
- *  freshness fetch's own budget, so a read it follows can neither hold the loop nor outlive it. */
+/** The production {@link ClosureGit}: the hardened async leaf, whose child is bounded by LOOP-AVAILABLE time
+ *  (loop-bounded-child.ts) at the freshness fetch's own budget, so a read it follows can neither hold the loop nor
+ *  outlive it. */
 export function daemonClosureGit(repoDir: string): ClosureGit {
-  return async (args) => (await execFileLoopBounded("git", ["-C", repoDir, ...args],
-    { encoding: "utf8", maxBuffer: 1 << 26, timeout: GATEWAY_FETCH_TIMEOUT_MS })).stdout;
+  return (args) => hostWorktreeGitAsync(repoDir, args, { maxBuffer: 1 << 26, timeout: GATEWAY_FETCH_TIMEOUT_MS });
 }
 
 /** The trees a daemon module can import from: test/ is never loaded by the process. */
