@@ -10,6 +10,7 @@
 // There is no count and no cooldown: the window itself moves one boot at a time, so a re-promotion needs a fresh clean cycle.
 
 import { systemClock, type Clock } from "./clock.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { RunChildMode } from "./policy.js";
 
 export const RUN_CHILD_MODE_DECISION_STEP = "run_child.mode_decision";
@@ -18,6 +19,9 @@ export const RUN_CHILD_ADOPTION_PASS_STEP = "run_child.adoption_pass";
 export const RUN_CHILD_MODE_EVIDENCE_STEPS: ReadonlySet<string> = new Set([
   "daemon.start", "run_child.shadow", "run_child.lost", "run_child.settled", RUN_CHILD_ADOPTION_PASS_STEP, RUN_CHILD_MODE_DECISION_STEP,
 ]);
+
+/** W1-T9816: the union prefilter for those steps. Rotation keeps no `run_child.*` row and keeps `daemon.start` only 30 min. */
+export const RUN_CHILD_MODE_EVIDENCE_PATTERN = /"step":"(?:daemon\.start|run_child\.(?:shadow|lost|settled|adoption_pass|mode_decision))"/;
 
 /** What `auto` resolves to. */
 export type RunChildAutoMode = "shadow" | "on";
@@ -57,6 +61,8 @@ export interface RunChildModeEvidence {
   current: RunChildCycleEvidence;
   /** The last `run_child.mode_decision`'s `to`; `shadow` until one is ledgered. */
   mode: RunChildAutoMode;
+  /** W1-T9816: ledger files the window read could not read; any holds shadow. */
+  unread?: readonly string[];
 }
 
 export interface RunChildModeDecision {
@@ -185,6 +191,9 @@ export function decideRunChildMode(evidence: RunChildModeEvidence): RunChildMode
   if (charged.length) {
     return decided("shadow", `${from === "on" ? "demoted" : "held"}: ${charged.join(", ")} since the previous boot`);
   }
+  if (evidence.unread?.length) {
+    return decided("shadow", `${from === "on" ? "demoted" : "held"}: the evidence window is unreadable (${evidence.unread.join(", ")})`);
+  }
   if (from === "on") {
     const outside = seen.oomKills + seen.containerStops;
     return decided("on", outside ? `stays on: ${outside} loss(es) named an outside kill, not the contract` : "stays on: no contract failure since the previous boot");
@@ -230,9 +239,28 @@ export interface RunChildModeTracker {
   record(decision: RunChildModeDecision | undefined, log: (step: string, extra: Record<string, unknown>) => void, force?: boolean): void;
 }
 
+/** W1-T9816: the window's rows, oldest first, from the boot before the previous one. */
+export function runChildModeWindow(rows: Iterable<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const ordered = [...rows].filter((row) => typeof row.step === "string" && RUN_CHILD_MODE_EVIDENCE_STEPS.has(row.step))
+    .sort((a, b) => (text(a.ts) < text(b.ts) ? -1 : text(a.ts) > text(b.ts) ? 1 : 0));
+  const boots = ordered.flatMap((row, i) => (row.step === "daemon.start" ? [i] : []));
+  return ordered.slice(boots.length >= 3 ? boots[boots.length - 3] : 0);
+}
+
+/** W1-T9816: every evidence row of the ledger union under `stateDir`, plus what could not be read. */
+export function readRunChildModeUnion(
+  stateDir: string, read: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+): { rows: Array<Record<string, unknown>>; unread: string[] } {
+  const union = read(stateDir, { step: [...RUN_CHILD_MODE_EVIDENCE_STEPS], pattern: RUN_CHILD_MODE_EVIDENCE_PATTERN, refuseIncomplete: true });
+  return { rows: union.rows, unread: union.ok ? [] : [...union.unread] };
+}
+
 /** A daemon's running evidence, seeded from the ledger it booted with and fed every row it writes since. Holds counts, never rows. */
-export function createRunChildModeTracker(seed: Iterable<Record<string, unknown>>, clock: Clock = systemClock): RunChildModeTracker {
+export function createRunChildModeTracker(
+  seed: Iterable<Record<string, unknown>>, clock: Clock = systemClock, unread: readonly string[] = [],
+): RunChildModeTracker {
   const evidence = runChildModeEvidence(seed);
+  if (unread.length) evidence.unread = [...unread];
   const observe = (step: string, extra: Record<string, unknown> = {}): void => {
     if (RUN_CHILD_MODE_EVIDENCE_STEPS.has(step)) foldRunChildModeEvidence(evidence, { ts: clock.iso(), ...extra, step });
   };
