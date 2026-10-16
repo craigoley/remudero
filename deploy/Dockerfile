@@ -115,14 +115,15 @@ RUN chmod 0444 /etc/codex/requirements.toml \
 # missing sandbox binary should fail the build here, not a worker later.
 # Why: docs/deploy-image-forensics.md, "RUN apt-get install … procps lsof jq — REQ 8".
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bubblewrap socat procps lsof jq \
+      bubblewrap socat procps lsof jq python3 \
  && rm -rf /var/lib/apt/lists/* \
  && bwrap --version \
  && socat -V >/dev/null \
  && ps -eo pid= >/dev/null \
  && pgrep --version >/dev/null \
  && lsof -v >/dev/null 2>&1 \
- && jq --version >/dev/null
+ && jq --version >/dev/null \
+ && python3 -I -c "import argparse, contextlib, hashlib, json, os, pathlib, plistlib, pwd, re, shutil, stat, subprocess, sys, tempfile, time, uuid; assert sys.version_info >= (3, 9); print(sys.version)"
 # The checks above use `>/dev/null` rather than `| head -1`: `A && B | C` parses as `A && (B | C)`
 # and a pipeline's status is its last stage, so a piped check passes for a missing binary.
 
