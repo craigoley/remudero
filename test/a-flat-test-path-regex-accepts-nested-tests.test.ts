@@ -11,10 +11,9 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-import { addedTestFilesAtHead } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs modules have no declaration file.
 import { evaluateCensusPrecheck } from "../scripts/census-precheck.mjs";
@@ -25,6 +24,19 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURES = "scripts/fixture-copy-baseline.json";
 // Built by concatenation so THIS file never scores as a raw init site in the census it tests.
 const INIT_SITE = 'run(["' + 'init"]);\n';
+
+/** `addedTestFilesAtHead` read in a child process, the module located by a path built at run time.
+ *  A static import of src/run-task.ts would add this suite to the importer set of the affected-suite
+ *  reach census (scripts/affected-reach-baseline.json, shrink-only), a cost this one assertion does not earn. */
+function addedTestFilesAtHead(headSha: string, cwd: string): unknown {
+  const module = pathToFileURL(join(REPO_ROOT, "src", "run-task.ts")).href;
+  const code = `const m = await import(process.argv[1]); process.stdout.write(JSON.stringify(m.addedTestFilesAtHead(process.argv[2], process.argv[3])));`;
+  const out = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code, module, headSha, cwd], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  return JSON.parse(out);
+}
 
 function treeOf(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "rmd-nested-census-"));
