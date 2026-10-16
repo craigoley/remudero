@@ -192,6 +192,7 @@ runs, on the same inputs CI would produce.
                  (default coverage/lcov.info; relative paths resolve against the repo root)
   --dry-run      print the node invocation and diff base this would use; run nothing
   --keep-raw     retain the temporary raw V8 coverage directory and print its path
+  --batch-size N run serial admitted batches, compacting closed raw output between batches
 `;
 
 // ── The real implementation behind each injectable seam, each its OWN export a test calls directly.
@@ -295,6 +296,7 @@ export function main(argv, deps = {}) {
       lcov: { type: "string", default: "coverage/lcov.info" },
       "dry-run": { type: "boolean", default: false },
       "keep-raw": { type: "boolean", default: false },
+      "batch-size": { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -325,6 +327,12 @@ export function main(argv, deps = {}) {
     log(`diff-coverage-local: would then read the lcov at: ${lcovPath}`);
     log(`diff-coverage-local: would then check: git diff ${mergeBaseDiffArgs(values.base, "HEAD")[1]}`);
     return 0;
+  }
+
+  if (values["batch-size"] !== undefined) {
+    const result = spawnSync(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts/coverage-batches.mjs"), ...argv],
+      { cwd: REPO_ROOT, stdio: "inherit", env: { ...process.env, NODE_V8_COVERAGE: "" } });
+    return result.status ?? 1;
   }
 
   log(
