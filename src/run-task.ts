@@ -1487,6 +1487,8 @@ import {
   verifyBundlePin,
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learnings.js";
+import { doctrineCitationFactsAt } from "./lib/doctrine-citation-facts.js";
+import type { DoctrineCitationFacts } from "./lib/doctrine-citations.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
@@ -3081,6 +3083,7 @@ export function handedOffHeadRiskJudge(
   });
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
+import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
@@ -3246,6 +3249,7 @@ import {
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { withTouchedDeclarations } from "./lib/advance-declarations.js";
+import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
@@ -7883,8 +7887,12 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
   const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
+  // W1-T9092: an advance is material only when it touches the import closure of the entry this process started from.
+  const closureGit: ClosureGit = deps.git ? async (args) => deps.git!(args) : daemonClosureGit(repoDir);
+  const entry = daemonProcessEntry(repoDir);
   const read = (): Promise<DaemonFreshness> =>
-    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit)).then(daemonFreshnessFromService);
+    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit))
+      .then((svc) => withDaemonClosure(svc, (sha) => daemonProcessClosure(closureGit, sha, entry))).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
@@ -12990,6 +12998,7 @@ export async function runFixRung(opts: {
     // check arm (`runSweep`, sweep.ts) already use: never fall through to a strike, never log
     // `fix.dispatch` (the one ledger step a strike is counted from) — ledger the reason and stand
     // down, exactly as those sites do.
+    if (noReviewYet && currentCiFailures !== undefined) currentCiFailures = dropDerivativeAggregateCiFailure(currentCiFailures);
     if (currentMergeConflict === undefined && noReviewYet && currentCiFailures !== undefined && currentCiFailures.length === 0) {
       const reason =
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
@@ -30050,6 +30059,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
+  let doctrineCitations: DoctrineCitationFacts | undefined;
   let releasedIdsForAdmission = new Set<string>();
   if (scope && !offline) {
     try {
@@ -30167,6 +30177,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         }
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
+      // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
+      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      opts.doctrineCitations = doctrineCitations;
       opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and

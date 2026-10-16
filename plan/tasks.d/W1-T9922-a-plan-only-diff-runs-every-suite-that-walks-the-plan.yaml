@@ -1,0 +1,117 @@
+- id: W1-T9922
+  title: "A PLAN-ONLY DIFF RUNS EVERY SUITE THAT WALKS THE PLAN, HOWEVER IT SPELLS THE PATH — #12389 filed 42 shards, its CI ran 514 plan-reading suites, and the one that walks plan/ through [\"plan\", \"docs\", \"learnings\"].map((d) => join(REPO_ROOT, d)) was not among them, so main at bd42ca367 was the first run to see its red"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern, which suites the plan-reading lane selects for a plan diff; the classifier and its other lanes are unchanged
+  origin: "operator session 2026-10-16, filing agent F8: main red at bd42ca367 (CI run 38946416242, ci-shard 4/8), log ~/Remudero-notes/main-red-38946416242.log"
+  plan_refs: [W1-T5698, W1-T7809, W1-T2428, W1-T6084, W1-T6092, W1-T9869, W1-T9875]
+  files:
+    - scripts/diff-class.mjs
+    - test/a-plan-only-diff-runs-every-suite-that-walks-the-plan.test.ts
+  status: blocked
+  retirement: withdrawn  # AMENDED 2026-10-16 (overlap): #12418 (bfde61305) shipped the fix before this shard merged; see the rationale's first paragraph
+  attempts: 0
+  rationale: |
+    AMENDED 2026-10-16 (overlap): WITHDRAWN, because main already ships this task's fix. #12418 (bfde61305,
+    merged 20:02Z) landed before this shard's filing PR #12415 merged (21:13Z).
+      - WHAT LANDED. `censusSuiteFiles` (scripts/diff-class.mjs) now gates its inline-walker arm on
+        `namesAreaLoosely`, so a quoted bare segment walked through `join(REPO_ROOT, d)` selects the suite. That is
+        design point 1. Its test "a suite walking a bare plan or docs segment runs for a plan or docs edit"
+        (test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts) pins the #12389 shape, the real
+        frozen-bullet suite for the W1-T9875 shard path, and the naming-without-walking negative control. That
+        covers this shard's first three acceptance criteria.
+      - THE CENSUS. Its second test, "every suite that walks the repository and spells a plan path in any literal
+        form runs for a filed shard", fails on any repo walker that spells a plan path in any literal form and is not
+        selected. It has a positive control (at least 5 walkers). The 10 bare-segment suites this rationale lists are
+        therefore judged on every CI run instead of by hand. Measured at origin/main 6fb8ee06f, the selection is 522
+        suites for the W1-T9875 shard path (514 when filed).
+      - WHAT REMAINS, AND WHY IT IS NOT DISPATCHABLE. Design point 2 (the read-map arm) is left. It is for suites
+        that read plan/ only through a spawned child or more than one import hop. Measured at 6fb8ee06f, there is no
+        static route to them:
+          - following imports two hops reaches a plan walker from 2,275 of the unselected suites, because
+            src/lib/plan.ts is reachable from nearly every module;
+          - the 12 unselected suites that spawn a plan-walking script, sampled, use the script path as data or run it
+            in a fixture repo.
+        No live miss is observed either. Only observed reads can tell the cases apart. No consumption-ready read map
+        is published: `collect` in scripts/read-map-corpus.mjs never emits one, and its output says
+        liveNarrowingAllowed false, the W1-T6084 operator opt-in. A build of point 2 today would ship an arm that
+        selects nothing live, behind a fixture-only green proof. File it again once CI publishes a usable read map.
+    EVIDENCE, 2026-10-16:
+      - Main went red at bd42ca367 (CI run 38946416242, ci-shard 4/8). The one failing test was
+        "a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry" in
+        test/a-retired-index-line-keeps-its-frozen-bullet.test.ts.
+      - Its unresolved citation was the planned doctrine body new-tests-go-in-their-computed-folder.md (section plan-and-task-hygiene). At 6841dac49
+        it was named in files: by plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml, which #12389 (a plan-only
+        PR of 42 shards) added. The session repaired that red in #12405 (32dc6614f); this task touches neither that
+        test nor the shard.
+      - SECOND INSTANCE, THIS FILING: its first draft quoted that doctrine path in prose. Run locally, the same test
+        went red on the draft (`# fail 1`, the same unresolved path), and the plan-only selector would again not have
+        picked it. The draft was reworded before push.
+    REPRODUCED at origin/main 07a425844, where scripts/diff-class.mjs and src/lib/plan-scope.ts are unchanged since
+    6841dac49's parent (`git log 6841dac49^..origin/main -- scripts/diff-class.mjs src/lib/plan-scope.ts` is empty):
+      - `node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files <file holding
+        plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml>` prints selected_count=514 previous_count=660.
+      - The failing suite is absent from that list (0 hits), and from the no-changed-files listing too.
+      - POSITIVE CONTROL: the same listing selects test/lint-plan-broken-base.test.ts and
+        test/every-machine-shard-filer-lands-only-what-lint-plan-admits.test.ts.
+    WHY IT IS MISSED. For the failing suite, `enumeratesPopulation` returns true (it calls readdirSync on a REPO_ROOT
+    path), but `namedPlanOrDocsPaths` returns an empty set. The suite spells its roots as
+    `["plan", "docs", "learnings"].map((d) => join(REPO_ROOT, d))` and walks them with a recursive helper,
+    `citingFiles(dir)`. The join arm in `namedPlanOrDocsPaths` reads only quoted segments after the first argument, so
+    `join(REPO_ROOT, d)` names nothing, and a bare `"plan"` with no slash matches no literal arm. `readsWholePlan`
+    therefore reads false, and `readsChangedPlanOrDocs` drops the suite for any plan diff.
+    IT IS A CLASS, NOT ONE SPELLING. At origin/main 10 test files hold a bracketed bare `"plan"`, `"docs"` or
+    `"learnings"` array element and are not in the 514. Measured with
+    `grep -lE '\[\s*"(plan|docs|learnings)"\s*,' test/*.test.ts`, then removing the selected list. They include the
+    failing suite, test/the-wipe-test-can-only-ask-about-learnings.test.ts and test/panel-skills.test.ts. Not every one
+    reads plan/ (some pass "plan" as an argv word), so the builder classifies each in the PR body.
+    The observed read map (W1-T6084, test/setup/read-map.ts) already records every non-code path a suite reads or
+    lists. No consumption-ready map is published today: scripts/read-map-corpus.mjs `collect` says it "never emits
+    a consumption-ready read map", so a design that relies only on it would select nothing live.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the plan diffs of all 436 open heads for
+    namedPlanOrDocsPaths, planReadingSuiteFiles and plan-reading. W1-T5698 (merged) narrowed the selection to readers
+    of the changed paths. W1-T9869 (queued) makes the same lists walk nested test/ folders, the same function with a
+    different concern; whichever lands second merges the other. No open head changes this arm.
+  design: |
+    Operator rulings: no hard thresholds and no hand lists. The selection is derived from what a suite reads.
+    1. DERIVED ROOTS. A suite whose source holds a quoted bare plan-scope segment (`"plan"`, `"docs"`, `"learnings"`,
+       `"doctrine"`, as an array element or a join segment) is a reader of that tree. It does not matter whether the
+       segment reaches `join` as a literal or through a variable (`[...].map((d) => join(REPO_ROOT, d))`). The suite
+       must also enumerate a repo-rooted directory, as `enumeratesPopulation` already decides, including a walk inside
+       a helper whose parameter is the root. `namedPlanOrDocsPaths` returns those roots, so `readsWholePlan` sees
+       `plan` and a changed shard selects the suite. A bare segment in a suite that walks nothing selects nothing, so
+       W1-T5698's narrowing holds: a suite naming only plan/policy.yaml is still not picked for a shard diff.
+    2. OBSERVED READS, PREFERRED WHEN THEY CAN SPEAK. When a read map is supplied and `readMapProblem` says it is
+       usable, `planReadingSuiteFiles` also adds every suite the map records reading a changed path, or listing a
+       directory the path sits under (`readMapReaders`). When the map cannot speak, the stderr summary line names why,
+       for example `read_map=unusable (<reason>)`, and the derived arm alone decides. The static arm is never removed
+       while the map is absent.
+    3. THE CLI's existing `selected_count`/`previous_count` line gains the count the new arm added. The PR body quotes
+       it at origin/main for the W1-T9875 shard, and classifies each of the 10 bare-segment suites above as a real
+       plan reader or not.
+    4. Tests (new file, test titles verbatim as in the proofs below):
+       - a fixture suite in the #12389 shape (bare-segment array mapped through `join(REPO_ROOT, d)`, walked by a
+         recursive readdirSync helper) is selected for a lone plan/tasks.d shard diff; at origin/main it is not;
+       - the real test/a-retired-index-line-keeps-its-frozen-bullet.test.ts is in the CLI listing for the W1-T9875
+         shard path;
+       - a bare segment with no population walk, and a suite naming only plan/policy.yaml, are not selected for a
+         shard diff (positive control: W1-T5698's narrowing holds);
+       - a usable read-map fixture that records a suite listing `plan/**` selects that suite even when its source
+         names no plan path, and an unusable map falls back to the derived arm and names why.
+  acceptance:
+    - claim: "a #12389-shaped suite is selected for a lone shard diff"
+      proof: 'grep: test("W1-T9922: a suite that walks a bare plan segment is selected for a shard diff" in test/a-plan-only-diff-runs-every-suite-that-walks-the-plan.test.ts'
+    - claim: "the suite that reddened main at bd42ca367 is listed for the W1-T9875 shard"
+      proof: 'grep: test("W1-T9922: the frozen-bullet doctrine walk is listed for the W1-T9875 shard" in test/a-plan-only-diff-runs-every-suite-that-walks-the-plan.test.ts'
+    - claim: "a bare segment with no walk, or a policy-only name, still selects nothing for a shard diff"
+      proof: 'grep: test("W1-T9922: a bare segment with no walk selects nothing for a shard diff" in test/a-plan-only-diff-runs-every-suite-that-walks-the-plan.test.ts'
+    - claim: "a usable read map adds the suites it saw list plan/, and an unusable one is named"
+      proof: 'grep: test("W1-T9922: a usable read map adds the suites it saw read the plan" in test/a-plan-only-diff-runs-every-suite-that-walks-the-plan.test.ts'
+  falsifier: |
+    At origin/main, `planReadingSuiteFiles(root, ["plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml"])`
+    omits test/a-retired-index-line-keeps-its-frozen-bullet.test.ts and a fixture suite in the same shape, so the
+    first two tests fail. Restoring the literal-only `namedPlanOrDocsPaths` reddens them again.
