@@ -12,7 +12,9 @@ import { test } from "node:test";
 import { AGENT_VIEW_PARTS, createAgentView, type AgentProposalsBody, type AgentViewData } from "../src/lib/agent-view.js";
 import { deriveAnalyticsSnapshot } from "../src/lib/analytics-route.js";
 import { analyticsSourceBodies, type AnalyticsViewData } from "../src/lib/analytics-view.js";
-import type { Clock } from "../src/lib/clock.js";
+import { systemClock, type Clock } from "../src/lib/clock.js";
+import { buildAttentionCensus, listThreadViews } from "../src/lib/inbox-responder.js";
+import { plainInboxMessage } from "../src/lib/inbox-plain.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { createHostView, type HostViewData } from "../src/lib/host-view.js";
 import { writePersistedInbox } from "../src/lib/fleet-lane.js";
@@ -188,6 +190,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "", analytics: "", workstreams: "", actions: "", host: "", agent: "?instance=core&part=history", incidents: "", task: `?${taskViewKey("core", "W1-T1")}` };
 
 test("every registered view body validates against its declared schema", async (t) => {
+  t.mock.method(systemClock, "now", clock.now);
   const { root, stateDir, deps, runs } = fixture(t);
   await materializeAll(root, stateDir, deps);
   const routed = buildServeRoutes(deps).filter((r) => r.path.startsWith("/v1/views/") && r.path !== VIEW_EVENTS_PATH && r.path !== VIEW_VERSIONS_PATH)
@@ -283,7 +286,8 @@ test("the strict view validator refuses an undeclared field and a wrong enum in 
 test("W1-T5739: every GET /v1/inbox lane item validates against its declared schema", async (t) => {
   const { stateDir, deps } = fixture(t);
   deps.panelGraph.inboxFromSlowLane = true;
-  writePersistedInbox(stateDir, {
+  const content = {
+    snapshotScope: { root: deps.fleetControlRoot },
     complete: true, mergedTaskIds: [], projectionIndeterminate: false, ledgerRows: [],
     proposals: ["ready", "drafting", "notReady", "declined"].map((lane) => ({ id: `ruling:${lane}`, summary: lane, evidenceAnchors: [] })),
     classifications: [
@@ -292,7 +296,15 @@ test("W1-T5739: every GET /v1/inbox lane item validates against its declared sch
       { proposalId: "ruling:notReady", state: "not_ready", reasons: [{ predicate: "drafted", detail: "no draft yet" }] },
       { proposalId: "ruling:declined", state: "declined", reasons: [], declinedReason: "operator declined" },
     ],
-  }, NOW);
+    stores: { fleetDecisions: {}, plainMessages: {} },
+    attentionEvidence: { archiveLedger: "unavailable" as const, releases: [], judges: [] },
+  };
+  const views = listThreadViews(content.proposals.map((proposal, i) => ({ proposalId: proposal.id, summary: proposal.summary,
+    plain: plainInboxMessage(proposal, {}), state: (["ready", "drafting", "notReady", "declined"] as const)[i]! })), new Map(), {});
+  const attentionCensus = buildAttentionCensus({ classificationContent: content, views,
+    classifications: content.classifications as never, taskFacts: new Map(), releasedTaskIds: new Set(), judgeByTask: new Map(),
+    sources: { plan: "observed", registry: "observed", liveLedger: "observed", archiveLedger: "unavailable", githubProjection: "observed" } });
+  writePersistedInbox(stateDir, { ...content, classifications: content.classifications as never, snapshotKey: attentionCensus.snapshotKey, attentionCensus }, Date.now());
   const url = await listen(t, buildServeServer(deps));
   const res = await fetch(`${url}/v1/inbox`, { headers: READ });
   assert.equal(res.status, 200);

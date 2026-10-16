@@ -14,7 +14,8 @@ import { persistedInboxIdentity, readPersistedInbox, writeClassificationSnapshot
 import { deriveTaskReferent, parseProposalRegistryResult, pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { buildInboxDismissalAudit, inboxDismissalReceipts } from "./inbox-dismissal-audit.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { readSnapshotCursor, snapshotCursor } from "./read-page.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
@@ -140,20 +141,24 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   if (!deps.inboxSourceIdentity && proposals.length > 0) pruneInboxTriage(stateDir, proposals.map((p) => p.id));
   // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
   const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
-  const content = { ...persistedContent(classified, stores), dismissalAudit: dismissalAudit(classified, deps, now),
+  const inputs = { ...persistedContent(classified, stores), dismissalAudit: dismissalAudit(classified, deps, now),
+    snapshotScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope ?? { root: deps.inboxRoot },
     ...(deps.inboxSourceIdentity ? { sourceIdentity: deps.inboxSourceIdentity } : {}) };
+  const attentionCensus = materializeInboxAttentionCensus(deps, classified, stores, inputs);
+  const content = { ...inputs, snapshotKey: attentionCensus.snapshotKey, attentionCensus };
   const identity = persistedInboxIdentity(content);
   const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
+  const generatedAt = fixedClock(written ? now : memo.writtenAtMs!).iso();
+  const bodies = inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot), inboxStoreSource(generatedAt), content.snapshotKey);
   if (written) {
     writePersistedInbox(stateDir, content, now);
     writeClassificationSnapshot(stateDir, classifications, fixedClock(now), inboxClassificationEvidence(classified));
     memo.identity = identity;
     memo.writtenAtMs = now;
   }
-  const generatedAt = fixedClock(memo.writtenAtMs!).iso();
   return {
-    bodies: inboxViewBodies(inboxLanes({ ...classified, stores }, deps.inboxRoot), inboxStoreSource(generatedAt)),
+    bodies,
     proposals: proposals.length, changed, written, pruned: prunedIds.length, nextSnoozeWakeAt: nextInboxSnoozeWake(stateDir, now), generatedAt,
   };
 }
@@ -176,6 +181,7 @@ type LaneItem = { proposalId: string; lane?: string };
 
 /** One page of one section, with every lane's counts so a page alone can draw the section tabs. */
 export interface InboxViewData {
+  snapshotKey?: string;
   section: InboxViewSection;
   items: LaneItem[];
   counts: Lanes["counts"];
@@ -199,10 +205,10 @@ function sectionItems(lanes: Lanes, section: InboxViewSection): LaneItem[] {
 
 /**
  * Every key of the `inbox` view: per section, pages of at most {@link pagesWithin}'s bytes. The first
- * page is `section=<s>`; page n is `section=<s>&cursor=<offset>`, the offset of its first item. A
+ * page is `section=<s>`; continuation cursors bind the classification, section and item offset. A
  * `needsYou` item names its `lane`. No clock is in `data`, so an unchanged inbox keeps its ETags.
  */
-export function inboxViewBodies(lanes: Lanes, source: ViewSource): InboxViewBody[] {
+export function inboxViewBodies(lanes: Lanes, source: ViewSource, snapshotKey?: string): InboxViewBody[] {
   return INBOX_VIEW_SECTIONS.flatMap((section) => {
     const items = sectionItems(lanes, section);
     const pages = pagesWithin(items);
@@ -210,9 +216,12 @@ export function inboxViewBodies(lanes: Lanes, source: ViewSource): InboxViewBody
     return pages.map((page, index) => {
       const at = offset;
       offset += page.length;
-      const params = new URLSearchParams(index === 0 ? { section } : { section, cursor: String(at) });
-      const next = index + 1 < pages.length ? { next: String(offset) } : {};
-      return { key: viewKey(params), data: { section, items: page, counts: lanes.counts, page: { index, of: pages.length, total: items.length, ...next } }, sources: [source] };
+      const params = new URLSearchParams(index === 0 ? { section } : { section, cursor: snapshotKey ? snapshotCursor({ snapshotKey, section, offset: at }) : String(at) });
+      const next = index + 1 < pages.length ? { next: snapshotKey ? snapshotCursor({ snapshotKey, section, offset }) : String(offset) } : {};
+      const data = { ...(snapshotKey ? { snapshotKey } : {}), section, items: page, counts: lanes.counts, page: { index, of: pages.length, total: items.length, ...next } };
+      // PRIMARY CONTROL: leave 4 KiB of the 64 KiB wire budget for the view envelope and sources.
+      if (Buffer.byteLength(JSON.stringify(data)) > 60 * 1024) throw new Error("Inbox page exceeds its maintained payload budget");
+      return { key: viewKey(params), data, sources: [source] };
     });
   });
 }
@@ -227,17 +236,50 @@ export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): View
   return {
     name: INBOX_VIEW_NAME,
     version: INBOX_VIEW_VERSION,
-    ...(deps.inboxFromSlowLane ? { shadowSources: { items: INBOX_STORE_SOURCE, counts: INBOX_STORE_SOURCE, page: INBOX_STORE_SOURCE } } : {}),
+    ...(deps.inboxFromSlowLane ? { shadowSources: { snapshotKey: INBOX_STORE_SOURCE, items: INBOX_STORE_SOURCE, counts: INBOX_STORE_SOURCE, page: INBOX_STORE_SOURCE } } : {}),
+    validateRequest: (params, source) => {
+      if (!source) return undefined;
+      const section = params.get("section") ?? "";
+      if (!INBOX_VIEW_SECTIONS.includes(section as InboxViewSection)) return undefined;
+      const head = source.body(INBOX_VIEW_NAME, viewKey(new URLSearchParams({ section })));
+      if (!head && !params.has("cursor")) return undefined;
+      const key = (head?.body.data as Partial<InboxViewData> | undefined)?.snapshotKey;
+      const cursor = readSnapshotCursor(params.get("cursor") ?? undefined, key, section);
+      if ("error" in cursor) return cursor;
+      const selected = source.body(INBOX_VIEW_NAME, viewKey(params));
+      for (const entry of [head, selected]) {
+        if (!entry) continue;
+        const data = entry.body.data as Partial<InboxViewData> | undefined;
+        const judged = source.judge(entry.body.sources, clock.now(), entry);
+        const own = judged.find(item => item.name === INBOX_STORE_SOURCE);
+        const age = clock.now() - Date.parse(own?.asOf ?? "");
+        if (data?.snapshotKey !== key || !Number.isFinite(age) || age < 0 || judged.some(item => item.state !== "fresh") || age > INBOX_STALE_AFTER_MS) {
+          return { status: 503, error: "inbox_snapshot_stale", detail: "The maintained classification source is missing, invalid or stale." };
+        }
+      }
+      return undefined;
+    },
     compute: (params) => {
       const section = params.get("section");
       if (!INBOX_VIEW_SECTIONS.includes(section as InboxViewSection)) return { error: `section must be one of ${INBOX_VIEW_SECTIONS.join(", ")}` };
-      const read = deps.inboxFromSlowLane ? readSlowLaneInbox(deps) : undefined;
+      const read = readSlowLaneInbox(deps);
+      if (deps.inboxFromSlowLane) {
+        if (!read) return { status: 503, error: "inbox_snapshot_pending", detail: "A completed maintained classification is not available yet." };
+        const planSource = deps.readPlanSource?.();
+        if (planSource?.state === "unavailable") return { status: 503, error: "plan_source_unavailable", detail: "Current plan evidence is unavailable." };
+        const age = clock.now() - Date.parse(read.generatedAt);
+        if (planSource?.state === "stale" || !Number.isFinite(age) || age < 0 || age > INBOX_STALE_AFTER_MS) {
+          return { status: 503, error: "inbox_snapshot_stale", detail: "The maintained classification or its current plan source is missing, invalid or stale." };
+        }
+      }
       const classified = read?.classified ?? (deps.inboxFromSlowLane ? undefined : peekClassifiedInbox(deps));
       if (!classified) return { error: "serve has not classified the inbox yet" };
+      const cursor = read || deps.inboxFromSlowLane ? readSnapshotCursor(params.get("cursor") ?? undefined, read?.snapshotKey, section!) : undefined;
+      if (cursor && "error" in cursor) return cursor;
       const source = read
         ? inboxStoreSource(read.generatedAt, clock.now() - Date.parse(read.generatedAt) > INBOX_STALE_AFTER_MS ? "stale" : "fresh")
         : inboxStoreSource(clock.iso());
-      const body = inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source).find((b) => b.key === viewKey(params));
+      const body = inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source, cursor?.snapshotKey).find((b) => b.key === viewKey(params));
       return body ? { data: body.data, sources: body.sources } : { error: `no such page: ${viewKey(params)}` };
     },
   };
