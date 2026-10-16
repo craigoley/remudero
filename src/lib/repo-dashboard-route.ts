@@ -25,6 +25,7 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import type { Route } from "./service.js";
+import { observeSelectedRegistry, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { sendJson } from "./panel-actions.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
@@ -684,6 +685,7 @@ function statStampSync(path: string): string {
 }
 
 export interface RepoDashboardOptions {
+  selectedRegistryObserver?: SelectedRegistryObserver;
   /** Repository root containing the managed-repos state file. */
   root: string;
   /** A validated gateway registry identity limits an instance route to its own ledger and plan. */
@@ -914,12 +916,13 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
     }
     return resolveIdentities(deps, parseRegistryRepos(text));
   };
-  const project = async (onlyOwn: boolean): Promise<RepoDashboardResult> => {
+  const project = (onlyOwn: boolean): Promise<RepoDashboardResult> => observeSelectedRegistry(deps.selectedRegistryObserver, "repo-dashboard",
+    { instanceName: deps.ownInstance, repository: deps.instanceRepository && `${deps.instanceRepository.owner}/${deps.instanceRepository.repo}` }, async () => {
     const resolved = await resolve();
     const measured = resolved.identities.length > 0 && deps.ledgerPath !== undefined ? await measure(resolved.identities, deps.ledgerPath) : undefined;
     if (measured && !measured.outcome.ok) throw new RepoTelemetryUnavailableError(measured.outcome.reason);
     return dashboardResult(deps, resolved, measured?.outcome, measured ? measured.atMs : clock.now(), onlyOwn);
-  };
+  });
   return [
     { method: "GET", path: "/v1/repos", scope: "read", handler: async (_req, res) => sendJson(res, 200, await project(false)) },
     { method: "GET", path: "/v1/repos/summary", scope: "read", handler: async (_req, res) => sendJson(res, 200, await project(true)) },

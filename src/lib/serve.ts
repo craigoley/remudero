@@ -43,7 +43,7 @@ import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import { createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
 import { readSelectedInstanceRegistry, type RegistrySelectionInput, type RegistryFileIO } from "./instance-registry-selection.js";
-import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions } from "./selected-registry-consumers.js";
+import { createSelectedRegistryObserver, observeSelectedRegistry, type SelectedRegistryConsumerOptions, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import {
   assertWriteTiersComplete,
   createConfirmNonceStore,
@@ -318,6 +318,7 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  selectedRegistryObservation?: SelectedRegistryConsumerOptions;
   routeReadRollup?: RouteReadRollup;
   projectionWorker?: ConsoleProjectionWorker;
   readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every" | "slowLane">;
@@ -1964,7 +1965,8 @@ export type HostRegistryState = InstancesHostRegistryState;
  * repo registry answered and the host copy is only the thing being checked against it.
  * W1-T5056: while the `instances` view serves, the answer is that body's projection and reads no file.
  */
-export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches" | "autoMode"> };
+export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches" | "autoMode">;
+  selectedRegistryObserver?: SelectedRegistryObserver };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
   const selectedInput = deps.selectedRegistry === undefined ? undefined : {
@@ -1986,7 +1988,7 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     method: "GET",
     path: "/v1/registry",
     scope: "read",
-    handler: async (_req, res) => {
+    handler: (_req, res) => observeSelectedRegistry(deps.selectedRegistryObserver, "serve-registry", {}, async () => {
       if (selectedInput !== undefined) {
         const selected = await readSelectedInstanceRegistry(selectedInput, deps.selectedRegistryIO);
         if (selected.kind === "unknown" || selected.kind === "refused") {
@@ -2003,13 +2005,13 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
       const answer = served ? registryFromInstances(served.body.data as InstancesData)
         : legacyRegistryBody(await read(deps.repoRegistryPath).then((text): RegistryRead => (text === undefined ? { ok: false, code: "unreadable" } : { ok: true, text })), await read(hostPath));
       sendJson(res, answer.status, answer.status === 200 ? { ...answer.body, generatedAt: clock.iso() } : answer.body);
-    },
+    }),
   };
 }
 /** `owner/name` — the grammar {@link parseInstanceRegistry} requires, so both sides compare as-is. */
 const ONBOARDING_READINESS_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-export type OnboardingReadinessRouteInput = NonNullable<ServeDeps["onboardingReadiness"]> & { repoRegistryPath: string };
+export type OnboardingReadinessRouteInput = NonNullable<ServeDeps["onboardingReadiness"]> & { repoRegistryPath: string; selectedRegistryObserver?: SelectedRegistryObserver };
 
 /**
  * W1-T4264 — `GET /v1/onboarding/readiness?repo=<owner/name>`: the eight checks of
@@ -2018,7 +2020,7 @@ export type OnboardingReadinessRouteInput = NonNullable<ServeDeps["onboardingRea
  * makes that ONE check `unknown` (path-free code, as buildRegistryRoute) — never a 503, never a pass.
  */
 export function buildOnboardingReadinessRoute(deps: OnboardingReadinessRouteInput): Route {
-  const selected = createSelectedRegistryObserver(deps.selectedRegistryObservation);
+  const selected = deps.selectedRegistryObserver ?? createSelectedRegistryObserver(deps.selectedRegistryObservation);
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
   const clock = deps.clock ?? systemClock;
   const cache = new Map<string, { atMs: number; snapshot: OnboardingReadinessSnapshot }>();
@@ -2751,6 +2753,7 @@ export function readEvalCardInput(stateDir: string, trialId: string | undefined)
 }
 
 interface ServeRoutesAssembly {
+  selectedRegistryObserver?: SelectedRegistryObserver;
   routes: Route[];
   instanceAnalyticsCaches: AnalyticsSnapshotCache[];
   navBadgeScopes: () => NavBadgeScope[];
@@ -2768,6 +2771,7 @@ function assembleServeRoutes(
   readModel?: ReadModelWorkerHandle,
   memory?: ServeMemoryRegistry,
 ): ServeRoutesAssembly {
+  const selectedRegistryObserver = createSelectedRegistryObserver(deps.selectedRegistryObservation);
   const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
   const badgeScopes: NavBadgeScope[] = [];
   const navBadgeScopes = (): NavBadgeScope[] => [
@@ -2932,6 +2936,7 @@ function assembleServeRoutes(
   const rawRoutes = [
     withStatusNeedsYou(withFleetRuntimeHealth(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), readRuntimeHealth), needsYouGates),
     ...buildRepoDashboardRoutes({
+      selectedRegistryObserver,
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       ownInstance: deps.instances?.coreInstance ?? CORE_INSTANCE,
@@ -3060,12 +3065,14 @@ function assembleServeRoutes(
     // W1-T4227: the fleet's one registry, read-only — see buildRegistryRoute's own doc.
     buildRegistryRoute({
       ...deps.registry,
+      selectedRegistryObserver,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
       ...(readModel ? { readModel } : {}),
     }),
     // W1-T4264: defaults to the SAME registry path buildRegistryRoute (above) resolves.
     buildOnboardingReadinessRoute({
       ...deps.onboardingReadiness,
+      selectedRegistryObserver,
       repoRegistryPath: deps.onboardingReadiness?.repoRegistryPath ?? deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
     }),
     buildOnboardingRepositoryInventoryRoute(deps.onboardingRepositoryInventory),
@@ -3164,7 +3171,7 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready };
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready, selectedRegistryObserver };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -3419,6 +3426,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", analyticsCache.stop);
   server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
   server.on("close", () => {
+    routeAssembly.selectedRegistryObserver?.close();
     for (const cache of routeAssembly.instanceAnalyticsCaches) cache.stop();
     routeAssembly.linkRefusals.stop();
   });
