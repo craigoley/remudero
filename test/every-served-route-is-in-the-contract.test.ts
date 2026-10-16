@@ -59,6 +59,8 @@ function servedPaths(): string[] {
       instances: { registryPath, stateBase: join(root, "instances") },
     } as unknown as ServeDeps;
     const assembled = buildServeRoutes(deps);
+    assert.equal(assembled.some(route => route.path === "/v1/i/site/inbox/retirement-restore" && route.method === "POST"), true,
+      "the real registered retirement restore entry is a mounted POST, independently of OpenAPI");
     const routes = assembled.map((route) => route.path);
     assert.deepEqual(assembled.filter(route => route.path === "/v1/i/site/inbox/why-me-correction")
       .map(route => route.method), ["POST"], "the real registry row mounts the advisory write");
@@ -78,7 +80,7 @@ function servedPaths(): string[] {
     const instanceAnswers = routes.filter((path) => path === "/v1/i/site/manual/approve" || path === "/v1/i/site/escalation/mark-handled")
       .map((path) => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceAnswers.length, 2, "both answer routes now names for an instance's escalations must be mounted for a registered instance");
-    const inbox = ["inbox", "inbox/attention-census", "inbox/proposal", "inbox/reframe", "inbox/why-me-correction"];
+    const inbox = ["inbox", "inbox/attention-census", "inbox/proposal", "inbox/reframe", "inbox/why-me-correction", "inbox/retirement-restore"];
     const instanceInbox = routes.filter(path => inbox.some(p => path === `/v1/i/site/${p}`))
       .map(path => path.replace("/site/", "/{instance}/"));
     assert.equal(instanceInbox.length, inbox.length, "every declared instance Inbox route is mounted for the real registry row");
@@ -119,4 +121,8 @@ test("W1-T9286: the real instance why-me route survives the census and parameter
     assert.deepEqual(contractDrift([alias], [path]), { undeclared: [], unserved: [] });
   assert.deepEqual(contractDrift(served.filter(route => route !== path), [path]).unserved,
     [normalise(path)], "removing the mounted route must remain a detected contract failure");
+});
+
+test("W1-T9284: the served route census retains the real registered retirement restore POST", () => {
+  assert.ok(servedPaths().map(normalise).includes("/v1/i/{}/inbox/retirement-restore"));
 });
