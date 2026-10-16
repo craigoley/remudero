@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
+import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
@@ -164,7 +165,117 @@ export function parseDependabotBumpFacts(title: string, body: string): DepReview
       facts.push(fact);
     }
   }
-  return facts;
+  // W1-T9828: a title fact elided by fitDependabotTitle folds into the body fact it abbreviates.
+  return facts.filter((f) => !facts.some((g) => g !== f && g.fromVersion === f.fromVersion && g.toVersion === f.toVersion &&
+    !g.dependency.includes(ELIDED_SEGMENT) && elidedDependencyMatches(f.dependency, g.dependency)));
+}
+
+const ELIDED_SEGMENT = "/…/";
+
+function elidedDependencyMatches(elided: string, full: string): boolean {
+  const at = elided.indexOf(ELIDED_SEGMENT);
+  if (at < 0) return false;
+  const head = elided.slice(0, at + 1), tail = elided.slice(at + ELIDED_SEGMENT.length - 1);
+  return full.length > head.length + tail.length && full.startsWith(head) && full.endsWith(tail);
+}
+
+// ── W1-T9828 — an over-long Dependabot title is fitted, never tail-cut ─────
+
+export type DependabotTitleFit =
+  | { kind: "fits" }
+  | { kind: "fitted"; title: string }
+  | { kind: "unfittable"; reason: string };
+
+const VERSION_TEXT = String.raw`v?\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?`;
+const SINGLE_BUMP_RE = new RegExp(String.raw`^(bump)\s+([^\s,]+)\s+from\s+(${VERSION_TEXT})\s+to\s+(${VERSION_TEXT})`, "i");
+const GROUP_BUMP_RE = /^(bump)\s+the\s+([\w./-]+)\s+group/i;
+const TITLE_CLAUSE_RE = /\s+(in the [\w./-]+ group|across \d+ director(?:y|ies)|in \/\S*|with \d+ updates?)/y;
+
+export function overHeaderLimit(title: string): boolean {
+  return checkCommitMessage(title).some((v) => v.rule === "header-max-length");
+}
+
+/** Dependabot's trailing clauses, in order, or undefined when the tail is not its grammar. */
+function titleClauses(tail: string): string[] | undefined {
+  const clauses: string[] = [];
+  TITLE_CLAUSE_RE.lastIndex = 0;
+  while (TITLE_CLAUSE_RE.lastIndex < tail.length) {
+    const m = TITLE_CLAUSE_RE.exec(tail);
+    if (!m) return undefined;
+    clauses.push(m[1]);
+  }
+  return clauses;
+}
+
+/**
+ * Fit an over-long Dependabot title under commitlint's own header-max-length. Each step runs only
+ * while still over: drop `across N directories`, then the group clause, then elide the dependency's
+ * interior path segments, then drop `in /<dir>`; anything still over is refused, never tail-cut.
+ * The fitted title must parse to the original's bump facts and semver level.
+ */
+export function fitDependabotTitle(title: string, body: string): DependabotTitleFit {
+  if (!overHeaderLimit(title)) return { kind: "fits" };
+  const prefix = CONVENTIONAL_TITLE_PREFIX_RE.exec(title)?.[0] ?? "";
+  const rest = title.slice(prefix.length).replace(/\s+/g, " ").trim();
+  const single = SINGLE_BUMP_RE.exec(rest), group = single ? null : GROUP_BUMP_RE.exec(rest);
+  const clauses = single ?? group ? titleClauses(rest.slice((single ?? group)![0].length)) : undefined;
+  if (clauses === undefined) return { kind: "unfittable", reason: "the title is not Dependabot's bump grammar" };
+  let dependency = single?.[2] ?? "";
+  const build = () => prefix + (single ? `${single[1]} ${dependency} from ${single[3]} to ${single[4]}` : `${group![1]} the ${group![2]} group`) +
+    clauses.map((c) => ` ${c}`).join("");
+  const drop = (re: RegExp) => () => { const i = clauses.findIndex((c) => re.test(c)); if (i >= 0) clauses.splice(i, 1); };
+  const elide = () => {
+    const segments = dependency.split("/");
+    if (segments.length > 3) dependency = [segments[0], segments[1], "…", segments[segments.length - 1]].join("/");
+  };
+  let fitted = build();
+  for (const step of [drop(/^across /), drop(/ group$/), elide, drop(/^in \//)]) {
+    if (!overHeaderLimit(fitted)) break;
+    step();
+    fitted = build();
+  }
+  if (overHeaderLimit(fitted)) {
+    return { kind: "unfittable", reason: `the dependency and versions alone exceed ${CONVENTIONAL_LIMITS.headerMaxLength} characters` };
+  }
+  const facts = (t: string) => JSON.stringify(parseDependabotBumpFacts(t, body));
+  if (facts(fitted) !== facts(title) || overallSemverLevel(fitted, body) !== overallSemverLevel(title, body)) {
+    return { kind: "unfittable", reason: "a fitted title would change the bump facts the lane reads" };
+  }
+  return { kind: "fitted", title: fitted };
+}
+
+export type DependabotRetitleOutcome = "fits" | "retitled" | "failed" | "refused";
+
+/** The title write fires `pull_request.edited`, so pr-title-lint re-runs on the new title with a fresh event.
+ *  A refusal is ledgered once per head and title; the hold's escalation asks for it. */
+export async function reconcileDependabotTitle(args: {
+  statePath: string;
+  prNumber: number;
+  headSha: string;
+  title: string;
+  body: string;
+  retitle: (title: string) => Promise<void>;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): Promise<DependabotRetitleOutcome> {
+  const fit = fitDependabotTitle(args.title, args.body);
+  if (fit.kind === "fits") return "fits";
+  const at = { pr_number: args.prNumber, head_sha: args.headSha, old_title: args.title };
+  if (fit.kind === "unfittable") {
+    const state = readRefreshState(args.statePath, args.headSha) as DepReviewHoldState & { retitleRefused?: { headSha?: unknown; title?: unknown } };
+    if (state.retitleRefused?.headSha === args.headSha && state.retitleRefused.title === args.title) return "refused";
+    state.retitleRefused = { headSha: args.headSha, title: args.title };
+    writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+    args.log("dep-review.retitle_refused", { ...at, reason: fit.reason });
+    return "refused";
+  }
+  try {
+    await args.retitle(fit.title);
+  } catch (error) {
+    args.log("dep-review.retitle_failed", { ...at, candidate: fit.title, error: String((error as Error)?.message ?? error) });
+    return "failed";
+  }
+  args.log("dep-review.retitled", { ...at, new_title: fit.title });
+  return "retitled";
 }
 
 export function majorMigrationBumps(title: string, body: string): DepReviewBumpFact[] {
