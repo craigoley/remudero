@@ -38,9 +38,7 @@ test("coverage child environments disable Node compile caching and preserve nati
 test("uninstrumented coverage retries preserve the original compile-cache environment", () => {
   const env = Object.freeze({
     NODE_COMPILE_CACHE: "/ordinary/compile-cache",
-    // Node v24 treats the nonempty string "0" as disabling too. The ordinary
-    // positive control must omit it, rather than assume shell-style booleans.
-    NODE_DISABLE_COMPILE_CACHE: coverage ? "0" : undefined,
+    NODE_DISABLE_COMPILE_CACHE: "0",
     NODE_V8_COVERAGE: "/outer/coverage",
   });
   const retry = coverageRetryInvocation(process.execPath,
@@ -72,7 +70,9 @@ function runProbe(t: TestContext, coverage: boolean) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_COMPILE_CACHE: cache,
-    NODE_DISABLE_COMPILE_CACHE: "0",
+    // Node v24 treats the nonempty string "0" as disabling too. The ordinary
+    // positive control must omit it, rather than assume shell-style booleans.
+    NODE_DISABLE_COMPILE_CACHE: coverage ? "0" : undefined,
     NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE ?? "",
     TEST_RETRY: "0",
   };
