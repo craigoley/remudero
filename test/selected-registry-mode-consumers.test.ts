@@ -300,7 +300,7 @@ test("selected mode refuses missing invalid and retired evidence without changin
     { label: "explicit empty path", settings: { registryPath: "" }, reason: "invalid_path" },
     { label: "missing instance", settings: { instanceName: undefined }, reason: "invalid_instance" },
     { label: "wrong instance", settings: { instanceName: "another" }, reason: "instance_missing_or_ambiguous" },
-    { label: "retired instance", content: registry("shadow").replace("    github_repo:", "    live: false\n    github_repo:"), reason: "instance_retired" },
+    { label: "retired instance", content: registry("shadow").replace("    github_repo:", "    retired: true\n    github_repo:"), reason: "instance_retired" },
     { label: "unsupported contract", settings: { contractVersion: 99 }, reason: "unsupported_contract" },
     { label: "invalid deadline", settings: { timeoutMs: 0 }, reason: "invalid_bounds" },
     { label: "malformed bytes", content: "instances: not-a-row\n", reason: "malformed" },
@@ -333,7 +333,7 @@ test("selected mode synchronous seams remain unknown and never create a selected
   } finally { fx.cleanup(); }
 });
 
-test("selected mode snapshots real input and handle methods across pending filesystem work", async () => {
+test("selected mode snapshots real input and handle methods across pending filesystem work", { timeout: 30_000 }, async () => {
   const fx = fixture("shadow"), rows: Array<Record<string, unknown>> = [];
   let release!: () => void, entered!: () => void, handle: Awaited<ReturnType<typeof registryFileIO.open>> | undefined, closed = 0;
   const barrier = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
@@ -356,7 +356,7 @@ test("selected mode snapshots real input and handle methods across pending files
   } finally { release(); fx.cleanup(); }
 });
 
-test("selected mode cancellation returns unknown while late real handles still close", async () => {
+test("selected mode cancellation returns unknown while late real handles still close", { timeout: 30_000 }, async () => {
   const fx = fixture("shadow"), rows: Array<Record<string, unknown>> = [], controller = new AbortController();
   let release!: () => void, entered!: () => void, didClose!: () => void, closed = 0;
   const barrier = new Promise<void>(resolve => { release = resolve; }), started = new Promise<void>(resolve => { entered = resolve; });
@@ -373,4 +373,16 @@ test("selected mode cancellation returns unknown while late real handles still c
     controller.abort(); assert.equal(await pending, "armed"); assert.equal(rows.at(-1)?.reason, "cancelled");
     release(); await closing; assert.equal(closed, 1);
   } finally { release(); fx.cleanup(); }
+});
+
+test("selected mode armed-idle root carries its binding through the independent REST merge", async () => {
+  const fx = fixture("shadow", "live", true, "mergeDirect"), shim = ghShim(), path = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${path}`;
+  try {
+    assert.equal(await withLiveWritesAllowed(() => fx.effects.arm!(pr, "armed-idle")), "armed");
+    assert.equal(fx.rows().find(row => row.action === "direct-merge")?.selected_outcome, "would-shadow");
+    assert.equal(shim.calls().length, 1);
+    assert.match(shim.calls()[0]!, /repos\/owner\/repo\/pulls\/1\/merge/);
+    assert.ok(shim.calls()[0]!.includes(pr.headSha!), "the original real expected-head guard survives the custom direct path");
+  } finally { process.env.PATH = path; rmSync(shim.dir, { recursive: true, force: true }); fx.cleanup(); }
 });
