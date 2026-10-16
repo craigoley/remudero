@@ -13,7 +13,7 @@
  */
 // Why: the "Option A" narrow-scope decision — docs/forensics/board.md#file-header
 
-import { recentEntryFromLine, RECENT_ACTIVITY_HISTORY_CAP, RECENT_ACTIVITY_VERBS, type RecentActivityEntry } from "./recent-projection.js";
+import { recentEntryFromLine, recentRunId, RECENT_ACTIVITY_HISTORY_CAP, RECENT_ACTIVITY_VERBS, type RecentActivityEntry } from "./recent-projection.js";
 export { RECENT_ACTIVITY_VERBS } from "./recent-projection.js";
 export type { RecentActivityEntry, RecentActivityVerb } from "./recent-projection.js";
 import type { ServerResponse } from "node:http";
@@ -1017,7 +1017,7 @@ export function recentActivityEntries(cache: RecentActivityCache, max = 20): Rec
 export function feedRecentActivity(deps: BoardDeps, cache: RecentActivityCache, newLines: ReadonlyArray<Record<string, unknown>>): void {
   const state = cache.state;
   for (const line of newLines) {
-    const runId = typeof line.run_id === "string" ? line.run_id : undefined;
+    const runId = recentRunId(line.run_id);
     if (line.step === "pr.opened" && runId && typeof line.pr_url === "string") {
       state.prByRun.set(runId, line.pr_url);
     }
