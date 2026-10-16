@@ -1,0 +1,95 @@
+- id: W1-T9879
+  title: "rmd test-move <folder> MOVES ONE FOLDER'S TESTS AS PURE RENAMES — regenerated against current main, skipping every file an open PR or run-/fix- branch touches, re-keying (never deleting) every path-keyed manifest and baseline, and logging the move in .git-blame-ignore-revs and the ledger (test restructure, letter H)"
+  repo: remudero
+  depends_on: [W1-T9860, W1-T9861, W1-T9862, W1-T9863, W1-T9864, W1-T9869, W1-T9870, W1-T9871, W1-T9872, W1-T9873, W1-T9876]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, the move tool; each run renames hundreds of tests and re-keys every path-keyed manifest
+  band_meaning: blast-radius
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter H'
+  plan_refs: [W1-T9860, W1-T9864, W1-T9876, W1-T9880, W1-T9881, W1-T9882]
+  files:
+    - src/lib/test-move.ts
+    - src/run-task.ts
+    - scripts/census-precheck.mjs
+    - test/ci/a-test-move-is-a-pure-rename.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 2 (2026-10-16): fleet-driven waves move one folder per PR, skipping files any open PR touches.
+    Best-practices section 4 says to commit the script and regenerate the move, as TypeScript's typeformer did, rather
+    than rebase a giant diff. Zulip's TinglingGit moves only the files no open PR touches.
+    RENAME DETECTION (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section E):
+    - Exact renames are always paired.
+    - 3,700 edited moves showed as A, and flake-screen.mjs (--diff-filter=A), check-proof.ts, run-task.ts and
+      worker-branch-shape.mjs key on A.
+    PATH-KEYED FILES TO RE-KEY (inventory section C, re-verified to exist at 889966ea5):
+    - scripts/test-tier-manifest.json and scripts/test-tier-coverage-manifest.json;
+    - scripts/census-precheck-parity-baseline.json (84 rows). Rewriting its rows reads as `grown` to
+      test/every-ci-census-is-asked-before-the-push.test.ts (~111).
+    - census-precheck.mjs PRECHECK_TRIGGERED_SUITES (~769), PRECHECK_PATH_TRIGGERED_SUITES (~831) and PRECHECK_PARITY
+      (~902);
+    - ci-parity.ts CENSUS_POPULATION (12 literals);
+    - expiring-fixture-census.mjs RECORDED_POPULATION_BY_FILE (~250), where refusePopulationDrop fires;
+    - scripts/source-text-assertion-baseline.json, scripts/assertion-discrimination-baseline.json and
+      hooks/mkdtemp-allowlist.txt. A moved file gets allowance 0 and goes red.
+    - scripts/comment-load-baseline.json, scripts/affected-reach-baseline.json and scripts/mutation-relevant-paths.json;
+    - stryker.conf.json and package.json's named test:* scripts;
+    - workflow run: lines: ci.yml ~1177, clock-sweep.yml ~85 and ~88, recovery-drill.yml ~66;
+    - learnings/*.yaml files: scopes, and one learning assertion `test -f test/no-plan-shard-carries-a-duplicate-key.test.ts`;
+    - the corpus binding of scripts/lib/native-author-runtime.mjs.
+  design: |
+    1. `rmd test-move <folder> [--dry-run]`, registered in src/run-task.ts as testMoveCommand, works on a fresh worktree
+       of origin/main.
+       - Candidates: the rows scripts/test-placement/test-folders.tsv (W1-T9874) assigns to <folder> or its second
+         levels, plus any test added since whose placeTest says <folder>. They are regenerated on every run; no stored
+         diff is ever replayed.
+    2. SKIP SET.
+       - Every file touched by an open PR. This takes ONE GitHub read per wave (a paged list of open PRs with their
+         files), paced by the shared read floor.
+       - Every file a run-*/fix-* branch head changes against its merge base. This is a git-only read: ls-remote plus
+         diff.
+       - Every file that is not location-free by W1-T9864's guard.
+       - Every file whose basename is not unique.
+       Skipped files are listed in the PR body by reason.
+    3. MOVE COMMIT. It holds only `git mv`, with byte-identical content. The tool asserts that
+       `git diff -M100% --name-status` shows only R100 for every moved test, and refuses otherwise.
+    4. RE-KEY COMMIT, the second commit in the same PR.
+       - Every path-keyed file above is rewritten old -> new, with values preserved and rows never deleted.
+       - census-precheck's parity judgement becomes rename-aware: a row whose path this diff renames, with identical
+         values, is not growth.
+       - The tool asserts that no key in those files names an absent path afterwards.
+    5. BUDGET. The tool measures git's rename pairing on the prospective diff in a scratch clone. If any moved file
+       fails to pair as R100, it halves the batch until all do, and leaves the rest for the next run of the same wave.
+       There is no fixed file count.
+    6. RECORD.
+       - Append the move commit's SHA to .git-blame-ignore-revs, preceded by a line `# test-move <folder> <task id>`.
+         The file is created by the first wave.
+       - Append one compact JSON line (JSON.stringify, no spaces) to scripts/test-placement/waves.ndjson, beginning
+         {"folder":"<folder>","task":"<id>","base":"<sha>","moved":n,"skipped":{...}}.
+       - Write a ledger row, step `test.move`, with the same fields.
+    7. --dry-run prints the plan and writes nothing. The tool never pushes or merges; the wave task's normal PR flow
+       does.
+    New test under test/ci/.
+  acceptance:
+    - claim: 'a move commit holds only exact renames'
+      proof: 'grep: test("W1-T9879: a move commit holds only exact renames" in test/ci/a-test-move-is-a-pure-rename.test.ts'
+    - claim: 'a file an open pull request or a run branch touches is skipped'
+      proof: 'grep: test("W1-T9879: a file an open pull request or run branch touches is skipped" in test/ci/a-test-move-is-a-pure-rename.test.ts'
+    - claim: 'manifest and baseline rows are re-keyed with their values, never deleted'
+      proof: 'grep: test("W1-T9879: manifest rows are re-keyed with their values, never deleted" in test/ci/a-test-move-is-a-pure-rename.test.ts'
+    - claim: 'a renamed parity-baseline row is not read as growth'
+      proof: 'grep: test("W1-T9879: a renamed parity row is not read as growth" in test/ci/a-test-move-is-a-pure-rename.test.ts'
+    - claim: 'the move commit is appended to the blame ignore list and the wave log'
+      proof: 'grep: test("W1-T9879: the move is recorded in the blame ignore list and the wave log" in test/ci/a-test-move-is-a-pure-rename.test.ts'
+    - claim: 'the wave is regenerated from current main, not replayed'
+      proof: 'grep: test("W1-T9879: the wave is regenerated from current main, not replayed" in test/ci/a-test-move-is-a-pure-rename.test.ts'
+    - claim: 'the CLI exposes rmd test-move'
+      proof: 'grep: testMoveCommand( in src/run-task.ts'
+  falsifier: |
+    On origin/main there is no test-move verb and no move module, so every grep misses. Hand-moving a folder edits
+    imports (so pairs drop below R100 at scale), leaves ghost manifest rows, and reads every re-keyed parity row as
+    growth.
