@@ -268,7 +268,7 @@ export function readAllThreads(
   return parseAllThreads(raw, deps.threadStorePath);
 }
 
-/** Parse already-qualified bytes without reopening the thread path. */
+
 export function parseAllThreads(raw: string, sourcePath: string): ReturnType<typeof readAllThreads> {
   const threads = new Map<string, ThreadMessage[]>();
   for (const line of raw.split("\n")) {
