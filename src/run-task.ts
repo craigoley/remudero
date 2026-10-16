@@ -1179,7 +1179,7 @@ import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1881,6 +1881,9 @@ import {
   readIdleLightCadence,
 } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
+import {
+  createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
+} from "./lib/daemon-memory-census.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
@@ -37557,16 +37560,17 @@ export function createDaemonGatewayFactory(
 function memoiseBoardSnapshotByRepo(
   root: string,
   log: (event: string, extra?: Record<string, unknown>) => void,
-): (owner: string, repo: string) => BoardSnapshotCache {
+): ((owner: string, repo: string) => BoardSnapshotCache) & { built: () => Iterable<BoardSnapshotCache> } {
   const cache = new Map<string, BoardSnapshotCache>();
-  return (owner, repo) => {
+  // W1-T9647: `built` lets the daemon's memory row size the closed-PR rows each cache keeps.
+  return Object.assign((owner: string, repo: string) => {
     const key = `${owner}/${repo}`;
     const hit = cache.get(key);
     if (hit) return hit;
     const built = createBoardSnapshotCache(root, owner, repo, { log });
     cache.set(key, built);
     return built;
-  };
+  }, { built: () => cache.values() });
 }
 
 /**
@@ -39598,7 +39602,10 @@ export async function daemonCommand(
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
   // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSyncAsync(reportPlanQuarantine));
+  // W1-T9647: every plan this daemon holds — boot, active, the tick read's and each lane's sync — is one copy on the
+  // `daemon.memory` row; a reload sharing task objects with the plan before it is counted once.
+  const daemonPlanCopies = createPlanCopyBook({ refs: () => [plan, activePlanRef.current, tickReadGeneration?.facts.plan] });
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(quarantiningPlanSyncAsync(reportPlanQuarantine), daemonPlanCopies.observe));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
@@ -40155,13 +40162,28 @@ export async function daemonCommand(
   // W1-T8401: before a container-short hold the daemon reclaims its own slack (one tightest-factor collection, paced
   // by its footprint's own variance) and ledgers what it freed and the heap ceiling it would derive, in shadow.
   const daemonMemoryGovernor = createDaemonMemoryGovernor({ policy: memoryPolicyRead.policy });
+  const daemonLiveSet = createLiveSetKeeper();
   const slackReclaimer = createDaemonSlackReclaimer({
     policy: memoryPolicyRead.policy,
     inForcePercent: () => daemonMemoryGovernor.inForcePercent?.() ?? memoryPolicyRead.policy.heapGrowingPercent,
     footprintBytes: () => daemonFootprint.samples().map((sample) => sample.bytes),
-    log: (record) => log("daemon.slack_reclaim", { ...record }),
+    log: (record) => log("daemon.slack_reclaim", { ...daemonLiveSet.keep(record) }),
   });
   installDaemonSlackReclaimer(slackReclaimer);
+  // W1-T9647: what holds the heap, on its own unref'd timer; `unattributed_live_bytes` is read against the reclaimer's
+  // last measured live set above. Cheap counters and sliced walks only: no snapshot, no forced collection.
+  const stopMemoryCensus = startDaemonMemoryCensus({
+    holders: daemonHolderSource({
+      planCopies: daemonPlanCopies,
+      sizedMemos: { terminalUnionScans: terminalUnionScans.size, mergeLogEvidenceByRoot: mergeLogEvidenceByRoot.size,
+        dispatchFilingCache: dispatchFilingCache.size, baseReproductionHostCache: baseReproductionHostCache.size },
+      boardSnapshots: boardSnapshotFor.built,
+      tickRead: () => tickReadGeneration?.facts,
+      ledgerMemos: ledgerMemoHolders,
+      sourceMapsEnabled: () => process.sourceMapsEnabled,
+    }),
+    log, liveSet: daemonLiveSet.read, bootHeadSha: daemonLoadedCodeSha,
+  });
   log("daemon.heap_ceiling_shadow", { basis: "boot", ...slackReclaimer.derivedCeiling() });
   try {
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
@@ -40190,6 +40212,7 @@ export async function daemonCommand(
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
         onPlanReload: (fresh) => {
           activePlanRef.current = fresh;
+          daemonPlanCopies.observe(fresh);
         },
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
@@ -40840,6 +40863,7 @@ export async function daemonCommand(
     await readPlane?.stop();
     if (!deps.checkPause && !deps.runDaemon) disposeSharedPauseRefresh(realDeps().sharedPauseGit);
     loopTelemetry.stop();
+    stopMemoryCensus();
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
     githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
