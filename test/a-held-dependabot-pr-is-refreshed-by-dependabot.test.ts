@@ -353,3 +353,44 @@ test("W1-T9584: invalid refresh history refuses to forget requested heads", (t) 
     assert.deepEqual(logs, [], `${description}: never claim a refresh outcome`);
   }
 });
+
+test("W1-T9913: the dep-review command recreates an armed head blocked by a stale event instead of re-posting", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9913-cmd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  let mergeStateStatus = "BLOCKED";
+  const posts: string[] = [];
+  const arms: string[] = [];
+  const comments: string[] = [];
+  const deps: DepReviewDeps = {
+    config: { root, ledger: ledgerPath } as never,
+    clock: clockFromMillisFn(() => NOW),
+    gh: () => ({
+      number: 11968, url: "https://github.com/craigoley/remudero/pull/11968",
+      title: "chore(deps): bump example from 1.0.0 to 1.0.1", body: "", headRefOid: HEAD,
+      headRefName: "dependabot/github_actions/example-1.0.1", author: { login: "app/dependabot" },
+      mergeStateStatus, autoMergeRequest: { enabledAt: "2026-10-16T14:33:10Z" },
+      statusCheckRollup: [
+        { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-10-15T10:43:00Z", completedAt: "2026-10-15T11:03:00Z" },
+        { name: "ci-gate", conclusion: "SUCCESS", startedAt: "2026-10-15T15:10:50Z", completedAt: "2026-10-15T15:30:00Z" },
+        { context: "remudero-review", state: "SUCCESS", startedAt: "2026-10-16T14:33:00Z" },
+      ],
+    }),
+    prDiff: () => "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n",
+    postStatus: (async (args) => { posts.push(args.state); return { posted: true }; }) as DepReviewDeps["postStatus"],
+    arm: (url) => { arms.push(url); return "armed"; },
+    prMutations: { comment: (_url, body) => { comments.push(body); }, close: () => { throw new Error("never closes"); } },
+  };
+  const run = () => depReviewCommand("11968", ["--repo", "remudero"], deps);
+  const ledger = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(await run(), 1);
+  assert.equal(await run(), 1);
+  assert.deepEqual(comments, [DEPENDABOT_RECREATE_COMMAND], "the second sighting asks Dependabot to recreate");
+  assert.deepEqual(posts, [], "no review is re-posted on a stale-event block");
+  assert.deepEqual(arms, [], "nothing is re-armed");
+  assert.equal(ledger().filter((r) => r.step === "dep-review.stale_event.recreate_requested").length, 1);
+  assert.equal(ledger().filter((r) => r.step === "dep-review.decided").at(-1)?.decision, "arm");
+  mergeStateStatus = "CLEAN";
+  assert.equal(await run(), 0, "a head GitHub does not block takes the ordinary arm path");
+  assert.deepEqual(posts, ["success"]);
+});

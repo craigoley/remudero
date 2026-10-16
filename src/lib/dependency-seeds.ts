@@ -159,6 +159,28 @@ function verifyPackages(checkout: string, modules: string): void {
   }
 }
 
+/** An occupied destination is never replaced. Validate it before calling it available: a dangling
+ * borrower or stale generation must not silently become an install/retry storm. Legacy installs
+ * have no generation identity; package checks do not claim their unrecorded toolchain is proven. */
+function verifyExistingDependencies(checkout: string, modules: string, opts: DependencySeedOptions): void {
+  if (!statSync(modules).isDirectory()) throw new Error("dependency destination is not a directory");
+  verifyPackages(checkout, modules);
+  const marker = join(modules, CONSUMER_MARKER);
+  let reference: { version?: unknown; key?: unknown; checkout?: unknown; seed?: unknown };
+  try { reference = JSON.parse(readFileSync(marker, "utf8")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const expected = dependencySeedIdentity(checkout, opts);
+  if (reference.version !== VERSION || reference.key !== expected.key || reference.checkout !== checkout ||
+      typeof reference.seed !== "string" || !isAbsolute(reference.seed)) {
+    throw new Error("occupied dependency generation identity mismatch");
+  }
+  const ready = JSON.parse(readFileSync(join(reference.seed, "ready.json"), "utf8")) as SeedMetadata;
+  if (ready.version !== VERSION || ready.key !== expected.key) throw new Error("occupied dependency generation is not ready");
+}
+
 function linkPackages(seedModules: string, dest: string): void {
   mkdirSync(dest);
   for (const name of readdirSync(seedModules)) {
@@ -177,7 +199,11 @@ function linkPackages(seedModules: string, dest: string): void {
 export function materializeDependencySeed(checkout: string, opts: DependencySeedOptions = {}): DependencySeedResult {
   checkout = realpathSync(checkout);
   const dest = join(checkout, "node_modules");
-  try { lstatSync(dest); return { status: "present" }; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  let occupied = false;
+  try { lstatSync(dest); occupied = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  // Keep the validation outside the ENOENT catch: an occupied dangling link must never fall
+  // through to provisioning, which could otherwise publish through another owner's path.
+  if (occupied) { verifyExistingDependencies(checkout, dest, opts); return { status: "present" }; }
   const root = opts.root ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   makeStore(root);
   const meta = dependencySeedIdentity(checkout, opts);

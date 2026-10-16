@@ -15,6 +15,7 @@ import { deriveTaskReferent, parseProposalRegistryResult, pruneRatifiedProposals
 import { buildInboxDismissalAudit, inboxDismissalReceipts } from "./inbox-dismissal-audit.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
+import { projectWhyMeFeedback, type WhyMeFeedback } from "./inbox-why-me.js";
 import { readSnapshotCursor, snapshotCursor } from "./read-page.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
@@ -55,6 +56,7 @@ function dismissalAudit(classified: ClassifiedInbox, deps: PanelGraphDeps, now: 
 
 /** What the last pass wrote: its content's identity, and when. Seeded from disk on the first pass. */
 export interface InboxRefreshMemo {
+  whyMeFeedback?: WhyMeFeedback;
   identity?: string;
   writtenAtMs?: number;
 }
@@ -120,7 +122,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   }
   if (memo.identity === undefined) {
     const onDisk = readPersistedInbox(stateDir);
-    if (onDisk) Object.assign(memo, { identity: onDisk.identity, writtenAtMs: Date.parse(onDisk.generatedAt) });
+    if (onDisk) Object.assign(memo, { identity: onDisk.identity, writtenAtMs: Date.parse(onDisk.generatedAt), whyMeFeedback: onDisk.whyMeFeedback });
   }
   const classified = await classifyAllProposalsSliced(deps);
   if (deps.inboxMayPersist && !deps.inboxMayPersist()) throw new Error("instance inbox lease is not held");
@@ -145,7 +147,11 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
     snapshotScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope ?? { root: deps.inboxRoot },
     ...(deps.inboxSourceIdentity ? { sourceIdentity: deps.inboxSourceIdentity } : {}) };
   const attentionCensus = materializeInboxAttentionCensus(deps, classified, stores, inputs);
-  const content = { ...inputs, snapshotKey: attentionCensus.snapshotKey, attentionCensus };
+  const scope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+  // Separate advisory history: classification facts/pages retain W1-T9288's immutable key.
+  let whyMeFeedback = scope ? projectWhyMeFeedback(stateDir, scope, attentionCensus, fixedClock(now).iso()) : undefined;
+  if (whyMeFeedback && whyMeFeedback.identity === memo.whyMeFeedback?.identity) whyMeFeedback = memo.whyMeFeedback;
+  const content = { ...inputs, snapshotKey: attentionCensus.snapshotKey, attentionCensus, ...(whyMeFeedback ? { whyMeFeedback } : {}) };
   const identity = persistedInboxIdentity(content);
   const changed = identity !== memo.identity;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
@@ -156,6 +162,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
     writeClassificationSnapshot(stateDir, classifications, fixedClock(now), inboxClassificationEvidence(classified));
     memo.identity = identity;
     memo.writtenAtMs = now;
+    memo.whyMeFeedback = whyMeFeedback;
   }
   return {
     bodies,

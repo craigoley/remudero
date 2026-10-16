@@ -9,6 +9,7 @@
 // never appears in the sample; its bytes stay in `unattributed_bytes`.
 
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -52,7 +53,7 @@ function scratch(t: TestContext, kind: string, book: Book): { dir: string; stops
   return { dir, stopsFirst: (stop) => void stops.push(stop) };
 }
 
-const named = (readings: readonly HolderReading[], name: string): HolderReading | undefined => readings.find((reading) => reading.name === name);
+const named = <T extends HolderReading>(readings: readonly T[], name: string): T | undefined => readings.find((reading) => reading.name === name);
 const sized = (reading: HolderReading | undefined): boolean => reading !== undefined && reading.bytes > 0 && reading.error === undefined;
 
 test("W1-T5480: a real read-model worker's views thread is sized on serve's sample and leaves unattributed_bytes", async (t) => {
@@ -121,4 +122,265 @@ test("W1-T5480: a thread that never answers for its own threads is named unsized
   assert.match(unsized?.error ?? "", new RegExp(`thread ${silent.threadId}'s own threads unsized: no answer within 300ms`));
   const sample = memory.sampleServeMemory([], { usage: () => USAGE, headroom: () => undefined, workerHeaps: readings });
   assert.ok(sample.holders.some((holder) => holder.name === unsized?.name && holder.error), "the sample carries the unsized reading by name");
+});
+
+type HeapRequest = { type: string; id: number; timeoutMs: number };
+
+/** Observe only the request map's construction, synchronously: no production count API or global mock across awaits. */
+function nestedProbe(post?: (message: HeapRequest) => void) {
+  const requests: HeapRequest[] = [];
+  const thread = Object.assign(new EventEmitter(), {
+    threadId: 701,
+    getHeapStatistics: async () => ({ total_heap_size: 1024, used_heap_size: 512, external_memory: 64 }),
+    postMessage: (message: HeapRequest) => { requests.push(message); post?.(message); },
+  });
+  const maps: Map<unknown, unknown>[] = [];
+  const NativeMap = Map;
+  class ObservedMap<K, V> extends NativeMap<K, V> {
+    constructor(entries?: Iterable<readonly [K, V]> | null) {
+      super(entries);
+      maps.push(this);
+    }
+  }
+  let answer: (message: unknown) => boolean;
+  try {
+    globalThis.Map = ObservedMap;
+    answer = nested.askNestedThreadHeaps(thread as unknown as Worker);
+  } finally {
+    globalThis.Map = NativeMap;
+  }
+  assert.equal(maps.length, 1, "control: only the nested request map was observed");
+  return {
+    thread, requests, answer, waiting: maps[0]!,
+    sample: (timeoutMs = 50) => memory.readWorkerHeaps([{ kind: "probe:deadline", thread: thread as unknown as memory.WorkerThread }], timeoutMs),
+  };
+}
+
+const heapTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+const INSIDE_PROBE = `${memory.WORKER_HEAP_PREFIX}inside:probe:deadline`;
+
+test("nested heap deadlines release every timed-out resolver and preserve unsized readings", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nestedProbe();
+  for (let sample = 0; sample < 3; sample++) {
+    const pending = probe.sample();
+    await heapTurn();
+    assert.equal(probe.waiting.size, 1, "control: this sample has a pending nested request");
+    t.mock.timers.tick(50);
+    const readings = await pending;
+    const unsized = named(readings, INSIDE_PROBE);
+    assert.equal(unsized?.entries, 0);
+    assert.equal(unsized?.bytes, 0);
+    assert.match(unsized?.error ?? "", /own threads unsized: no answer within 50ms/);
+    assert.equal((unsized as memory.WorkerHeapReading).used_bytes, undefined, "unknown used heap stays absent");
+    assert.equal(named(readings, `${memory.WORKER_HEAP_PREFIX}probe:deadline`)?.bytes, 1088, "control: the parent's heap was sized");
+    assert.equal(probe.waiting.size, 0, "a completed timeout must release its resolver");
+    assert.equal(memory.sampleServeMemory([], { usage: () => USAGE, headroom: () => undefined, workerHeaps: readings }).unattributed_bytes,
+      USAGE.rss - USAGE.heapTotal - USAGE.external - 1088, "unknown nested bytes remain unattributed");
+  }
+  assert.equal(probe.requests.length, 3, "every sample still asks the worker");
+});
+
+test("a late nested heap answer cannot settle a newer sample or retain either resolver", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nestedProbe();
+  const expired = probe.sample();
+  await heapTurn();
+  t.mock.timers.tick(50);
+  assert.ok(named(await expired, INSIDE_PROBE)?.error, "control: the first request timed out");
+
+  let settled = false;
+  const current = probe.sample().then((readings) => { settled = true; return readings; });
+  const child = { name: `${memory.WORKER_HEAP_PREFIX}probe:child`, kind: "worker-heap", entries: 1, bytes: 80, used_bytes: 60 };
+  assert.equal(probe.answer({ type: nested.THREAD_HEAPS_ANSWER, id: probe.requests[0]!.id, readings: [{ ...child, bytes: 999 }] }), true);
+  await heapTurn();
+  assert.equal(settled, false, "a late answer is consumed without settling the current sample");
+  assert.equal(probe.waiting.size, 1, "only the current request remains");
+  assert.equal(probe.answer({ type: nested.THREAD_HEAPS_ANSWER, id: probe.requests[1]!.id, readings: [child] }), true);
+  const readings = await current;
+  assert.equal(named(readings, child.name)?.bytes, 80);
+  assert.equal(named(readings, INSIDE_PROBE), undefined, "a timely measured answer needs no unknown placeholder");
+  assert.equal(probe.waiting.size, 0);
+  t.mock.timers.tick(1000);
+  assert.equal(probe.waiting.size, 0, "the settled deadline cannot recreate a request");
+});
+
+test("a failed nested heap post releases its resolver and preserves the post failure", async () => {
+  const failure = new Error("heap request port is closed");
+  const probe = nestedProbe(() => { throw failure; });
+  await assert.rejects(probe.sample(), (error: unknown) => error === failure);
+  assert.equal(probe.requests.length, 1, "control: the failed post was attempted");
+  assert.equal(probe.waiting.size, 0, "a failed post must not retain its resolver");
+});
+
+test("a nested heap request left unanswered by worker exit is released at its deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nestedProbe();
+  const pending = probe.sample();
+  await heapTurn();
+  assert.equal(probe.waiting.size, 1, "control: the request was pending before exit");
+  probe.thread.emit("exit", 0);
+  t.mock.timers.tick(50);
+  const readings = await pending;
+  assert.match(named(readings, INSIDE_PROBE)?.error ?? "", /own threads unsized/);
+  assert.equal(probe.waiting.size, 0, "an exited worker's unanswered resolver is still deadline-bounded");
+});
+
+type NativeHeap = { total_heap_size: number; used_heap_size: number; external_memory: number };
+const NATIVE_HEAP: NativeHeap = { total_heap_size: 1024, used_heap_size: 512, external_memory: 64 };
+const NATIVE_PROBE = `${memory.WORKER_HEAP_PREFIX}probe:native`;
+
+/** The native request's settlement is independent of the sample's deadline. */
+function nativeHeapProbe(t: TestContext, threadId = 801) {
+  const requests: Array<{ resolve: (heap: NativeHeap) => void; reject: (error: Error) => void }> = [];
+  const thread = Object.assign(new EventEmitter(), {
+    threadId,
+    getHeapStatistics: () => new Promise<NativeHeap>((resolve, reject) => requests.push({ resolve, reject })),
+  });
+  t.after(() => { for (const request of requests) request.resolve(NATIVE_HEAP); });
+  return {
+    thread, requests,
+    sample: (timeoutMs = 50) => memory.readWorkerHeaps([{ kind: "probe:native", thread: thread as unknown as memory.WorkerThread }], timeoutMs),
+    exit: () => { thread.threadId = -1; thread.emit("exit", 0); },
+  };
+}
+
+function assertNativeUnsized(readings: memory.WorkerHeapReading[], reason: RegExp = /unsized/): void {
+  const reading = named(readings, NATIVE_PROBE);
+  assert.ok(reading, "control: the tracked worker has a named reading");
+  assert.match(reading.error ?? "", reason);
+  assert.equal(reading.used_bytes, undefined, "an unread heap has no fabricated used size");
+  assert.equal(Object.values(reading.parts ?? {})[0]?.used_bytes, undefined);
+  assert.equal(memory.sampleServeMemory([], { usage: () => USAGE, headroom: () => undefined, workerHeaps: readings }).unattributed_bytes,
+    USAGE.rss - USAGE.heapTotal - USAGE.external, "unknown worker bytes remain unattributed");
+}
+
+test("native heap samples keep one underlying request across repeated timeouts", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nativeHeapProbe(t);
+  for (let sample = 0; sample < 3; sample++) {
+    const pending = probe.sample();
+    await heapTurn();
+    t.mock.timers.tick(50);
+    assertNativeUnsized(await pending);
+  }
+  assert.equal(probe.requests.length, 1, "a caller timeout does not settle the underlying native request");
+});
+
+test("native heap samples do not duplicate a concurrent underlying request", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nativeHeapProbe(t);
+  const first = probe.sample();
+  const second = probe.sample();
+  await heapTurn();
+  t.mock.timers.tick(50);
+  for (const reading of await Promise.all([first, second])) assertNativeUnsized(reading);
+  assert.equal(probe.requests.length, 1);
+});
+
+test("native heap resolution after timeout releases the request without replaying its old result", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nativeHeapProbe(t);
+  const expired = probe.sample();
+  await heapTurn();
+  t.mock.timers.tick(50);
+  assertNativeUnsized(await expired);
+  probe.requests[0]!.resolve({ ...NATIVE_HEAP, total_heap_size: 9999 });
+  await heapTurn();
+  let settled = false;
+  const current = probe.sample().then((reading) => { settled = true; return reading; });
+  await heapTurn();
+  assert.equal(probe.requests.length, 2, "actual settlement permits the next native request");
+  assert.equal(settled, false, "a timed-out sample's late result is not cached as the current sample");
+  probe.requests[1]!.resolve(NATIVE_HEAP);
+  const reading = named(await current, NATIVE_PROBE);
+  assert.equal(reading?.bytes, 1088);
+  assert.equal(reading?.used_bytes, 576);
+  assert.equal(reading?.error, undefined);
+});
+
+test("native heap late and current rejections release the request and preserve the current error", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nativeHeapProbe(t);
+  const expired = probe.sample();
+  await heapTurn();
+  t.mock.timers.tick(50);
+  assertNativeUnsized(await expired);
+  probe.requests[0]!.reject(new Error("late native failure"));
+  await heapTurn();
+  const failed = probe.sample();
+  assert.equal(probe.requests.length, 2);
+  probe.requests[1]!.reject(new Error("current native failure"));
+  assertNativeUnsized(await failed, /current native failure/);
+  const recovered = probe.sample();
+  assert.equal(probe.requests.length, 3, "a rejected request leaves no outstanding read");
+  probe.requests[2]!.resolve(NATIVE_HEAP);
+  assert.equal(named(await recovered, NATIVE_PROBE)?.used_bytes, 576);
+});
+
+test("native heap synchronous failures leave no outstanding request", async (t) => {
+  const probe = nativeHeapProbe(t);
+  const read = probe.thread.getHeapStatistics;
+  probe.thread.getHeapStatistics = () => { throw new Error("synchronous native failure"); };
+  assertNativeUnsized(await probe.sample(), /synchronous native failure/);
+  probe.thread.getHeapStatistics = read;
+  const recovered = probe.sample();
+  assert.equal(probe.requests.length, 1);
+  probe.requests[0]!.resolve(NATIVE_HEAP);
+  assert.equal(named(await recovered, NATIVE_PROBE)?.used_bytes, 576);
+});
+
+test("native heap exit rejects a late result and replacement workers keep their own requests", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const previous = nativeHeapProbe(t, 802);
+  const replacement = nativeHeapProbe(t, 803);
+  const oldSample = previous.sample();
+  previous.exit();
+  let settled = false;
+  const current = replacement.sample().then((reading) => { settled = true; return reading; });
+  previous.requests[0]!.resolve({ ...NATIVE_HEAP, total_heap_size: 9999 });
+  assertNativeUnsized(await oldSample, /exited/);
+  await heapTurn();
+  assert.equal(settled, false, "the old worker's result cannot settle its replacement's request");
+  replacement.requests[0]!.resolve(NATIVE_HEAP);
+  assert.equal(named(await current, NATIVE_PROBE)?.bytes, 1088);
+  assertNativeUnsized(await previous.sample(), /exited/);
+  assert.equal(previous.requests.length, 1, "the exited Worker object is never queried again");
+  const alreadyExited = nativeHeapProbe(t, 805);
+  alreadyExited.exit();
+  assertNativeUnsized(await alreadyExited.sample(), /exited/);
+  assert.equal(alreadyExited.requests.length, 0);
+});
+
+test("native heap request ownership uses Worker identity rather than its numeric thread id", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const previous = nativeHeapProbe(t, 804);
+  const replacement = nativeHeapProbe(t, 804);
+  const expired = previous.sample();
+  await heapTurn();
+  t.mock.timers.tick(50);
+  assertNativeUnsized(await expired);
+  const current = replacement.sample();
+  assert.equal(replacement.requests.length, 1, "another Worker object is queried in its own right");
+  previous.requests[0]!.resolve({ ...NATIVE_HEAP, total_heap_size: 9999 });
+  await heapTurn();
+  const concurrent = replacement.sample();
+  await heapTurn();
+  t.mock.timers.tick(50);
+  assertNativeUnsized(await concurrent);
+  assertNativeUnsized(await current);
+  assert.equal(replacement.requests.length, 1, "an old object's settlement cannot clear the replacement's outstanding request");
+});
+
+test("native heap timely positive control reads the real default Worker implementation", async (t) => {
+  const thread = new Worker("setInterval(() => {}, 1000);", { eval: true });
+  t.after(async () => { await thread.terminate(); });
+  await new Promise<void>((resolve, reject) => { thread.once("online", resolve); thread.once("error", reject); });
+  assert.equal(typeof thread.getHeapStatistics, "function", "control: the real runtime exposes heap statistics");
+  for (let sample = 0; sample < 2; sample++) {
+    const readings = await memory.readWorkerHeaps([{ kind: "probe:real-native", thread }]);
+    const reading = named(readings, `${memory.WORKER_HEAP_PREFIX}probe:real-native`);
+    assert.ok(sized(reading), JSON.stringify(readings));
+    assert.ok((reading?.used_bytes ?? 0) > 0);
+  }
 });
