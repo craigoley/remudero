@@ -11,7 +11,7 @@
   origin: "operator PR queue restoration request 2026-10-15, exact-head API and core ledger comparison"
   plan_refs: [W1-T5694, W1-T3244, W1-T2274, W1-T2275, W1-T5802, W1-T9664]
   files: [src/run-task.ts, src/lib/dep-review.ts, test/dep-review.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

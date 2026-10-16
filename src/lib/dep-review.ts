@@ -4,6 +4,7 @@ import { fixedClock } from "./clock.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
+import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
 
@@ -67,7 +68,7 @@ export function isDependabotAuthor(author: DepReviewAuthor): boolean {
 export type SemverLevel = "major" | "minor" | "patch" | "unknown";
 
 /** Bumped when this lane's decision contract changes, independently of task-review semantics. */
-export const DEP_REVIEW_ENGINE_REVISION = "dep-review-action-sha-pin-v1";
+export const DEP_REVIEW_ENGINE_REVISION = "dep-review-selected-attempts-v2";
 
 function parseVersion(v: string): [number, number, number] | null {
   const m = v.trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?/);
@@ -533,6 +534,86 @@ export interface DepReviewCheck {
    * re-run of this lane against a PR that already carries one must read this field,
    * not just `conclusion`. */
   state?: string;
+}
+
+export interface DepReviewSelectedHead {
+  number: number;
+  url: string;
+  headSha: string;
+  body: string;
+}
+
+export type DepReviewChecksObservation =
+  | { kind: "observed"; checks: ReturnType<typeof rollupFromRest> }
+  | { kind: "unknown"; reason: string };
+
+export async function readSelectedDepReviewChecks(
+  owner: string, repo: string, selected: DepReviewSelectedHead, read: GhApiFetcher,
+): Promise<DepReviewChecksObservation> {
+  const target = { ...selected }, slug = `${owner}/${repo}`.toLowerCase();
+  const unknown = (reason: string): DepReviewChecksObservation => ({ kind: "unknown", reason });
+  const id = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+  const record = (value: unknown): Record<string, unknown> | undefined =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const timestamp = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+  const rows = (value: unknown, key: string): Record<string, unknown>[] | undefined => {
+    const body = record(value);
+    if (body === undefined) return undefined;
+    const list = body[key];
+    if (!Array.isArray(list) || !Number.isSafeInteger(body.total_count) || body.total_count !== list.length || !list.every(row => record(row) !== undefined)) return undefined;
+    return list;
+  };
+  const pull = (value: unknown) => {
+    const p = record(value), head = record(p?.head), repository = record(record(p?.base)?.repo);
+    if (p === undefined || head === undefined || repository === undefined) return undefined;
+    if (!id(p.id) || p.number !== target.number || p.html_url !== target.url || p.state !== "open" || p.merged !== false ||
+        head.sha !== target.headSha || (p.body ?? "") !== target.body || !id(repository.id) ||
+        typeof repository.full_name !== "string" || repository.full_name.toLowerCase() !== slug) return undefined;
+    return { prId: p.id, repoId: repository.id };
+  };
+  if (!id(target.number) || !/^[a-f0-9]{40}$/.test(target.headSha) ||
+      target.url.toLowerCase() !== `https://github.com/${slug}/pull/${target.number}`) return unknown("selected_target_invalid");
+  let stage = "selected_pr";
+  try {
+    const first = pull(await read(singlePrRestArgs(owner, repo, target.number)));
+    if (!first) return unknown("selected_target_unavailable_or_changed");
+    stage = "check_runs";
+    const args = checkRunsRestArgs(owner, repo, target.headSha);
+    args[1] += "&filter=all";
+    const checks = rows(await read(args), "check_runs");
+    if (!checks || new Set(checks.map(c => c.id)).size !== checks.length || checks.some(c => !id(c.id) || c.head_sha !== target.headSha ||
+      typeof c.name !== "string" || !c.name || typeof c.status !== "string" || !timestamp(c.started_at) ||
+      (c.conclusion != null && typeof c.conclusion !== "string") || (c.completed_at != null && !timestamp(c.completed_at)))) return unknown("check_runs_incomplete_or_unbound");
+    stage = "commit_statuses";
+    const statusBody = await read(combinedStatusRestArgs(owner, repo, target.headSha));
+    const statuses = rows(statusBody, "statuses");
+    if (record(statusBody)?.sha !== target.headSha || !statuses || statuses.some(s => !id(s.id) || typeof s.context !== "string" || !s.context ||
+      typeof s.state !== "string" || !timestamp(s.created_at) || (s.updated_at != null && !timestamp(s.updated_at)))) return unknown("commit_statuses_incomplete_or_unbound");
+    stage = "workflow_runs";
+    const workflows = rows(await read(runsForHeadRestArgs(owner, repo, target.headSha)), "workflow_runs");
+    if (!workflows || new Set(workflows.map(r => r.id)).size !== workflows.length || workflows.some(r => !id(r.id) || !id(r.workflow_id) ||
+      !id(r.check_suite_id) || !id(r.run_attempt) || r.head_sha !== target.headSha)) return unknown("workflow_runs_incomplete_or_unbound");
+    const rollup = rollupFromRest(checks as Parameters<typeof rollupFromRest>[0], statuses as Parameters<typeof rollupFromRest>[1], workflows as NonNullable<Parameters<typeof rollupFromRest>[2]>);
+    for (let index = 0; index < checks.length; index++) {
+      const check = checks[index], entry = rollup[index], suite = record(check.check_suite)?.id;
+      const posted = typeof check.external_id === "string" && /^run:\d+:\d+:job:\d+$/.test(check.external_id);
+      const matching = posted ? [] : workflows.filter(r => r.check_suite_id === suite);
+      const direct = workflows.find(r => r.id === entry.workflowRunId), run = direct ?? matching[0];
+      if (matching.length > 1 || (direct && matching[0] && direct.id !== matching[0].id) ||
+          ((entry.workflowRunId !== undefined || record(check.app)?.slug === "github-actions") && run === undefined)) return unknown("workflow_identity_unresolved");
+      if (run !== undefined) {
+        entry.workflowRunId = run.id as number;
+        entry.workflowId = run.workflow_id as number;
+      }
+    }
+    stage = "selected_pr_recheck";
+    const final = pull(await read(singlePrRestArgs(owner, repo, target.number)));
+    if (!final || final.prId !== first.prId || final.repoId !== first.repoId) return unknown("selected_target_changed_during_read");
+    return { kind: "observed", checks: rollup };
+  } catch (error) {
+    void error; // JSON/transport/shape failures remain explicit unknown; never an empty success or external effect.
+    return unknown(`selected_evidence_read_failed:${stage}`);
+  }
 }
 
 /** Check-run/status conclusions that mean a gate is RED — mirrors run-task.ts's RED_CONCLUSIONS. */
@@ -1077,17 +1158,20 @@ export function renderDepReviewOwnRedFeedback(args: {
   title: string;
   body: string;
   headSha: string;
-  basis: "main-passes" | "survived-refresh";
+  basis: "main-passes" | "survived-refresh" | "outside-allowlist";
   bumps: readonly DependabotOwnRedBump[];
   redChecks: readonly string[];
   siblings: ReadonlyArray<{ prNumber: number; bumps: readonly DependabotOwnRedBump[] }>;
+  offendingFiles?: readonly string[];
 }): string {
   return [
     `Land the dependency bump(s) of Dependabot PR #${args.prNumber}, whose red is its own: ${args.title}`,
     "",
     args.basis === "main-passes"
       ? "Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes."
-      : "Dependabot proposed a minor/patch update whose red survived a requested Dependabot refresh.",
+      : args.basis === "outside-allowlist"
+        ? `Dependabot edited dependency file(s) outside the lane's allowlist: ${(args.offendingFiles ?? []).join(", ")}.`
+        : "Dependabot proposed a minor/patch update whose red survived a requested Dependabot refresh.",
     "A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest",
     "allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:",
     "tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked",
@@ -1225,4 +1309,57 @@ export function reconcileDependabotOwnRed(args: {
     red_checks: args.result.redChecks, folded_prs: siblings.map((s) => s.prNumber),
   });
   return "captured";
+}
+
+
+export type DependabotRefusedPathOutcome = "not-proposed" | "captured" | "folded" | "failed";
+
+export function reconcileDependabotRefusedPath(args: {
+  registryDir: string;
+  owner: string;
+  repo: string;
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  author: DepReviewAuthor;
+  commits: readonly DependabotHeadCommit[] | undefined;
+  result: DepReviewResult;
+  capture: (args: { raw: string; submissionKey: string }) => { id: string };
+  nowMs: number;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotRefusedPathOutcome {
+  const facts = { pr_number: args.prNumber, head_sha: args.headSha, offending_files: args.result.offendingFiles };
+  const bumps = parseDependabotBumpFacts(args.title, args.body)
+    .map((b) => ({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
+  const reason = !isDependabotAuthor(args.author) ? "non-dependabot-author"
+    : headCarriesForeignCommit(args.commits) ? "foreign-commit"
+      : bumps.length === 0 ? "unkeyed" : undefined;
+  if (reason !== undefined) {
+    args.log("dep-review.refused_path.not_proposed", { ...facts, reason });
+    return "not-proposed";
+  }
+  const registryPath = join(args.registryDir, OWN_RED_PROPOSALS_FILE);
+  const submissionKey = depReviewOwnRedSubmissionKey(args.owner, args.repo, bumps);
+  try {
+    const proposals = readOwnRedProposals(registryPath);
+    const mine = bumps.map(ownRedBumpKey);
+    const carrier = proposals.find((p) => mine.every((k) => p.bumps.includes(k)));
+    if (carrier !== undefined) {
+      args.log("dep-review.refused_path.folded", { ...facts, feedback_id: carrier.feedbackId });
+      return "folded";
+    }
+    const raw = renderDepReviewOwnRedFeedback({ ...args, basis: "outside-allowlist", bumps, redChecks: args.result.redChecks,
+      siblings: [], offendingFiles: args.result.offendingFiles });
+    const entry = args.capture({ raw, submissionKey });
+    writeAtomic(registryPath, `${JSON.stringify({ proposals: [...proposals, {
+      feedbackId: entry.id, submissionKey, bumps: [...new Set(mine)].sort(), prNumbers: [args.prNumber], filedAtMs: args.nowMs,
+    }] })}\n`);
+    args.log("dep-review.refused_path.feedback_captured", { ...facts, feedback_id: entry.id, submission_key: submissionKey });
+    return "captured";
+  } catch (error) {
+    args.log("dep-review.refused_path.capture_failed", { ...facts, submission_key: submissionKey, error: String((error as Error)?.message ?? error) });
+    return "failed";
+  }
 }

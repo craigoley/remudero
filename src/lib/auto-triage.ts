@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { holderFromLsRemote, type Awaitable, type ClaimGitDeps, type ClaimGitDepsAsync, type GitAnswer } from "./dispatch-claim.js";
 import { fixedClock } from "./clock.js";
+import { sameHost } from "./host-identity.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed, assertClaimRefPushAllowedAsync } from "./live-write-guard.js";
 import { hostWorktreeGit } from "./worktree-git.js";
@@ -250,7 +251,7 @@ export function assessTriageClaimLiveness(i: {
   let lastHostMs = Number.NEGATIVE_INFINITY;
   let lastHolderMs = Number.NEGATIVE_INFINITY;
   for (const row of i.rows) {
-    if (row.host !== i.holder.host || typeof row.ts !== "string") continue;
+    if (!sameHost(row.host, i.holder.host) || typeof row.ts !== "string") continue;
     const t = Date.parse(row.ts);
     if (Number.isNaN(t) || t < claimedMs - TRIAGE_CLAIM_HOST_LOOKBACK_MS) continue;
     hostSeen = true;

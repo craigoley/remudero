@@ -80,6 +80,8 @@ export interface CiLearningFilingResult {
   filed: CiLearningFiledShard[];
   skipped: string[];
   refused: { findingId: string; reason: string }[];
+  /** W1-T9753: paths the landing refused to carry forward because main changed them too. */
+  carryRefused?: FeedbackRefusal[];
 }
 
 const FEEDBACK_REL_DIR = "plan/feedback";
@@ -200,6 +202,8 @@ export interface LandFeedbackResult {
   queued?: string[];
   /** Set when a push lost its lease: the tip it expected, the tip it then found, and who made that tip. */
   leaseMoved?: { expected?: string; observed?: string; by?: string };
+  /** W1-T9753: what the build carried forward from the branch, and how many inherited copies it left at main's. */
+  carry?: LandingCarry;
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
@@ -784,6 +788,7 @@ interface LandingTreeBuild {
    *  `ci-learning` families, which carry no status lifecycle. Never included in `unlanded`/the
    *  tree, so a refusal can never ride into an armed auto-merge PR by construction. */
   refused: FeedbackRefusal[];
+  carry?: LandingCarry;
 }
 
 /** One landing-time refusal (W1-T3561) — surfaced on {@link LandFeedbackResult.refused} and, for
@@ -831,11 +836,43 @@ function* hasFeedbackLineage(net: LandingNet, blob: string): Generator<LandingAs
   catch { /* Presence is not authority: unreadable bytes get an independent unknown publication receipt. */ return false; }
 }
 
+/** W1-T9753: `own` maps each path the landing's own commits changed to its blob at their base (null: absent). */
+interface BranchPending {
+  ok: true;
+  tipSha: string | undefined;
+  own: Map<string, string | null>;
+  tipBlobs: Map<string, string>;
+}
+
+export interface LandingCarry {
+  carried: number;
+  inheritedSkipped: number;
+}
+
+function lsTreeBlobs(out: string): Map<string, string> {
+  const blobs = new Map<string, string>();
+  for (const entry of out.split("\0")) {
+    const tab = entry.indexOf("\t");
+    const [, type, sha] = entry.slice(0, tab).split(" ");
+    if (tab > 0 && type === "blob") blobs.set(entry.slice(tab + 1), sha);
+  }
+  return blobs;
+}
+
+function rawDiffBases(out: string): Map<string, string | null> {
+  const fields = out.split("\0");
+  const bases = new Map<string, string | null>();
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const left = fields[i].split(" ")[2] ?? "";
+    bases.set(fields[i + 1], /[^0]/.test(left) ? left : null);
+  }
+  return bases;
+}
+
 /**
- * Whatever `kind.ownedDir` content `origin/<branch>` currently carries — the union half of the
- * writer (W1-T3560 design (i)): every owner's still-pending records, not just this call's own,
- * so a disjoint sibling's batch is carried forward exactly as {@link landContent} already did
- * before this task, instead of being silently replaced by a tree that never read it.
+ * The union half of the writer (W1-T3560): every owner's pending records on `origin/<branch>`. W1-T9753:
+ * only what the landing's OWN commits changed since their merge base with main (`origin/main...<tip>`);
+ * every other file the tip holds was inherited from an older main, and restaging it reverted main's work.
  *
  * `tipSha: undefined` means the branch was never pushed, or was deleted on the remote since
  * (W1-T3888) — either way nothing pending there. `ok: false` means the branch's content, or its
@@ -846,7 +883,7 @@ function* hasFeedbackLineage(net: LandingNet, blob: string): Generator<LandingAs
 function* readBranchPending(
   net: LandingNet,
   kind: LandingKind,
-): Generator<LandingAsk, { ok: true; tipSha: string | undefined; files: string[] } | { ok: false; reason: string }, AskReply> {
+): Generator<LandingAsk, BranchPending | { ok: false; reason: string }, AskReply> {
   let remoteHasBranch: boolean;
   try {
     remoteHasBranch = yield* refreshLandingRef(net, kind.branch); // W1-T3888: the ACTUAL remote state
@@ -854,7 +891,7 @@ function* readBranchPending(
     return { ok: false, reason: `cannot refresh ${kind.branch}'s remote ref: ${String((e as Error)?.message ?? e)}` };
   }
   // A positively observed absence (W1-T3888) — the "never pushed" shape below already handles.
-  if (!remoteHasBranch) return { ok: true, tipSha: undefined, files: [] };
+  if (!remoteHasBranch) return { ok: true, tipSha: undefined, own: new Map(), tipBlobs: new Map() };
   let tipSha: string;
   try {
     tipSha = (yield* net.git(["rev-parse", `origin/${kind.branch}`])).trim();
@@ -863,59 +900,62 @@ function* readBranchPending(
     return { ok: false, reason: `cannot read ${kind.branch}'s tip after confirming it exists on the remote: ${String((e as Error)?.message ?? e)}` };
   }
   try {
-    const files = (yield* net.git(["ls-tree", "-r", "--name-only", `origin/${kind.branch}`]))
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      // Scoped to the directory this kind owns — unfiltered, this once reverted merged work
-      // with a correct parent (PR #1025), caught only because the deletions broke the build.
-      // Why: docs/forensics/feedback-landing.md#landcontent_scoped_carry_forward.
-      .filter((f) => f.startsWith(`${kind.ownedDir}/`));
-    return { ok: true, tipSha, files };
+    // Scoped to the directory this kind owns — unfiltered, this once reverted merged work
+    // with a correct parent (PR #1025), caught only because the deletions broke the build.
+    // Why: docs/forensics/feedback-landing.md#landcontent_scoped_carry_forward.
+    const own = rawDiffBases(yield* net.git(
+      ["diff", "--raw", "-z", "--no-abbrev", "--no-renames", `origin/main...${tipSha}`, "--", kind.ownedDir],
+    ));
+    const tipBlobs = lsTreeBlobs(yield* net.git(["ls-tree", "-r", "-z", tipSha, "--", kind.ownedDir]));
+    return { ok: true, tipSha, own, tipBlobs };
   } catch (e) {
     return { ok: false, reason: `cannot read ${kind.branch}'s pending content: ${String((e as Error)?.message ?? e)}` };
   }
 }
 
-/** Stage every carried-forward path at the blob `origin/<branch>` holds, skipping any already
- *  identical on `origin/main` (already merged for real) and any whose blob won't resolve (the
- *  ref moved between the `ls-tree` and this per-file read — dropped, never fatal; this is the
- *  W1-T191 regression lock, unchanged by this task). */
+/** Stage the landing's OWN paths (W1-T9753) at the tip's blob, skipping any identical on main or
+ *  absent from the tip (never fatal, W1-T191). A path main ALSO changed since the base is decided
+ *  by {@link decideFeedbackStage} for a feedback record, else refused by name; main's copy stands. */
 function* stageBranchPending(
   net: LandingNet,
   kind: LandingKind,
-  files: string[],
+  pending: BranchPending,
   env: NodeJS.ProcessEnv,
   scratchDir: string,
-): Generator<LandingAsk, FeedbackRefusal[], AskReply> {
+): Generator<LandingAsk, { refused: FeedbackRefusal[]; carry: LandingCarry }, AskReply> {
   const refused: FeedbackRefusal[] = [];
-  for (const f of files) {
-    let pendingBlob: string;
-    try {
-      pendingBlob = (yield* net.git(["rev-parse", `origin/${kind.branch}:${f}`])).trim();
-    } catch {
+  const mainBlobs = lsTreeBlobs(yield* net.git(["ls-tree", "-r", "-z", "origin/main", "--", kind.ownedDir]));
+  const carry: LandingCarry = { carried: 0, inheritedSkipped: 0 };
+  for (const [f, tipBlob] of pending.tipBlobs) {
+    if (!pending.own.has(f) && tipBlob !== mainBlobs.get(f)) carry.inheritedSkipped++;
+  }
+  let n = 0;
+  for (const [f, baseBlob] of pending.own) {
+    let pendingBlob = pending.tipBlobs.get(f);
+    const mainBlob = mainBlobs.get(f) ?? null;
+    if (pendingBlob === undefined || pendingBlob === mainBlob) continue; // deleted by the branch, or already merged into main for real
+    const mainMoved = mainBlob !== baseBlob;
+    if (mainMoved && (mainBlob === null || !isFeedbackRecordPath(kind, f))) {
+      refused.push({
+        path: f,
+        reason: `both main and ${kind.branch} changed ${f} since the landing's base; main's ${mainBlob === null ? "deletion" : "copy"} stands`,
+      });
       continue;
     }
-    let mainBlob: string | null;
-    try {
-      mainBlob = (yield* net.git(["rev-parse", `origin/main:${f}`])).trim();
-    } catch {
-      mainBlob = null;
-    }
-    if (pendingBlob === mainBlob) continue; // already merged into main for real
-    if (mainBlob !== null && isFeedbackRecordPath(kind, f) && (yield* hasFeedbackLineage(net, mainBlob))) {
+    if (mainBlob !== null && isFeedbackRecordPath(kind, f) && (mainMoved || (yield* hasFeedbackLineage(net, mainBlob)))) {
       const decision = yield* decideFeedbackStage(net, mainBlob, yield* net.git(["cat-file", "-p", pendingBlob]));
       if (decision.kind === "refuse") { refused.push({ path: f, reason: decision.reason }); continue; }
       if (decision.kind === "keep-upstream") continue;
       if (decision.content !== undefined) {
-        const source = join(scratchDir, `carried-${files.indexOf(f)}`);
+        const source = join(scratchDir, `carried-${n++}`);
         writeFileSync(source, decision.content);
         pendingBlob = (yield* net.git(["hash-object", "-w", source], { env })).trim();
       }
     }
     yield* net.git(["update-index", "--add", "--cacheinfo", `100644,${pendingBlob},${f}`], { env });
+    carry.carried++;
   }
-  return refused;
+  return { refused, carry };
 }
 
 function* blobAt(net: LandingNet, rev: string, path: string): Generator<LandingAsk, string | undefined, AskReply> {
@@ -1043,8 +1083,11 @@ function* finishLanding(
   const requestReview = opts.requestReview;
   // W1-T3561: fold a build's refusals onto a result — never onto the tree/files it names, so a
   // refused record can never ride into an armed auto-merge PR by construction (criterion 4).
-  const withRefused = (result: LandFeedbackResult, refused: FeedbackRefusal[]): LandFeedbackResult =>
-    refused.length > 0 ? { ...result, refused } : result;
+  const withRefused = (result: LandFeedbackResult, b: LandingTreeBuild): LandFeedbackResult => ({
+    ...result,
+    ...(b.refused.length > 0 ? { refused: b.refused } : {}),
+    ...(b.carry ? { carry: b.carry } : {}),
+  });
 
   // Push only when the tree differs from what's already on the branch: the tree is deterministic
   // for unchanged content but `commit-tree` stamps the time, so comparing commits instead
@@ -1081,7 +1124,7 @@ function* finishLanding(
   yield* observePublication(build);
   if ((yield* remoteBranchTree(net, kind.branch)) === build.treeSha) {
     const { prUrl, error } = yield* ensurePrOpen(kind, net, yield* bodyOf(build), requestReview);
-    return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
+    return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build);
   }
 
   const pushOnce = function* (b: LandingTreeBuild): Generator<LandingAsk, void, AskReply> {
@@ -1126,8 +1169,8 @@ function* finishLanding(
   try {
     yield* pushOnce(build);
   } catch (firstErr) {
-    if (firstErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: firstErr.message }, build.refused);
-    if (!lostLease(firstErr)) return withRefused({ landed: false, files: [], error: pushFailure(kind.branch, firstErr) }, build.refused);
+    if (firstErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: firstErr.message }, build);
+    if (!lostLease(firstErr)) return withRefused({ landed: false, files: [], error: pushFailure(kind.branch, firstErr) }, build);
     // Lost the lease: some OTHER owner's tip moved since we read it. Re-derive the union ONCE
     // against the NEW tip rather than force-replacing a tip we never read (W1-T3560 design (i)).
     // Any other push failure (credentials, network) moved no tip, so it is reported as itself.
@@ -1141,13 +1184,13 @@ function* finishLanding(
     yield* observePublication(retried);
     if ((yield* remoteBranchTree(net, kind.branch)) === retried.treeSha) {
       const { prUrl, error } = yield* ensurePrOpen(kind, net, yield* bodyOf(retried), requestReview);
-      return moved(withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused));
+      return moved(withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried));
     }
     try {
       yield* pushOnce(retried);
     } catch (secondErr) {
-      if (secondErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: secondErr.message }, retried.refused);
-      if (!lostLease(secondErr)) return moved(withRefused({ landed: false, files: [], error: pushFailure(kind.branch, secondErr) }, retried.refused));
+      if (secondErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: secondErr.message }, retried);
+      if (!lostLease(secondErr)) return moved(withRefused({ landed: false, files: [], error: pushFailure(kind.branch, secondErr) }, retried));
       // The ref moved again even under the retry (a third writer squeezed in) — refuse rather
       // than force-replacing a tip this call never actually read. Surfaced via `error`, never
       // swallowed, and `ensurePrOpen` is never reached — auto-merge is never armed on a refusal.
@@ -1160,7 +1203,7 @@ function* finishLanding(
             `union once (${String((secondErr as Error)?.message ?? secondErr)}); original failure: ` +
             `${String((firstErr as Error)?.message ?? firstErr)}`,
         },
-        retried.refused,
+        retried,
       ));
     }
     build = retried;
@@ -1171,10 +1214,10 @@ function* finishLanding(
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
     return moved(withRefused(
       { landed: true, files: build.unlanded, error: `pushed to ${kind.branch} but ${error}`, pushed: true },
-      build.refused,
+      build,
     ));
   }
-  return moved(withRefused({ landed: true, files: build.unlanded, prUrl, pushed: true }, build.refused));
+  return moved(withRefused({ landed: true, files: build.unlanded, prUrl, pushed: true }, build));
 }
 
 /** git names a lost `--force-with-lease` "(stale info)"; a push that failed for any other reason moved no tip. */
@@ -1328,9 +1371,9 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
       const pending = yield* readBranchPending(net, kind);
       if (!pending.ok) throw new Error(pending.reason);
       yield* net.git(["read-tree", "origin/main"], { env });
-      const carriedRefused = pending.tipSha ? yield* stageBranchPending(net, kind, pending.files, env, scratchDir as string) : [];
+      const carried = pending.tipSha ? yield* stageBranchPending(net, kind, pending, env, scratchDir as string) : undefined;
       const { files: unlanded, sources, contents, refused } = yield* scanLocalUnlanded(env);
-      refused.push(...carriedRefused);
+      refused.push(...(carried?.refused ?? []));
       for (const rel of unlanded) {
         let source = sources.get(rel) as string;
         const content = contents.get(rel);
@@ -1342,7 +1385,7 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
         yield* net.git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
       }
       const treeSha = (yield* net.git(["write-tree"], { env })).trim();
-      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused };
+      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused, carry: carried?.carry };
     };
 
     const initialMainSha = (yield* net.git(["rev-parse", "origin/main"])).trim();
@@ -1455,6 +1498,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
     // pass also happened to push something else.
     const refusalEvidence = result.refused && result.refused.length > 0 ? { refused: result.refused } : {};
     const leaseEvidence = result.leaseMoved ? { lease_moved: result.leaseMoved } : {};
+    const carryEvidence = result.carry ? { carried: result.carry.carried, inherited_skipped: result.carry.inheritedSkipped } : {};
     const gitEvidence = {
       git_driver: meter.driver,
       git_calls: meter.calls,
@@ -1471,6 +1515,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
         ...acknowledgementEvidence,
         ...refusalEvidence,
         ...leaseEvidence,
+        ...carryEvidence,
         ...gitEvidence,
       });
     } else {
@@ -1486,6 +1531,7 @@ function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedb
         ...acknowledgementEvidence,
         ...refusalEvidence,
         ...leaseEvidence,
+        ...carryEvidence,
         ...gitEvidence,
       });
     }
@@ -1554,7 +1600,7 @@ function* landContentSteps(
       // criterion 2, extended by W1-T3560 to the disk-scanning sibling too): this content-only
       // path has no disk to re-scan the way {@link landPending} does, so without this a second
       // call would drop the first call's content entirely.
-      const carriedRefused = pending.tipSha ? yield* stageBranchPending(net, kind, pending.files, env, scratchDir as string) : [];
+      const carried = pending.tipSha ? yield* stageBranchPending(net, kind, pending, env, scratchDir as string) : undefined;
 
       const unlanded: string[] = [];
       // W1-T3561: `landFeedbackStatusContent` (the console's `POST /v1/feedback/decision` write
@@ -1563,7 +1609,7 @@ function* landContentSteps(
       // `isFeedbackRecordPath`) — it must obey the same monotonic predicate {@link landPending}'s
       // disk scan does, per the task's design point (v), rather than the bare
       // `remoteSha === blobSha` identity check this loop used before.
-      const refused: FeedbackRefusal[] = [...carriedRefused];
+      const refused: FeedbackRefusal[] = [...(carried?.refused ?? [])];
       let i = 0;
       for (const { relPath, content: inputContent } of inputs) {
         let content = inputContent;
@@ -1603,7 +1649,7 @@ function* landContentSteps(
         unlanded.push(relPath);
       }
       const treeSha = (yield* net.git(["write-tree"], { env })).trim();
-      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused };
+      return { mainSha, treeSha, branchTipSha: pending.tipSha, unlanded, refused, carry: carried?.carry };
     };
 
     yield* net.git(["fetch", "origin", "--quiet"]);
@@ -2106,7 +2152,8 @@ function* ciLearningLandingSteps(
   } catch {
     // Best-effort acknowledgement only; pending bytes remain retryable.
   }
-  if (!landing.landed || landing.error) return { filed: [], skipped, refused };
+  const carryRefused = landing.refused?.length ? { carryRefused: landing.refused } : {};
+  if (!landing.landed || landing.error) return { filed: [], skipped, refused, ...carryRefused };
 
   const landed = new Set(landing.files);
   const filed = inputs
@@ -2114,7 +2161,7 @@ function* ciLearningLandingSteps(
     .map((input) => ciLearningFiledShardRead(input.relPath, input.content))
     .filter((read): read is { ok: true; filed: CiLearningFiledShard } => read.ok && read.filed !== undefined)
     .map((read) => read.filed);
-  return { filed, skipped, refused };
+  return { filed, skipped, refused, ...carryRefused };
 }
 
 /** The URL of the currently-open landing PR for this identity, if any — best-effort,
