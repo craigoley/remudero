@@ -1,0 +1,210 @@
+{
+  "schema": "rmd-semgrep-source-build-policy/v1",
+  "upstreamVersion": "1.181.0",
+  "distributionVersion": "1.181.0+remudero.1",
+  "dependencyPatch": {
+    "from": "mcp==1.29.0",
+    "to": "mcp==1.30.0"
+  },
+  "wheelTag": "cp312-none-manylinux_2_34_x86_64",
+  "source": {
+    "name": "semgrep-1.181.0.tar.gz",
+    "bytes": 520601,
+    "sha256": "4c0905288ccf9ee5330e766f1c677a31642a4cc0aac5a95097e7563f3f3a92fa",
+    "root": "semgrep-1.181.0",
+    "projectSha256": "70c1559656cbaa7f819903174456628824b9a2c5bfc1d7607f81341d31d11e33",
+    "fileCount": 171
+  },
+  "engineDonor": {
+    "name": "semgrep-1.181.0-cp310.cp311.cp312.cp313.cp314.py310.py311.py312.py313.py314-none-manylinux_2_34_x86_64.whl",
+    "bytes": 70540779,
+    "sha256": "c142ec04a2ed144970cb0a92f6877651dd3c088505eec737bb7f4db7ae5f0ffa",
+    "storagePrefix": "semgrep-1.181.0.data/purelib/",
+    "distInfo": "semgrep-1.181.0.dist-info",
+    "sourceBackedPackageFiles": 156,
+    "nativeMembers": [
+      {
+        "path": "semgrep/bin/__init__.py",
+        "bytes": 566,
+        "sha256": "16507ca81a83c9a71a3e0a5420249cd04d3bc89a8173b690afea86e7edd75362",
+        "mode": 420
+      },
+      {
+        "path": "semgrep/bin/semgrep-core",
+        "bytes": 254981648,
+        "sha256": "14f4b18720d881156bc0cc507b19130aa8d8db0882a5a479fb3919aadefca857",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libbz2.so.1",
+        "bytes": 79568,
+        "sha256": "bfbfcdf5306531d7b2a0167ce92a31d9aeac2c433376df9036e97e82852cbf70",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libcom_err.so.2",
+        "bytes": 26088,
+        "sha256": "380eaefae7b198294c6b0873476036e1834cb9abd3a56cea9648b36f06f53258",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libcrypto.so.3",
+        "bytes": 6338824,
+        "sha256": "911855a9f53d709f05208638ee96e3369111d449bb1d9efc16f96db4215d9a54",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libcurl.so.4",
+        "bytes": 529104,
+        "sha256": "713a0761c9a59fd8c4c2160f9d7cde13277fa4f32476aa98fa4be9dc7b217073",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libdw.so.1",
+        "bytes": 706680,
+        "sha256": "0235527783235a19574bd039da593b70db4c04ae5abf29b2b810b8c64444f4d4",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libelf.so.1",
+        "bytes": 118720,
+        "sha256": "524b8218e0ea837fa429c623aa46b88144cb2b3e9e3da17806ddd5fb05e55a9b",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libev.so.4",
+        "bytes": 77504,
+        "sha256": "45d8ade6463eb2cf75810e01f86df23745dea47398d202c3e2d16e1948ef85cd",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libgcc_s.so.1",
+        "bytes": 122984,
+        "sha256": "54e2e322fa795060d8c5a1c4d56382a96bf123b8787a16b640eda9e948137788",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libgmp.so.10",
+        "bytes": 704584,
+        "sha256": "a7154a5e29bc3ac9c1799996635cbb86fb75ba4f02cb08ce01457bc6c3957937",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libgssapi_krb5.so.2",
+        "bytes": 372368,
+        "sha256": "9274e5961d72284cd39377fc9f2007a33bda4ca890b1c2dc7d268efea6c96b29",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libk5crypto.so.3",
+        "bytes": 107672,
+        "sha256": "74db02ce6b688fb3a9528ccfa0fdc6002735bd105db93d3ab6b11f48c7ab113e",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libkeyutils.so.1",
+        "bytes": 26968,
+        "sha256": "338049f8e2686318fdeb35ed5eaa6f4609d3712bb6e25b4bd4af72ab3fcc9f89",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libkrb5.so.3",
+        "bytes": 934528,
+        "sha256": "9774b400ae75ac1fb5da3fe39c7f18621ab70596c31b1e6a76b93bdc58ecc048",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libkrb5support.so.0",
+        "bytes": 74400,
+        "sha256": "97a35fb97535bbaafeaed4265326244a1ff2ec72d1429b5c642e9e29201075f8",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/liblzma.so.5",
+        "bytes": 184520,
+        "sha256": "f59b472dfa908d85b8d29db7dcfc0dca53f215c2591b04e53e22c6d99401a782",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libm.so.6",
+        "bytes": 932688,
+        "sha256": "1c39d5359f21d9f39890301b324403d30a86b38097e4d01629be684e571fd5c0",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libnghttp2.so.14",
+        "bytes": 179632,
+        "sha256": "97845cf43088276e2a902c0faa361abc7d67ae3c287a31a3d28c8f986ed478a8",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libpcre2-8.so.0",
+        "bytes": 642520,
+        "sha256": "d42e101fe9d94c517da72d44b48f3cd4264d9337040adfb14a4b569acbe8e00c",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libresolv.so.2",
+        "bytes": 77000,
+        "sha256": "143719c422b982c6847bbf71d35254e1be1a44004c4e6e4d114ef5e6763cbfac",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libselinux.so.1",
+        "bytes": 185704,
+        "sha256": "1da7979dddc35e8408577e9349c046b1d6f696b877528a2ca8f033d433fdfd8c",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libssl.so.3",
+        "bytes": 1071280,
+        "sha256": "e8b3d8e0380f75f2766ac639cae3cc23b1f00b194bf37f175d7a6f88104fda43",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libstdc++.so.6",
+        "bytes": 2656680,
+        "sha256": "f500e57dde683cc1ca31c6b2fb6d8959bfdbbac77f36efc84501ee3fcac8427b",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libtree-sitter.so.0.26",
+        "bytes": 247472,
+        "sha256": "9eae85a7bb175a174048370c29e085a7d9b38c928b8ea56785761b9465198544",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libunwind.so.8",
+        "bytes": 67912,
+        "sha256": "5c82cb252136b475bcb68f78ff61575538a36a43161b276df8a774f1899c4596",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libz.so.1",
+        "bytes": 109472,
+        "sha256": "18fed02c1fd62a46482150b38fb2ca93cd36d17c7a660dd79c8012251a5d941c",
+        "mode": 493
+      },
+      {
+        "path": "semgrep/bin/libs/libzstd.so.1",
+        "bytes": 764680,
+        "sha256": "75b4f41a07135b9ab5e94ee660f8efddd8037f7350e7c952a04c06d26f2a29dc",
+        "mode": 493
+      }
+    ]
+  },
+  "packageRoots": [
+    "semgrep",
+    "semdep"
+  ],
+  "licenseFiles": [
+    "LICENSE"
+  ],
+  "entryPoints": {
+    "semgrep": "semgrep.console_scripts.entrypoint:main",
+    "pysemgrep": "semgrep.console_scripts.pysemgrep:main"
+  },
+  "published": false,
+  "pilotDefaultOff": true,
+  "runtimeQualified": false
+}
