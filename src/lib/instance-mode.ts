@@ -157,6 +157,8 @@ export function createSelectedModeQualification(
       const pending: unknown = record("instance_mode.shadow_observed", fields);
       lastKey = key; recordFailureReported = false;
       if (pending !== undefined) void Promise.resolve(pending).catch(() => {
+        // A rejected receipt is unknown/unrecorded, never durable evidence. Allow a later
+        // retry and emit the same bounded, private-safe sink diagnostic; effects stay unchanged.
         if (lastKey === key) lastKey = undefined;
         recordFailed();
       });
