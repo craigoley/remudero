@@ -17,6 +17,22 @@ Use the full-parity commands below when deliberately collecting further diagnost
 Keep the receipt in `coverage/preflight-author.json`; it records
 the exact head/base, suites, reasons, duration and outcomes on failure as well as success.
 
+When the publication destination is known, add `--head-ref <destination branch>` (short name or
+`refs/heads/...`) and optionally `--head-sha <full committed HEAD sha>`. Use the destination from
+the intended push refspec, even when the local branch is named `codex/...` or `claude/...`.
+For example, validation for `git push origin HEAD:run-unfiled-1792152000000` uses
+`node --import tsx scripts/preflight-author.mjs --head-ref run-unfiled-1792152000000`.
+This runs `head-identity-gate`'s predicate on the committed author message and fresh-base diff before
+selection, dependency checks, census, slot admission, static checks or tests. A mismatched
+`--head-sha` refuses: this run can certify only its committed HEAD. No trailer is invented and
+no branch or commit is rewritten. Revalidate if the publication destination or head changes.
+
+Before a destination is known, omit `--head-ref`: ordinary author validation continues, but
+`publicationIdentity.state` is explicitly `unknown-target`, never an identity PASS. A successful
+author receipt without a known target is not publication-identity assurance. The existing
+`hooks/pre-push` identity advice and narrow identity-loss refusal are unchanged; its first-push
+advice is not a substitute for supplying the actual destination here.
+
 The selector's symbol-level narrow set remains shadow-only. A highly connected module may select
 most of the repository; this is an honest result, not a reason to bypass its dependencies.
 `--dry-run` records selection only and never claims verification. Dirty trees, a failed fetch,
