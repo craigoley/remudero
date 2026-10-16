@@ -14,22 +14,23 @@ export function* securityMergeMetadataRequests(target) {
   if (target?.owner !== 'craigoley' || target.repo !== 'remudero' || !Number.isSafeInteger(target.prNumber) || target.prNumber < 1 ||
       (target.expectedHead !== undefined && !sha(target.expectedHead))) return {decision:unknown('invalid-target')};
   const prefix = `repos/${target.owner}/${target.repo}`, prPath = `${prefix}/pulls/${target.prNumber}`;
-  let headSha;
+  let headSha,baseSha;
   try {
     const first = yield prPath;
     headSha = first?.head?.sha;
+    baseSha = first?.base?.sha;
     if (!sha(headSha) || first.state !== 'open' || first.base?.repo?.full_name !== 'craigoley/remudero' || first.base.ref !== 'main' ||
-        (target.expectedHead !== undefined && target.expectedHead !== headSha)) return {headSha,decision:unknown('head-unavailable-or-changed')};
+        (target.expectedHead !== undefined && target.expectedHead !== headSha)) return {headSha,baseSha,decision:unknown('head-unavailable-or-changed')};
     if (!Number.isSafeInteger(first.changed_files) || first.changed_files < 1 || first.changed_files > CODE_SCANNING_MAX_CHANGED_FILES)
-      return {headSha,decision:unknown('changed-file-corpus-incomplete')};
+      return {headSha,baseSha,decision:unknown('changed-file-corpus-incomplete')};
     const files = [];
     for (let page = 1; page <= SECURITY_METADATA_MAX_PAGES; page++) {
       const rows = yield `${prPath}/files?per_page=100&page=${page}`;
-      if (!Array.isArray(rows) || rows.length > 100) return {headSha,decision:unknown('changed-file-corpus-incomplete')};
+      if (!Array.isArray(rows) || rows.length > 100) return {headSha,baseSha,decision:unknown('changed-file-corpus-incomplete')};
       files.push(...rows);
       if (files.length >= first.changed_files || rows.length < 100) break;
     }
-    if (new Set(files.map(file => file?.filename)).size !== files.length) return {headSha,decision:unknown('changed-file-corpus-ambiguous')};
+    if (new Set(files.map(file => file?.filename)).size !== files.length) return {headSha,baseSha,decision:unknown('changed-file-corpus-ambiguous')};
     const input = {prNumber:target.prNumber,headSha,observedHeadSha:headSha,filesComplete:files.length === first.changed_files,
       filesHeadSha:headSha,changedFileCount:first.changed_files,files};
     let decision = classifyCodeScanningMergePolicy(input), checks = [], checksComplete = false;
@@ -39,7 +40,7 @@ export function* securityMergeMetadataRequests(target) {
         const corpus = yield `${prefix}/commits/${headSha}/check-runs?filter=all&per_page=100&page=${page}`;
         if (!Number.isSafeInteger(corpus?.total_count) || corpus.total_count < 0 || corpus.total_count > 100 * SECURITY_METADATA_MAX_PAGES ||
             !Array.isArray(corpus.check_runs) || corpus.check_runs.length > 100 || (total !== undefined && total !== corpus.total_count))
-          return {headSha,decision:unknown('check-corpus-incomplete-or-changing')};
+          return {headSha,baseSha,decision:unknown('check-corpus-incomplete-or-changing')};
         total = corpus.total_count;checks.push(...corpus.check_runs);
         if (checks.length >= total || corpus.check_runs.length < 100) break;
       }
@@ -54,10 +55,10 @@ export function* securityMergeMetadataRequests(target) {
     const last = yield prPath;
     if (last?.head?.sha !== headSha || last.state !== 'open' || last.base?.sha !== first.base.sha || last.changed_files !== first.changed_files ||
         last.base?.repo?.full_name !== first.base.repo.full_name || last.base.ref !== first.base.ref)
-      return {headSha,decision:unknown('head-or-base-changed-during-observation')};
-    return {headSha,baseSha:first.base.sha,decision};
+      return {headSha,baseSha,decision:unknown('head-or-base-changed-during-observation')};
+    return {headSha,baseSha,decision};
   } catch {
-    return {headSha,decision:unknown('security-api-unavailable')};
+    return {headSha,baseSha,decision:unknown('security-api-unavailable')};
   }
 }
 
