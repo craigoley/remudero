@@ -14,14 +14,14 @@
  * `server.close()` on shutdown really does release everything this test opened.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { serveCommand, benchmarkAaReadinessRuntime, buildInboxDraftSpawnArgs, lintPlanCommand, main, approveCommand } from "../src/run-task.js";
+import { serveCommand, benchmarkAaReadinessRuntime, buildInboxDraftSpawnArgs, lintPlanCommand, main, approveCommand, draftProposalBatch } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { inboxDraftExampleFragmentYaml, composeStampLine, fileRatificationDraft, fileRatificationBatch, RatificationDraftRefusedError } from "../src/lib/inbox.js";
+import { inboxDraftExampleFragmentYaml, composeStampLine, fileRatificationDraft, fileRatificationBatch, RatificationDraftRefusedError, checkoutRepoFacts, lintDraftedFragment } from "../src/lib/inbox.js";
 import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -52,6 +52,43 @@ function instance(serve?: { host?: string; port?: number }): { home: string; roo
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root, installRoot: REPO_ROOT, serve }));
   return { home, root };
 }
+
+test("selected real daemon draft batch retains its captured intent through the actual lint after an asynchronous spawn", async (t) => {
+  const { home, root } = instance(), seed = gitRepo({ kind: "selected-draft-origin" });
+  t.after(() => { seed.cleanup(); rmSync(home, { recursive: true, force: true }); });
+  mkdirSync(join(seed.dir, "plan")); mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  copyFileSync(join(REPO_ROOT, "src", "lib", "plan.ts"), join(seed.dir, "src", "lib", "plan.ts"));
+  seed.git("add", "."); seed.git("commit", "-m", "chore: seed a private draft fixture");
+  seed.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  mkdirSync(join(root, "repos"), { recursive: true }); seed.git("clone", "--quiet", seed.dir, join(root, "repos", "fixture"));
+  const selectedPath = join(home, "selected.yaml");
+  writeFileSync(selectedPath, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
+  const fragment = inboxDraftExampleFragmentYaml(), facts = checkoutRepoFacts(seed.dir), id = "P-selected-draft";
+  assert.deepEqual(lintDraftedFragment(fragment, id, composeStampLine(id, "qualification only", ["NEW-1"]), undefined,
+    facts.moduleExists, facts.readGrepProofFile, facts.pathIsDirectory, facts.pathExistsAtBase), [],
+    "prove this exact fixture is lint-clean BEFORE any real batch can reach an uninjected escalation default");
+  for (const enabled of [false, true]) {
+    const config = JSON.parse(readFileSync(join(home, ".config", "remudero", "config.json"), "utf8"));
+    if (enabled) config.selectedRegistryMode = { mode: "shadow", instanceName: "fixture", registryPath: selectedPath };
+    const rows: Array<Record<string, unknown>> = []; let calls = 0;
+    const outcome = await draftProposalBatch([{ id, summary: "qualification only", evidenceAnchors: [] }], config, "owner", "fixture",
+      `SELECTED-DRAFT-${enabled ? "shadow" : "legacy"}`, (step, fields) => rows.push({ step, ...fields }), async args => {
+        calls++; assert.equal(calls, 1, "this clean fixture must never retry or reach an escalation capacity port");
+        assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
+        assert.ok(!args.prompt.includes(selectedPath), "private intent cannot be added to an untrusted prompt");
+        config.selectedRegistryMode = undefined; await Promise.resolve();
+        return { text: `=== FRAGMENT START ===\n${fragment}\n=== FRAGMENT END ===\nSTAMP: qualification only`,
+          blocks: [], sessionId: "private-draft-fixture", costUsd: 0, numTurns: 1, subtype: "success", stderr: "", isError: false, apiError: false } as WorkerResult;
+      });
+    assert.equal(calls, 1); assert.equal(outcome[0]?.ok, true);
+    const selected = rows.filter(row => row.step === "instance_registry.consumer_shadow_observed");
+    assert.equal(selected.length, enabled ? 1 : 0, "the REAL batch, not only a fixture-supplied context, must own its post-spawn lint");
+    assert.ok(selected.every(row => row.action === "inbox-discovery" && row.selected_state === "unknown" && row.publication_permission === "not-granted"));
+    assert.ok(!JSON.stringify(selected).includes(selectedPath));
+    assert.equal(readFileSync(join(root, "repos", "fixture", "plan", "tasks.yaml"), "utf8"), "[]\n");
+  }
+});
 
 test("selected real approve command scopes single and batch fileability adapters without publication", async (t) => {
   const { home, root } = instance(), selectedPath = join(home, "selected.yaml"), state = join(root, "state");
