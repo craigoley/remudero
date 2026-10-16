@@ -1,0 +1,78 @@
+- id: W1-T9814
+  title: "A FULL PASS IGNORES A HEAD HELD BY A MEMORY-WAITING LIGHT-PASS ACTION AND WAITS OUT THE SAME ADMISSION ITSELF — W1-T9780 (#12309) puts the light pass's actions in an AsyncLocalStorage scope and holds a head whose action is waiting for memory, but only runSweepLightPass reads that hold. A full pass over the same head runs runSweep's fix-progress judgment again, a second risk-judge spawn queued at the same admission, and awaits it inline. On 2026-10-16 the full pass that started at 06:10:59Z disposed its last heads at 06:59:14Z, after the same 32-42 min admission waits"
+  repo: remudero
+  depends_on: [W1-T9780]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a full pass treats a memory-held head as the light pass does, and its own progress judgment waiting for memory leaves the pass; what a judgment decides is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 9 (B18): #12309 W1-T9780 hand-back, 'a full pass doesn't check held heads'"
+  plan_refs: [W1-T9780, W1-T9779, W1-T7096, W1-T5523, W1-T5633, W1-T100]
+  files:
+    - src/lib/sweep.ts
+    - test/a-full-pass-respects-a-memory-held-light-pass-head.test.ts
+  status: queued
+  priority: 2  # operator-2026-10-16: the same memory-admission holder W1-T9780 detached from the light pass still holds the full pass, and the full pass duplicates its spawn
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16), and at the W1-T9780 head origin/run-W1-T9780-1792154069627 (#12309,
+    open, 5ccfa6039):
+    - #12309 adds, in src/lib/sweep.ts, `lightPassActionScope = new AsyncLocalStorage<{ onMemoryWait }>()`,
+      `lightPassMemoryWaits = new Map<string, { sinceMs }>()` and `lightPassMemoryWaitPorts()`, whose `sleep` calls
+      `lightPassActionScope.getStore()?.onMemoryWait()`. Only `productionFixProgressJudge` passes it
+      (`memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() }`). runSweepLightPass races each
+      per-PR action against that signal, `detachSweepAction(..., { actionKind: "light-pass-action" })`, and on later
+      light passes disposes the held head `wait` (`lightPassMemoryWaitSummary`).
+    - On that head, `lightPassMemoryWaits` is read only inside runSweepLightPass. The full pass (run-task.ts's
+      daemon tick `runSweep(..., withFullSweepRepairAdmission({...}))`) never reads it.
+    - runSweep's pre-loop progress judgment is sequential and awaited:
+      `for (const pr of openPrs) { ... const result = await judgeFixProgress(input, progressJudge);`. In a full pass
+      it runs outside `lightPassActionScope`, so its admission backs off through the default sleep and the pass
+      waits. Nothing keys that judgment on a head already being judged by a detached light-pass action, so a
+      held head gets a second risk-judge spawn queued at the same admission.
+    - Measured by agent F5 / W1-T9780's rationale (core ledger, 2026-10-16): `memory_budget.enforce_admit`
+      waited_ms 1,931,002 / 2,182,763 / 2,531,380 for #12271 / #12270 / the #12267 fix. "The full pass that started
+      at 06:10:59Z waited too: its last three dispositions came at 06:59:14-15Z." Review admission waits over
+      10-14T23Z..10-16T07Z: n=69, p50 4.3 min, p90 18.5 min, max 60.9 min.
+    - The other judges named in the lead do not hold a light pass. They are not in scope:
+      - judgeHandedOffHead is started off the pass (`startHandedOffHeadJudgment`: `judge(pr, controller.signal).then(settle, threw)`
+        plus one setImmediate, W1-T5523).
+      - The code-scanning judge (`codeScanningGateForHead`: `judge(pr, alerts).then(settle, threw)`) runs from the
+        same pool.
+      - head-rehome `judgeQuiet` never runs on a light surface (`deps.repairAdmissionSurface === "light"` gives
+        "identity trailer commit deferred to full sweep").
+    - OVERLAP CHECKED: W1-T9779 (merged) keeps the watchdog from recycling a pass in flight, and does not shorten one.
+      W1-T9780 (open) covers the light pass only. W1-T9762 and W1-T9761 re-price waits and do not move them off a
+      pass. Recent open heads show no other diff naming lightPassMemoryWaits or judgeFixProgress's admission.
+  design: |
+    Operator rulings: no new fixed threshold and no second ticker.
+    1. ONE HOLD, BOTH PASSES. runSweep (the full surface) reads W1-T9780's `lightPassMemoryWaits` before its
+       pre-loop. A head held there is disposed `wait` with the same `lightPassMemoryWaitSummary` reason and row
+       (`in_flight_action: "light-pass-action"`), and gets no progress judgment and no action this pass.
+    2. THE FULL PASS'S OWN WAIT LEAVES THE PASS. The full pass's progress judgment runs in the same
+       `lightPassActionScope` port. When its admission first backs off, that head's judgment detaches as a
+       `light-pass-action` registration, the head is recorded in the same hold map, and the pass goes on with the head
+       `progressContinue: { reason: "progress judgment waiting for memory admission", unavailable: true }`. The
+       verdict row `fix.progress_judged` still lands when the judge settles, and the next pass reads it.
+    3. stop() and the freshness drain still wait for the detached registration (drainDetachedSweepActions), as in
+       W1-T9780.
+    4. sweep.ts sits at its comment ceiling: no new comment lines there.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - a full pass over a head held by a memory-waiting light-pass action disposes it `wait` and spawns no
+         progress judge for it;
+       - a full pass whose own progress judgment backs off in admission returns before the judge settles, and a
+         later pass reads its verdict row;
+       - a head with no hold is judged by the full pass inline as today (positive control).
+  acceptance:
+    - claim: "a full pass stands down on a head whose light-pass action still waits for memory admission"
+      proof: 'grep: test("W1-T9814: a full pass stands down on a head held by a memory-waiting light-pass action" in test/a-full-pass-respects-a-memory-held-light-pass-head.test.ts'
+    - claim: "a full pass's own progress judgment waiting for memory admission does not hold the pass"
+      proof: 'grep: test("W1-T9814: a full pass progress judgment waiting for memory leaves the pass" in test/a-full-pass-respects-a-memory-held-light-pass-head.test.ts'
+    - claim: "a head with no hold is judged inline as today"
+      proof: 'grep: test("W1-T9814: an unheld head is judged by the full pass as today" in test/a-full-pass-respects-a-memory-held-light-pass-head.test.ts'
+  falsifier: |
+    At the W1-T9780 head, a light pass that detaches a head's action on a memory wait, followed by a full runSweep
+    over the same head with a fix-progress judge that is due, calls the judge a second time and awaits it. The full
+    pass does not return until that judge's admission resolves, so the first two tests fail.

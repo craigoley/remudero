@@ -1,0 +1,72 @@
+- id: W1-T9819
+  title: "A NO-PR RUN BRANCH BLOCKS ITS TASK FOR A FIXED DAY AFTER ITS RUN HAS ENDED — orphanRunBranchReleased frees a run ref only once its epoch is ORPHAN_RUN_BRANCH_GRACE_MS (24 h) old, though the run that pushed it already wrote its terminal verdict, holds no lock and the reaper proved the tip has no PR; release on that evidence, and replace the fixed day with the longest run span the daemon has observed"
+  repo: remudero
+  depends_on: [W1-T9482, W1-T9815]  # W1-T9482 threads a requeue receipt into the same OrphanRunBranchEvidence; W1-T9815 keeps a work-carrying branch as a receipt before an ended run's branch can be released
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — when the duplicate-build guard steps aside for a no-PR run ref; the ref is never deleted, and an open PR, a live lock or an unproven tip still blocks
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 15 (I3): W1-T9786's NOT IN SCOPE note 'ORPHAN_RUN_BRANCH_GRACE_MS is a fixed 24 h timer'"
+  plan_refs: [W1-T147, W1-T9482, W1-T9786, W1-T8676, W1-T4002, W1-T1205, W1-T534, W1-T5520]
+  files:
+    - src/lib/drain.ts
+    - src/lib/branch-reaper.ts
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/orphan-run-branch-release.test.ts
+    - test/a-no-pr-branch-of-an-ended-run-stops-blocking-dispatch.test.ts
+  status: queued
+  priority: 2  # holds a task up to a day with no hand help needed to release it; W1-T9482 (P1) covers the observed requeue case
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16):
+    - src/lib/drain.ts: `/** Default grace before a no-PR run branch stops blocking: long past any single run's wall
+      clock. */ export const ORPHAN_RUN_BRANCH_GRACE_MS = 24 * 60 * 60 * 1000;`
+    - `orphanRunBranchReleased(ref, orphan)` releases a ref only when the reaper's `noPrHeadShas[ref.ref] === ref.sha`,
+      `!orphan.liveTaskIds.has(ref.taskId)`, and `orphan.nowMs - <epoch from the ref name> >=
+      (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS)`. The grace stands in for "the run is over"; the ledger already
+      says so directly: a `run-<taskId>-<epoch>` ref is `run-` plus its run id, and every ended run writes ONE
+      terminal `verdict` row for that run id (W1-T4655, `endThrownRun`).
+    - src/lib/branch-reaper.ts `orphanRunBranchEvidenceReader` supplies only noPrHeadShas, nowMs and liveTaskIds;
+      src/run-task.ts wires it from the reap state file and `liveInflightRuns(inflightDir)`.
+    - MEASURED (from the W1-T9786 and W1-T9482 filings, core ledger read-only): W1-T9047 refused as
+      run-branch-already-pushed from 2026-10-15T20:26Z to 2026-10-16T01:07Z, released at 02:22Z only by the grace;
+      W1-T7898 requeued 13:04Z on 10-14 and held until 07:34Z on 10-15. On 10-16, 21 queued unmerged tasks had run
+      branches on origin, no open PR and no run.start in the last 6 h.
+    - test/orphan-run-branch-release.test.ts pins the fixed grace.
+    - SWEEP: plan/tasks.d on main naming ORPHAN_RUN_BRANCH_GRACE_MS or orphanRunBranchReleased: W1-T5520, W1-T8676,
+      W1-T9482, W1-T9786. W1-T9482 (queued; no merged trailer, no run-W1-T9482-* branch on origin) adds a requeue
+      receipt to the same evidence and keeps the grace for every other ref, so it does not cover this; both edit
+      `orphanRunBranchReleased`, hence the dependency. No open head since 10-12 diffs either symbol.
+    OVERLAP (lint duplicate-surface): W1-T147, the overnight chaos drill, shares daemon.ts and run-task.ts as
+    broad files only; it does not touch the orphan-branch release.
+  design: |
+    No new fixed count, timer or bound.
+    1. ENDED-RUN EVIDENCE. `OrphanRunBranchEvidence` gains `endedRunIds`: the run ids with a terminal `verdict` row,
+       folded the way `pendingWorkerBoundaryHandoffs` is (the daemon's boot ledger lines, then the per-settle refresh
+       it already does per task), never a new whole-ledger read per pass.
+    2. RELEASE ON IT. `orphanRunBranchReleased` releases a ref whose run id is in `endedRunIds`, whose tip the reaper
+       proved has no PR, and whose task holds no live lock, with no age test. A ref kept as a checkpoint receipt is
+       already excused before this guard (`runBranchStateFrom`), so the work-carrying case resumes rather than
+       rebuilds.
+    3. NO VERDICT ROW READABLE (rotated out, another host's run): release once the ref's epoch is older than the
+       longest settled run span the daemon has observed (`settledSpansByClass` over the restart history it already
+       reads). With no observed span, keep blocking: unproven evidence releases nothing, as today. Delete
+       ORPHAN_RUN_BRANCH_GRACE_MS; keep `graceMs` as an injected override for tests only.
+    4. Log each release once per ref as `dispatch.run_branch_exception` with reason `run-ended-no-pr` or
+       `older-than-observed-runs`, beside the existing `orphan-run-branch-no-pr`.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below); update test/orphan-run-branch-release.test.ts
+       to the new rule:
+       - a no-PR ref whose run wrote a terminal verdict an hour ago stops blocking at once;
+       - the same ref with a live lock, a re-pushed tip, or no verdict row and an epoch inside the observed span still
+         blocks (controls).
+  acceptance:
+    - claim: "a no-PR run ref whose run has ended stops blocking dispatch without waiting a fixed day"
+      proof: 'grep: test("W1-T9819: a no-PR branch of an ended run stops blocking dispatch" in test/a-no-pr-branch-of-an-ended-run-stops-blocking-dispatch.test.ts'
+    - claim: "a live lock, a re-pushed tip, or an unproven run still blocks"
+      proof: 'grep: test("W1-T9819: an unproven or live run branch still blocks" in test/a-no-pr-branch-of-an-ended-run-stops-blocking-dispatch.test.ts'
+  falsifier: |
+    At origin/main, stillBlockedByPushedRunBranch for a task with one ref whose epoch is 2 h old, whose tip is in
+    noPrHeadShas, with no live lock and its run's failed verdict in the ledger, returns true: the first test fails.
