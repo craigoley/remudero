@@ -1,32 +1,52 @@
 - id: W1-T9806
-  title: "NO PUSH PRECHECK SEES A SUITE THAT WALKS AN IMPORT CLOSURE — #12289's implement push read the coverage precheck 'unavailable — 2768 suite(s) are too wide to precheck quickly', and the baked-closure censuses (test/baked-supervisor-inputs.test.ts, test/a-busy-primary-reaches-its-image-recycle.test.ts) read their files through a variable path, so source-text-readers places them nowhere, rmd census-membership never names them, and W1-T9757's census precheck would not run them either; the PR learned of the red only from CI"
+  title: "THE BAKED-CLOSURE CENSUSES ARE ASKED BEFORE THE PUSH OF ANY DIFF THAT REACHES THEIR CLOSURE, AND THEIR REFUSAL NAMES THE LISTS TO UPDATE — #12289's implement push read the coverage precheck 'unavailable — 2768 suite(s) are too wide to precheck quickly', and the baked-closure censuses (test/baked-supervisor-inputs.test.ts, deployLogicModules in test/a-busy-primary-reaches-its-image-recycle.test.ts) read their files through a variable path, so source-text-readers places them nowhere, rmd census-membership never names them, and scripts/census-precheck.mjs never runs them; the PR learned of the red only from CI"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T9757]  # same file (scripts/census-precheck.mjs), which W1-T9757 (after W1-T9740) also edits; serialize, never parallel
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 6.00
-  risk: high  # Rule 19: one concern — a suite that walks a seed's import closure declares the seed, and the reader derivation expands it into walks; what runs the joined suites is W1-T9757's
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which pushes ask the baked-closure censuses, and what their refusal says. Two subsystems (the reader derivation and the precheck's triggered rows), so high. Who acts on the refusal is W1-T9851's
   band_meaning: span
-  origin: "operator session 2026-10-16 filing agent Q3 lead 3 (D4 lead c): #12289 (W1-T9541) opened with the closure censuses unrun; CI coverage-shard 5/8, 8/8 red on them"
-  plan_refs: [W1-T9757, W1-T9483, W1-T5617, W1-T9541]
+  origin: "operator session 2026-10-16 filing agent Q3 lead 3 (D4 lead c): #12289 (W1-T9541) opened with the closure censuses unrun; CI coverage-shard 5/8, 8/8 red on them. Amended 2026-10-16 by plan agent P1 on the operator ruling that retired W1-T9804"
+  plan_refs: [W1-T9757, W1-T9740, W1-T9483, W1-T5617, W1-T5692, W1-T9565, W1-T9541, W1-T9804, W1-T9851]
   files:
     - src/lib/source-text-readers.ts
+    - scripts/census-precheck.mjs
     - test/baked-supervisor-inputs.test.ts
     - test/a-busy-primary-reaches-its-image-recycle.test.ts
     - test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts
   status: queued
-  priority: 2  # a closure join reaches CI unwarned and costs a fix round; with W1-T9757 landed the push would refuse it before the PR opens
+  priority: 1  # operator ruling 2026-10-16: a baked-closure join is caught BEFORE the PR opens; this is the catch
   attempts: 0
   rationale: |
-    READ at origin/main db88033a3 (2026-10-16):
+    OPERATOR RULING (Craig, 2026-10-16): W1-T9804 ("a scope amendment may add a .github/workflows/ path") is REJECTED
+    as a security weakening and retired with `superseded_by: W1-T9806`.
+    - The auto-mode classifier refused that edit as [Security Weaken].
+    - Builder B19 found that a "tracked-path token insertion" into codeql.yml's or semgrep.yml's `paths-ignore` passes
+      W1-T9804's rule and removes a path from scanning.
+    - Craig chose to PREVENT, not carve out. The fix lane never edits a workflow file. A change that joins the baked
+      closure is caught BEFORE the PR opens. The implement worker gets the closure-census results and updates the lists
+      in its own reviewed build (W1-T9851). A case that is still missed escalates to a person (W1-T9851).
+    The lists a closure join must update:
+    - DEPLOY_LOGIC_PATHS in deploy/install-host-units.sh, held to the deployer closure by `deployLogicModules` in
+      test/a-busy-primary-reaches-its-image-recycle.test.ts;
+    - BAKED_RUNTIME_SOURCE_PATHS in src/lib/baked-runtime-inputs.ts, held to the serve-supervisor closure by
+      test/baked-supervisor-inputs.test.ts;
+    - .github/workflows/acr-build.yml's `on.push.paths` list (held to BAKED_RUNTIME_SOURCE_PATHS by
+      test/acr-build-trigger.test.ts) and its drift `for p in ...` loop.
+    #12289's hand repair 3d24f75dd edited exactly those three files.
+
+    READ at origin/main db88033a3 (2026-10-16), re-read at d1f751b9d:
     - src/run-task.ts `coveragePrecheck`: `if (suites.length > PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING) return { outcome:
       "unavailable", reason: ... "too wide to precheck quickly ..." }`. A diff to src/lib/ledger.ts reaches thousands of
       suites. W1-T9483 (queued) gives the coverage precheck a narrow first pass. That is about coverage, not censuses.
     - The census half runs through scripts/census-precheck.mjs (hooks/pre-push and the fix rung's
-      `fixCensusSnapshotSteps`). W1-T9757 (queued, unbuilt: no merged trailer, no run- head) makes it also run the
-      census-shaped readers `discoverSourceTextReaders` places on the diff. That covers "run the census-membership
-      suites" for every push, whatever the coverage precheck says.
+      `fixCensusSnapshotSteps`). `evaluateAdmittedCensusSuites` joins CENSUS_ADMITTED_MEMBERS by `walks`, plus
+      PRECHECK_TRIGGERED_SUITES and PRECHECK_PATH_TRIGGERED_SUITES by `trigger`. Each failing row prints
+      `census-suite: <file> fails — run ...; <remedy>`. None of the three suites above is in any of those tables.
+    - W1-T9757 (queued, unbuilt: no merged trailer, no run- head) makes the precheck also run the census-shaped readers
+      `discoverSourceTextReaders` places on the diff. Its appended rows carry no `remedy`.
     - The gap W1-T9757 leaves: src/lib/source-text-readers.ts `walksFromArgs` composes a walk only from literal
       segments ("a segment that is a variable stops the composition there").
       - test/baked-supervisor-inputs.test.ts walks `queue = ["src/lib/serve-supervisor-main.ts"]` with
@@ -35,10 +55,10 @@
         `queue = ["src/lib/deployer.ts"]` with `readFileSync(file, "utf8")`.
       Neither suite carries a marker or a git pathspec, so both read `walks: []` and `censusShaped: false`. No diff
       joins them, and #12289's ledger.ts diff, which grew both closures, joins neither.
-    - #12289's repair (3d24f75dd) shows those two suites hold DEPLOY_LOGIC_PATHS and BAKED_RUNTIME_SOURCE_PATHS (and
-      acr-build.yml's lists) to the closures.
-    - NOT COVERED: no shard on main or on the heads updated since 10-12 mentions an import-closure census marker
-      (swept plan/tasks.d and the head diffs for census-closure|import closure).
+    - NOT COVERED: no shard on main or on any open head mentions an import-closure census marker or a baked-closure
+      precheck row (swept origin/main plan/tasks.d and every open head's plan/ and file diffs, 2026-10-16, for
+      census-closure|baked closure|DEPLOY_LOGIC_PATHS|BAKED_RUNTIME_SOURCE_PATHS and for edits to
+      scripts/census-precheck.mjs and src/lib/source-text-readers.ts: none).
   design: |
     1. THE MARKER. src/lib/source-text-readers.ts exports `CENSUS_CLOSURE_MARKER = "@census-closure:"`. A comment line
        carrying it names one or more seed paths before its prose, as `@census-reads:` does.
@@ -46,17 +66,47 @@
        tree being read: static `import`/`export ... from` and literal `import()`/`require()`, `.js` read as `.ts`,
        type-only imports skipped, as test/baked-supervisor-inputs.test.ts `runtimeImports` reads them. Each closure
        file becomes an exact walk, and the reader is `censusShaped: true`. A seed that does not exist is no walk, and
-       the meta-census's `isUnplacedSourceReader` reports it as today.
+       the meta-census's `isUnplacedSourceReader` reports it as today. This makes `rmd census-membership` name both
+       suites for any diff into their closures.
     3. THE TWO SUITES. test/baked-supervisor-inputs.test.ts declares `// @census-closure: src/lib/serve-supervisor-main.ts`
        and test/a-busy-primary-reaches-its-image-recycle.test.ts declares `// @census-closure: src/lib/deployer.ts`.
        Their assertions do not change.
-    4. Nothing in scripts/census-precheck.mjs changes here. W1-T9757 runs whatever census-shaped readers a diff
-       joins, so once both land, a #12289-shaped push is refused before the PR opens.
-    5. Tests (new file, `test(` titles verbatim as in the proofs below):
+    4. EXPLICIT SELECTION BEFORE THE PUSH. scripts/census-precheck.mjs adds three PRECHECK_PATH_TRIGGERED_SUITES rows,
+       so the precheck asks them whether or not W1-T9757's reader rows have landed:
+       - test/baked-supervisor-inputs.test.ts, seed src/lib/serve-supervisor-main.ts;
+       - test/a-busy-primary-reaches-its-image-recycle.test.ts, seed src/lib/deployer.ts;
+       - test/acr-build-trigger.test.ts, seed src/lib/serve-supervisor-main.ts.
+       Each row's trigger is a `closureImportTrigger(seed)`. It is true when the diff changes the suite, its seed, or
+       one of the catalog files (deploy/install-host-units.sh, src/lib/baked-runtime-inputs.ts,
+       .github/workflows/acr-build.yml). It is also true when a changed file inside the seed's relative-import
+       closure (the union of the head and merge-base closures, walked through `readHead`/`readBase` with
+       IMPORT_SPECIFIER_RE, `.js` read as `.ts`) imports a specifier set at head that differs from its merge base.
+       An added import and a removed one both count, since both move the closure. The text walk may over-include a
+       type-only import. A wider join costs one suite run, and a narrower one costs a CI round.
+       The rows are `modeled: evaluateAdmittedCensusSuites` in PRECHECK_PARITY through the existing spread.
+    5. THE REFUSAL NAMES THE LISTS. Each row's `remedy` names, in this build, every list its census holds:
+       - the supervisor row: "catalog each module the closure gains or loses in BAKED_RUNTIME_SOURCE_PATHS
+         (src/lib/baked-runtime-inputs.ts) and in .github/workflows/acr-build.yml's on.push.paths and drift loop";
+       - the deployer row: DEPLOY_LOGIC_PATHS (deploy/install-host-units.sh);
+       - the trigger row: acr-build.yml's on.push.paths and drift loop against BAKED_RUNTIME_SOURCE_PATHS.
+       No remedy may end in the `or record ... in <file>` shape. `censusPushRefusal` would read that as an offered
+       baseline. When W1-T9757's reader row for the same suite also joins, the explicit row wins the `testFile`
+       dedupe, so its remedy is the one printed.
+    6. Nothing here decides who acts on the refusal or widens a fix round's scope. That is W1-T9851's job.
+       requestScopeAmendment and INSTRUMENT_SURFACE are not touched.
+    7. Tests (new file, `test(` titles verbatim as in the proofs below):
        - a fixture tree where seed a.ts imports b.ts and b.ts imports c.ts, plus a suite declaring
          `@census-closure: a.ts`: the reader walks a.ts, b.ts and c.ts, and `readerJoins` is true for a diff to c.ts;
        - on the real tree, the readers for the two suites in step 3 join `src/lib/ledger.ts` (the #12289 diff);
-       - a type-only import does not extend the closure, and a missing seed leaves the suite unplaced.
+       - a type-only import does not extend the reader closure, and a missing seed leaves the suite unplaced;
+       - `evaluateAdmittedCensusSuites` over #12289's shape (src/lib/ledger.ts at head importing a new
+         ./host-identity.js its base did not) joins all three rows, with `runSuites` faked;
+       - with `runSuites` reporting test/baked-supervisor-inputs.test.ts failing, the violation row names
+         BAKED_RUNTIME_SOURCE_PATHS, src/lib/baked-runtime-inputs.ts and .github/workflows/acr-build.yml, and
+         `censusPushRefusal` (src/run-task.ts) reads no offered baseline from it;
+       - an import added to a src/lib file outside both closures joins none of the three rows (negative control).
+       The new suite drives `evaluateAdmittedCensusSuites`. Give it a PRECHECK_PARITY row,
+       `{ modeled: evaluateAdmittedCensusSuites }`, beside W1-T9757's.
   acceptance:
     - claim: "a suite declaring an import-closure seed walks every file in that closure"
       proof: 'grep: test("W1-T9806: a census-closure seed walks its whole runtime import closure" in test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts'
@@ -64,8 +114,19 @@
       proof: 'grep: test("W1-T9806: the baked-closure censuses join a ledger diff" in test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts'
     - claim: "a type-only import does not extend the closure and a missing seed stays unplaced"
       proof: 'grep: test("W1-T9806: a type-only import or a missing seed adds no walk" in test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts'
+    - claim: "the push precheck asks the baked-closure censuses when a diff changes an import inside their closure"
+      proof: 'grep: test("W1-T9806: the push precheck asks the baked-closure censuses for a closure import change" in test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts'
+    - claim: "a baked-closure census refusal names every list and file that catalogs the closure, and offers no baseline"
+      proof: 'grep: test("W1-T9806: a baked-closure refusal names the lists that catalog the closure" in test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts'
+    - claim: "an import added outside both closures asks no baked-closure census"
+      proof: 'grep: test("W1-T9806: an import outside both closures asks no baked-closure census" in test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts'
     - claim: "the serve-supervisor closure census declares its seed"
       proof: "grep: @census-closure: src/lib/serve-supervisor-main\\.ts in test/baked-supervisor-inputs.test.ts"
+    - claim: "the deployer closure census declares its seed"
+      proof: "grep: @census-closure: src/lib/deployer\\.ts in test/a-busy-primary-reaches-its-image-recycle.test.ts"
   falsifier: |
-    At origin/main, `sourceTextReaderOf("test/baked-supervisor-inputs.test.ts", <its text>, roots)` returns `walks: []` and
-    `censusShaped: false`, so `readerJoins(reader, "src/lib/ledger.ts")` is false and the second test fails.
+    At origin/main, two things fail. First, `sourceTextReaderOf("test/baked-supervisor-inputs.test.ts", <its text>,
+    roots)` returns `walks: []` and `censusShaped: false`, so `readerJoins(reader, "src/lib/ledger.ts")` is false and
+    the second test fails. Second, `evaluateAdmittedCensusSuites` over a src/lib/ledger.ts diff that adds
+    `import ... from "./host-identity.js"` joins none of the three suites, so `runSuites` is never asked for them and
+    the fourth test fails.
