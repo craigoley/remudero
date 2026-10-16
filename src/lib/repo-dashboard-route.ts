@@ -877,6 +877,7 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
  * so a portfolio card needs neither the whole portfolio nor `/status`. Both share one cached pass.
  */
 export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
+  const selectedRegistryObserver = deps.selectedRegistryObserver;
   const clock = deps.clock ?? systemClock;
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
   const inProcess = deps.readLedger !== undefined || deps.readPlan !== undefined;
@@ -916,7 +917,7 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
     }
     return resolveIdentities(deps, parseRegistryRepos(text));
   };
-  const project = (onlyOwn: boolean): Promise<RepoDashboardResult> => observeSelectedRegistry(deps.selectedRegistryObserver, "repo-dashboard",
+  const project = (onlyOwn: boolean): Promise<RepoDashboardResult> => observeSelectedRegistry(selectedRegistryObserver, "repo-dashboard",
     { instanceName: deps.ownInstance, repository: deps.instanceRepository && `${deps.instanceRepository.owner}/${deps.instanceRepository.repo}` }, async () => {
     const resolved = await resolve();
     const measured = resolved.identities.length > 0 && deps.ledgerPath !== undefined ? await measure(resolved.identities, deps.ledgerPath) : undefined;

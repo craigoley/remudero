@@ -267,12 +267,13 @@ function registryInstances(opts: InstanceGatewayOptions): RegistryInstance[] {
  * other instance is built here from its own state root. Never throws for one instance's state.
  */
 export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: InstanceGatewayOptions): Route[] {
+  const selectedRegistryObserver = opts.selectedRegistryObserver;
   const core = opts.coreInstance ?? CORE_INSTANCE;
   const stateBase = opts.stateBase ?? DEFAULT_INSTANCE_STATE_BASE;
   const out: Route[] = [];
   for (const instance of registryInstances(opts)) {
-    const observe = (route: Route): Route => opts.selectedRegistryObserver === undefined ? route : { ...route,
-      handler: (req, res, context) => observeSelectedRegistry(opts.selectedRegistryObserver, "serve-topology",
+    const observe = (route: Route): Route => selectedRegistryObserver === undefined ? route : { ...route,
+      handler: (req, res, context) => observeSelectedRegistry(selectedRegistryObserver, "serve-topology",
         { instanceName: instance.name, repository: instance.repo }, () => route.handler(req, res, context)) };
     if (instance.name === core) {
       out.push(...coreInstanceRoutes(coreRoutes, core, instance.repo, opts).map(observe));
@@ -403,6 +404,7 @@ export function checkInstanceLiveness(
 
 /** Start the gateway's liveness watch; returns its stop. A registry naming no other instance starts nothing. */
 export function watchInstanceLiveness(opts: InstanceGatewayOptions & { ledgerPath: string }): () => void {
+  const selectedRegistryObserver = opts.selectedRegistryObserver;
   const roots = livenessInstances(opts);
   if (roots.length === 0) return () => {};
   const down = new Set<string>();
@@ -421,7 +423,7 @@ export function watchInstanceLiveness(opts: InstanceGatewayOptions & { ledgerPat
       opts.log?.("fleet.liveness_check_failed", { reason: String((error as Error).message ?? error) });
     }
     // Independent identity evidence at this actual tick; no second legacy scan, new timer or effect permission.
-    for (const root of roots) void observeSelectedRegistry(opts.selectedRegistryObserver, "serve-liveness",
+    if (selectedRegistryObserver) for (const root of roots) void observeSelectedRegistry(selectedRegistryObserver, "serve-liveness",
       { instanceName: root.name, repository: root.repo }, () => undefined);
   }, LIVENESS_CHECK_MS);
 }

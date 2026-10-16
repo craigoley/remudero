@@ -1969,6 +1969,7 @@ export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegi
   selectedRegistryObserver?: SelectedRegistryObserver };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
+  const selectedRegistryObserver = deps.selectedRegistryObserver;
   const selectedInput = deps.selectedRegistry === undefined ? undefined : {
     ...deps.selectedRegistry,
     ...(deps.selectedRegistry.requiredCapabilities ? { requiredCapabilities: [...deps.selectedRegistry.requiredCapabilities] } : {}),
@@ -1988,7 +1989,7 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     method: "GET",
     path: "/v1/registry",
     scope: "read",
-    handler: (_req, res) => observeSelectedRegistry(deps.selectedRegistryObserver, "serve-registry", {}, async () => {
+    handler: (_req, res) => observeSelectedRegistry(selectedRegistryObserver, "serve-registry", {}, async () => {
       if (selectedInput !== undefined) {
         const selected = await readSelectedInstanceRegistry(selectedInput, deps.selectedRegistryIO);
         if (selected.kind === "unknown" || selected.kind === "refused") {
@@ -3314,6 +3315,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     log: deps.log,
     beforeExit: () => {
       readModel?.stop();
+      routeAssembly.selectedRegistryObserver?.close();
       analyticsCache.stop();
       liveAnalyticsCache.stop();
       stopWakeSummary();
