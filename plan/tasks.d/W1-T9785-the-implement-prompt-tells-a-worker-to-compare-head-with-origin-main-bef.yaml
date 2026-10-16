@@ -1,0 +1,24 @@
+- id: W1-T9785
+  title: The implement prompt tells a worker to compare HEAD with origin/main before editing and to merge, never rebase, when they differ
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/prompt-render.ts
+    - test/prompt-render.test.ts
+  acceptance:
+    - claim: "The rendered implement prompt carries a BASE CHECK instruction: before editing, a worker with git access compares HEAD with origin/main and, if they differ in a file the task declares, merges origin/main into the run branch (never rebase, never force-push)"
+      proof: "unit test: the implement prompt carries a base check against origin/main before editing"
+    - claim: The BASE CHECK is omitted for a shell-less worker that has no git, so it is never told to run a command it cannot
+      proof: "unit test: a shell-less implement prompt omits the base check"
+  origin: followup:W1-T9541-1792112542986:2026-10-16T01:26:00.927Z:0
+  rationale: >-
+    From the 2026-10-16 follow-up on W1-T9541-1792112542986, ratified via rmd approve:
+  
+    follow-up harvest [task]: rebase the worktree onto the latest origin/main before implementing,
+    because HEAD and origin/main differ by 7 files and the shard was verified against a different
+    commit. — from W1-T9541 (run W1-T9541-1792112542986)
