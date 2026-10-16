@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-15: verify #12030 adoption and follow #12045 through normal runtime adoption"
   plan_refs: [W1-T79, W1-T3245, W1-T3694, W1-T3756, W1-T3581, W1-T5282, W1-T5746, W1-T9092, W1-T9637]
   files: [src/lib/self-sync.ts, src/run-task.ts, test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts, test/daemon-freshness.test.ts, test/daemon-external-wait-freshness.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

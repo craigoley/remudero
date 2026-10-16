@@ -1,0 +1,122 @@
+- id: W1-T9851
+  title: "A BAKED-CLOSURE JOIN IS CATALOGUED BY ITS OWN IMPLEMENT BUILD, AND ONE NO BUILD CATALOGS REACHES A PERSON, NEVER A FIX-ROUND WORKFLOW EDIT — the implement census rung stages only `files:` plus offered baselines, so a worker told by W1-T9806's refusal to update acr-build.yml cannot commit it, and a rung that cannot clear ends `verdict: failed` with no person asked; a fix round whose red needs acr-build.yml stands down 'non-test paths need scope'"
+  repo: remudero
+  depends_on: [W1-T9806, W1-T9805]  # W1-T9806: the refusal rows this routes; W1-T9805: both edit runFixRung's scope-need flow (src/run-task.ts), serialize
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the route a baked-closure census refusal takes: the implement build catalogs it, and anything no build catalogs goes to a person. requestScopeAmendment, INSTRUMENT_SURFACE and every CI gate are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-16 (Craig): W1-T9804 rejected as a security weakening; the fix lane never edits workflow files, the implement worker updates the closure lists in its own reviewed build, a missed case escalates to a person. Split from W1-T9806 by plan agent P1 (Rule 19)"
+  plan_refs: [W1-T9804, W1-T9806, W1-T9805, W1-T9757, W1-T4656, W1-T4797, W1-T6465, W1-T297, W1-T9541]
+  files:
+    - src/lib/baked-closure-catalog.ts
+    - src/run-task.ts
+    - test/a-baked-closure-join-is-catalogued-by-its-build-or-reaches-a-person.test.ts
+  status: queued
+  priority: 1  # operator ruling 2026-10-16: three PRs joined the baked closure in three days (#11703, #12058, #12289), and each needed a hand push
+  attempts: 0
+  rationale: |
+    OPERATOR RULING (Craig, 2026-10-16), relayed by the operator session. W1-T9804 is REJECTED as a security weakening.
+    The auto-mode classifier refused it as [Security Weaken]. Builder B19 showed that a "tracked-path token insertion"
+    into codeql.yml's or semgrep.yml's `paths-ignore` would pass its rule and remove a path from scanning.
+    Craig chose instead to PREVENT, not carve out:
+    - the fix lane never edits workflow files;
+    - a change that joins the baked closure (DEPLOY_LOGIC_PATHS in deploy/install-host-units.sh,
+      BAKED_RUNTIME_SOURCE_PATHS in src/lib/baked-runtime-inputs.ts, the acr-build.yml trigger and drift list) is
+      caught BEFORE the PR opens (W1-T9806);
+    - the implement worker gets the closure-census results and updates those lists in its own reviewed build (this
+      task);
+    - a case that is still missed escalates to a person, never to a fix-round workflow edit (this task).
+
+    READ at origin/main d1f751b9d (2026-10-16):
+    - src/run-task.ts, implement fallback push: the pre-push hook's census refusal (`censusPushRefusal`) goes to
+      `repairCensusRefusedPush`, its only call site. Each strike's harness commit stages only
+      `declaredPaths: [...(task.files ?? []), ...refusal.offeredBaselines]`. A worker that follows W1-T9806's remedy
+      and edits .github/workflows/acr-build.yml, deploy/install-host-units.sh or src/lib/baked-runtime-inputs.ts on a
+      task whose `files:` lacks them has those edits refused as undeclared.
+    - When the rung returns `refused`, the run ledgers `verdict: failed` with `cause: "census-refused-push"` and keeps
+      the worktree. Nothing asks a person.
+    - `censusPushRefusal` reads each row's census as the text before its first `:`, so every census-suite row reads
+      `census-suite`. The suite's file appears only in the row text (`census-suite: <file> fails — ...`).
+    - runFixRung, `fixAction.kind === "scope-needed"`: with a filed task, the round calls `amendScope`.
+      `requestScopeAmendment` refuses any INSTRUMENT_SURFACE path (`^\\.github/workflows/` included) as
+      `instrument-path`, and the round stands down `non-test paths need scope`. Only the unfiled-scope arm above it
+      escalates to a person (`fix.scope_amendment` outcome `unfiled-escalated`, through `escalate()`).
+    - #12289 (W1-T9541) is the case: ledger.ts and fs-race-safe.ts gained an import of the new
+      src/lib/host-identity.ts. Amendment #12292 added only deploy/install-host-units.sh, and the PR merged on a hand
+      push, 3d24f75dd, editing acr-build.yml, install-host-units.sh and baked-runtime-inputs.ts.
+    - NOT COVERED: no shard on main or on any open head routes a census refusal's catalog files or escalates a
+      workflow scope need (swept origin/main plan/tasks.d and every open head's plan/ diff, 2026-10-16, for
+      baked closure|DEPLOY_LOGIC_PATHS|BAKED_RUNTIME_SOURCE_PATHS|census-closure: none outside W1-T9804 and W1-T9806).
+  design: |
+    1. THE CATALOG. New src/lib/baked-closure-catalog.ts exports `BAKED_CLOSURE_CATALOG`. It maps each baked-closure
+       census to the exact files that catalog its closure and the list each file holds:
+       - test/baked-supervisor-inputs.test.ts → src/lib/baked-runtime-inputs.ts (BAKED_RUNTIME_SOURCE_PATHS) and
+         .github/workflows/acr-build.yml (on.push.paths, the drift loop);
+       - test/acr-build-trigger.test.ts → .github/workflows/acr-build.yml;
+       - test/a-busy-primary-reaches-its-image-recycle.test.ts → deploy/install-host-units.sh (DEPLOY_LOGIC_PATHS).
+       It also exports a pure `bakedClosureCatalogFiles(refusalText)`, which returns the catalog files of every
+       `census-suite: <file> fails` row whose file is a key. The paths are exact, never a prefix, so no other
+       workflow file can ever be returned. The module imports nothing from the deployer or supervisor closures, so
+       it never joins them.
+    2. THE IMPLEMENT BUILD CATALOGS THE JOIN. The implement fallback push's call to `repairCensusRefusedPush` passes
+       `catalogFiles: (refusal) => bakedClosureCatalogFiles(refusal.text)`, recomputed on each strike's refusal. On each strike the rung:
+       - adds those files to the strike's `declaredPaths`;
+       - adds them to `reachableRemedyFiles` as `{ path, job: "baked-closure" }`;
+       - adds a prompt line naming each list and its file.
+       Only this implement call site passes `catalogFiles`. The PR body the run opens lists, under a "Baked-closure
+       catalog" line, each catalog file staged this way. That puts the widening in front of the review, and review's
+       existing `scope_violation` and `instrument_entangled` advisories still fire on it. This adds no gate exemption:
+       every CI check and review floor judges the PR as today.
+    3. A MISS ON THE IMPLEMENT PATH REACHES A PERSON. Suppose the rung returns `refused` and
+       `bakedClosureCatalogFiles(rung.refusal.text)` is non-empty. Beside today's `verdict: failed`, the run calls
+       `escalate()` with a question that names:
+       - the census rows;
+       - each list and its file;
+       - the worktree kept.
+       The options are `catalog-and-resume` and `file-a-task`, recommending `catalog-and-resume`. The run ledgers
+       `census_push.closure_escalated` with `issue_url`, or the delivery error. A refusal naming no catalog census
+       behaves as today.
+    4. THE FIX LANE ESCALATES, AND NEVER AMENDS A WORKFLOW. In runFixRung's `scope-needed` arm, a need whose paths
+       include a `.github/workflows/` path does not call `amendScope`. It escalates to a person through the same
+       `escalate()` shape as the unfiled-scope arm. The question names:
+       - the workflow path(s);
+       - the failing check signature;
+       - for a check whose log names a BAKED_CLOSURE_CATALOG census, that census's lists.
+       The round ledgers `fix.scope_amendment` outcome `workflow-escalated` (or `workflow-escalation-failed`), dedupes
+       on the same `identity_key` shape, and stands down. A need with no workflow path takes today's `amendScope`
+       path unchanged. requestScopeAmendment, its `instrument-path` refusal and INSTRUMENT_SURFACE do not change.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below; fakes for spawn, push and escalate):
+       - a `census-suite: test/baked-supervisor-inputs.test.ts fails` refusal on a task whose `files:` lacks the
+         catalog files. A worker that edits acr-build.yml and baked-runtime-inputs.ts gets both staged by the harness
+         commit, the push clears, and the prompt names BAKED_RUNTIME_SOURCE_PATHS;
+       - `bakedClosureCatalogFiles` returns only exact catalog paths for the three censuses, nothing for another
+         census row, and never a `.github/workflows/` path other than acr-build.yml;
+       - a rung that cannot clear a baked-closure refusal calls `escalate()` once and ledgers
+         `census_push.closure_escalated`. A rung that cannot clear an unrelated census refusal does not escalate
+         (positive control for today's behaviour);
+       - a fix round whose NEEDS_SCOPE names .github/workflows/acr-build.yml calls `escalate()`, never calls
+         `amendScope`, and stands down. One naming only deploy/install-host-units.sh still calls `amendScope`;
+       - every BAKED_CLOSURE_CATALOG key is a PRECHECK_PATH_TRIGGERED_SUITES row in scripts/census-precheck.mjs
+         whose `remedy` names each of its catalog files (W1-T9806), so the two lists cannot drift.
+  acceptance:
+    - claim: "the implement census rung stages the exact catalog files a baked-closure refusal names, and its prompt names the lists"
+      proof: 'grep: test("W1-T9851: the implement census rung stages the catalog files a baked-closure refusal names" in test/a-baked-closure-join-is-catalogued-by-its-build-or-reaches-a-person.test.ts'
+    - claim: "the catalog returns exact paths only, and never a workflow other than acr-build.yml"
+      proof: 'grep: test("W1-T9851: the catalog offers exact paths and never another workflow" in test/a-baked-closure-join-is-catalogued-by-its-build-or-reaches-a-person.test.ts'
+    - claim: "a baked-closure refusal the implement rung cannot clear escalates to a person"
+      proof: 'grep: test("W1-T9851: a baked-closure refusal the implement rung cannot clear escalates to a person" in test/a-baked-closure-join-is-catalogued-by-its-build-or-reaches-a-person.test.ts'
+    - claim: "a fix round whose scope need names a workflow path escalates to a person and requests no amendment"
+      proof: 'grep: test("W1-T9851: a fix round whose scope need names a workflow escalates and requests no amendment" in test/a-baked-closure-join-is-catalogued-by-its-build-or-reaches-a-person.test.ts'
+    - claim: "every catalogued census is a precheck row whose remedy names its catalog files"
+      proof: 'grep: test("W1-T9851: every baked-closure precheck row names its catalog files" in test/a-baked-closure-join-is-catalogued-by-its-build-or-reaches-a-person.test.ts'
+    - claim: "the implement push wires the catalog into its census rung"
+      proof: "grep: bakedClosureCatalogFiles( in src/run-task.ts"
+  falsifier: |
+    At origin/main, `repairCensusRefusedPush` over a `census-suite: test/baked-supervisor-inputs.test.ts fails` refusal,
+    on a task whose `files:` lacks src/lib/baked-runtime-inputs.ts and .github/workflows/acr-build.yml, with a worker
+    that edits both, has the harness commit refuse both as undeclared. The rung returns `refused` and `escalate()` is
+    never called, so the first and third tests fail. A fix round whose NEEDS_SCOPE names acr-build.yml calls
+    `amendScope`, which is refused `instrument-path`, and stands down with no escalation, so the fourth test fails.

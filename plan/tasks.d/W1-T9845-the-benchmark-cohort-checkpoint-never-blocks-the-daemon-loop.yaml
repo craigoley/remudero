@@ -1,0 +1,73 @@
+- id: W1-T9845
+  title: "THE BENCHMARK COHORT CHECKPOINT IS NEVER READ OR WRITTEN SYNCHRONOUSLY ON THE DAEMON LOOP — runBenchmarkCohortPass's readCheckpoint (readFileSync + JSON.parse) and writeCheckpoint (JSON.stringify + writeFileSync) run on the daemon's own thread over a 37.15 MB file that keeps growing, and on 2026-10-16 readCheckpoint was the top frame of a 14.4-min loop freeze (lag 863,946 ms: a 328 s readFileSync plus 221 s of GC) that ended in a watchdog recycle: the daemon's cohort pass runs in a worker thread"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — which thread the daemon's cohort pass runs on; the pass's computation and checkpoint format are unchanged
+  band_meaning: blast-radius
+  origin: "daemon.loop_stall_profile 2026-10-16T06:10:39Z (operator-approved P1 raise recorded on W1-T8876); coordinator fan-out 2026-10-15 brief B21"
+  plan_refs: [W1-T8876, W1-T9114, W1-T4554, W1-T5723]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - src/run-task.ts
+    - test/the-benchmark-cohort-checkpoint-never-blocks-the-daemon-loop.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 (daemon.loop_stall_profile at 06:10:39Z, quoted in W1-T8876's priority note on origin/main):
+    a 14.4-min loop freeze, lag 863,946 ms. Its top frame was readCheckpoint: a 328 s readFileSync of the 37.15 MB
+    state/benchmark-cohort-v1.json (29.6 MB on 2026-10-12) plus 221 s of GC. It led into a watchdog recycle.
+    READ at origin/main 9bb91fadc (symbols, not lines):
+    - src/lib/benchmark-cohort.ts `runBenchmarkCohortPass` is async, but its first statement is
+      `readCheckpoint(stateDir)`: `JSON.parse(readFileSync(checkpointPath(stateDir), "utf8"))`. It runs before the
+      first await, so it runs inside the daemon's call. `writeCheckpoint` (`JSON.stringify` + `writeFileSync` +
+      `renameSync`) runs on every exit path that returns a checkpointBytes.
+    - src/lib/daemon.ts calls `deps.runBenchmarkCohortPass()` and hands the promise to `detachSweepAction`. Detaching
+      only defers the settle; the synchronous read, parse, stringify and write still run on the loop, and the parsed
+      object graph lives in the daemon's own heap, so its GC is the daemon's GC.
+    - src/run-task.ts `buildBenchmarkCohortDaemonHooks` wires `runBenchmarkCohortPass(stateDir, { maxSources: 4 })`
+      in process.
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and all 428 origin heads for readCheckpoint,
+    benchmark-cohort-v1.json and benchmark cohort with worker/off-loop/async. Control: main reads 7 shards; no head
+    reads more than main.
+    - W1-T8876 (PR 12355, open, branch run-W1-T8876-1792165765658) PACES the pass: inputs-changed gating and at most
+      once per BENCHMARK_COHORT_MIN_INTERVAL_MS=900000, moving the hook into `benchmarkCohortCadence` in
+      src/lib/benchmark-cohort.ts. A due pass still does the whole synchronous read, parse and write on the loop.
+      The two compose: whichever merges second points the cadence's default `run` at the off-loop pass.
+    - W1-T9114 (queued, depends on W1-T9086) moves detached actions into adoptable run children by measured drain
+      cost. It may later move `benchmark-cohort` out of process too; this task does not wait for it, and its worker
+      leaves W1-T9114's table one kind with nothing left on the loop.
+  design: |
+    No new fixed constant, no new cap and no new policy key.
+    1. `runBenchmarkCohortPass` gains an off-loop twin in src/lib/benchmark-cohort.ts, `runBenchmarkCohortPassOffLoop`
+       (stateDir, opts), that starts one worker per pass from the module's own URL through `startWorker`
+       (src/lib/child-entry-argv.ts), runs the unchanged `runBenchmarkCohortPass` there, posts the
+       structured-clonable `BenchmarkCohortPassResult` back and exits. The read, parse, stringify, write and the
+       parsed object graph's GC are the worker's, never the daemon isolate's, and the heap is freed when it exits.
+    2. The daemon hook's default `run` (src/run-task.ts `buildBenchmarkCohortDaemonHooks` at base; W1-T8876's
+       `benchmarkCohortCadence` if it merges first) calls the off-loop twin. An injected `run` is unchanged.
+    3. A worker that throws, errors or exits before it reports rejects the pass with a named reason, so the daemon's
+       existing `benchmark_cohort.run_failed` row reports it. It never resolves a success-shaped result and never
+       falls back to an in-thread pass.
+    4. The CLI entry (`runBenchmarkCohortIdlePass`, used by deploy/entrypoint.sh's idle-starved pulse in its own
+       process) and `benchmark-aa`'s in-process read are unchanged.
+    5. The module is not added to scripts/build-child-entries.mjs WORKER_ENTRIES: the daemon runs under tsx (bin/rmd),
+       so startWorker starts it from source. A bundled parent refuses loudly, as startWorker already does.
+    FOLLOW-UP, named and not filed here: an incremental or append checkpoint format, so a pass does not re-read and
+    re-serialize the whole growing file. This task removes the loop freeze; the host I/O of a 37 MB read and rewrite
+    per due pass remains. Also named: once W1-T8876 merges, its fixed 900000 floor could become pacing measured
+    from input change and pass cost. That stays out of this task.
+  acceptance:
+    - claim: "the daemon hook's cohort pass makes no synchronous fs call on the checkpoint path on the daemon thread, while the pass reads and writes it in a worker (positive control: a main-thread read is recorded)"
+      proof: 'grep: test("W1-T9845: the daemon cohort pass never reads or writes its checkpoint on the loop" in test/the-benchmark-cohort-checkpoint-never-blocks-the-daemon-loop.test.ts'
+    - claim: "the off-loop pass returns the same snapshot an in-thread pass returns over the same ledger"
+      proof: 'grep: test("W1-T9845: the off-loop cohort pass returns the in-thread result" in test/the-benchmark-cohort-checkpoint-never-blocks-the-daemon-loop.test.ts'
+    - claim: "a worker that fails rejects the pass with its reason, never a success-shaped result"
+      proof: 'grep: test("W1-T9845: a failed cohort worker rejects the pass" in test/the-benchmark-cohort-checkpoint-never-blocks-the-daemon-loop.test.ts'
+  falsifier: |
+    Point the hook's default run back at the in-thread runBenchmarkCohortPass: the recorder on the main thread's
+    node:fs sees readFileSync and writeFileSync on benchmark-cohort-v1.json, and the first test fails.

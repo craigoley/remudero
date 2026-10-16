@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-16 (Craig, 11:25Z: get #12289 green and find why rmd did not handle it): #12289's fix round 1 ended NEEDS_SCOPE; its amendment #12292 merged at 11:24:43Z, but the round was not re-dispatched until 11:42:30Z"
   plan_refs: [W1-T5318, W1-T5534, W1-T5758, W1-T6465, W1-T1110]
   files: [src/lib/arm-auto-merge.ts, test/a-pr-the-sweep-merges-is-terminal-at-its-merge.test.ts, test/arm-outcome-five-sites.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

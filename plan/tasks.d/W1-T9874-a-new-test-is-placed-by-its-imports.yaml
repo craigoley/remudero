@@ -1,0 +1,83 @@
+- id: W1-T9874
+  title: "A TEST'S FOLDER IS COMPUTED FROM ITS IMPORTS, NOT CHOSEN — commit the src-module-to-subsystem map and the 21-folder list as repo data, port the import-graph classifier to placeTest({imports, name}), and expose it as rmd test-place (test restructure, letter E, part 1)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, computing a test's folder; spans the placement module, its data and the CLI verb
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter E (part 1 of 2)'
+  plan_refs: [W1-T9875, W1-T9876, W1-T9879, W1-T9901]
+  files:
+    - src/lib/test-placement.ts
+    - src/run-task.ts
+    - scripts/test-placement/subsystem-map.json
+    - scripts/test-placement/test-folders.tsv
+    - test/a-new-test-is-placed-by-its-imports.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULINGS 4 AND 7 (2026-10-16):
+    - The tree is 21 subsystem folders plus rules/: console-api, worker, ci, inbox, rules, review, daemon, plan, github,
+      deploy, learning, ledger, sweep, gardeners, fix-lane, routing, dispatch, memory, triage, infra and sre.
+    - console-api, worker and ci get second levels.
+    - No folder is named census, ratchet or baseline.
+    - The map is reusable for a later src/lib split.
+    THE SEED, committed with this filing under plan/seeds/test-restructure-2026-10-16/:
+    - subsystem-map.json holds module_subsystem (599 modules), subsystem_seed_rules, helper_subsystems, name_keywords,
+      module_name_tokens, the scoring weights and formula, the second-level families and folder_of_subsystem;
+    - proposed-map.tsv holds the reviewed assignment of all 3,640 tests at the a323d87ed snapshot;
+    - taxonomy.md section 1 describes the method.
+    MEASURED at the snapshot:
+    - confidence: 1,876 high, 1,324 medium, 425 low, 15 none;
+    - 723 tests value-import 3 or more subsystems, so about 26% ambiguity is the floor for any single-parent layout;
+    - modularity is 0.236 for the seeded map against 0.457 for Louvain;
+    - a folder is recoverable from the test's name alone for only about 27% of tests (taxonomy.md section 7), so
+      placement must read imports.
+  design: |
+    1. DATA. Copy subsystem-map.json to scripts/test-placement/subsystem-map.json. Copy proposed-map.tsv (path, folder,
+       kind, confidence) to scripts/test-placement/test-folders.tsv. Code reads only these copies, never plan/seeds;
+       the seed directory stays as provenance.
+    2. src/lib/test-placement.ts exports:
+       - extractTestFeatures(path, text): value, type-only and helper imports of src/ and scripts/ modules (helper
+         imports followed through test/helpers|setup|lib), repo path strings, imported symbol names and name tokens.
+         It uses a comment-aware scanner, NOT a regex comment stripper: taxonomy.md section 1.1 records a regex
+         stripper eating real code.
+       - placeTest({ imports, name, kind? }) returns { folder, confidence, primary, runnerUp, reasons }. It reproduces
+         taxonomy.md section 1 step 3 from the JSON:
+         - the reach weight times (IDF + 0.1) times the symbol factor, plus the name and prefix bonus;
+         - infra damping;
+         - per subsystem, the best module plus 0.3 times each other module;
+         - the run-task hub's symbol and name token vote;
+         - rule kind sends the test to rules/;
+         - second levels come from the family regexes.
+         IDF is taken over the CURRENT test population and computed once per tree SHA, never per call.
+         A src module missing from module_subsystem is placed by subsystem_seed_rules (first regex wins); a test with
+         no signal at all goes to infra/ with confidence none.
+    3. `rmd test-place <path...>`, registered in src/run-task.ts as testPlaceCommand, prints the folder, the confidence
+       and the reasons for each file. Builders and minters use it.
+    4. AGREEMENT IS MEASURED, NOT ASSERTED AGAINST A CONSTANT. A test runs placeTest over every row of test-folders.tsv
+       at head and reports agreement by confidence band. The TSV's header records the high-band agreement measured at
+       commit. The test fails only if high-band agreement falls below that recorded value; it may rise when the map
+       improves (W1-T9901).
+    5. A test asserts that no folder or second-level name matches RULE_SUITE_NAME_RE (src/lib/ci-parity.ts).
+    New test flat in test/.
+  acceptance:
+    - claim: 'a test that imports only sweep is placed in sweep'
+      proof: 'grep: test("W1-T9874: a test importing only sweep is placed in sweep" in test/a-new-test-is-placed-by-its-imports.test.ts'
+    - claim: 'the run-task hub defers to the imported symbol names'
+      proof: 'grep: test("W1-T9874: the run-task hub defers to the imported symbol names" in test/a-new-test-is-placed-by-its-imports.test.ts'
+    - claim: 'a suite that walks the repo as text is placed in rules'
+      proof: 'grep: test("W1-T9874: a suite that walks the repo as text is placed in rules" in test/a-new-test-is-placed-by-its-imports.test.ts'
+    - claim: 'agreement with the reviewed map never falls below the value recorded at commit'
+      proof: 'grep: test("W1-T9874: agreement with the reviewed map never falls below the recorded value" in test/a-new-test-is-placed-by-its-imports.test.ts'
+    - claim: 'no folder name reads as a rule suite'
+      proof: 'grep: test("W1-T9874: no folder name reads as a rule suite" in test/a-new-test-is-placed-by-its-imports.test.ts'
+    - claim: 'the CLI exposes placement as rmd test-place'
+      proof: 'grep: testPlaceCommand( in src/run-task.ts'
+  falsifier: |
+    On origin/main there is no placement module, map or CLI verb, so every grep misses. Nothing in the repo can say
+    where a new test belongs.
