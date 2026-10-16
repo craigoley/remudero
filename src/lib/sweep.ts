@@ -13,6 +13,8 @@ import { HOST_GIT_CONFIG, hostWorktreeGit, WorktreePointerRefusedError } from ".
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
@@ -1991,7 +1993,8 @@ export function productionFixProgressJudge(opts: {
       `Round count: ${input.rounds.length}`,
       scrubRiskJudgeText(JSON.stringify(input)).text,
     ].join("\n");
-    const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt });
+    const result = await (opts.spawn ?? benchmarkNonDispatchSpawn("risk-judge"))({ ...args, prompt,
+      memoryShadow: { ...args.memoryShadow, ...lightPassMemoryWaitPorts() } });
     if (result.subtype !== undefined && result.subtype !== "success") return undefined;
     return parseFixProgressVerdict(result.text);
   };
@@ -5023,12 +5026,41 @@ export function rearmSpendsBound(
 /** W1-T5911 — the head-bound record that a non-fleet actor armed or enqueued a risk-refused head. */
 export const RISK_OVERRIDE_OBSERVED_STEP = "automerge.risk_override_observed";
 
-/** W1-T970's refusal, cleared for THIS head only by a capped override or an observed hand arm (W1-T219). */
+/** W1-T970's refusal, cleared for THIS head by a capped override, a hand arm (W1-T219), a later proceed or a stale shard (W1-T9799). */
 function riskRefusalStands(lines: ReadonlyArray<Record<string, unknown>>, riskRefused: Map<string, string | undefined>,
-  pr: OpenPrView): boolean {
+  pr: OpenPrView, planDigest?: string): boolean {
   return riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
     !(pr.taskId !== undefined && cappedOverrideFromLedger(lines, pr.taskId, pr.headSha, pr.prUrl) !== undefined) &&
-    rowsAtHead(lines, RISK_OVERRIDE_OBSERVED_STEP, pr).length === 0;
+    rowsAtHead(lines, RISK_OVERRIDE_OBSERVED_STEP, pr).length === 0 &&
+    !proceededSinceEscalation(lines, pr) && riskEscalationAwaitingRejudge(pr, lines, planDigest) === undefined;
+}
+
+function latestEscalation(lines: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">):
+  { row: Record<string, unknown>; decidedSince?: Record<string, unknown> } | undefined {
+  let row: Record<string, unknown> | undefined;
+  let decidedSince: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    if (line.pr_number !== pr.prNumber || line.head_sha !== pr.headSha) continue;
+    if (line.step === "risk_judge.escalated") {
+      row = line;
+      decidedSince = undefined;
+    } else if (row !== undefined && line.step === "risk_judge.decision" && line.availability !== "unavailable") {
+      decidedSince = line;
+    }
+  }
+  return row === undefined ? undefined : { row, decidedSince };
+}
+
+function proceededSinceEscalation(lines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
+  return latestEscalation(lines, pr)?.decidedSince?.action === "proceed";
+}
+
+export function riskEscalationAwaitingRejudge(pr: Pick<OpenPrView, "prNumber" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>, planDigest: string | undefined): "plan_context_changed" | undefined {
+  if (planDigest === undefined) return undefined;
+  const latest = latestEscalation(lines, pr);
+  if (latest === undefined || latest.decidedSince !== undefined || latest.row.plan_context_digest === planDigest) return undefined;
+  return "plan_context_changed";
 }
 
 /** W1-T5911 — the first non-fleet arm or enqueue after this head's latest escalation, or why none counts. */
@@ -12580,6 +12612,7 @@ export interface SweepDeps {
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView, signal?: AbortSignal) => Promise<HandedOffHeadJudgment>;
+  planContextDigestFor?: (pr: OpenPrView) => string | undefined;
   /** W1-T5523 — where that judgment runs: off the pass, capped and bounded. Omitted, the process-wide
    *  pool, so the dedup and the cap span every pass and both sweep entrypoints. */
   handedOffHeadJudgments?: HandedOffHeadJudgmentPool;
@@ -13279,8 +13312,8 @@ function reviewerCodeFreshnessBackoffReason(
 /** W1-T5403 — what the sweep's risk judgment of a handed-off head decided. `unavailable` is its own
  *  value, never folded into either action: it holds the arm this pass and is asked again next pass. */
 export type HandedOffHeadJudgment =
-  | { action: "proceed"; reason: string }
-  | { action: "escalate"; reason: string; issueUrl?: string }
+  | { action: "proceed"; reason: string; planContextDigest?: string }
+  | { action: "escalate"; reason: string; issueUrl?: string; planContextDigest?: string }
   | { action: "unavailable"; reason: string };
 
 /** W1-T5403 — one handed-off head's judgment: the input the judge is shown, and the orchestrator
@@ -13314,10 +13347,11 @@ export function riskJudgeHandedOffHead(
     if (result.verdict.availability === "unavailable") {
       return { action: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
     }
+    const digest = input.planContextDigest === undefined ? {} : { planContextDigest: input.planContextDigest };
     if (result.action.kind === "escalate") {
-      return { action: "escalate", reason: result.action.reason, issueUrl: result.escalationUrl };
+      return { action: "escalate", reason: result.action.reason, issueUrl: result.escalationUrl, ...digest };
     }
-    return { action: "proceed", reason: result.action.reason };
+    return { action: "proceed", reason: result.action.reason, ...digest };
   };
 }
 
@@ -14395,7 +14429,8 @@ function repeatedFixRefusalReason(reason: string): string {
  *  rejection is ledgered by `detachFixDispatch` (W1-T5932, W1-T5951); any other is swallowed. */
 /** W1-T2981 widened this from the single `"fix-dispatch"` literal: the registry was always a
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
-export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort";
+export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
+  | "light-pass-action";
 export type DetachedFixPhase = "worker" | "ci-wait";
 
 interface DetachedSweepActionRegistration {
@@ -14419,7 +14454,7 @@ export function detachSweepAction(
 ): (phase: DetachedFixPhase) => void {
   const registration: DetachedSweepActionRegistration = {
     ...action, startedAtMs: Date.now(),
-    phase: action.actionKind === "fix-dispatch" ? action.phase ?? "worker" : "best-effort",
+    phase: action.actionKind === "fix-dispatch" || action.actionKind === "light-pass-action" ? action.phase ?? "worker" : "best-effort",
   };
   const onPhase = (phase: DetachedFixPhase) => {
     registration.phase = phase;
@@ -17443,7 +17478,7 @@ export async function runSweep(
         // rule's `when` and never in the merge path — the SAME non-action shape every other dedup
         // has. It clears on a NEW head sha or an explicit operator override.
         const riskRefusedKey = `${pr.prNumber}@${pr.headSha}`;
-        let refused = riskRefusalStands(ledgerLines, prior.riskRefused, pr);
+        let refused = riskRefusalStands(ledgerLines, prior.riskRefused, pr, deps.planContextDigestFor?.(pr));
         // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM. Deliberately NEVER
         // sha-keyed, unlike `refused` above: a hold binds the PR, not any one head, so a push while
         // held changes nothing. No dedup key is seeded, so the pass re-derives whole the moment an
@@ -17882,7 +17917,13 @@ export async function runSweep(
                 break;
               }
               // W1-T5403: a handed-off head never met the in-run risk judge — judge it once here.
-              const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines);
+              const planDigest = deps.planContextDigestFor?.(pr);
+              const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines) ?? riskEscalationAwaitingRejudge(pr, ledgerLines, planDigest);
+              if (handoff === "plan_context_changed") {
+                const key = `${pr.prNumber}@${pr.headSha}`;
+                const settled = judgmentPool.settled.get(key);
+                if (settled !== undefined && settled.planContextDigest !== planDigest) judgmentPool.settled.delete(key);
+              }
               if (handoff !== undefined) {
                 const riskHold = await holdHandedOffHeadForRiskJudgment(
                   pr, handoff, deps.judgeHandedOffHead, log, judgmentPool,
@@ -20111,6 +20152,35 @@ const inFlightNote = (inFlight: number): string => (inFlight > 0 ? `, in-flight 
 // Closed by `drainInFlightReviews` (an exit), reopened by the next light pass.
 let lightPassRefillsClosed = false;
 
+const lightPassActionScope = new AsyncLocalStorage<{ onMemoryWait: () => void }>();
+const lightPassMemoryWaits = new Map<string, { sinceMs: number }>();
+
+/** W1-T9780: an enforced admission backs off through `sleep`, so its first call detaches the waiting light-pass action. */
+export function lightPassMemoryWaitPorts(): Pick<AdmissionPorts, "sleep"> {
+  return {
+    sleep: async (ms) => {
+      lightPassActionScope.getStore()?.onMemoryWait();
+      await delay(ms);
+    },
+  };
+}
+
+function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: number): SweepSummary {
+  const reason = sinceMs === undefined
+    ? "light-pass action detached while waiting for memory admission"
+    : `light-pass action for this head is still waiting for memory admission (detached ` +
+      `${Math.round(Math.max(0, (deps.now ? deps.now() : systemClock.now()) - sinceMs) / 1000)}s ago) — not re-admitted until it settles`;
+  if (sinceMs !== undefined && !deps.dryRun) {
+    (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+      step: "sweep.disposed", pr_number: pr.prNumber, pr_url: pr.prUrl, disposition: "wait", acted: false, reason,
+      stand_down_reason: reason, head_sha: pr.headSha, in_flight_action: "light-pass-action" });
+  }
+  const byDisposition = ZERO_COUNTS();
+  byDisposition.wait = 1;
+  return { total: 1, byDisposition, actionsTaken: 0, actionsFailed: 0, noneCount: 0,
+    actions: [{ prNumber: pr.prNumber, prUrl: pr.prUrl, taskId: pr.taskId, disposition: "wait", reason, acted: false }] };
+}
+
 /** W1-T5931: the one review bound both passes admit under — the width minus every review in flight. */
 export function reviewAdmissionBound(width: number): { bound: number; inFlight: number } {
   const inFlight = lightPassSpawningReservations + fullPassReviewsInFlight;
@@ -20122,6 +20192,11 @@ export async function runSweepLightPass(
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
+  const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
+  if (memoryHeld.length > 0) {
+    const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
+    return [...held, ...await runSweepLightPass(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy)];
+  }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
     return [await runSweep([], deps, policy)];
@@ -20235,6 +20310,7 @@ export async function runSweepLightPass(
   const reevaluationRows = deps.appendLine ?? appendLedger;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
+  const memoryDetachedNumbers = new Set<number>();
   // W1-T9498: this pass's spawning reviews not yet settled; the repair admission reads it live.
   let unsettledSpawning = spawning.length;
   for (const pr of [...spawning, ...planFilings]) {
@@ -20290,9 +20366,8 @@ export async function runSweepLightPass(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
       const baseStandDownReasonFor = deps.standDownReasonFor;
-      // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick this
-      // pass runs inside is awaited whichever PR won the post-review admission, so the fix rung's
-      // CI wait must leave the await on both branches.
+      // W1-T2379: `detachFixWait` is set on EVERY forwarded shape, admitted or not — the tick awaits this
+      // pass whichever PR won the post-review admission, so the fix rung's CI wait leaves it on both branches.
       const scopedDeps: SweepDeps =
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
           ? {
@@ -20366,7 +20441,9 @@ export async function runSweepLightPass(
         if (previousPlanMerge !== undefined) await previousPlanMerge;
         return runSweep([pr], scopedDeps, policy);
       };
-      return sweepOne().then(async (summary) => {
+      let onMemoryWait!: () => void;
+      const memoryWait = new Promise<"memory-wait">((resolve) => { onMemoryWait = () => resolve("memory-wait"); });
+      const settled = lightPassActionScope.run({ onMemoryWait: () => onMemoryWait() }, sweepOne).then(async (summary) => {
         if (heldAtSelection !== undefined && !deps.dryRun) {
           const disposed = readLedger(deps.ledgerPath).findLast((l) => l.step === "sweep.disposed" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
@@ -20380,6 +20457,18 @@ export async function runSweepLightPass(
         planMergeTurn?.finish();
         if (pr.prNumber === lastPlanMergeNumber) releasePlanMerge();
         if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
+      });
+      return Promise.race([settled, memoryWait]).then((first) => {
+        if (first !== "memory-wait") return first;
+        const key = lightPassHeadKey(pr);
+        const hold = { sinceMs: deps.now ? deps.now() : systemClock.now() };
+        lightPassMemoryWaits.set(key, hold);
+        memoryDetachedNumbers.add(pr.prNumber);
+        detachSweepAction(settled.finally(() => {
+          if (lightPassMemoryWaits.get(key) === hold) lightPassMemoryWaits.delete(key);
+        }), { actionKind: "light-pass-action", taskId: pr.taskId ?? `PR-${pr.prNumber}` });
+        deps.log?.("sweep.light_pass.memory_wait_detached", { pr_number: pr.prNumber, head_sha: pr.headSha });
+        return lightPassMemoryWaitSummary(pr, deps);
       });
     }),
   );
@@ -20494,7 +20583,7 @@ export async function runSweepLightPass(
   } finally {
     releasePlanMerge();
     for (const [number, release] of releases) {
-      if (!detachedNumbers.has(number)) release();
+      if (!detachedNumbers.has(number) && !memoryDetachedNumbers.has(number)) release();
     }
   }
 }
