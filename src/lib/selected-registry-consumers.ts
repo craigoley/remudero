@@ -188,3 +188,8 @@ export async function observeSelectedRegistry<T>(observer: SelectedRegistryObser
   target: RegistryConsumerTarget, operation: () => T | Promise<T>): Promise<T> {
   return observer === undefined ? operation() : observer.observe(action, target, operation);
 }
+
+export function observeSelectedRegistrySync<T>(observer: SelectedRegistryObserver | undefined, action: RegistryConsumerAction,
+  target: RegistryConsumerTarget, operation: () => T): T {
+  return observer === undefined ? operation() : observer.observeSync(action, target, operation);
+}
