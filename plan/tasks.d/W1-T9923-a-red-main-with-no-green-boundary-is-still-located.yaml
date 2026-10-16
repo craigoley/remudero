@@ -1,0 +1,103 @@
+- id: W1-T9923
+  title: "A RED MAIN WITH NO GREEN BOUNDARY, OR NO PROBE IT CAN DISPATCH, IS STILL LOCATED — on 2026-10-16 the main-repair lane wrote main.repair.unlocated five times for the bd42ca367 red (\"names no first red merge after a green run\", then \"no probe could be dispatched\"), opened no fix, and a human repaired main, though the failing assertion named the path that #12389 had just added"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern, how the red-main lane names its offender when the CI-run boundary is missing; a wrong name sends the fix or revert at an innocent merge, so every new method carries its evidence and the existing writer backstop still judges it
+  band_meaning: span
+  origin: "operator session 2026-10-16, filing agent F8: main red at bd42ca367 (CI run 38946416242), core ledger main.repair rows 17:40-18:48Z"
+  plan_refs: [W1-T6403, W1-T7760, W1-T9665, W1-T5843, W1-T4817]
+  files:
+    - src/lib/main-health-rung.ts
+    - src/run-task.ts
+    - test/a-red-main-with-no-green-boundary-is-still-located.test.ts
+  status: queued
+  priority: 1  # every unlocated red keeps main red for every PR until a human acts; 2026-10-16 is the observed instance
+  attempts: 0
+  rationale: |
+    EVIDENCE, core ledger (~/rmd-state2/state/ledger.ndjson on the host, bounded tail read), 2026-10-16:
+      - 18:28:45Z `main.repair.ratchet_not_applicable` head bd42ca367, reason "ci-shard (4/8) failed 1 test(s)".
+      - 18:28:55Z `main.repair.unlocated` head bd42ca367, failing_checks [ci], reason "main's push run history names no
+        first red merge after a green run". The same pair recurs at 18:35:58Z (34b3bf216) and 18:37:01Z (fb566039c).
+        It was also seen at 17:40:09Z for an earlier red (96d49d7e2).
+      - 18:48:55Z, once a boundary was read (first_red_sha bd42ca367, after_green_sha 479b097de),
+        `main.repair.probe_dispatch_failed` probe_sha c73ab052d, error "gh api response body was unreadable". Then
+        `main.repair.unlocated` reason "no probe could be dispatched for the cancelled commits since 479b097de...".
+      - No `main.repair.located` row followed, and the session fixed main by hand.
+    WHAT THE TRUTH WAS. The first-parent span 479b097de..bd42ca367 is 6 merges: 9156fd658, d6f6dddf3, c73ab052d,
+    f34685418, 6841dac49 (#12389) and bd42ca367 (#12364). The failing test's assertion printed the one unresolved path
+    doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md, and 6841dac49 is the merge that added a
+    file naming it (plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml). The first red's own merge, bd42ca367,
+    is innocent. Main's push runs are cancelled while pending (doctrine ci-and-merging/cancelled-is-not-red), so the
+    culprit's own run never concluded.
+    READ at origin/main 07a425844, src/lib/main-health-rung.ts:
+      - `repairRedMain` writes `main.repair.unlocated` with the "names no first red merge" reason when
+        `observation.firstRedCommit` is absent and no bisection is pending. That is the 18:28 path.
+      - `locateOffender` (W1-T7760) proves a first red only by dispatching CI probes on the span (`probes.dispatch`,
+        a REST ref plus a ci.yml dispatch), priced by `medianCiRunMs`. When every dispatch throws and none is in
+        flight, it returns unlocated. That is the 18:48 path.
+      - `baseReproductionFiles(failures)` already parses the failing test files. `mergesSinceGreenOf` (W1-T9665)
+        already reads each span merge's files and patch, and asks whether each one reaches a failing test. Neither is
+        used to locate anything.
+      - `locatedWriterRefusal` refuses a located sha whose CI never concluded red, unless `probeVerdicts` says it did.
+        A new method must therefore hand the backstop its own evidence, never bypass it.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the plan diffs of all 436 open heads for
+    main.repair.unlocated, "no first red merge", probe_dispatch_failed, bisected-first-red and planMainBisection.
+    W1-T7760 and W1-T6403 (merged) built the CI-probe locator and the repair lane. W1-T9665 (merged) lists merges
+    since green for the fix prompt. No queued task locates without a CI verdict.
+  design: |
+    Operator rulings: no hard thresholds (no fixed span, probe count or time cap), lean into automation.
+    1. TWO LOCAL METHODS, TRIED IN ORDER, BEFORE `unlocated` IS WRITTEN. They run when no first red is read, or when
+       the CI probe locator returns unlocated. They also run beside CI probes when local evidence is cheaper.
+       a. NAMED-PATH ATTRIBUTION. Take the paths and identifiers the failing assertions print (the `+`/`-` lines and
+          the error message of each `not ok` block, which the repair lane already holds), plus the failing test
+          files. For each, find the newest first-parent merge in the candidate range that added or removed the string
+          (`git log --first-parent -S<string>` over the range, in the daemon's managed checkout). The range is from
+          the last green when one is known. Otherwise it runs back from the head until the failing test file is
+          absent or passes (see b). A merge named by every printed string, and by no other merge, is a candidate, but
+          not yet a verdict.
+       b. LOCAL SINGLE-FILE BISECT. Run only the failing test files, with the CI test flags, at merge commits in a
+          detached worktree. The rung has no git or test seam today (`MainHealthRungDeps` holds only fetch, issues
+          and ledger readers), so it gains two injected seams, `searchHistory` for (a) and `runFilesAt(sha, files)`
+          for (b). src/run-task.ts, where `buildMainHealthRung` is wired, gives them defaults on the daemon's
+          managed checkout and a worker worktree under the existing worker sandbox, never the host shell. Probe the named-path candidate and its first parent first. When no candidate exists, bisect the
+          range. With no green bound, step back by doubling from the head until the files pass, then bisect. Each
+          probe is priced at the file's own measured duration from the failing run's log. The number of probes
+          follows the range size (log2), never a fixed cap. A proof is a red at X and a green at X's first parent,
+          on the same files. A file that fails at both, or passes at both, proves nothing and is named.
+    2. THE EXISTING BACKSTOP JUDGES IT. The local verdicts go into `probeVerdicts` with the evidence kind `local-file`,
+       so `locatedWriterRefusal` accepts a sha only with a proven red/green pair. A named path with no local proof is
+       written as `main.repair.suspect` with the method and its inputs, and never names an offender.
+    3. THEN THE NORMAL PATH. `main.repair.located` is written with method `named-path-bisect` or `local-bisect`, and
+       the lane proceeds to its fix PR, or to the revert proposal when the fix fails, exactly as for `first-red-run`.
+    4. LEDGER THE METHOD AND ITS INPUTS: the strings searched, the range and how it was bounded (`last_green` or
+       `stepped_back`), each probe (sha, files, verdict, duration) and the proven pair. A new
+       `main.repair.local_probe` row per probe joins the rotation-retained steps, so a rotation never re-runs one.
+    5. FALL BACK, NAMED. When both methods fail, `main.repair.unlocated` is written as today, with a `local_reason`
+       naming why: the failing file is absent at the range start, no probe ran, the probes disagree, or the sandbox
+       was unavailable.
+    6. Tests (new file, test titles verbatim as in the proofs below; drive the rung with a fake git, a fake local
+       test runner and the existing probe and fetch fakes, as the W1-T7760 suite does):
+       - the 2026-10-16 shape: no first red read, a six-merge range in which merge 5 adds the printed path, and a
+         local runner red at merge 5 and green at merge 4. `main.repair.located` names merge 5 with method
+         `named-path-bisect`. At origin/main the same input writes `main.repair.unlocated`;
+       - every CI probe dispatch throws, and the local bisect still locates the culprit;
+       - a named path whose local probes pass at both the candidate and its parent writes `main.repair.suspect`,
+         and `main.repair.unlocated` with a `local_reason`, never `located`;
+       - with a green boundary and a dispatchable CI probe, the W1-T7760 path is unchanged (positive control).
+  acceptance:
+    - claim: "a red with no green boundary is located from the path its assertion names, proven by a local bisect"
+      proof: 'grep: test("W1-T9923: a red with no green boundary is located from the path its assertion names" in test/a-red-main-with-no-green-boundary-is-still-located.test.ts'
+    - claim: "when no CI probe can be dispatched, the local single-file bisect still locates the culprit"
+      proof: 'grep: test("W1-T9923: when no CI probe can be dispatched a local bisect still locates the culprit" in test/a-red-main-with-no-green-boundary-is-still-located.test.ts'
+    - claim: "a named path with no local red and green pair is a suspect, and unlocated names its local reason"
+      proof: 'grep: test("W1-T9923: an unproven named path is a suspect and unlocated names its local reason" in test/a-red-main-with-no-green-boundary-is-still-located.test.ts'
+    - claim: "with a green boundary and a dispatchable probe, the CI-probe locator is unchanged"
+      proof: 'grep: test("W1-T9923: with a green boundary the ci probe locator is unchanged" in test/a-red-main-with-no-green-boundary-is-still-located.test.ts'
+  falsifier: |
+    At origin/main, a red-main observation with no `firstRedCommit` and a failing assertion naming a path added by
+    one span merge writes `main.repair.unlocated` with "names no first red merge after a green run" and never calls
+    a local runner, so the first test fails. A probe dispatch that throws returns unlocated, so the second test fails.
