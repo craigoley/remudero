@@ -7,8 +7,9 @@
   `on: pull_request` still has no `types:`, so an edit re-runs none of its jobs. Other workflows
   that DO fire on `edited`: `acceptance-author-gate.yml` and `proof-discrimination-gate.yml` (the
   same four types), and `ci-gate.yml` (`edited` only, W1-T4400: it re-aggregates the required
-  `ci-gate` after a body or title repair). *(Corrected 2026-10-16: the frozen rule below predates
-  #6062.)*
+  `ci-gate` after a body or title repair). Because those gates re-run, a body edit is never free:
+  editing after review discards the finished review (#11942). *(Corrected 2026-10-16 in #12391: the
+  frozen rule below predates #6062.)*
 
 *(Index line merged 2026-10-16: the superseded W1-T3323 bullet below no longer ships beside its successor; its id resolves here through `doctrine/merged-rules.json`.)*
 
