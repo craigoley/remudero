@@ -90,11 +90,22 @@ function boundedReason(reason: unknown): string {
 /** Metadata values are identifiers, not prose. Bound them so a malformed ledger row cannot
  *  turn the recent feed into an unbounded payload; unlike a reason, an absent identifier stays
  *  absent instead of being replaced by a success-shaped fallback. */
-function boundedRecentTelemetryText(value: unknown): string | undefined {
+function boundedRecentTelemetryText(value: unknown, max = 160): string | undefined {
   if (typeof value !== "string") return undefined;
-  const text = value.trim();
+  const text = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
   if (!text) return undefined;
-  return text.length <= 160 ? text : `${text.slice(0, 159)}…`;
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/** Join keys are never truncated: two overlong ids must not become one apparently proven run. */
+export function recentRunId(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= 160 && value.trim() === value
+    ? value
+    : undefined;
+}
+
+function recentEventTime(value: unknown): string | undefined {
+  return typeof value === "string" && value.length <= 160 && Number.isFinite(Date.parse(value)) ? value : undefined;
 }
 
 function recentPrNumber(value: unknown): number | undefined {
@@ -146,6 +157,7 @@ export function recentEntryFromLine(
     case "implement.done":
       return { taskId, title, ts, verb: "spend", costUsd, numTurns, prUrl, prNumber };
     case "worker.activity": {
+      const runId = recentRunId(line.run_id);
       const workerRole = recentWorkerRole(line.worker_role);
       const provider = boundedRecentTelemetryText(line.provider);
       const requestedModel = boundedRecentTelemetryText(line.requested_model);
@@ -155,12 +167,13 @@ export function recentEntryFromLine(
         title,
         ts,
         verb: "worker",
-        detail: typeof line.event_kind === "string" ? line.event_kind : "activity",
+        detail: boundedRecentTelemetryText(line.event_kind) ?? "activity",
         eventKind:
           line.event_kind === "working" || line.event_kind === "tool-executing" || line.event_kind === "message"
             ? line.event_kind
             : undefined,
-        ...(typeof line.event_at === "string" ? { eventAt: line.event_at } : {}),
+        ...(runId ? { runId } : {}),
+        ...(recentEventTime(line.event_at) ? { eventAt: recentEventTime(line.event_at) } : {}),
         ...(workerRole ? { workerRole } : {}),
         ...(provider ? { provider } : {}),
         ...(requestedModel ? { requestedModel } : {}),
@@ -168,11 +181,12 @@ export function recentEntryFromLine(
         ...(typeof line.turns_so_far === "number" && Number.isFinite(line.turns_so_far) && line.turns_so_far >= 0
           ? { turnsSoFar: line.turns_so_far }
           : {}),
-        ...(typeof line.tool_name === "string" ? { toolName: line.tool_name } : {}),
-        ...(typeof line.tool_reason === "string" ? { toolReason: line.tool_reason } : {}),
-        ...(typeof line.tool_started_at === "string" ? { toolStartedAt: line.tool_started_at } : {}),
-        ...(typeof line.tool_completed_at === "string" ? { toolCompletedAt: line.tool_completed_at } : {}),
-        ...(typeof line.tool_duration_ms === "number" ? { toolDurationMs: Math.max(0, line.tool_duration_ms) } : {}),
+        ...(boundedRecentTelemetryText(line.tool_name) ? { toolName: boundedRecentTelemetryText(line.tool_name) } : {}),
+        ...(boundedRecentTelemetryText(line.tool_reason, 240) ? { toolReason: boundedRecentTelemetryText(line.tool_reason, 240) } : {}),
+        ...(recentEventTime(line.tool_started_at) ? { toolStartedAt: recentEventTime(line.tool_started_at) } : {}),
+        ...(recentEventTime(line.tool_completed_at) ? { toolCompletedAt: recentEventTime(line.tool_completed_at) } : {}),
+        ...(typeof line.tool_duration_ms === "number" && Number.isFinite(line.tool_duration_ms) && line.tool_duration_ms >= 0
+          ? { toolDurationMs: line.tool_duration_ms } : {}),
         ...(line.tool_outcome === "success" || line.tool_outcome === "error" ? { toolOutcome: line.tool_outcome } : {}),
         prUrl,
         prNumber,
@@ -235,7 +249,7 @@ export function projectRecentEntry(db: ReadModelDb, instance: string, line: Reco
   const ts = typeof line.ts === "string" ? line.ts : "";
   const tsMs = Date.parse(ts);
   if (!Number.isFinite(tsMs)) return;
-  const runId = typeof line.run_id === "string" ? line.run_id : undefined;
+  const runId = recentRunId(line.run_id);
   const prUrl = typeof line.pr_url === "string" ? line.pr_url : undefined;
   const sql = recentStatements(db);
   sql.instance.run(instance);
@@ -260,7 +274,7 @@ export function projectRecentEntry(db: ReadModelDb, instance: string, line: Reco
 /** Structural LedgerRowProjection typing keeps this leaf independent of its registering module. */
 export const RECENT_ROW_PROJECTION = {
   name: "recent_entry",
-  version: 1,
+  version: 2,
   tables: ["recent_instance", "recent_entry", "recent_merge", "recent_run_pr"],
   ddl: RECENT_DDL,
   markers: ['"step":'],
