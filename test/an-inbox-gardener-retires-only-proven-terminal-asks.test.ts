@@ -484,6 +484,8 @@ test("the production gardener reads committed credit overrides from its separate
   const result = await runInboxGardener({ stateDir: f.state, scope: wired.scope, ports: { ...wired.ports, judge: undefined }, mode: "act", clock: fixedClock(f.now()) });
   assert.equal("retired" in result && result.retired, 0); assert.equal(f.store().events.length, 0);
   writeFileSync(overrides, "{malformed"); await assert.rejects(owned(), /parse|YAML|flow|collection/i);
+  writeFileSync(overrides, " ".repeat(INBOX_GARDENER_SOURCE_LIMITS.creditOverrideBytes + 1));
+  await assert.rejects(owned(), /oversized/, "operator policy is a bounded qualified source, never a capped observed corpus");
   writeFileSync(overrides, "[]\n"); writeFileSync(join(f.root, "plan", "credit-overrides.yaml"), JSON.stringify(removal));
   wired = await owned(); assert.equal((await wired.ports.proof(wired.candidate))?.kind, "merged-task", "an unrelated state-root copy cannot override authoritative checkout policy");
   assert.equal(wired.candidate.sourcePolicy, initialPolicy);

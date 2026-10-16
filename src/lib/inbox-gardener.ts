@@ -154,7 +154,7 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
 
 const RELEVANT_STEPS = ["panel.proposal_reframe_requested", "panel.proposal_declined", "panel.proposal_restored", "ratify.reframed", "ratify.approved", "inbox.gardener_retired", "inbox.gardener_restored", "inbox.gardener_outcome"];
 /** BACKSTOP: refuse oversized unverified sources; never label a capped source complete. */
-export const INBOX_GARDENER_SOURCE_LIMITS = { registryBytes: 512 * 1024, threadBytes: 1024 * 1024,
+export const INBOX_GARDENER_SOURCE_LIMITS = { registryBytes: 512 * 1024, threadBytes: 1024 * 1024, creditOverrideBytes: 64 * 1024,
   proposals: 2048, relevantRows: 4096, relevantBytes: 512 * 1024, rowBytes: 16 * 1024 } as const;
 const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence", version: 2,
   tables: ["inbox_gardener_latest", "inbox_gardener_mirrors"],
@@ -234,7 +234,7 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
     retainedRows = ledger.rows;
     if (!fs.statSync(join(options.stateDir, LEDGER_FILENAME)).isFile()) throw new Error("live ledger unavailable");
     const overridePath = options.creditOverridePath ?? join(dirname(options.planPath), "credit-overrides.yaml");
-    const rawOverrides = fs.existsSync(overridePath) ? parseYaml(fs.readFileSync(overridePath, "utf8")) : [];
+    const rawOverrides = fs.existsSync(overridePath) ? parseYaml(boundedFile(overridePath, INBOX_GARDENER_SOURCE_LIMITS.creditOverrideBytes)) : [];
     if (!Array.isArray(rawOverrides) || rawOverrides.some(o => !o || o.action !== "remove-credit" || typeof o.task !== "string" || !Number.isSafeInteger(o.pr) || o.pr < 1 || o.author_class !== "operator" || typeof o.reason !== "string" || !o.reason.trim())) throw new Error("credit override source unverified");
     overrides = rawOverrides;
     const verdicts = ledgerProposalVerdicts([...ledger.rows].sort((a, b) => Date.parse(String(a.ts)) - Date.parse(String(b.ts))));
