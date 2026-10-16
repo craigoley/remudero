@@ -482,6 +482,8 @@ import {
   type SweepCycleOutcome,
   priorUnrecognisedResetStrings,
   pendingWorkerBoundaryHandoffs,
+  daemonPushTokenSource,
+  receivePackCredentialProbe,
   v8HeapStatistics,
 } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
@@ -3262,7 +3264,7 @@ import {
   refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
-import { LEDGER_REQUEST_STEP, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
+import { LEDGER_REQUEST_STEP, realScopedMint, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
   orphanRunBranchEvidenceReader,
@@ -40204,6 +40206,9 @@ export async function daemonCommand(
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
         // `repo:` field — the SAME value, never a second resolution that could drift from it.
         targetRepo: target.repo,
+        // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
+        probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
+          token: daemonPushTokenSource(`${target.owner}/${target.repo}`, gitCredentialSocket ? (deps.gitCredentialMint ?? realScopedMint(log)) : undefined) }),
         // W1-T2397: the second half of the wiring #3125 could only take for `drainCommand`. Same
         // pair, same factory, same contract — and this is the lane that actually dispatches.
         openSiblingBuildFor,
