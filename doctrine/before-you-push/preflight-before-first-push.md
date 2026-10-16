@@ -33,6 +33,13 @@ author receipt without a known target is not publication-identity assurance. The
 `hooks/pre-push` identity advice and narrow identity-loss refusal are unchanged; its first-push
 advice is not a substitute for supplying the actual destination here.
 
+No automatic consumer currently supplies the target to this entry point. Treat this as fail-fast
+plumbing with measurement scoped to explicitly supplied targets, not as a guarantee that publication
+identity errors are impossible. Automatic target wiring and its qualification remain separate work.
+The paired real-Git fixture in `test/author-publication-identity.test.ts` models the #12409 repair:
+the same `codex/...` destination and code tree refuse without a trailer and admit after a new commit
+carries the fixture-only `Remudero-Task: PR-12409` trailer.
+
 The selector's symbol-level narrow set remains shadow-only. A highly connected module may select
 most of the repository; this is an honest result, not a reason to bypass its dependencies.
 `--dry-run` records selection only and never claims verification. Dirty trees, a failed fetch,

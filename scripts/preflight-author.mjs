@@ -179,6 +179,7 @@ export function authorSelection(root, changed, range, spawn = spawnSync) {
 }
 
 /** Judge the publication destination, never the local branch name. Unknown is not a pass.
+ *  No automatic consumer supplies the target yet; measurement is scoped to explicit caller input.
  *  `git` is the author's checked, environment-scrubbed runner, pinned to this worktree. */
 export function authorPublicationIdentity({ headRef, headSha, baseSha, publicationSha }, git) {
   const scope = { headRef: headRef ?? null, headSha, baseSha };

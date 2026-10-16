@@ -85,6 +85,35 @@ test('author publication identity refuses a code destination before selection ev
   assert.match(result.receipt.affectedTestsNotRunReason, /publication identity refused/);
 });
 
+test('author publication identity admits the same codex destination only after its fixture PR-number trailer is committed', (t) => {
+  const f = fixture(t);
+  const target = 'codex/publication-destination';
+  const refused = dryRun(f, ['--head-ref', target, '--head-sha', f.headSha]);
+  assert.equal(refused.status, 1);
+  assert.equal(refused.selections, 0);
+  assert.equal(refused.receipt.verdict, 'refused');
+  assert.equal(refused.identity.state, 'refused');
+  assert.equal(refused.identity.headRef, target);
+  assert.equal(refused.identity.headSha, f.headSha);
+  assert.match(refused.identity.message, /matches neither conforming form/);
+  assert.doesNotMatch(f.git('log', '-1', '--format=%B'), /^Remudero-Task:/m);
+
+  // Isolated fixture-only PR identity, modeling #12409's forward-commit repair.
+  // Keep the destination and code tree identical; no live credit or history rewrite.
+  f.git('commit', '--allow-empty', '-m', 'fix: publication fixture PR identity\n\nRemudero-Task: PR-12409');
+  const repairedSha = f.git('rev-parse', 'HEAD');
+  assert.notEqual(repairedSha, f.headSha);
+  assert.equal(f.git('rev-parse', `${repairedSha}^{tree}`), f.git('rev-parse', `${f.headSha}^{tree}`));
+  assert.match(f.git('log', '-1', '--format=%B'), /^Remudero-Task: PR-12409$/m);
+  const admitted = dryRun(f, ['--head-ref', target, '--head-sha', repairedSha]);
+  assert.equal(admitted.status, 0);
+  assert.equal(admitted.selections, 1);
+  assert.equal(admitted.receipt.verdict, 'not-run');
+  assert.deepEqual(admitted.identity, { state: 'passed', headRef: target, targetRef: `refs/heads/${target}`,
+    headSha: repairedSha, baseSha: f.baseSha, message: "identified via the head commit's Remudero-Task trailer" });
+  assert.equal(f.git('branch', '--show-current'), 'codex/publication-fixture');
+});
+
 test('author publication identity leaves an unknown target explicit and allows ordinary author selection', (t) => {
   const f = fixture(t);
   // Even a local run branch cannot fabricate a known publication target.
