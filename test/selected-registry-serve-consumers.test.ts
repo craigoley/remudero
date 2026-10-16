@@ -87,8 +87,10 @@ test("selected readiness observer reaches the real handler without replacing leg
   assert.ok(!JSON.stringify(row).includes(f.root));
 });
 
-test("selected serve composition forwards one shadow context to the real registry readiness and dashboard routes", async (t) => {
+test("selected serve composition forwards one shadow context to the real registry readiness and dashboard routes", { timeout: 30_000 }, async (t) => {
   const f = fixture(t), ledgerPath = join(f.root, "ledger.ndjson"), planPath = join(f.root, "tasks.yaml");
+  const actions = ["repo-dashboard", "repositories-view", "serve-readiness", "serve-registry"];
+  const receipts = new Map(actions.map(action => [action, pendingValue<void>()]));
   writeFileSync(f.legacy, selectedText("core"));
   writeFileSync(ledgerPath, ""); writeFileSync(planPath, "[]\n");
   const controller = new AbortController(); t.after(() => controller.abort());
@@ -99,7 +101,10 @@ test("selected serve composition forwards one shadow context to the real registr
     ledgerPath, fleetControlRoot: f.root, questionsRoot: f.root,
     tokens: { read: "r", write: "w" }, githubAppRefresh: { start: () => ({ armed: false }) }, log: () => {},
     registry: { repoRegistryPath: f.legacy }, onboardingReadiness: { gateway }, instances: { registryPath: f.legacy },
-    selectedRegistryObservation: { ...f.options, input: { signal: controller.signal } },
+    selectedRegistryObservation: { ...f.options, input: { signal: controller.signal }, record: (step: string, fields: Record<string, unknown>) => {
+      f.options.record(step, fields);
+      if (step === STEP) receipts.get(String(fields.action))?.resolve();
+    } },
   } as unknown as ServeDeps;
   const routes = buildServeRoutes(deps);
   for (const [path, expectedStatus] of [["/v1/registry", 200], ["/v1/onboarding/readiness", 200], ["/v1/repos/summary", 200], ["/v1/views/repositories", 404]] as const) {
@@ -110,8 +115,9 @@ test("selected serve composition forwards one shadow context to the real registr
     assert.equal(code, expectedStatus, raw);
     assert.ok(!raw.includes("selected-material-sentinel"));
   }
-  for (let n = 0; n < 100 && f.rows.filter(row => row.step === STEP).length < 4; n++) await new Promise(resolve => setTimeout(resolve, 10));
-  assert.deepEqual(f.rows.filter(row => row.step === STEP).map(row => row.fields.action).sort(), ["repo-dashboard", "repositories-view", "serve-readiness", "serve-registry"]);
+  // The HTTP budget can return a cold snapshot while the real dashboard worker is still starting.
+  await Promise.all([...receipts.values()].map(receipt => receipt.promise));
+  assert.deepEqual(f.rows.filter(row => row.step === STEP).map(row => row.fields.action).sort(), actions);
   assert.ok(f.rows.every(row => row.fields.publication_permission === "not-granted"));
 });
 

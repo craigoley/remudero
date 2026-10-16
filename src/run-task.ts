@@ -1189,10 +1189,6 @@ import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, 
 import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
-/** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
-function selectedRegistryIntentForConfig(config: Config) {
-  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } });
-}
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -2005,6 +2001,11 @@ export type FreshTreeReviewSeams = {
   prepareWorktree?: (repoDir: string, worktreePath: string) => boolean;
   /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
   worktreeRoot: string;
+}
+
+/** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
+function selectedRegistryIntentForConfig(config: Config) {
+  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } });
 }
 
 /** Parse only the facts a restart must prove before it reuses W1-T3723's stable reviewer path.
