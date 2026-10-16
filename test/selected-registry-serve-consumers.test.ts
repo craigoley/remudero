@@ -398,7 +398,7 @@ test("selected trusted-worker intent snapshots data without carrying ports or gr
   assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
   for (const invalid of [null, "invalid", { ...intent, version: 999 }, { ...intent, input: null }, { kind: "unknown", version: 1 },
     { ...intent, input: { requiredCapabilities: [42] } }, { ...intent, input: { timeoutMs: "invalid" } },
-    { ...intent, input: { requiredCapabilities: "invalid" } }, { get kind() { throw new Error("private-intent-sentinel"); } }]) {
+    { ...intent, input: { requiredCapabilities: "invalid" } }, { version: 1, get kind() { throw new Error("private-intent-sentinel"); } }]) {
     const unknown = Reflect.apply(restore, undefined, [invalid, f.options.record]) as typeof observer; t.after(() => unknown.close());
     await unknown.observe("repositories-view", { instanceName: "fixture" }, () => "legacy"); await unknown.settled();
     assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown"); assert.equal(f.rows.at(-1)?.fields.reason, "transport_unavailable");
@@ -741,6 +741,21 @@ test("selected consumer requires identity support without normalizing unsupporte
   await observer.settled();
   assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown");
   assert.equal(f.rows.at(-1)?.fields.reason, "identity_capability_missing");
+});
+
+test("selected intent's unreadable supported transport cannot become a trusted fallback or public exception", async (t) => {
+  const f = fixture(t); let reads = 0;
+  const unreadable = { version: 1, get kind(): "shadow" { reads++; throw new Error("private-intent-sentinel"); } };
+  const copied = registryConsumers.copySelectedRegistryIntent(unreadable);
+  assert.deepEqual(copied, { kind: "unknown", version: 1 }); assert.equal(Object.isFrozen(copied), true);
+  const observer = registryConsumers.selectedRegistryObserverFromIntent(unreadable, f.options.record)!;
+  t.after(() => observer.close());
+  assert.equal(await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "actual-legacy-result"), "actual-legacy-result");
+  await observer.settled();
+  assert.equal(reads, 2, "the supported-version kind getter really threw; version refusal must not short-circuit this catch test");
+  assert.equal(f.rows.at(-1)?.fields.reason, "transport_unavailable");
+  assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
+  assert.ok(!JSON.stringify(f.rows).includes("private-intent-sentinel"));
 });
 
 });
