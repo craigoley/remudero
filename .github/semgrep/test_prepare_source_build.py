@@ -122,6 +122,13 @@ class SourceAssemblyTests(unittest.TestCase):
         self.build()
         self.assertEqual((source, donor, project), (self.source_raw, self.donor_raw, PROJECT))
 
+    def test_source_metadata_preserves_utf8_readme_bytes(self):
+        self.sources["README.md"] = "Original source résumé 🔎\n".encode("utf-8")
+        self.source_again()
+        _, files, _ = self.build()
+        path = next(p for p in files if p.endswith("/METADATA"))
+        self.assertTrue(files[path][0].endswith(self.sources["README.md"]))
+
     def test_explicit_patch_changes_only_project_version_and_one_dependency(self):
         patched, project, diff = B.patch_project(PROJECT, self.policy)
         self.assertIn(b'-version = "1.181.0"', diff)

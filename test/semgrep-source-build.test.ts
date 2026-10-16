@@ -17,7 +17,7 @@ test("Semgrep source assembly preserves original engine and source while requiri
   const source = readFileSync(path, "utf8");
   const expected = [...source.matchAll(/^    def (test_[a-z0-9_]+)\(self\):$/gm)]
     .map(match => `__main__.SourceAssemblyTests.${match[1]}`).sort();
-  assert.equal(expected.length, 31, "update the explicit native case population when adding controls");
+  assert.equal(expected.length, 32, "update the explicit native case population when adding controls");
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), "rmd-source-assembly-controls-")));
   const before = sourceHashes();
   try {
@@ -26,7 +26,7 @@ test("Semgrep source assembly preserves original engine and source while requiri
       { encoding: "utf8", timeout: 60_000, maxBuffer: 2 << 20, env: { ...process.env, TMPDIR: scratch } });
     assert.equal(run.error, undefined); assert.equal(run.signal, null);
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stderr, /Ran 31 tests in /); assert.match(run.stderr, /\nOK\n/);
+    assert.match(run.stderr, /Ran 32 tests in /); assert.match(run.stderr, /\nOK\n/);
     const result = JSON.parse(readFileSync(receipt, "utf8"));
     assert.equal(result.schema, "rmd-semgrep-source-assembly-controls/v1");
     assert.equal(result.successful, true);

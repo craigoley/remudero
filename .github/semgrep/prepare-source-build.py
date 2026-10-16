@@ -216,8 +216,11 @@ def metadata_from_source(project, sources, policy):
         need(license_file in sources and license_file in project["license-files"], "LICENSE_MISSING")
         message["License-File"] = license_file
     need(project["readme"] == "README.md" and "README.md" in sources, "README_MISSING")
-    message.set_payload(sources["README.md"].decode("utf-8"))
-    return message.as_bytes()
+    # Core metadata has a UTF-8 body, not an email transfer-encoding requirement.
+    # Preserve the source README bytes; an ASCII-only fixture must not conceal
+    # BytesGenerator rejecting real upstream Unicode prose and emoji.
+    sources["README.md"].decode("utf-8")
+    return message.as_bytes() + sources["README.md"]
 
 
 def encode_record(files, record_path):
