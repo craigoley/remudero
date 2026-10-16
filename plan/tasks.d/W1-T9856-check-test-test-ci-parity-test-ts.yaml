@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.18
   status: queued
@@ -48,3 +48,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are src/lib/ci-parity.ts and a new test file (test/check-test-test-ci-parity-test-ts.test.ts). The description gives no sign of touching secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The task is a CI-friction remedy with a measurable follow-up. The gardener compares fix-round share before and after merge, so the finding can be verified. The task also reopens the cause at rung 2 if the share does not fall."
+      - "The family track record is mixed (27 merged, 40 declined, Beta mean 0.62). That calls for ordinary scrutiny but is not a gates-state concern. The change still goes through CI and review."
+      - "The filing shows a flaky test (a FLAKE-RETRY on lint-plan:fast) and repeated hand fixes to ci-parity.ts. This is a well-trodden area, and the work is a code change plus a test, not a policy decision for the operator."
+    judged_at: "2026-10-16T20:43:26.118Z"
+    pin: "a164edd8c22997ede576e0c676cde67ccbb7803ae18e4213a6db5a9529953c85"

@@ -1,0 +1,9 @@
+- id: clock-sweep-report-refusal-needs-per-pr-cause
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/**", "package.json"]
+  fact: >-
+    When the clock-sweep-report (merge the shards, classify, deliver) gate refuses a pull request,
+    read that pull request's failed job step and its repair diff before choosing a remedy.
+  src: "ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver)"
+  cited: "2026-10-16"

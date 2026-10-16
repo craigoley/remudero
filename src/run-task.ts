@@ -480,6 +480,7 @@ import {
   type IntakeRungDecision,
   type IntakeRungRunResult,
   type LightPassScope,
+  lightPassFixAdmitted,
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
@@ -1469,6 +1470,8 @@ import {
   verifyBundlePin,
 } from "./lib/learnings.js";
 import type { LearningEntry, LearningsIndex, RuleHeadline } from "./lib/learnings.js";
+import { doctrineCitationFactsAt } from "./lib/doctrine-citation-facts.js";
+import type { DoctrineCitationFacts } from "./lib/doctrine-citations.js";
 import { assertProvenance, citation } from "./lib/provenance.js";
 import { certainStaleProofs, grepOnlyBaseTargets, isDialectGrepProof, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./lib/proof-base-stale.js";
 import { loadOperatorNotesForTask, renderOperatorNotes, appendOperatorNote } from "./lib/operator-notes.js";
@@ -1604,6 +1607,9 @@ import {
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
+  reconcileDependabotStaleEvent,
+  dependabotStaleEventVerdict,
+  buildDepReviewStaleEventEscalation,
   reconcileDependabotTitle,
   overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
@@ -1723,6 +1729,7 @@ import {
   checksStateFromRollup,
   checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
+  supersededRedsNowPassing,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDayUnpricedRows,
@@ -3025,6 +3032,7 @@ export function handedOffHeadRiskJudge(
   });
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
+import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
@@ -3143,6 +3151,7 @@ import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
 import { withSyncChildReservation } from "./lib/host-memory-learning.js";
 import { installShadowMemorySink, ownContainerWorkLive, readContainerMemoryHeadroom, type ContainerMemoryHeadroom } from "./lib/host-memory-shadow.js";
+import { buildYieldsToRepair } from "./lib/repair-memory-demand.js";
 // W1-T2557: reuses cost-anomaly's ALREADY-COMMITTED multiplier/minSamples policy data for the
 // runaway-turns bound below — see `deriveRunawayTurnBound`'s own doc for why this borrows that
 // row rather than inventing a second, duplicate "N times median" knob just because the unit is
@@ -3189,6 +3198,7 @@ import {
   type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { withTouchedDeclarations } from "./lib/advance-declarations.js";
+import { daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit } from "./lib/daemon-closure.js";
 import { LIVE_EDIT_TREES, runLiveEditLadder, withLiveEditLadders, type LiveEditLadderWiring, type LiveEditTree } from "./lib/live-edit-ladder.js";
 import { recoveryRefMaintainer } from "./lib/recovery-refs.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
@@ -7793,8 +7803,12 @@ export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFres
  *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
 export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
   const localGit: AsyncGitRunner = deps.git ? async (args) => deps.git!(args) : asyncGit(repoDir);
+  // W1-T9092: an advance is material only when it touches the import closure of the entry this process started from.
+  const closureGit: ClosureGit = deps.git ? async (args) => deps.git!(args) : daemonClosureGit(repoDir);
+  const entry = daemonProcessEntry(repoDir);
   const read = (): Promise<DaemonFreshness> =>
-    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit)).then(daemonFreshnessFromService);
+    checkServiceFreshnessAsync(repoDir, env, deps).then((svc) => withTouchedDeclarations(svc, localGit))
+      .then((svc) => withDaemonClosure(svc, (sha) => daemonProcessClosure(closureGit, sha, entry))).then(daemonFreshnessFromService);
   return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
@@ -12872,6 +12886,7 @@ export async function runFixRung(opts: {
     // check arm (`runSweep`, sweep.ts) already use: never fall through to a strike, never log
     // `fix.dispatch` (the one ledger step a strike is counted from) — ledger the reason and stand
     // down, exactly as those sites do.
+    if (noReviewYet && currentCiFailures !== undefined) currentCiFailures = dropDerivativeAggregateCiFailure(currentCiFailures);
     if (currentMergeConflict === undefined && noReviewYet && currentCiFailures !== undefined && currentCiFailures.length === 0) {
       const reason =
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
@@ -23968,7 +23983,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits,mergeStateStatus,autoMergeRequest",
   ])) as {
     number: number;
     url: string;
@@ -23979,6 +23994,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
     commits?: DependabotHeadCommit[];
+    mergeStateStatus?: string;
+    autoMergeRequest?: unknown;
   };
   const config = deps.config ?? loadConfig();
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
@@ -24206,6 +24223,22 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 0;
   }
   if (result.decision === "arm") {
+    const raw = view.statusCheckRollup ?? [];
+    const stale = dependabotStaleEventVerdict({
+      mergeStateStatus: view.mergeStateStatus, autoMergeArmed: view.autoMergeRequest != null,
+      reviewPosted: raw.some((c) => (c.context ?? c.name) === REVIEW_CONTEXT && String(c.state ?? c.conclusion ?? "").toUpperCase() === "SUCCESS"),
+      supersededReds: supersededRedsNowPassing(raw),
+    });
+    if (stale.kind === "stale-event") { // W1-T9913: one fresh event for a superseded red, never a re-post.
+      const outcome = reconcileDependabotStaleEvent({
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, checks: stale.checks, nowMs: clock.now(), log,
+        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body),
+        escalate: () => escalate(buildDepReviewStaleEventEscalation({ prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+          headSha: view.headRefOid, checks: stale.checks }), { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      });
+      console.log(`dependabot stale-event block ${outcome} (${stale.checks.join(", ")}): ${view.url}`);
+      return 1;
+    }
     // W1-T228: guarded post — decideDepReview never executes a proof, so
     // this attempt's evidence is always "no_evidence"; the guard still
     // refuses it if a STRONGER (executed) verdict is already posted for this
@@ -29906,6 +29939,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const creditedMergedIds = creditedMergedIdsFrom(statusByTaskId);
   // W1-T3730: computed at most once per pass, not per task — the diff does not change between tasks.
   let planOnlyFilingDiff: boolean | undefined;
+  let doctrineCitations: DoctrineCitationFacts | undefined;
   let releasedIdsForAdmission = new Set<string>();
   if (scope && !offline) {
     try {
@@ -30023,6 +30057,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         }
       }
       if (planOnlyFilingDiff !== undefined) opts.planOnlyFiling = planOnlyFilingDiff;
+      // #12389: a changed shard's doctrine citations must resolve, or name a page its own files: creates. Read once.
+      doctrineCitations ??= doctrineCitationFactsAt(checkoutRoot);
+      opts.doctrineCitations = doctrineCitations;
       opts.resolveNameFilteredCandidates = (rawName: string) => resolveNameFilteredCandidates(checkoutRoot, rawName);
       // W1-T1225: a `grep:` proof's named file, read ONLY in --base mode (`scope` populated iff
       // `baseRef` was given) — the same changed-tasks scoping W1-T497's resolver above uses, and
@@ -35760,7 +35797,7 @@ export function memoryGovernorGateFor(
     const once = () => checkMemoryGovernor(
       readAvailableMibBounded(readAvailableMib ?? readAvailableMemoryMib, ledgerPath, runId, policy), policy, readContainer?.(), ownWorkLive,
     );
-    const result = reclaimBeforeHold(once(), once, reclaim);
+    const result = buildYieldsToRepair(reclaimBeforeHold(once(), once, reclaim), ownWorkLive); // W1-T9706: a fitting build yields to a waiting repair.
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
@@ -45952,7 +45989,9 @@ export function buildSweepLightHook(
       });
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
-      const fixRungAllowed = !reviewOnly && fixRungAllowedBesideInFlight(
+      // W1-T9808: after a restart latched, a fix that would outlast the drain's time left closes the fix rung.
+      const fixAdmitted = lightPassFixAdmitted(scope);
+      const fixRungAllowed = fixAdmitted && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
       );
@@ -45999,9 +46038,10 @@ export function buildSweepLightHook(
             runId,
             log,
             reviewerCodeRecovery,
+            restartAdmission: scope?.admit,
             // W1-T8086: own-red and conflict repairs use per-claim capacity on ordinary passes;
             // review-only still stands them down.
-            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, !reviewOnly),
+            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly, fixAdmitted),
             // W1-T5922: the arm's own reads, wired as the full hook wires them.
             readLiveStateAtAct: effects.readLiveState,
             // W1-T7734: the light pass re-derives a moved head in-pass too, as the full pass does.

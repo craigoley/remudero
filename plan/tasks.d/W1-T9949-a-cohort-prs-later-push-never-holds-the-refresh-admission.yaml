@@ -1,0 +1,54 @@
+- id: W1-T9949
+  title: "ONE COHORT PR'S NEWEST HEAD HOLDS EVERY BASE-RED REFRESH — refreshAdmissionReading judges a refreshed PR's CI uptake on its CURRENT head, so when the fix lane pushes that PR again the next pass reads 'its CI has not started', admits width 0, and never writes a new cohort; on 2026-10-16 #12388 and #12391 waited from main green (~19:45Z) to a hand refresh at 20:58Z behind #12394, whose refreshed head had run CI an hour earlier"
+  repo: remudero
+  depends_on: [W1-T9933]  # same function and file (src/lib/sweep.ts refresh admission); serialise so the two edits never meet in parallel
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what counts as a cohort PR's CI uptake. Width, order, clearance and the light-pass surface are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 PR-queue drain (agent PRQ, 21:00Z): two base-red PRs held 70+ minutes after main went green, refreshed by hand"
+  plan_refs: [W1-T9595, W1-T9933, W1-T4351, W1-T7735]
+  files:
+    - src/lib/sweep.ts
+    - test/a-cohort-prs-later-push-never-holds-the-refresh-admission.test.ts
+  status: queued
+  priority: 1  # every base-red PR waits on the refresh admission once main recovers; one busy cohort PR stalls them all for a full pass at a time
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger (live ledger.ndjson, streamed read-only from the Azure host) and one gated GraphQL read:
+    - 19:49:10Z `sweep.base_red.refresh_admission` (signal slow-start, width 1) admitted #12394 from head 0c535ce0, outcome
+      updated. Its refreshed head 9601162d ran CI (red by 19:58Z).
+    - The fix lane pushed #12394 again: head 2410e623c, committed 20:33:59Z, first check started 20:37:26Z (74 contexts).
+    - The next full pass (`sweep.pass` 20:44:41Z) wrote at 20:56:19Z `sweep.base_red.refresh_admission` signal "waiting",
+      width 0, admitted [], waiting [#12388 head c12de974, #12391 head ba8cc476], both "behind": [12394],
+      ci_not_started [12394]. The PRs read "main is green, but waiting for refresh admission behind #12394 (its CI has
+      not started)". Both had been held since 19:32:05Z, and main read green from about 19:45Z.
+    - 20:58Z: both were refreshed by hand (REST update-branch, pinned to their heads), 70+ minutes after main went green.
+    - WHY: refreshAdmissionReading (src/lib/sweep.ts) takes the cohort from the LATEST admission row with a non-empty
+      `admitted`. It reads each cohort PR's uptake from that PR's CURRENT view (checksState / checksPendingSince), not
+      from the head the refresh produced. A width-0 pass admits nothing, so no newer cohort ever replaces the stale
+      one: whenever a cohort PR is pushed again, or its newest head's checks are not yet in the pass's snapshot, every
+      held candidate waits a whole further full pass.
+    NOT COVERED ELSEWHERE: W1-T9595 (merged) built the cohort signal. W1-T9933 (queued) presses a cleared refresh before
+    the loop ends, but keeps this reading. W1-T7735 decides whether a refresh is worth a CI run. None changes what
+    counts as uptake. Swept plan/tasks.d on origin/main at 21:00Z.
+  design: |
+    1. Uptake is a property of the refresh, not of the PR's newest head. A cohort entry counts as STARTED once any head
+       at or after the refreshed head has a started CI. That covers the post-refresh head being pushed again (a newer
+       head proves the PR moved on) and a closed or merged PR (dropped, as today).
+    2. NOT STARTED only while the PR's head is still the post-refresh head and its checks have not started.
+    3. UNREADABLE (width 1) is unchanged for a head the refresh never moved or for unreadable contexts.
+    4. Each admission row records, per admitted entry, the post-refresh head when the update returns it, so the next
+       pass can tell "the refresh's head" from "a later push".
+    No new bound and no LLM.
+  acceptance:
+    - claim: "a cohort PR pushed again after its refresh no longer holds the admission, and the held candidates are admitted"
+      proof: 'grep: test("W1-T9949: a cohort PR pushed again after its refresh does not hold the admission" in test/a-cohort-prs-later-push-never-holds-the-refresh-admission.test.ts'
+    - claim: "a cohort PR still on its post-refresh head with no started checks still holds the admission"
+      proof: 'grep: test("W1-T9949: a post-refresh head whose CI has not started still holds the admission" in test/a-cohort-prs-later-push-never-holds-the-refresh-admission.test.ts'
+  falsifier: |
+    At origin/main, refreshAdmissionReading over an admission row that admitted #12394 from 0c535ce0, with #12394's
+    current view at a newer head whose checksState is "none", returns signal "waiting" with notStarted [12394], so the
+    first test fails.

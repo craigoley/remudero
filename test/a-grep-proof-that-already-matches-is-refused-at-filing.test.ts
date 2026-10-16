@@ -109,11 +109,11 @@ function shard(id: string, proofLine: string): string {
   ].join("\n");
 }
 
-async function lintFiling(id: string, proofLine: string): Promise<{ exitCode: number; output: string }> {
+async function lintFiling(id: string, proofLine: string, text = shard(id, proofLine)): Promise<{ exitCode: number; output: string }> {
   const shardDir = join(FIXTURE.root, "plan", "tasks.d");
   mkdirSync(shardDir, { recursive: true });
   const rel = `plan/tasks.d/${id}-fixture.yaml`;
-  writeFileSync(join(FIXTURE.root, rel), shard(id, proofLine));
+  writeFileSync(join(FIXTURE.root, rel), text);
   const base = execFileSync("git", ["-C", FIXTURE.root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   execFileSync("git", ["-C", FIXTURE.root, "add", rel]);
   execFileSync("git", ["-C", FIXTURE.root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", `fixture(plan): file ${id}`]);
@@ -153,4 +153,24 @@ test("W1-T4904: a plan-only filing whose grep proof is a declared guard or a for
   assert.doesNotMatch(guard.output, /proof-grep-already-true/);
   const forward = await lintFiling("W1-T4904-C", '      proof: "grep: a line no file holds yet in src/lib/plan.ts"');
   assert.doesNotMatch(forward.output, /proof-grep-already-true/);
+});
+
+// #12389 — a filing citing a doctrine page no file holds is refused, unless its own files: creates the page.
+const DOCTRINE_PAGE = "doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md";
+
+function doctrineShard(id: string, files: string[]): string {
+  return shard(id, '      proof: "grep: a line no file holds yet in src/lib/plan.ts"')
+    .replace("  files: [src/lib/task-linter.ts]", `  files: [${files.join(", ")}]\n  design: |\n    Add a CLAUDE.md headline pointing at ${DOCTRINE_PAGE}.`);
+}
+
+async function lintShardText(id: string, text: string): Promise<{ exitCode: number; output: string }> {
+  return lintFiling(id, "", text);
+}
+
+test("rmd lint-plan refuses a filing that cites a doctrine page no file holds and its files: does not create", async () => {
+  const refused = await lintShardText("W1-T99001", doctrineShard("W1-T99001", ["src/lib/plan.ts"]));
+  assert.equal(refused.exitCode, 1, refused.output);
+  assert.match(refused.output, /\[doctrine-citation-unresolved\]/);
+  const planned = await lintShardText("W1-T99002", doctrineShard("W1-T99002", ["src/lib/plan.ts", DOCTRINE_PAGE]));
+  assert.doesNotMatch(planned.output, /doctrine-citation-unresolved/);
 });

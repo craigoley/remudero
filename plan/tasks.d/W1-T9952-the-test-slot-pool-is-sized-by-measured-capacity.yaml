@@ -1,0 +1,60 @@
+- id: W1-T9952
+  title: "THE TEST-SLOT POOL IS SIZED BY MEASURED CAPACITY, NOT ONE SLOT PER FOUR CORES — `defaultTestSlots` fixes the Mac at floor(10/4) = 2 slots whatever its load and memory, and the Mac has no memory reading at all. Admit the head of the queue while the CPU the live holders were granted and the measured memory headroom still hold one more run"
+  repo: remudero
+  depends_on: [W1-T9950, W1-T9951]  # admission of the queue head is W1-T9950's; W1-T9951 also edits the slot loop and preflight-author; serialize every test-slot.ts edit
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one concern — how many test runs the host admits at once
+  band_meaning: blast-radius
+  origin: "operator brief 2026-10-16 (Craig, P1): size the slot pool from measured machine capacity, not a fixed number; three agents waited 10-42 min on a 2-slot pool"
+  plan_refs: [W1-T6090, W1-T7809, W1-T9102, W1-T9950]
+  files:
+    - src/lib/test-slot.ts
+    - test/the-test-slot-pool-is-sized-by-measured-capacity.test.ts
+  status: queued
+  priority: 1  # a fixed 2-slot pool on a 10-core, 16 GiB Mac turns three concurrent preflights into a 40-minute queue
+  attempts: 0
+  rationale: |
+    READ 2026-10-16 ~21:00Z on the operator Mac, origin/main d50367256:
+    - src/lib/test-slot.ts `defaultTestSlots(cores)` = `RMD_TEST_SLOTS` or max(1, floor(cores / 4)). It was
+      written for the 8-core fleet host ("two on the 8-core fleet host"). On this Mac, `availableParallelism()`
+      is 10, so the pool is 2 slots. At the time of the read, load1 was 2.9 and `hw.memsize` 16 GiB.
+    - `testRunConcurrency(load, slots)` already gives each run ceil((cores - 2) / slots) workers less the busy
+      load. So the per-run fan-out is measured, but the NUMBER of runs is not. Two holders each granted 4 of 8
+      usable cores close the pool. Two holders granted 1 worker each (a cold typecheck, or a run capped by
+      run-unfiled-1792161817235's `maxConcurrency: 1`) also close it, leaving most of the cores idle.
+    - `readMemoryHeadroom` reads /proc/meminfo and cgroup v2 only. On darwin it returns undefined, so
+      `memoryShort` admits on count alone and `memoryTestConcurrency` sizes nothing. Memory never decides
+      anything on the Mac.
+  design: |
+    No new fixed threshold. The pool is whatever the measured CPU and memory hold. `RMD_TEST_SLOTS` stays as an
+    explicit operator override.
+    1. CPU BY GRANTED WORK. The head of W1-T9950's queue is admitted while the cores left after headroom, less
+       the concurrency the live holders were granted, less the non-test load, still give it at least one
+       worker. Non-test load is load1 minus the live holders' granted concurrency, floored at 0, so a test run
+       is never counted twice. Its grant is `testRunConcurrency` over what is left. Slot record indexes run up
+       to the CPU-derived ceiling (cores minus headroom) instead of a fixed N. Every reader of slot files
+       (`othersThan`, the reclaim walk, W1-T9950's free-slot count) walks that same derived range.
+    2. MEMORY ON DARWIN. `readMemoryHeadroom` gains a darwin reading: free + inactive + purgeable + speculative
+       pages times the page size, from `vm_stat` (bounded spawn, injectable). Today's `memoryShort` and
+       `memoryTestConcurrency` rules then admit or size the Mac exactly as they do Linux. An unreadable
+       `vm_stat` stays undefined, today's behaviour, and says so in the note.
+    3. NAMED IN THE NOTE. A lease's note and `test_slot.acquired` row name the inputs that admitted it: cores,
+       headroom cores, holders' granted concurrency, non-test load, memory headroom and named peaks. A later
+       read can then see why N runs were open.
+    4. Tests go in the new file, with injected load, memory and holders. Include one test that runs the real
+       default darwin `vm_stat` reader on a darwin host and is skipped by name elsewhere (doctrine
+       coverage-traps/cover-the-real-default). The proofs below name the `test(` titles verbatim.
+  acceptance:
+    - claim: "on an idle 10-core host with two live single-worker holders, a third run is admitted; on a host whose granted concurrency and load fill the usable cores, it waits"
+      proof: 'grep: test("W1-T9952: the pool admits by granted CPU, not one slot per four cores" in test/the-test-slot-pool-is-sized-by-measured-capacity.test.ts'
+    - claim: "on darwin the memory headroom is read from vm_stat and closes a slot the named peaks cannot fit beside"
+      proof: 'grep: test("W1-T9952: darwin memory headroom gates admission" in test/the-test-slot-pool-is-sized-by-measured-capacity.test.ts'
+    - claim: "an explicit RMD_TEST_SLOTS still fixes the pool"
+      proof: 'grep: test("W1-T9952: RMD_TEST_SLOTS still overrides the measured pool" in test/the-test-slot-pool-is-sized-by-measured-capacity.test.ts'
+  falsifier: |
+    At origin/main d50367256: `defaultTestSlots(10)` is 2. With two live holders recorded at concurrency 1 and
+    load1 0, a third `acquireTestSlot` (injected cores 10) waits until the bound. `readMemoryHeadroom()` on
+    darwin returns undefined.
