@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from "./test-path-resolver.js";
 import { createRequire } from "node:module";
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -1576,6 +1577,46 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
   return null;
 }
 
+/** The test path a proof CITES, when it is one the basename fallback may resolve (W1-T9860): a whole-file node
+ *  `unit test:` path, or a house-dialect `grep:` target under test/. A title-only proof already searches recursively
+ *  and is left alone; a Vitest path and a legacy fenced argv are not this resolver's. */
+function citedTestPath(w: WhitelistedProof): string | undefined {
+  if (w.kind === "test") return w.nameFiltered || w.runner === "vitest" ? undefined : w.label;
+  const target = dialectGrepTargetPath(w);
+  return target?.startsWith("test/") ? target : undefined;
+}
+
+/** A proof's text with its cited test path resolved in the tree being judged (W1-T9860). */
+export interface ResolvedProofText {
+  proof: string;
+  /** The cited test path, when the proof cites one. */
+  cited?: string;
+  resolution?: TestPathResolution;
+  /** Set only when the basename fallback was used: the line a caller prints so the move stays visible. */
+  note?: string;
+}
+
+/** Resolve a proof's cited test path through {@link resolveTestPath} and return proof TEXT naming the resolved file,
+ *  so every executor, base-tree builder and parse downstream reads one path. FAIL CLOSED: an exact hit, an absent or
+ *  ambiguous basename, or a rewrite that does not re-parse to the resolved path returns the proof unchanged, so the
+ *  caller grades it exactly as it did before. `tree` omitted judges the checkout's own files. */
+export function resolveProofTestPath(
+  proof: string,
+  root: string,
+  opts: { tree?: string; target?: SuiteRegistryTarget } = {},
+): ResolvedProofText {
+  const w = parseWhitelistedProof(proof, opts.target);
+  const cited = w ? citedTestPath(w) : undefined;
+  if (cited === undefined) return { proof };
+  const resolution = resolveTestPath(cited, { root, ...(opts.tree === undefined ? {} : { tree: opts.tree }) });
+  if (!("path" in resolution) || resolution.how !== "basename") return { proof, cited, resolution };
+  const at = proof.lastIndexOf(cited);
+  const rewritten = proof.slice(0, at) + resolution.path + proof.slice(at + cited.length);
+  const reparsed = parseWhitelistedProof(rewritten, opts.target);
+  if (!reparsed || citedTestPath(reparsed) !== resolution.path) return { proof, cited, resolution };
+  return { proof: rewritten, cited, resolution, note: basenameResolutionNote(cited, resolution.path) };
+}
+
 /** Executes a {@link WhitelistedProof}'s argv and reports the outcome — injectable so unit tests fake
  *  pass/fail/no-match/throw without touching the filesystem. `"no-match"` (name-filtered proofs only) means the run
  *  completed but ZERO tests matched: NOT a failing test, so the caller degrades it to `not_executable`. */
@@ -2880,7 +2921,9 @@ export function certainHeadRefusals(
   const refusals: CertainHeadRefusal[] = [];
   for (const c of visibleCriteria([...criteria])) {
     const proof = (c.proof ?? "").trim();
-    const w = c.satisfied_by ? null : parseWhitelistedProof(proof);
+    // W1-T9860: a cited test path that moved is judged at its unique basename's file, as the reviewer judges it.
+    const resolved = c.satisfied_by ? undefined : resolveProofTestPath(proof, cwd);
+    const w = resolved === undefined ? null : parseWhitelistedProof(resolved.proof);
     if (!w) continue;
     let why: string | undefined;
     let blocking = false;
@@ -2893,7 +2936,7 @@ export function certainHeadRefusals(
         why = `"${w.label}" appears under test/ only in comments (${resolution.files.join(", ")}), never as a test name`;
       }
     } else if (w.kind === "test" && !w.nameFiltered && w.runner !== "vitest") {
-      if (!existsSync(join(cwd, w.label))) why = `the test file ${w.label} does not exist`;
+      if (!existsSync(join(cwd, w.label))) why = `the test file ${w.label} does not exist${unresolvedBasenameClause(resolved)}`;
     } else if (w.kind === "grep" && dialectGrepTargetPath(w) !== undefined) {
       try {
         if (exec(w, cwd) !== "pass") {
@@ -2907,6 +2950,16 @@ export function certainHeadRefusals(
     if (why) refusals.push({ claim: c.claim, proof, why, ...(blocking ? { blocking: true as const } : {}) });
   }
   return refusals;
+}
+
+/** Why the basename fallback did not rescue an absent cited test path, for a refusal's `why` (W1-T9860). */
+function unresolvedBasenameClause(r: ResolvedProofText | undefined): string {
+  if (r?.resolution === undefined || !("unresolved" in r.resolution)) return "";
+  return r.resolution.unresolved === "ambiguous"
+    ? `, and its basename names ${r.resolution.candidates.join(", ")} — ambiguous, not guessed`
+    : r.resolution.reason !== undefined
+      ? `, and its basename was not looked up (${r.resolution.reason})`
+      : ", and no test under test/ carries its basename";
 }
 
 /** W1-T227's command builder: swap the full {@link TEST_GLOB} in a compiled `baseArgs` for the candidates {@link
@@ -3770,6 +3823,28 @@ export function proofFormCorrection(proof: string, execCtx: ProofExecContext): s
   );
 }
 
+/** The proof a head-resolved criterion re-runs at the merge base (W1-T9860): each tree resolves the CITED path in its
+ *  own index. No fallback at the head leaves the base run exactly as it was. A base that cannot resolve the cited path
+ *  re-runs the head's resolved proof, the same as if the plan had cited the moved path itself. */
+function baseProofFor(
+  proof: string,
+  headProof: WhitelistedProof,
+  headResolution: ResolvedProofText,
+  baseCwd: string,
+  target: SuiteRegistryTarget | undefined,
+): WhitelistedProof {
+  if (headResolution.note === undefined) return headProof;
+  const atBase = resolveProofTestPath(proof, baseCwd, { target });
+  if (atBase.resolution === undefined || !("path" in atBase.resolution)) return headProof;
+  return parseWhitelistedProof(atBase.proof, target) ?? headProof;
+}
+
+/** The note for a cited test path that is absent and whose basename names two files: never guessed, said aloud. */
+function ambiguousResolutionNote(r: ResolvedProofText): string | undefined {
+  if (r.resolution === undefined || !("unresolved" in r.resolution) || r.resolution.unresolved !== "ambiguous") return undefined;
+  return `cited test path ${r.cited} is absent and its basename names ${r.resolution.candidates.join(", ")} — ambiguous, not guessed`;
+}
+
 export function judgeCriterion(
   criterion: AcceptanceCriterion,
   reportTokens: Set<string>,
@@ -3888,8 +3963,12 @@ export function judgeCriterion(
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof that never PARSED
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
+  // W1-T9860: a cited test path absent at the head is resolved by its unique basename, and the verdict says so.
+  let resolutionNote: string | undefined;
   if (execCtx) {
-    const whitelisted = parseWhitelistedProof(criterion.proof, execCtx.target);
+    const headResolution = resolveProofTestPath(criterion.proof, execCtx.cwd, { target: execCtx.target });
+    resolutionNote = headResolution.note ?? ambiguousResolutionNote(headResolution);
+    const whitelisted = parseWhitelistedProof(headResolution.proof, execCtx.target);
     if (whitelisted) {
       if (whitelisted.nameFiltered && whitelisted.runner === "vitest") {
         whitelisted.diffTestFiles = [...(execCtx.diffFiles ?? [])].filter((file) =>
@@ -3958,7 +4037,7 @@ export function judgeCriterion(
               let missingExportNote: string | undefined;
               const baseOutcome =
                 execCtx.baseCwd !== undefined
-                  ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
+                  ? classifyBaseProofOutcome(baseProofFor(criterion.proof, whitelisted, headResolution, execCtx.baseCwd, execCtx.target), exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
                       missingExportNote = note;
                     })
                   : undefined;
@@ -4152,6 +4231,8 @@ export function judgeCriterion(
     met = keywordMet;
     reason = `${keywordReason} — NOTE: ${PROOF_FORM_ADVISORY}: ${proofForm}; keyword floor applied`;
   }
+
+  if (resolutionNote !== undefined) reason = `${reason} — NOTE: ${resolutionNote}`;
 
   // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict — keyword coverage, overridden by
   // whitelisted execution where applicable — BEFORE the semantic layer below can downgrade it.

@@ -59,6 +59,7 @@ import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
 import { loadPlan } from "../src/lib/plan.ts";
 import { isInPlanScope } from "../src/lib/plan-scope.ts";
 import { lintTask } from "../src/lib/task-linter.ts";
+import { resolveTestPath } from "../src/lib/test-path-resolver.ts";
 import { taskIdFromRunBranch } from "../src/lib/status.ts";
 import { execFileSync } from "node:child_process";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
@@ -596,7 +597,9 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
     if (Array.isArray(declaredFiles)) {
       const violations = lintTask(
         { id: creditedTaskId, files: declaredFiles, acceptance: Array.isArray(declaredAcceptance) ? declaredAcceptance : [] },
-        { creditedBuild: true, moduleExists: (path) => existsSync(join(REPO_ROOT, path)) },
+        // W1-T9860: a declared or cited test that moved is found by its unique basename; an absent or ambiguous one
+        // still fails the check, so the BLOCK keeps firing on a test that never shipped.
+        { creditedBuild: true, moduleExists: (path) => existsSync(join(root, path)) || "path" in resolveTestPath(path, { root }) },
       ).violations.filter((violation) => violation.check === "credited-test-path");
       if (violations.length > 0) return { ok: false, defect: "credited-test-path", message: violations.map((v) => v.message).join(" ") };
     }
