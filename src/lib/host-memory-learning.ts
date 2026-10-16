@@ -8,7 +8,8 @@
  *
  * (1) MEASURE. While a reservation's work runs, its owner samples the tree (the bound roots and every descendant) on an
  *     unref'd timer: the sum of each live member's concurrent VmRSS. Historical VmHWM peaks need not coincide. At release the
- *     largest sum seen is that tree's peak. A tree never observed records nothing; it is never recorded as zero.
+ *     largest sum seen is that tree's peak, stored with its age when last raised (W1-T9762: the class's time to peak).
+ *     A tree never observed records nothing; it is never recorded as zero.
  * (2) STORE. One append-only NDJSON file per instance under `estimates/` in the shared ledger directory, so instances
  *     never write the same file. Reads are a bounded tail of each file. Compaction keeps the newest samples per class.
  * (3) LEARN. The estimate is a decayed, weighted quantile of the class's peaks. The class default is a PRIOR, a
@@ -79,6 +80,8 @@ export interface PeakSample {
   measurementBasis?: "legacy-hwm" | "concurrent-rss" | "process-hwm" | "unknown";
   /** Simultaneously observed legacy HWM sum: existing admission continues learning its original metric. */
   legacyPeakMib?: number;
+  /** W1-T9762: the tree's age, since its reservation opened, when its concurrent-RSS peak was last raised. */
+  peakAgeMs?: number;
 }
 
 export interface LearnedEstimate {
@@ -107,6 +110,29 @@ export function learnEstimate(
     if (cumulative >= params.quantile * total) return { estimateMib: Math.ceil(w.value), samples: usable.length };
   }
   return { estimateMib: Math.ceil(weighted.at(-1)!.value), samples: usable.length };
+}
+
+/** How much of a class's growth a live tree still has ahead of it, or why that is unmeasured. */
+export type Survival = { factor: number; samples: number } | { unmeasured: string };
+
+/**
+ * W1-T9762: the weighted share of the class's time-to-peak samples later than `ageMs`, with learnEstimate's half-life
+ * weighting and prior rule. The prior is a non-decaying pseudo-sample at the longest measured time to peak, so stale
+ * samples drift back toward no decay while a tree older than every measured peak has nothing ahead of it. Pure.
+ */
+export function survivalAt(
+  samples: readonly Pick<PeakSample, "peakAgeMs" | "at">[], ageMs: number, now: number,
+  params: { halfLifeMs: number; priorWeight: number } = ESTIMATE_LEARNING,
+): Survival {
+  const usable = samples.filter((s) => Number.isFinite(s.peakAgeMs) && s.peakAgeMs! >= 0 && Number.isFinite(s.at));
+  if (usable.length === 0) return { unmeasured: "no time-to-peak samples" };
+  const weighted = [
+    { value: Math.max(...usable.map((s) => s.peakAgeMs!)), weight: params.priorWeight },
+    ...usable.map((s) => ({ value: s.peakAgeMs!, weight: 0.5 ** (Math.max(0, now - s.at) / params.halfLifeMs) })),
+  ];
+  const total = weighted.reduce((sum, w) => sum + w.weight, 0);
+  const ahead = weighted.filter((w) => w.value > ageMs).reduce((sum, w) => sum + w.weight, 0);
+  return { factor: ahead / total, samples: usable.length };
 }
 
 // ── classification of non-dispatch lanes (pure) ─────────────────────────────────────────────────────────────────────
@@ -148,6 +174,7 @@ export const ESTIMATE_CACHE_MS = 60_000;
 
 export interface PeakStoreOptions {
   legacyPeakMib?: number;
+  peakAgeMs?: number;
   measurementBasis?: PeakSample["measurementBasis"];
   entryKind?: "bundle" | "tsx";
   location?: () => { dir: string; scope?: "host" | "local" };
@@ -208,7 +235,7 @@ function parseSamples(text: string): PeakSample[] {
   for (const line of text.split("\n")) {
     if (!line) continue;
     try {
-      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; f?: unknown; entry_kind?: unknown; basis?: unknown; legacy_p?: unknown };
+      const row = JSON.parse(line) as { c?: unknown; p?: unknown; at?: unknown; f?: unknown; entry_kind?: unknown; basis?: unknown; legacy_p?: unknown; ttp_ms?: unknown };
       const at = typeof row.at === "string" ? Date.parse(row.at) : NaN;
       if (!WORKER_CLASSES.includes(row.c as WorkerClass) || typeof row.p !== "number" || !Number.isFinite(at)) continue;
       if (row.f !== undefined && (row.c !== "test" || typeof row.f !== "string" || !row.f)) continue;
@@ -217,6 +244,7 @@ function parseSamples(text: string): PeakSample[] {
         measurementBasis: row.basis === undefined || row.basis === "legacy-hwm" ? "legacy-hwm"
           : row.basis === "concurrent-rss" || row.basis === "process-hwm" ? row.basis : "unknown",
         ...(typeof row.f === "string" ? { testFile: testFileKey(row.f) } : {}),
+        ...(typeof row.ttp_ms === "number" && Number.isFinite(row.ttp_ms) && row.ttp_ms >= 0 ? { peakAgeMs: row.ttp_ms } : {}),
         ...(row.entry_kind === "bundle" || row.entry_kind === "tsx" ? { entryKind: row.entry_kind } : {}) });
     } catch (error) {
       void error; // A torn line: one sample among many.
@@ -243,7 +271,8 @@ const lineOf = (s: PeakSample): string =>
     basis: s.measurementBasis ?? "legacy-hwm",
     ...(s.legacyPeakMib !== undefined ? { legacy_p: s.legacyPeakMib } : {}),
     ...(s.testFile ? { f: s.testFile } : {}),
-    ...(s.entryKind ? { entry_kind: s.entryKind } : {}) })}\n`;
+    ...(s.entryKind ? { entry_kind: s.entryKind } : {}),
+    ...(s.peakAgeMs !== undefined ? { ttp_ms: Math.round(s.peakAgeMs) } : {}) })}\n`;
 
 /** Record one measured tree peak for this instance. NEVER throws. */
 export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: PeakStoreOptions = {}, testFile?: string): boolean {
@@ -259,6 +288,7 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
       measurementBasis: opts.measurementBasis ?? "legacy-hwm",
       ...(opts.legacyPeakMib !== undefined ? { legacyPeakMib: opts.legacyPeakMib } : {}),
       ...(testFile ? { testFile: testFileKey(testFile) } : {}),
+      ...(opts.peakAgeMs !== undefined ? { peakAgeMs: opts.peakAgeMs } : {}),
       ...(opts.entryKind ? { entryKind: opts.entryKind } : {}) }));
     cachedEstimates.delete(workerClass);
     const size = (opts.size ?? ((target: string) => statSync(target).size))(path);
@@ -325,24 +355,27 @@ export function testFileEstimates(selection: readonly string[], opts: PeakStoreO
   });
 }
 
-const cachedEstimates = new Map<WorkerClass, { at: number; estimate: LearnedEstimate; typical: LearnedEstimate }>();
+type LearnedClass = { estimate: LearnedEstimate; typical: LearnedEstimate; timeToPeak: PeakSample[] };
+const cachedEstimates = new Map<WorkerClass, { at: number } & LearnedClass>();
 
 export function resetLearnedEstimateCacheForTests(): void {
   cachedEstimates.clear();
   diagnosticsSeen.clear();
 }
 
-function learnedClass(workerClass: WorkerClass, opts: PeakStoreOptions): { estimate: LearnedEstimate; typical: LearnedEstimate } {
+function learnedClass(workerClass: WorkerClass, opts: PeakStoreOptions): LearnedClass {
   const now = (opts.clock ?? systemClock).now();
   const cached = cachedEstimates.get(workerClass);
   if (cached && now - cached.at < ESTIMATE_CACHE_MS) return cached;
-  const samples = readPeakSamples(workerClass, opts).flatMap(s => s.measurementBasis === "concurrent-rss"
+  const raw = readPeakSamples(workerClass, opts);
+  const samples = raw.flatMap(s => s.measurementBasis === "concurrent-rss"
     ? s.legacyPeakMib === undefined ? [] : [{ ...s, peakMib: s.legacyPeakMib }]
     : s.measurementBasis === "unknown" ? [] : [s]);
   const prior = DEFAULT_ESTIMATE_MIB[workerClass];
   const learned = {
     estimate: learnEstimate(samples, prior, now),
     typical: learnEstimate(samples, prior, now, { ...ESTIMATE_LEARNING, quantile: ESTIMATE_LEARNING.typicalQuantile }),
+    timeToPeak: raw.filter((s) => s.peakAgeMs !== undefined),
   };
   cachedEstimates.set(workerClass, { at: now, ...learned });
   return learned;
@@ -357,6 +390,11 @@ export function classEstimate(workerClass: WorkerClass, opts: PeakStoreOptions =
  *  class has no tail above its typical and its whole estimate counts as typical. */
 export function classTypical(workerClass: WorkerClass, opts: PeakStoreOptions = {}): LearnedEstimate {
   return learnedClass(workerClass, opts).typical;
+}
+
+/** W1-T9762: the class's measured survival at a live tree's age (see {@link survivalAt}). */
+export function classSurvival(workerClass: WorkerClass, ageMs: number, opts: PeakStoreOptions = {}): Survival {
+  return survivalAt(learnedClass(workerClass, opts).timeToPeak, ageMs, (opts.clock ?? systemClock).now());
 }
 
 /** The estimate and the source a reservation records for it. */
@@ -376,18 +414,22 @@ export interface TreeSamplerPorts {
   readFile: (path: string) => string;
   setTimer: (fn: () => void, ms: number) => { unref?: () => void } | undefined;
   clearTimer: (timer: unknown) => void;
+  /** When a peak is raised, so its age can be recorded. */
+  clock: Clock;
 }
 
 /** A test run the sampler found inside a tracked tree, ended once the runner's whole tree has exited. */
 export interface NestedTestRun {
   /** The runner tree's peak in MiB, or undefined when it was never observed. Called once. */
-  finish(peakMib: number | undefined, legacyPeakMib?: number): void;
+  finish(peakMib: number | undefined, legacyPeakMib?: number, peakAgeMs?: number): void;
 }
 
 export interface TrackHooks {
   /** A `node --test` runner appeared in this tree: open its reservation, or return undefined to leave it in this tree. */
   onTestRunner?: (pid: number) => NestedTestRun | undefined;
   onTestFilePeak?: (path: string, peakMib: number) => void;
+  /** W1-T9762: when the tree's reservation opened, the origin of the age its peak is recorded at. */
+  openedAtMs?: number;
 }
 
 interface Tracked {
@@ -395,6 +437,8 @@ interface Tracked {
   legacyPeakMib?: number;
   roots: Array<{ pid: number; start: string }>;
   peakMib: number;
+  /** When `peakMib` was last raised. */
+  peakAtMs?: number;
   observed: boolean;
   hooks?: TrackHooks;
   /** Set on a test run found inside another tree: it ends when its runner's tree has exited. */
@@ -408,6 +452,7 @@ function defaultSamplerPorts(): TreeSamplerPorts {
     readFile: (path) => readFileSync(path, "utf8"),
     setTimer: (fn, ms) => setInterval(fn, ms),
     clearTimer: (timer) => clearInterval(timer as NodeJS.Timeout),
+    clock: systemClock,
   };
 }
 
@@ -429,8 +474,9 @@ export function treeMembers(roots: readonly { pid: number; start: string }[], li
 }
 
 export interface TreePeakSampler {
-  /** End through the public finish hook, returning separately labelled current-RSS and legacy-HWM peaks. */
-  finishMeasurement?(id: string): { peakMib?: number; legacyPeakMib?: number };
+  /** End through the public finish hook, returning separately labelled current-RSS and legacy-HWM peaks, and the age
+   *  the current-RSS peak was reached at when the tree was tracked with its reservation's open time. */
+  finishMeasurement?(id: string): { peakMib?: number; legacyPeakMib?: number; peakAgeMs?: number };
   track(id: string, pid: number, hooks?: TrackHooks): void;
   /** Legacy sum-of-HWM peak, retained for existing adapters; concurrent training uses finishMeasurement. */
   finish(id: string): number | undefined;
@@ -550,7 +596,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         if (!run) continue;
         const nestedId = `${id}>test:${key}`;
         tracked.set(nestedId, { roots: [{ pid, start }], peakMib: 0, observed: false, nested: run,
-          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak } });
+          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak, openedAtMs: ports.clock.now() } });
         rootOwner.set(key, nestedId);
       }
     }
@@ -572,7 +618,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
   const sampleNow = (): void => {
     if (tracked.size === 0 || sampling) return;
     sampling = true;
-    const ended: Array<{ run: NestedTestRun; peakMib: number | undefined; legacyPeakMib?: number }> = [];
+    const ended: Array<{ run: NestedTestRun; peakMib: number | undefined; legacyPeakMib?: number; peakAgeMs?: number }> = [];
     try {
       let listing: ProcessListing;
       try {
@@ -599,20 +645,23 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         flushFiles(entry, new Set(own.map((pid) => `${pid}:${startOf.get(pid)}`)));
         if (peak !== undefined && peak > 0) {
           entry.observed = true;
+          if (peak > entry.peakMib) entry.peakAtMs = ports.clock.now();
           entry.peakMib = Math.max(entry.peakMib, peak);
         }
         // (3) A nested run ends once its runner's whole tree has exited.
         if (entry.nested && own.length === 0) {
           tracked.delete(id);
-          ended.push({ run: entry.nested, peakMib: entry.observed && !entry.rssIncomplete ? entry.peakMib : undefined, legacyPeakMib: entry.legacyPeakMib });
+          const measured = entry.observed && !entry.rssIncomplete;
+          ended.push({ run: entry.nested, peakMib: measured ? entry.peakMib : undefined, legacyPeakMib: entry.legacyPeakMib,
+            peakAgeMs: measured ? peakAgeOf(entry) : undefined });
         }
       }
     } finally {
       sampling = false;
     }
-    for (const { run, peakMib, legacyPeakMib } of ended) {
+    for (const { run, peakMib, legacyPeakMib, peakAgeMs } of ended) {
       try {
-        run.finish(peakMib, legacyPeakMib);
+        run.finish(peakMib, legacyPeakMib, peakAgeMs);
       } catch (error) {
         void error; // A failed release is the ledger's to report; the sampler carries on.
       }
@@ -652,12 +701,20 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
       const entry = tracked.get(id);
       // run-child wraps finish to capture its legacy result. Dispatch through that adapter, not around it.
       const legacyPeakMib = this.finish(id);
-      return entry ? { ...(entry.observed && !entry.rssIncomplete ? { peakMib: entry.peakMib } : {}), legacyPeakMib }
+      const peakAgeMs = entry ? peakAgeOf(entry) : undefined;
+      return entry ? { ...(entry.observed && !entry.rssIncomplete
+        ? { peakMib: entry.peakMib, ...(peakAgeMs !== undefined ? { peakAgeMs } : {}) } : {}), legacyPeakMib }
         : { legacyPeakMib };
     },
     sampleNow,
     size: () => tracked.size,
   };
+}
+
+/** The tree's age at its last raised peak, since its reservation opened; undefined without both instants. */
+function peakAgeOf(entry: Tracked): number | undefined {
+  const opened = entry.hooks?.openedAtMs;
+  return opened === undefined || entry.peakAtMs === undefined ? undefined : Math.max(0, entry.peakAtMs - opened);
 }
 
 let processSampler: TreePeakSampler | undefined;
@@ -699,8 +756,8 @@ function openNestedTestRun(
   }, context.ledger);
   handle.bindRoot(pid);
   return {
-    finish(peakMib, legacyPeakMib) {
-      if (peakMib !== undefined) recordPeak("test", peakMib, { ...context.store, measurementBasis: "concurrent-rss", legacyPeakMib });
+    finish(peakMib, legacyPeakMib, peakAgeMs) {
+      if (peakMib !== undefined) recordPeak("test", peakMib, { ...context.store, measurementBasis: "concurrent-rss", legacyPeakMib, peakAgeMs });
       else if (legacyPeakMib !== undefined) recordPeak("test", legacyPeakMib, { ...context.store, measurementBasis: "legacy-hwm" });
       handle.releaseOccupancy();
     },
@@ -736,17 +793,19 @@ export function openLearnedReservation(
     ...(input.entryKind ? { entryKind: input.entryKind } : {}),
     ...(estimate.samples > 0 ? { measured: { estimateMib: estimate.estimateMib, samples: estimate.samples } } : {}),
   }, deps.ledger);
-  return learnedHandle(handle, input.workerClass, estimate.estimateMib, estimateSourceOf(estimate), input.root, deps, store);
+  return learnedHandle(handle, input.workerClass, estimate.estimateMib, estimateSourceOf(estimate), input.root, deps, store,
+    (deps.ledger?.clock ?? systemClock).now());
 }
 
 function learnedHandle(
   handle: MemoryReservationHandle, workerClass: WorkerClass, estimateMib: number, estimateSource: EstimateSource,
-  root: string | undefined, deps: LearnedReservationOptions, store: PeakStoreOptions,
+  root: string | undefined, deps: LearnedReservationOptions, store: PeakStoreOptions, openedAtMs: number,
 ): LearnedReservation {
   const sampler = deps.sampler ?? sharedSampler();
   const key = handle.id ?? `untracked-${Math.random().toString(36).slice(2)}`;
   let finished = false;
   const hooks: TrackHooks = {
+    openedAtMs,
     ...(workerClass === "test" ? {} : {
       onTestRunner: (pid: number) => openNestedTestRun(pid, { ...(root ? { root } : {}),
         ledger: deps.ledger, store: { ...store, entryKind: undefined } }),
@@ -774,7 +833,8 @@ function learnedHandle(
           const measured = sampler.finishMeasurement?.(key);
           const peak = measured ? measured.peakMib : sampler.finish(key);
           if (peak !== undefined) recordPeak(workerClass, peak, { ...store,
-            measurementBasis: measured ? "concurrent-rss" : "legacy-hwm", legacyPeakMib: measured?.legacyPeakMib });
+            measurementBasis: measured ? "concurrent-rss" : "legacy-hwm", legacyPeakMib: measured?.legacyPeakMib,
+            ...(measured?.peakAgeMs !== undefined ? { peakAgeMs: measured.peakAgeMs } : {}) });
           else if (measured?.legacyPeakMib !== undefined) recordPeak(workerClass, measured.legacyPeakMib, { ...store, measurementBasis: "legacy-hwm" });
         } catch (error) {
           recordError(store, "finish", error);
@@ -798,7 +858,9 @@ export function adoptLearnedReservation(
     location: deps.ledger?.location, instance: deps.ledger?.instance, root: deps.ledger?.root,
     ...deps.store, ...(entry.entry_kind ? { entryKind: entry.entry_kind } : {}),
   };
-  const learned = learnedHandle(handle, entry.workerClass, entry.estimateMib, entry.estimateSource, deps.ledger?.root, deps, store);
+  const opened = Date.parse(entry.openedAt); // expiring-fixture: exempt -- the origin of a measured peak age; no threshold compares it.
+  const learned = learnedHandle(handle, entry.workerClass, entry.estimateMib, entry.estimateSource, deps.ledger?.root, deps, store,
+    Number.isFinite(opened) ? opened : (deps.ledger?.clock ?? systemClock).now());
   learned.bindRoot(identity.pid);
   return learned;
 }

@@ -1,0 +1,72 @@
+- id: W1-T9802
+  title: "A PR THE SWEEP MERGES IS TERMINAL AT ITS MERGE — a direct merge writes no `pr.terminal` row until a later tick's closed-PR read, so a fix round awaiting that scope amendment stands down as `fix already dispatched for this head` the whole time: #12292 merged 11:24:43Z on 2026-10-16 and got its row 11:34:09Z; #11558 merged 02:59:11Z on 2026-10-14 and got its row 04:04:19Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19 sizing: the exact-step-list pin in test/arm-outcome-five-sites.test.ts counts as a second concern; the change itself is one concern, when a merge the sweep made becomes a ledgered terminal fact
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-16 (Craig, 11:25Z: get #12289 green and find why rmd did not handle it): #12289's fix round 1 ended NEEDS_SCOPE; its amendment #12292 merged at 11:24:43Z, but the round was not re-dispatched until 11:42:30Z"
+  plan_refs: [W1-T5318, W1-T5534, W1-T5758, W1-T6465, W1-T1110]
+  files: [src/lib/arm-auto-merge.ts, test/a-pr-the-sweep-merges-is-terminal-at-its-merge.test.ts, test/arm-outcome-five-sites.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main edcb2f0b1. Symbols, not lines.
+    OBSERVED in core's ledger on 2026-10-16 (task W1-T9541, PR #12289, head bd848cd):
+      - 11:12:56Z `fix.done` subtype `scope_amendment_pending`; `fix.scope_amendment` created #12292 (deploy/install-host-units.sh).
+      - 11:24:43Z `automerge.armed` outcome `direct-merged` for #12292 (the sweep merged the plan PR itself).
+      - 11:25:41Z..11:33:54Z every `sweep.disposed` for #12289 read "NOT DISPATCHED this pass: fix already dispatched
+        for this head (bd848cd) — awaiting its outcome before spending another strike".
+      - 11:34:09Z `pr.terminal` merged for #12292, from `sweepPrTerminalRung`'s closed-PR read. The tick that ran it
+        started at 11:22, before the merge, so its snapshot could not see it.
+      - 11:42:30Z the next pass over #12289 dispatched. 17.8 minutes from merge to dispatch.
+    The same gap on 2026-10-14: #11558 (W1-T4275's scope amendment for #11531) was `direct-merged` at 02:59:11Z and got
+    its `pr.terminal` row at 04:04:19Z, 65 minutes later.
+    WHY. `fixRungStalledWithoutNewHead` (src/lib/sweep.ts) releases a round left at `scope_amendment_pending` only when
+    a `pr.terminal` row names the amendment merged or closed. `buildFixProgressInput` (src/lib/fix-progress-judge.ts)
+    counts a pending amendment the same way. The only writer of `pr.terminal` is `runPrTerminalReconcile`, fed by a
+    tick-start closed-PR snapshot. But the sweep already KNOWS the merge happened: `logArmAttribution`
+    (src/lib/arm-auto-merge.ts) writes `automerge.armed` outcome `direct-merged` and
+    `automerge.clean_status_direct_merge` at that moment, and that outcome is returned only once GitHub merged it
+    (`mergeDirectAfterPreflightSteps` checks `isMerged` on a post-merge error).
+    MEASURED: 8 scope amendments were created in core's ledger 2026-10-10..16.
+    NOT IN SCOPE, named so the builder does not widen the diff:
+      - After the release, `requestScopeAmendment` updates the branch and the round stands down to wait for CI on the
+        new head (11:42:59Z `branch_update_requested`, head c7fc5e6). That costs one more CI cycle for a red already
+        diagnosed. It is a separate lead with a different fix.
+      - `runPrTerminalReconcile` and its dedup are unchanged. `liveTerminalCovers` already reads a live merged row
+        as settled, so it will not write a second row.
+  design: |
+    1. In `logArmAttribution` (src/lib/arm-auto-merge.ts), inside the existing `outcome === "direct-merged"` branch,
+       after `automerge.clean_status_direct_merge`, log one `PR_TERMINAL_STEP` row (import it from ./ledger-carry.js):
+       `{ task_id: "SWEEP", pr_url, pr_number, state: "merged", merged_at: <now ISO>, source: "automerge.direct_merge" }`.
+       No other outcome writes one. An `armed` outcome is a promise to merge, not a merge.
+    2. Nothing else changes. The stall gate, the progress judge, pruneCarriedRows and the reconcile dedup already read
+       `pr.terminal`.
+    3. test/arm-outcome-five-sites.test.ts pins the exact step list a direct merge writes. Its two direct-merge lists
+       gain "pr.terminal".
+    4. New test file, `test(` titles verbatim as in the proofs below:
+       - `logArmAttribution` with `direct-merged` writes exactly one merged `pr.terminal` row naming the PR;
+       - `armed`, `direct-merge-failed` and `arm-error-ignored` write none;
+       - THE SYMPTOM: over the four rows core wrote for #12289's round 1 (`fix.dispatch` ci-log, both
+         `fix.scope_amendment` rows naming #12292, `fix.done` scope_amendment_pending), `fixRungStalledWithoutNewHead`
+         is false; with the rows `logArmAttribution` writes for #12292's direct merge appended, it is true.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-pr-the-sweep-merges-is-terminal-at-its-merge.test.ts"
+    - claim: "a fix round awaiting a scope amendment is released by the sweep's own direct merge of it"
+      proof: 'grep: test("W1-T9802: a fix round awaiting a scope amendment the sweep merged is released at the merge" in test/a-pr-the-sweep-merges-is-terminal-at-its-merge.test.ts'
+    - claim: "a direct merge writes the merged pr.terminal row"
+      proof: 'grep: test("W1-T9802: a direct merge by the sweep writes the merged pr\.terminal row at the merge" in test/a-pr-the-sweep-merges-is-terminal-at-its-merge.test.ts'
+    - claim: "an arm that has not merged writes no terminal row"
+      proof: 'grep: test("W1-T9802: an arm that has not merged writes no pr\.terminal row" in test/a-pr-the-sweep-merges-is-terminal-at-its-merge.test.ts'
+    - claim: "the terminal row names its source"
+      proof: 'grep: source: "automerge\.direct_merge" in src/lib/arm-auto-merge.ts'
+  falsifier: |
+    Against main, the symptom test reads `fixRungStalledWithoutNewHead` false after the merge rows (the round stays
+    deduped), and the direct-merge test finds no `pr.terminal` row. If the row were written for an `armed` outcome, the
+    no-merge test fails.
