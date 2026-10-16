@@ -1629,6 +1629,9 @@ import {
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
+  reconcileDependabotStaleEvent,
+  dependabotStaleEventVerdict,
+  buildDepReviewStaleEventEscalation,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -1755,6 +1758,7 @@ import {
   checksStateFromRollup,
   checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
+  supersededRedsNowPassing,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDayUnpricedRows,
@@ -24075,7 +24079,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits",
+    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits,mergeStateStatus,autoMergeRequest",
   ])) as {
     number: number;
     url: string;
@@ -24086,6 +24090,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
     commits?: DependabotHeadCommit[];
+    mergeStateStatus?: string;
+    autoMergeRequest?: unknown;
   };
   const config = deps.config ?? loadConfig();
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
@@ -24301,6 +24307,23 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 0;
   }
   if (result.decision === "arm") {
+    const raw = view.statusCheckRollup ?? [];
+    const stale = dependabotStaleEventVerdict({
+      mergeStateStatus: view.mergeStateStatus, autoMergeArmed: view.autoMergeRequest != null,
+      reviewPosted: raw.some((c) => (c.context ?? c.name) === REVIEW_CONTEXT && String(c.state ?? c.conclusion ?? "").toUpperCase() === "SUCCESS"),
+      supersededReds: supersededRedsNowPassing(raw),
+    });
+    if (stale.kind === "stale-event") {
+      // W1-T9913: an armed head GitHub still blocks on a superseded red gets one fresh event, never a re-post.
+      const outcome = reconcileDependabotStaleEvent({
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, checks: stale.checks, nowMs: clock.now(), log,
+        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body),
+        escalate: () => escalate(buildDepReviewStaleEventEscalation({ prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+          headSha: view.headRefOid, checks: stale.checks }), { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      });
+      console.log(`dependabot stale-event block ${outcome} (${stale.checks.join(", ")}): ${view.url}`);
+      return 1;
+    }
     // W1-T228: guarded post — decideDepReview never executes a proof, so
     // this attempt's evidence is always "no_evidence"; the guard still
     // refuses it if a STRONGER (executed) verdict is already posted for this
