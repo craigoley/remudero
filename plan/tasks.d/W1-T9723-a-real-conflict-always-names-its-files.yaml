@@ -15,7 +15,7 @@
     - src/lib/open-prs-rest.ts
     - src/run-task.ts
     - test/a-real-conflict-always-names-its-files.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
