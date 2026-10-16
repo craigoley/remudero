@@ -1,0 +1,50 @@
+- id: W1-T9764
+  title: "AN INCREMENTAL LEDGER UNION ACCOUNTS ITS BYTES AS IT GROWS, NOT BY STRINGIFYING EVERY KEPT ROW ON EACH SET — createIncrementalLedgerUnion's sized-memo measure runs approximateMemoBytes (a JSON length) over all its rows on every set, synchronously on the daemon loop; the dispatch-selection union alone keeps 52,314 rows (16.5 MiB, offline census)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, how the union's memo size is computed; the rows it answers and the reported size's meaning are unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9647 memory census (PR 12231), item Z2'
+  plan_refs: [W1-T9105, W1-T9647, W1-T9527, W1-T9753]
+  files:
+    - src/lib/ledger-union.ts
+    - test/an-incremental-union-accounts-its-bytes-as-it-grows.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED offline by the W1-T9647 build (PR 12231), census 27d1f36d8d59 on 2026-10-15 over a synthetic production-scale corpus (369 rotations x 8,900 rows, 18,000 live rows, 12,000 closed PRs, 600 issues; plan at 4,112 tasks); evidence logs-8864/9647-census/census-27d1f36d8.{json,md}. Live set 867 MiB, filing threshold 43.4 MiB (min of 5% of the live set and 50 MiB). The per-step shares are INFERRED.
+    - Union holders: dispatch-value 52,314 rows / 16.5 MiB; run-task.escalation-triage-evidence 17,067 / 10.8 MiB;
+      sweep.escalation-triage-history 8,163 / 5.9 MiB.
+    READ at origin/main 3ce249c80 (src/lib/ledger-union.ts; symbols, not lines):
+    - createSizedMemo.set(key, value) calls measure(key, value) on every set.
+    - createIncrementalLedgerUnion passes a measure that builds a Set of every kept row (rotations, live, last result)
+      and returns approximateMemoBytes([key, [...rows], ...]), which is JSON.stringify(...).length: one full
+      serialization of every row it holds, each time the reader stores its state, i.e. on every read that is not an
+      unchanged-ledger hit. That is W1-T9105's accounting, applied to unions it was not sized for.
+    INFERRED: on the order of the union's own size (10-20 MB of JSON) serialized per read on the loop, plus the garbage;
+    unbounded as the unions grow. Not yet timed live; the test below times it.
+  design: |
+    1. The union accounts bytes incrementally: each rotation's read and the live read carry a byte figure computed once
+       when they are parsed (bytes of the lines kept, which the scan already has), and the state's size is the sum of
+       the parts it holds; the last-result set adds nothing new (it shares rows).
+    2. createSizedMemo keeps its API; the union passes a measure that sums those carried figures, so a set costs O(parts),
+       not O(rows).
+    3. The reported approx_bytes stays within the old figure's order (the test bounds the ratio) so W1-T9105's
+       memo_sizes and W1-T9647's holder rows keep their meaning.
+    No new constant.
+    NOTE: src/lib/ledger-union.ts is in BAKED_RUNTIME_SOURCE_PATHS, so the build PR rebuilds the image once.
+    Tests go in test/an-incremental-union-accounts-its-bytes-as-it-grows.test.ts, titled verbatim as in the proofs.
+  acceptance:
+    - claim: "storing a union state never serializes its rows: JSON.stringify is not called by the measure"
+      proof: 'grep: test("W1-T9764: a union state is sized without serializing its rows" in test/an-incremental-union-accounts-its-bytes-as-it-grows.test.ts'
+    - claim: "the incremental figure stays within a factor of two of the old JSON-length figure on a realistic corpus"
+      proof: 'grep: test("W1-T9764: the incremental size stays within twice the old figure" in test/an-incremental-union-accounts-its-bytes-as-it-grows.test.ts'
+  falsifier: |
+    On origin/main, spy on JSON.stringify while a union reads a corpus of 20,000 kept rows after one appended line: the
+    measure serializes all 20,000 rows and the first test fails. Size each part from its row count alone (no bytes):
+    the figure drifts far below the JSON length and the second test fails.
