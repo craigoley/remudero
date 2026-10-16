@@ -47,7 +47,7 @@ function capture(options: SelectedRegistryConsumerOptions | undefined): Captured
       input: Object.freeze({ cliPath, envPath,
         configuredPath: configuredPath === undefined ? settings.registryPath : configuredPath,
         contractVersion: contractVersion ?? settings.contractVersion,
-        requiredCapabilities: Object.freeze([...(requiredCapabilities ?? []), "identity"]),
+        requiredCapabilities: Object.freeze([...(requiredCapabilities ?? [])]),
         expectedDigest, maxBytes: maxBytes ?? settings.maxBytes,
         timeoutMs: timeoutMs ?? settings.timeoutMs, signal }), io: ports };
   } catch {
@@ -100,7 +100,10 @@ export function createSelectedRegistryObserver(options: SelectedRegistryConsumer
     if (captured.kind !== "selected") return { kind: "unknown", reason: "input_unreadable" };
     try {
       const result = await reader({ ...captured.input, signal }, captured.io);
-      return result.kind === "ready" ? result : { kind: "unknown", reason: result.kind === "legacy" ? "selection_missing" : result.reason };
+      if (result.kind !== "ready") return { kind: "unknown", reason: result.kind === "legacy" ? "selection_missing" : result.reason };
+      // Preserve the reader's input bounds; require our identity capability on its returned contract, not by growing caller input.
+      if (!result.binding.capabilities.includes("identity")) return { kind: "unknown", reason: "identity_capability_missing" };
+      return result;
     } catch {
       // A rejected custom port remains unknown, never cached/legacy selected authority.
       return { kind: "unknown", reason: "source_read_rejected" };
