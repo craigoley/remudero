@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
 import { type HostMemoryLedgerOptions, type HostMemoryReading, type ReadingEntry } from "../src/lib/host-memory-ledger.js";
 // A namespace import, so a run at a base without the new exports still loads and each subtest fails on its own.
 import * as learning from "../src/lib/host-memory-learning.js";
@@ -203,7 +203,7 @@ test("W1-T9762: a recorded peak carries the age the tree reached it", () => {
   const sampler = learning.createTreePeakSampler({
     listProcesses: () => ({ complete: true, rows: [{ pid: 10, parent: 1, start: "proc:5" }] }),
     readFile: (path) => path.endsWith("/stat") ? `10 (node) S 1 ${"0 ".repeat(17)}5 0 0` : status(rssMib),
-    setTimer: () => undefined, clearTimer: () => undefined, now: () => now,
+    setTimer: () => undefined, clearTimer: () => undefined, clock: clockFromMillisFn(() => now),
   });
   const appended: string[] = [];
   const store = { list: () => [] as string[], append: (_p: string, line: string) => void appended.push(line), size: () => 0, clock: fixedClock(NOW) };
@@ -232,7 +232,7 @@ test("W1-T9762: a recorded peak carries the age the tree reached it", () => {
   const bare = learning.createTreePeakSampler({
     listProcesses: () => ({ complete: true, rows: [{ pid: 10, parent: 1, start: "proc:5" }] }),
     readFile: (path) => path.endsWith("/stat") ? `10 (node) S 1 ${"0 ".repeat(17)}5 0 0` : status(400),
-    setTimer: () => undefined, clearTimer: () => undefined, now: () => NOW,
+    setTimer: () => undefined, clearTimer: () => undefined, clock: fixedClock(NOW),
   });
   bare.track("bare", 10);
   assert.equal(bare.finishMeasurement!("bare").peakAgeMs, undefined);

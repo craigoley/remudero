@@ -415,7 +415,7 @@ export interface TreeSamplerPorts {
   setTimer: (fn: () => void, ms: number) => { unref?: () => void } | undefined;
   clearTimer: (timer: unknown) => void;
   /** When a peak is raised, so its age can be recorded. */
-  now: () => number;
+  clock: Clock;
 }
 
 /** A test run the sampler found inside a tracked tree, ended once the runner's whole tree has exited. */
@@ -452,7 +452,7 @@ function defaultSamplerPorts(): TreeSamplerPorts {
     readFile: (path) => readFileSync(path, "utf8"),
     setTimer: (fn, ms) => setInterval(fn, ms),
     clearTimer: (timer) => clearInterval(timer as NodeJS.Timeout),
-    now: () => systemClock.now(),
+    clock: systemClock,
   };
 }
 
@@ -596,7 +596,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         if (!run) continue;
         const nestedId = `${id}>test:${key}`;
         tracked.set(nestedId, { roots: [{ pid, start }], peakMib: 0, observed: false, nested: run,
-          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak, openedAtMs: ports.now() } });
+          hooks: { onTestFilePeak: entry.hooks?.onTestFilePeak, openedAtMs: ports.clock.now() } });
         rootOwner.set(key, nestedId);
       }
     }
@@ -645,7 +645,7 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
         flushFiles(entry, new Set(own.map((pid) => `${pid}:${startOf.get(pid)}`)));
         if (peak !== undefined && peak > 0) {
           entry.observed = true;
-          if (peak > entry.peakMib) entry.peakAtMs = ports.now();
+          if (peak > entry.peakMib) entry.peakAtMs = ports.clock.now();
           entry.peakMib = Math.max(entry.peakMib, peak);
         }
         // (3) A nested run ends once its runner's whole tree has exited.
