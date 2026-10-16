@@ -30,6 +30,8 @@ import { FEEDBACK_RECORD_STATUSES, mergeFeedbackRecord } from "./feedback-record
 import {
   LANDING_BRANCH,
   landFeedbackStatusContent,
+  lsTreeBlobs,
+  rawDiffBases,
   type FeedbackRefusal,
   type LandFeedbackOpts,
   type LandFeedbackResult,
@@ -175,32 +177,34 @@ function readOriginMainBytes(git: GitExec, relPath: string): string | undefined 
   }
 }
 
-/** Every top-level feedback entry on the shared landing branch's remote tip, bounded like a root's
- *  own scan. Best-effort: a branch that has never been pushed, or an unreadable ref, reads as
+/** The landing branch's OWN top-level records (W1-T9803): only the paths its own commits changed
+ *  since their merge base with origin/main, the pending set W1-T9753 gave the landing writer
+ *  (`readBranchPending`), read at the tip's blob. A copy the branch only inherited from an older
+ *  main is never a source: main may have deleted it since, and `--apply` would re-land it. A path
+ *  the branch deleted is not a candidate. A branch never pushed, or an unreadable ref, reads as
  *  empty — the same "no pending content" posture {@link import("./feedback-landing.js")} takes. */
 function listBranchFeedbackIds(git: GitExec): { ids: Map<string, string>; byteCount: number; truncated: boolean } {
   const ids = new Map<string, string>();
   let byteCount = 0;
+  const tip = `origin/${LANDING_BRANCH}`;
   let relPaths: string[];
+  let tipBlobs: Map<string, string>;
   try {
-    relPaths = git(["ls-tree", "-r", "--name-only", `origin/${LANDING_BRANCH}`])
-      .split("\n")
-      .map((s) => s.trim())
-      .filter((f) => f.startsWith(`${FEEDBACK_REL_DIR}/`) && f.endsWith(".yaml"))
-      .filter((f) => !f.slice(FEEDBACK_REL_DIR.length + 1).includes("/"))
-      .sort();
+    const own = [...rawDiffBases(git(["diff", "--raw", "-z", "--no-abbrev", "--no-renames", `origin/main...${tip}`, "--", FEEDBACK_REL_DIR])).keys()]
+      .filter((f) => f.endsWith(".yaml") && !f.slice(FEEDBACK_REL_DIR.length + 1).includes("/"));
+    tipBlobs = own.length > 0 ? lsTreeBlobs(git(["ls-tree", "-z", tip, "--", ...own])) : new Map();
+    relPaths = own.filter((f) => tipBlobs.has(f)).sort();
   } catch {
-    // The branch has never been pushed, or the ref is otherwise unreadable — reads as empty,
-    // never fatal (the same "no pending content" posture a first-ever landing call takes).
+    // Never pushed, or the ref is otherwise unreadable — reads as empty, never fatal.
     return { ids, byteCount, truncated: false };
   }
   const truncated = relPaths.length > MAX_RECORDS_PER_SOURCE;
   for (const relPath of relPaths.slice(0, MAX_RECORDS_PER_SOURCE)) {
     let bytes: string;
     try {
-      bytes = git(["show", `origin/${LANDING_BRANCH}:${relPath}`]);
+      bytes = git(["cat-file", "blob", tipBlobs.get(relPath) as string]);
     } catch {
-      continue; // the ref moved between ls-tree and this read — dropped, never fatal
+      continue; // the blob is unreadable (a pruned object) — dropped, never fatal
     }
     byteCount += Buffer.byteLength(bytes, "utf8");
     ids.set(relPath.slice(FEEDBACK_REL_DIR.length + 1, -".yaml".length), bytes);
