@@ -22,7 +22,7 @@ export async function runSecurityMergeProducer(eventName, event, transport, targ
     const number=Number(event.inputs?.pr_number);
     if (!Number.isSafeInteger(number) || number < 1) throw Error('invalid dispatch PR number');
     candidates=[{number}];
-  } else if (eventName === 'workflow_run' && event.workflow_run?.name === 'CodeQL') {
+  } else if (eventName === 'workflow_run' && ['CodeQL','Semgrep runtime compatibility'].includes(event.workflow_run?.name)) {
     const sha=event.workflow_run.head_sha;
     if (!/^[a-f0-9]{40}$/.test(sha ?? '')) throw Error('missing workflow head');
     // One bounded association page; at the API page ceiling, never presume it was complete.

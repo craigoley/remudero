@@ -1,4 +1,5 @@
 import {classifyCodeScanningMergePolicy, CODE_SCANNING_MAX_CHANGED_FILES} from './code-scanning-merge-policy.mjs';
+import {changesSemgrepRuntime, semgrepRuntimeMetadataRequests} from './semgrep-runtime-merge-policy.mjs';
 
 export const SECURITY_MERGE_CONTEXT = 'security-merge-policy';
 export const SECURITY_METADATA_MAX_PAGES = 30; // BACKSTOP: complete evidence or UNKNOWN, never partial success.
@@ -31,9 +32,9 @@ export function* securityMergeMetadataRequests(target) {
     if (new Set(files.map(file => file?.filename)).size !== files.length) return {headSha,decision:unknown('changed-file-corpus-ambiguous')};
     const input = {prNumber:target.prNumber,headSha,observedHeadSha:headSha,filesComplete:files.length === first.changed_files,
       filesHeadSha:headSha,changedFileCount:first.changed_files,files};
-    let decision = classifyCodeScanningMergePolicy(input);
+    let decision = classifyCodeScanningMergePolicy(input), checks = [], checksComplete = false;
     if (decision.state !== 'not-applicable' && decision.reason === 'check-corpus-incomplete') {
-      const checks = [];let total;
+      let total;
       for (let page = 1; page <= SECURITY_METADATA_MAX_PAGES; page++) {
         const corpus = yield `${prefix}/commits/${headSha}/check-runs?filter=all&per_page=100&page=${page}`;
         if (!Number.isSafeInteger(corpus?.total_count) || corpus.total_count < 0 || corpus.total_count > 100 * SECURITY_METADATA_MAX_PAGES ||
@@ -42,7 +43,12 @@ export function* securityMergeMetadataRequests(target) {
         total = corpus.total_count;checks.push(...corpus.check_runs);
         if (checks.length >= total || corpus.check_runs.length < 100) break;
       }
-      decision = classifyCodeScanningMergePolicy({...input,checksComplete:checks.length === total,checksHeadSha:headSha,checks});
+      checksComplete = checks.length === total;
+      decision = classifyCodeScanningMergePolicy({...input,checksComplete,checksHeadSha:headSha,checks});
+    }
+    if (decision.mergeAllowed && changesSemgrepRuntime(files)) {
+      const runtime = yield* semgrepRuntimeMetadataRequests({headSha,baseSha:first.base.sha,prNumber:target.prNumber,files,checks,checksComplete});
+      decision = runtime.mergeAllowed ? {state:'safe',mergeAllowed:true,reason:'trusted-exact-head-security-and-runtime-compatible'} : runtime;
     }
     // Changes to head/base/file-count during pagination invalidate even a docs-only result.
     const last = yield prPath;
