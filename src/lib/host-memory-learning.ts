@@ -858,7 +858,7 @@ export function adoptLearnedReservation(
     location: deps.ledger?.location, instance: deps.ledger?.instance, root: deps.ledger?.root,
     ...deps.store, ...(entry.entry_kind ? { entryKind: entry.entry_kind } : {}),
   };
-  const opened = Date.parse(entry.openedAt);
+  const opened = Date.parse(entry.openedAt); // expiring-fixture: exempt -- the origin of a measured peak age; no threshold compares it.
   const learned = learnedHandle(handle, entry.workerClass, entry.estimateMib, entry.estimateSource, deps.ledger?.root, deps, store,
     Number.isFinite(opened) ? opened : (deps.ledger?.clock ?? systemClock).now());
   learned.bindRoot(identity.pid);
