@@ -1728,6 +1728,7 @@
     "test/every-routing-decision-records-why.test.ts": 63,
     "test/every-served-route-is-in-the-contract.test.ts": 16,
     "test/every-shard-on-main-is-lintable.test.ts": 7800,
+    "test/every-source-reading-suite-declares-what-it-reads.test.ts": 3300,
     "test/every-step-a-ledger-fold-reads-back-survives-rotation.test.ts": 29,
     "test/every-test-run-in-a-container-takes-the-host-wide-slot.test.ts": 2700,
     "test/every-test-run-is-judged-by-its-summary-not-its-exit.test.ts": 4300,

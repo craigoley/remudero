@@ -54,6 +54,9 @@ function stableHash(text: string): number {
 export interface FixTranscript {
   taskId: string;
   taskShape: string;
+  /** The worker model that ran the round (W1-T9640): lessons and promotions are kept per model, because the fix
+   *  lane's arms are refused at very different rates (src/lib/fix-routing-learner.ts). */
+  model: string;
   commitRefusedReason?: string;
   reviewerVerdict?: string;
   excerpt: string;
@@ -61,12 +64,14 @@ export interface FixTranscript {
 
 export function validateFixTranscript(value: unknown): FixTranscript | null {
   if (!isRecord(value)) return null;
-  if (!boundedString(value.taskId, MAX_ID) || !boundedString(value.taskShape, 80) || !boundedString(value.excerpt, MAX_TEXT)) return null;
+  if (!boundedString(value.taskId, MAX_ID) || !boundedString(value.taskShape, 80) || !boundedString(value.model, 80) ||
+    !boundedString(value.excerpt, MAX_TEXT)) return null;
   if (value.commitRefusedReason !== undefined && !boundedString(value.commitRefusedReason, MAX_TEXT)) return null;
   if (value.reviewerVerdict !== undefined && !boundedString(value.reviewerVerdict, MAX_TEXT)) return null;
   return {
     taskId: value.taskId.trim(),
     taskShape: value.taskShape.trim(),
+    model: value.model.trim(),
     ...(value.commitRefusedReason !== undefined ? { commitRefusedReason: value.commitRefusedReason.trim() } : {}),
     ...(value.reviewerVerdict !== undefined ? { reviewerVerdict: value.reviewerVerdict.trim() } : {}),
     excerpt: value.excerpt.trim(),

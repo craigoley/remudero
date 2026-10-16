@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: fix #11660 (W1-T8777) and its root cause"
   plan_refs: [W1-T8777, W1-T6180, W1-T210]
   files: [scripts/coverage-merge-ratchet.mjs, test/a-line-any-process-ran-keeps-its-hits-through-the-coverage-merge.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

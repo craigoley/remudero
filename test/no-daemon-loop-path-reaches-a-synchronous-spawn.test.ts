@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { loopReachable, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
+import { loopReachable, MODULE_LOAD, splitObjectLiteral, topLevelFunctions, type Fn } from "./helpers/daemon-loop-walk.js";
 
 /** Loop-reachable functions that still call a synchronous spawn primitive or hand one over as a value,
  *  with the count recorded at build time (2026-10-10, f49ee17d3; re-recorded the same day on e91d490f1
@@ -42,7 +42,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   buildRegisteredGarden: 3,
   buildSweepEffects: 5, // Armed-idle direct merge now awaits its transport and security observation.
   buildWipeTestCadenceDaemonHooks: 1,
-  captureImportedModule: 1, // W1-T9660: daemonCommand > runTask > workerBoundaryStack; no conversion filed
   changeView: 1,
   changedShardProofs: 2,
   checkCliFreshness: 1,
@@ -125,7 +124,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   execGhStatusPost: 1,
   execWhitelistedProof: 1,
   executeWorktreeRemoval: 1,
-  executingHarnessRevision: 1, // W1-T9660: daemonCommand > runTask > workerBoundaryStack; no conversion filed
   extractReviewFindings: 1,
   fetchMergedCoverageArtifact: 4,
   fetchNewestPrReview: 1,
@@ -219,7 +217,6 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   readyDraftViaGh: 1,
   realArmDeps: 7, // +1 2026-10-11: the closing-reference guard reads the PR body before a sync arm (ghJson handed over); +1 W1-T9536: the sync own-files compare reader (realArmDepsAsync overrides it)
   realDeployDeps: 1,
-  realGitRemoteDeps: 1, // W1-T9660: daemonCommand > realDeps > composeRealDeps; no conversion filed
   realReviewWorktree: 1,
   realSharedPauseGitDeps: 1,
   reapBranchesSteps: 1,
@@ -250,7 +247,7 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   run: 1,
   runCoverageImprovementCadence: 1,
   runGhPrCreate: 1,
-  runInTree: 1, // W1-T9660: via defaultPreflightChecks, driven sync by the boot sweep, landContent and landCiLearningShards (syncPreflightOf); W1-T9615 converted the SRE capture, W1-T9638 the per-poll landing
+  runInTree: 1, // W1-T9660: via defaultPreflightChecks; W1-T9695/W1-T9696 moved the boot sweep, daemon landContent, CI-learning and the intake/alert/revalidation/evidence/handoff captures off it. Still sync: captureFeedback from coverage-improvement, hand-run census, source-size follow-up, grilled reply, dep-review, the CLI sweep's repair capture; recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by name only, the planPrPreflight option and the sweepFeedbackLanding dep
   runMachineFilingJudge: 1,
   runNpmScriptViaSpawn: 1,
   runPrewarmChannelsSync: 1,
@@ -563,8 +560,22 @@ test("W1-T9615: the SRE lane's daemon input reaches no synchronous plan-PR prefl
   }
 });
 
+/** W1-T9696: daemon-loop captures that now stage for the async sweep, and so never name captureFeedback. */
+const STAGED_CAPTURE_SEEDS = ["pollIssues", "pollAlerts", "productionIssueRevalidationPorts", "feedbackEvidenceCoverageFiler"] as const;
+
+test("W1-T9696: the staged daemon-loop captures reach no inline captureFeedback", () => {
+  const fns = censusFunctions();
+  // Positive control: the CLI verbs inject the inline capture, and this walk sees it.
+  assert.ok(loopReachable(fns, "issuesCommand").has("captureFeedback") && loopReachable(fns, "opsCommand").has("captureFeedback"));
+  for (const seed of STAGED_CAPTURE_SEEDS) {
+    const reach = loopReachable(fns, seed);
+    assert.ok(reach.has("stageFeedbackCapture"), `${seed} reaches its staging capture`);
+    assert.ok(!reach.has("captureFeedback"), `${seed} reaches the inline captureFeedback`);
+  }
+});
+
 /** Reached only through a column-0 object-literal const, so the function-only walk never saw them (W1-T9660). */
-const OBJECT_LITERAL_SPAWNERS = ["runInTree", "captureImportedModule", "executingHarnessRevision", "realGitRemoteDeps"] as const;
+const OBJECT_LITERAL_SPAWNERS = ["runInTree"] as const;
 
 test("W1-T9660: the daemon-wide census reaches a sync spawner named only inside an object-literal const", () => {
   const fns = censusFunctions();
@@ -603,4 +614,60 @@ test("W1-T9660: the daemon-wide census ignores an identifier that appears only i
   // A backtick inside a regex literal opens no template: the code after it, and its spawn, stay visible.
   assert.equal(codeOnly("x(/[;&|`$]/.test(p)); a / b / c; /* `t */ (e ?? execFileSync)(z);"), 'x("".test(p)); a / b / c;   (e ?? execFileSync)(z);');
   assert.ok(reach.has("assertOpenWeightToolBoundary") && (population(fns).get("assertOpenWeightToolBoundary") ?? 0) > 0, "runTask's cash-containment default stays a counted, reached spawner");
+});
+
+/** W1-T9701: evaluated once while run-task.ts and benchmark-run.ts load, before daemonCommand runs. */
+const MODULE_LOAD_CAPTURES = ["captureImportedModule", "executingHarnessRevision"] as const;
+
+test("W1-T9701: the census attributes a const initializer call to module load, not the loop", () => {
+  const fns = censusFunctions();
+  const reach = loopReachable(fns, "daemonCommand");
+  const pop = population(fns);
+  const atLoad = loopReachable(fns, MODULE_LOAD);
+  assert.ok(reach.has("runTask") && reach.has("workerBoundaryStack"), "positive control: the loop still reaches runTask and the const it names");
+  for (const name of MODULE_LOAD_CAPTURES) {
+    assert.ok((pop.get(name) ?? 0) > 0, `${name} is still a counted sync spawner`);
+    assert.ok(!reach.has(name), `${name} runs at module load, not on the daemon loop`);
+    assert.ok(atLoad.has(name), `the module-load node holds ${name}`);
+    assert.ok(!Object.hasOwn(SYNC_SPAWN_LOOP_BASELINE, name), `${name} holds no row`);
+  }
+  // The node is not identifier-shaped, so no body names it and no daemon path reaches it.
+  assert.ok(!reach.has(MODULE_LOAD));
+  // Falsifier: walked without the split, the loop reaches both again through runTask > workerBoundaryStack.
+  const unsplit = fns.map((f) => (f.name === "workerBoundaryStack" ? { ...f, body: `${f.body}\n${fns.filter((g) => g.name === MODULE_LOAD && g.file === f.file).map((g) => g.body).join("\n")}` } : f));
+  assert.ok(loopReachable(unsplit, "daemonCommand").has("captureImportedModule"));
+});
+
+test("W1-T9701: an object literal member function is still loop reach", () => {
+  const fns = censusFunctions();
+  // Arrow members: plan-pr-emitter's defaultPreflightChecks still reaches the in-tree spawn its arrows call.
+  assert.ok(loopReachable(fns, "defaultPreflightChecks").has("runInTree"), "an arrow member's callee is reached");
+  // Handed-over values: REAL_ALERT_FIX_DISPATCH_DEPS still reaches the seams it hands the dispatch.
+  const deps = loopReachable(fns, "REAL_ALERT_FIX_DISPATCH_DEPS");
+  assert.ok(deps.has("worktreeAddAsync") && deps.has("ensureTaskTrailer"), "a handed-over member is reached");
+
+  // Synthetic: a literal with a call-valued member, an arrow member, a handed-over member, a call passed a function,
+  // a method, and a column-0 statement after it. Only what the initializer evaluates goes to module load.
+  const source = [
+    "const fixture = {",
+    "  pinned: atLoad(fileURLToPath(import.meta.url)),",
+    "  run: (a) => onLoop(a),",
+    "  handed: handedOver,",
+    "  wrapped: memoize(() => wrappedOnLoop()),",
+    "  method(x) { return inMethod(x); },",
+    "};",
+    "fixture.later = afterLiteral(fixture.pinned);",
+  ].join("\n");
+  const { reach, load } = splitObjectLiteral(source, source.indexOf("{"));
+  assert.equal(reach.length, source.length, "both halves keep the body's length");
+  const synthetic: Fn[] = [
+    { name: "seed", file: "x", body: "function seed() { fixture; }" },
+    { name: "fixture", file: "x", body: reach },
+    { name: MODULE_LOAD, file: "x", body: load },
+    ...["atLoad", "onLoop", "handedOver", "memoize", "wrappedOnLoop", "inMethod", "afterLiteral"].map((name) => ({ name, file: "x", body: `function ${name}() {}` })),
+  ];
+  const fromSeed = loopReachable(synthetic, "seed");
+  assert.deepEqual(["onLoop", "handedOver", "memoize", "wrappedOnLoop", "inMethod"].filter((n) => !fromSeed.has(n)), [], "functions and handed-over values stay reached");
+  assert.deepEqual(["atLoad", "afterLiteral"].filter((n) => fromSeed.has(n)), [], "initializer calls are not reached from the seed");
+  assert.deepEqual(["atLoad", "afterLiteral"].filter((n) => !loopReachable(synthetic, MODULE_LOAD).has(n)), [], "the module-load node holds them");
 });

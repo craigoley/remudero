@@ -61,8 +61,18 @@ export interface LoopBound {
   readonly timedOut: boolean;
   /** Disarms the deadline and any escalation (the child's own exit does this too). */
   cancel(): void;
+  /** Attach positive grace to this bound's actual primary expiry, not a second timeout-plus-grace deadline. */
+  escalateAfter(graceMs: number, onEscalate?: () => void): void;
   /** The named rejection for this bound, carrying what the child reported. */
   timeoutError(command: string, facts?: ChildFacts): LoopBoundedChildTimeout;
+}
+
+type BoundedChild = Pick<ChildProcess, "kill"> & Partial<Pick<ChildProcess, "once" | "exitCode" | "signalCode">>;
+const childBounds = new WeakMap<BoundedChild, LoopBound>();
+
+/** The primary already bounding this exact child, if it has not been cancelled or settled. */
+export function childLoopBound(child: BoundedChild): LoopBound | undefined {
+  return childBounds.get(child);
 }
 
 export interface LoopBoundOptions {
@@ -83,42 +93,58 @@ export interface LoopBoundOptions {
  * the child exits; a caller reads `timedOut` in its exit/close handler and reports a failure when it is set.
  */
 export function boundChildByLoopTime(
-  child: Pick<ChildProcess, "kill"> & Partial<Pick<ChildProcess, "once" | "exitCode" | "signalCode">>,
+  child: BoundedChild,
   budgetMs: number,
   opts: LoopBoundOptions = {},
 ): LoopBound {
   const clock = opts.clock ?? systemClock;
   const killSignal = opts.killSignal ?? "SIGTERM";
   let timedOut = false;
+  let cancelled = false;
+  let graceMs = opts.escalateAfterMs;
+  let onEscalate = opts.onEscalate;
   let cancelEscalation: (() => void) | undefined;
-  const cancelDeadline = loopAvailableDeadline(clock, budgetMs, () => {
-    timedOut = true;
-    opts.onExpire?.();
-    child.kill(killSignal);
-    const graceMs = opts.escalateAfterMs;
-    if (graceMs !== undefined && graceMs > 0) {
+  const armEscalation = (): void => {
+    cancelEscalation?.();
+    if (!cancelled && graceMs !== undefined && graceMs > 0) {
       cancelEscalation = loopAvailableDeadline(clock, graceMs, () => {
         if ((child.exitCode ?? null) !== null || (child.signalCode ?? null) !== null) return;
-        opts.onEscalate?.();
+        onEscalate?.();
         child.kill("SIGKILL");
       });
     }
+  };
+  const cancelDeadline = loopAvailableDeadline(clock, budgetMs, () => {
+    timedOut = true;
+    opts.onExpire?.();
+    // Arm before signalling: a synchronous exit/error callback can cancel the grace too.
+    armEscalation();
+    child.kill(killSignal);
   });
   const cancel = (): void => {
+    cancelled = true;
     cancelDeadline();
     cancelEscalation?.();
+    if (childBounds.get(child) === bound) childBounds.delete(child);
   };
   // A test seam's stand-in child may not be an emitter; its caller cancels from its own callback.
   child.once?.("exit", cancel);
   child.once?.("error", cancel);
-  return {
+  const bound: LoopBound = {
     get timedOut() {
       return timedOut;
     },
     cancel,
+    escalateAfter(ms, notify) {
+      graceMs = ms;
+      onEscalate = notify;
+      if (timedOut) armEscalation();
+    },
     timeoutError: (command, facts = {}) =>
       new LoopBoundedChildTimeout(command, budgetMs, { signal: typeof killSignal === "string" ? killSignal : null, ...facts }),
   };
+  childBounds.set(child, bound);
+  return bound;
 }
 
 /** Facts off an execFile result or rejection, for the named rejection. */

@@ -254,7 +254,7 @@ test("rmd progress-watchdog on capture-diagnostics writes one bundle through the
     assert.match(first.out[0], /^progress-watchdog: STALLED action=capture-diagnostics /);
     assert.match(first.out[1], /^diagnostics bundle: .*progress-\d{8}T\d{6}Z$/);
     assert.deepEqual(calls, [
-      ["docker", "ps", "--format", "{{.Names}}"],
+      ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
       ["docker", "logs", "--tail", "200", "remudero-tenant"],
     ]);
     const bundleDir = first.out[1].slice("diagnostics bundle: ".length);
