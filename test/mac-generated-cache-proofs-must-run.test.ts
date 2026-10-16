@@ -18,6 +18,7 @@ test("missing Python fails a real janitor safety proof instead of skipping its e
     // negative control must itself fail if an availability skip replaces it.
     const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, TMPDIR: root, PATH: root + ":" + (process.env.PATH ?? "/usr/bin:/bin") };
     delete env.NODE_TEST_CONTEXT;
+    env.NODE_V8_COVERAGE = undefined;
     const child = spawnSync(process.execPath, [
       "--test", "--test-reporter=tap", "--import", "tsx",
       "--test-name-pattern", proof, join(repo, "test/mac-generated-cache-safety.test.ts"),
