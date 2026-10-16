@@ -1,0 +1,69 @@
+- id: W1-T9818
+  title: "A DEPENDENCY HOLD WAITS A FIXED DAY BEFORE ANYONE IS ASKED — reconcileDepReviewHold escalates only when nowMs minus heldSinceMs reaches DEP_REVIEW_HOLD_AGE_MS (24 h), whatever the hold is doing: a red nothing will ever re-run waits the full day, and a hold whose refresh or owned build is still moving is asked about at 24 h anyway; escalate when the hold stops moving instead"
+  repo: remudero
+  depends_on: []  # W1-T9584, W1-T9586 and W1-T9797 (all merged) write the remedy records this reads
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — when the dependency hold asks the operator; what a hold is, the issue it opens, its retirement and every arm/status effect are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 14 (D1): the fixed 24 h hold backstop, against the operator's no-hard-thresholds ruling"
+  plan_refs: [W1-T5022, W1-T9584, W1-T9586, W1-T9797, W1-T9798]
+  files:
+    - src/lib/dep-review.ts
+    - src/run-task.ts
+    - test/dep-review-held-escalation.test.ts
+    - test/a-dependency-hold-escalates-when-it-stops-moving.test.ts
+  status: queued
+  priority: 2  # a held Dependabot head (security bumps included: #12191 carried GHSA-84m7-p3x7-pcfv) waits up to a day for its first operator ask with no remedy acting
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16):
+    - src/lib/dep-review.ts: `/** BACKSTOP: allow a full day for transient CI failures before asking the repository
+      operator. */ export const DEP_REVIEW_HOLD_AGE_MS = 24 * 60 * 60 * 1000;`
+    - `reconcileDepReviewHold` sets `state.heldSinceMs ??= args.nowMs` on a hold and escalates only past
+      `args.nowMs - state.heldSinceMs < DEP_REVIEW_HOLD_AGE_MS`, once per head. Nothing else it reads (red checks,
+      refresh records, proposals) changes when it asks.
+    - The hold now has remedies that move on their own: W1-T9584 `reconcileDependabotRefresh` asks Dependabot for a
+      new head once per head (refresh records in the same state file); W1-T9586 `reconcileDependabotOwnRed` and
+      W1-T9797 `reconcileDependabotRefusedPath` file an owned-build proposal (own-red-proposals.json). W1-T9584 and
+      W1-T9586 each left "the 24 h hold escalation" in place as the backstop; W1-T9797 and W1-T9798 list it as out
+      of scope. So no filed task replaces it.
+    - The stated reason, "transient CI failures", is itself evidence the lane can read: a transient red is re-run
+      (a new attempt of the red check), and `dedupeRollupByLatestAttempt` (src/lib/sweep.ts) already selects the
+      newest attempt the call site in `depReviewCommand` (src/run-task.ts) passes in.
+    - test/dep-review-held-escalation.test.ts `W1-T5022: aged dependency hold escalates once per head` pins the
+      fixed age (`const ageMs = 24 * 60 * 60 * 1000`).
+    - SWEEP: plan/tasks.d on main naming DEP_REVIEW_HOLD_AGE_MS or the hold backstop: W1-T9584, W1-T9586, W1-T9797,
+      W1-T9798, each keeping it unchanged. No open head since 10-12 diffs DEP_REVIEW_HOLD_AGE_MS or heldSinceMs.
+  design: |
+    No new count, timer or fixed bound. The operator's ruling: no hard thresholds.
+    1. PROGRESS, READ FROM WHAT THE HOLD ALREADY HOLDS. Each dep-review pass computes a hold fingerprint: the head
+       sha, the sorted red check names with each one's newest attempt identity (the selected rollup's run/attempt
+       id and completion time), the refresh record for this head (requested, delivered), and the proposal registry
+       entry covering this PR's bumps (feedback id). The state file stores the fingerprint and when it last changed.
+    2. A REMEDY IN FLIGHT holds the ask: a refresh requested for this head and not yet answered by a new head, or a
+       captured owned-build proposal whose task has not reached a terminal outcome. While one is in flight and its
+       own evidence keeps moving, no ask is made.
+    3. ESCALATE ON NO PROGRESS. The hold asks once per head when two successive passes read the same fingerprint
+       and no remedy is in flight, so a red nothing will re-run is asked about on the next pass, not after a day.
+       A remedy in flight whose evidence has not moved for longer than the longest gap that remedy kind has shown
+       on holds that later recovered (learned from the state files' own history) asks too. With no such history
+       yet, the ask waits for that remedy's own terminal signal.
+    4. Delete DEP_REVIEW_HOLD_AGE_MS. The issue body names the evidence (fingerprint unchanged since <ts>, remedy
+       state) in place of the age. Retirement, once-per-head asks and the corrupt-state refusal are unchanged.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below), driving `depReviewCommand` over the existing
+       held-escalation fixture shape; update W1-T5022's aged-hold test to the new rule:
+       - a hold whose red check is never re-run and has no remedy asks on the second unchanged pass;
+       - a hold whose red check gets a new attempt, or whose refresh is in flight, does not ask while that moves;
+       - a hold with no recovered history keeps an in-flight proposal un-asked until its task is terminal.
+  acceptance:
+    - claim: "a hold with no remedy in flight and no new check attempt asks the operator on its next unchanged pass"
+      proof: 'grep: test("W1-T9818: a dependency hold that stops moving asks at once" in test/a-dependency-hold-escalates-when-it-stops-moving.test.ts'
+    - claim: "a hold whose red is re-run or whose refresh or owned build is still moving is not asked about"
+      proof: 'grep: test("W1-T9818: a moving dependency hold is not escalated" in test/a-dependency-hold-escalates-when-it-stops-moving.test.ts'
+  falsifier: |
+    At origin/main, a held head whose red check keeps the same attempt and has no refresh or proposal, run through
+    depReviewCommand on two passes ten minutes apart, opens no issue (the age is under 24 h), so the first test
+    fails.

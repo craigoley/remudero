@@ -16,6 +16,7 @@ import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } fr
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
+import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -239,7 +240,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     receipt.steps.push({ name, ok, ...metadata, exitCode: result.status, signal: result.signal ?? null,
       durationMs: result.durationMs ?? null, startedAt: result.startedAt ?? null, finishedAt: result.finishedAt ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
-      ...(name.startsWith('affected-tests') ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
+      ...(name.startsWith('affected-tests') || name === 'workflow-contract-precheck'
+        ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
         stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr),
         ...(result.nativeResult ? { nativeResult: result.nativeResult } : {}),
@@ -337,6 +339,30 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
+        const workflowInputs = authorWorkflowContractInputs(receipt.changedFiles);
+        receipt.workflowContractPrecheck = { required: workflowInputs.length > 0, inputs: workflowInputs, suites: [] };
+        if (workflowInputs.length > 0) {
+          const suites = verifiedSuites(root, AUTHOR_WORKFLOW_CONTRACT_SUITES);
+          receipt.workflowContractPrecheck.suites = suites;
+          // This fixed, cheap contract runs before any heavy admission or capacity truncation.
+          // R-50 walks all workflows, including new names with no literal reader hit.
+          const judged = prepareJudgedRun();
+          const command = lowPriorityCommand(process.execPath, judgedNodeTestArgs(['--test', '--test-reporter=tap',
+            '--test-concurrency=1', '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...suites], judged.args));
+          const result = runStep('workflow-contract-precheck', command.args, command.file, judged.env, AUTHOR_WORKFLOW_CONTRACT_MAX_MS);
+          const judge = closeJudgedRun(judged, suites, { status: result.status ?? 1, root,
+            role: 'workflow-contract-precheck', prefix: 'preflight-author' });
+          const ok = completeTestResult(result) && judge.verdict.complete;
+          report('workflow-contract-precheck', result, ok, { inputs: workflowInputs, suites,
+            priority: command.priority, runtimeBoundMs: AUTHOR_WORKFLOW_CONTRACT_MAX_MS,
+            judge: { complete: judge.verdict.complete, given: judge.verdict.given,
+              reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20),
+              lastStarted: judge.verdict.lastStarted, exitSite: judge.verdict.exitSite } });
+          if (!ok) {
+            receipt.affectedTestsNotRunReason = 'workflow-contract-precheck did not succeed; no heavy slot/static/test phase was started';
+            throw new Error('changed workflow inputs failed the cache/timeout contracts; see workflow-contract-precheck');
+          }
+        }
         const docsInputs = authorDocsIndexInputs(receipt.changedFiles);
         receipt.docsIndexPrecheck = { required: docsInputs.length > 0, inputs: docsInputs };
         if (docsInputs.length > 0) {

@@ -192,9 +192,7 @@ export function removedLinesByFile(diffText) {
   return files;
 }
 
-/**
- * Every non-deleted TypeScript source path on the new side of a diff. A file every shard omits
- * must fail rather than reaching findUncoveredAddedLines' "lcov never saw this file" carve-out.
+/** Non-deleted src/ TS or src/scripts MJS; missing canonical SF must fail before the unseen-file carve-out.
  * @param {string} diffText
  */
 export function changedSourceFiles(diffText) {
@@ -204,7 +202,8 @@ export function changedSourceFiles(diffText) {
     const path = line.slice(4).trim();
     if (path === '/dev/null') continue;
     const relative = path.replace(/^b\//, '');
-    if (relative.startsWith('src/') && relative.endsWith('.ts')) files.add(relative);
+    if ((relative.startsWith('src/') && relative.endsWith('.ts'))
+      || ((relative.startsWith('src/') || relative.startsWith('scripts/')) && relative.endsWith('.mjs'))) files.add(relative);
   }
   return [...files].sort();
 }
@@ -243,6 +242,8 @@ export function classifyTypeOnlyModule(file, readSource = (f) => readFileSync(f,
   } catch (err) {
     return { verdict: 'undecidable', stage: 'read', message: err?.message ?? String(err) };
   }
+  // Native MJS cannot claim TS erasure; read first to preserve unread-source UNKNOWN.
+  if (file.endsWith('.mjs')) return { verdict: 'emits-code' };
   // NODE'S OWN STRIPPER, NOT esbuild, AND THE REASON IS THE JOB THIS RUNS IN. `coverage-ratchet`
   // installs NOTHING -- W1-T3207 asserts it in test/workflow-single-suite-run.test.ts ("the artifact
   // consumer installs neither npm dependencies nor Playwright", and separately that it "must not

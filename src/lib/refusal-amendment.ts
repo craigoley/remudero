@@ -72,6 +72,23 @@ export function extractRefusal(reportExcerpt: string | undefined): WorkerRefusal
   return out;
 }
 
+/** Bounds the excerpt a fix round's hand-off row carries; far above any real refusal block. */
+const MAX_FIX_REFUSAL_EXCERPT_CHARS = 4000;
+
+/**
+ * W1-T9792: the categorized `REFUSED:` block out of a fix worker's report, for its `fix.needs_design`
+ * row — undefined unless {@link extractRefusal} finds at least one categorized line, so a prose-only
+ * NEEDS_DESIGN keeps its escalation and is never nominated.
+ */
+export function refusalExcerptFromFixReport(report: string | undefined): string | undefined {
+  if (extractRefusal(report).length === 0) return undefined;
+  const lines = report!.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\s*REFUSED:\s*$/.test(line));
+  let end = start + 1;
+  while (end < lines.length && lines[end]!.trim() !== "" && !/^\s*[A-Z][A-Z _-]+:/.test(lines[end]!)) end++;
+  return lines.slice(start, end).join("\n").slice(0, MAX_FIX_REFUSAL_EXCERPT_CHARS);
+}
+
 export type AmendmentKind = "close-unbuilt" | "widen-files" | "add-precondition" | "re-scope-criteria";
 
 /** The change each closed refusal class implies. DATA, so a new class is a row, not a branch. */
@@ -142,6 +159,7 @@ function amendmentSettled(recorded: readonly Record<string, unknown>[], mainSha:
  * amendment has already been recorded for that same source run (W1-T5531: a main-red refusal is
  * re-offered once, when `mainSha` has moved). A later verdict of any kind
  * (a merged PR, a failure) supersedes the refusal, so a task that moved on is never held for it.
+ * W1-T9792: a fix round's newest `fix.needs_design` row carrying a REFUSED excerpt is nominated beside them.
  */
 export function noPrVerdictRowsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -150,6 +168,8 @@ export function noPrVerdictRowsFromLedger(
   mainSha?: string,
 ): NoPrVerdictRow[] {
   const latest = new Map<string, Record<string, unknown>>();
+  // W1-T9792: a fix round's hand-off, keyed per task; a later round with another outcome supersedes it.
+  const latestFix = new Map<string, Record<string, unknown>>();
   const handled = new Map<string, Record<string, unknown>[]>();
   for (const line of lines) {
     const taskId = line.task_id;
@@ -159,21 +179,28 @@ export function noPrVerdictRowsFromLedger(
       handled.set(key, [...(handled.get(key) ?? []), line]);
     } else if (line.step === "verdict") {
       latest.set(taskId, line);
+    } else if (line.step === "fix.needs_design") {
+      latestFix.set(taskId, line);
+    } else if (line.step === "fix.done" && line.fix_outcome !== "NEEDS_DESIGN") {
+      latestFix.delete(taskId);
     }
   }
   const out: NoPrVerdictRow[] = [];
-  for (const [taskId, row] of latest) {
-    if (row.verdict !== "no_pr") continue;
+  const nominate = (taskId: string, row: Record<string, unknown>, runId: unknown): void => {
     const excerpt = row.report_excerpt;
-    const runId = row.run_id;
-    if (typeof excerpt !== "string" || typeof runId !== "string") continue;
+    if (typeof excerpt !== "string" || typeof runId !== "string") return;
     const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
     // An undated or stale row is history — never a live block to hold a task for.
-    if (!Number.isFinite(at) || nowMs - at > maxAgeMs) continue;
+    if (!Number.isFinite(at) || nowMs - at > maxAgeMs) return;
     const recorded = handled.get(`${taskId}\u0000${runId}`);
-    if (recorded && amendmentSettled(recorded, mainSha)) continue;
+    if (recorded && amendmentSettled(recorded, mainSha)) return;
     out.push({ taskId, runId, reportExcerpt: excerpt,
       ...(typeof row.pre_dispatch_contract_revision === "string" ? { contractRevision: row.pre_dispatch_contract_revision } : {}) });
+  };
+  for (const [taskId, row] of latest) if (row.verdict === "no_pr") nominate(taskId, row, row.run_id);
+  // One source per round: the daemon run id is shared by every PR the pass touched, so the head names the round.
+  for (const [taskId, row] of latestFix) {
+    if (typeof row.run_id === "string" && typeof row.head_sha === "string") nominate(taskId, row, `${row.run_id}@${row.head_sha}`);
   }
   return out;
 }
