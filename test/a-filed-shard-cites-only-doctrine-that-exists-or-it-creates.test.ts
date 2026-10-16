@@ -67,3 +67,13 @@ test("a doctrine path names a section and a page, never a bare page", () => {
   assert.equal(DOCTRINE_PATH_RE.test("doctrine/README.md"), false, "a page outside any section is no citation");
   assert.equal(DOCTRINE_PATH_RE.test("doctrine/Plan/Page.md"), false, "doctrine slugs are lower case");
 });
+
+test("a checkout with no doctrine/ has no doctrine sections, so lint-plan cites nothing there", async () => {
+  const { withTempDir } = await import("../src/lib/tmp.js");
+  const { doctrineCitationFactsAt } = await import("../src/lib/doctrine-citation-facts.js");
+  await withTempDir("no-doctrine", (root) => {
+    const facts = doctrineCitationFactsAt(root);
+    assert.equal(facts.sections.size, 0);
+    assert.deepEqual(lintTask(task(), { doctrineCitations: facts }).violations.filter((v) => v.check === "doctrine-citation-unresolved"), []);
+  });
+});
