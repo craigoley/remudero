@@ -10,6 +10,11 @@ import { createSelectedRegistryObserver } from "../src/lib/selected-registry-con
 import { registryFileIO } from "../src/lib/instance-registry-selection.js";
 
 interface Row { step: string; fields: Record<string, unknown> }
+function pendingValue<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(accept => { resolve = accept; });
+  return { promise, resolve };
+}
 const STEP = "instance_registry.consumer_shadow_observed";
 const selectedText = (name = "fixture", repo = "owner/repo") =>
   `instances:\n  ${name}:\n    github_repo: ${repo}\n    mode: shadow\n    state_dir: /private/selected-material-sentinel\n`;
@@ -88,7 +93,7 @@ test("selected readiness absent opt-in preserves legacy checks without a selecte
 });
 
 test("selected consumer effects run immediately while the selected reader is pending", async (t) => {
-  const f = fixture(t), pending = Promise.withResolvers<never>();
+  const f = fixture(t), pending = pendingValue<never>();
   const observer = createSelectedRegistryObserver({ ...f.options, io: { ...registryFileIO, lstat: () => pending.promise } })!;
   t.after(() => observer.close());
   let calls = 0;
@@ -107,7 +112,7 @@ test("selected consumer captures its source ports capabilities and target before
   f.options.settings.registryPath = join(f.root, "wrong.yaml");
   capabilities[0] = "unsupported";
   io.lstat = () => assert.fail("captured IO cannot retarget through caller mutation");
-  const gate = Promise.withResolvers<string>(), target = { repository: "owner/repo", instanceName: "fixture" };
+  const gate = pendingValue<string>(), target = { repository: "owner/repo", instanceName: "fixture" };
   const value = observer.observe("serve-readiness", target, () => gate.promise);
   target.repository = "attacker/elsewhere";
   target.instanceName = "wrong";
