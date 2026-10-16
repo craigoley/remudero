@@ -19,6 +19,7 @@
  * `repos/<repo>`, where the daemon clones every repo it manages (`join(config.root, "repos", repo)`).
  */
 import { readFileSync } from "node:fs";
+import { observeSelectedRegistry, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot, type AnalyticsSnapshotCache } from "./analytics-route.js";
@@ -81,6 +82,7 @@ export interface InstanceStateRoot {
 export type InstanceAvailability = { ok: true } | { ok: false; reason: string };
 
 export interface InstanceGatewayOptions {
+  selectedRegistryObserver?: SelectedRegistryObserver;
   /** The repo-tracked registry; serve.ts defaults it to `daemonInstanceRegistryPath` of the checkout. */
   registryPath?: string;
   stateBase?: string;
@@ -269,8 +271,11 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
   const stateBase = opts.stateBase ?? DEFAULT_INSTANCE_STATE_BASE;
   const out: Route[] = [];
   for (const instance of registryInstances(opts)) {
+    const observe = (route: Route): Route => opts.selectedRegistryObserver === undefined ? route : { ...route,
+      handler: (req, res, context) => observeSelectedRegistry(opts.selectedRegistryObserver, "serve-topology",
+        { instanceName: instance.name, repository: instance.repo }, () => route.handler(req, res, context)) };
     if (instance.name === core) {
-      out.push(...coreInstanceRoutes(coreRoutes, core, instance.repo, opts));
+      out.push(...coreInstanceRoutes(coreRoutes, core, instance.repo, opts).map(observe));
       continue;
     }
     const root = instanceStateRoot(instance, stateBase);
@@ -312,7 +317,7 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
         routes: (opts.inboxSources ?? defaultInstanceInboxSources)(root, instance.repo, github),
       }),
     ];
-    out.push(...routes.map((route) => guardInstanceRoute(route, instance.name, availability)));
+    out.push(...routes.map((route) => observe(guardInstanceRoute(route, instance.name, availability))));
   }
   return out;
 }
@@ -415,5 +420,8 @@ export function watchInstanceLiveness(opts: InstanceGatewayOptions & { ledgerPat
       // A timer callback that throws would take the whole gateway down with it.
       opts.log?.("fleet.liveness_check_failed", { reason: String((error as Error).message ?? error) });
     }
+    // Independent identity evidence at this actual tick; no second legacy scan, new timer or effect permission.
+    for (const root of roots) void observeSelectedRegistry(opts.selectedRegistryObserver, "serve-liveness",
+      { instanceName: root.name, repository: root.repo }, () => undefined);
   }, LIVENESS_CHECK_MS);
 }

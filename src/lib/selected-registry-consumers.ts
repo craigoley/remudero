@@ -2,7 +2,7 @@ import type { SelectedModeSettings } from "./config-schema.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
   type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
 
-export type RegistryConsumerAction = "serve-registry" | "serve-readiness" | "serve-go-live" | "serve-topology"
+export type RegistryConsumerAction = "serve-registry" | "serve-readiness" | "serve-go-live" | "serve-shadow-evidence" | "serve-topology"
   | "serve-liveness" | "repositories-view" | "repo-dashboard" | "benchmark-discovery" | "inbox-discovery";
 export interface RegistryConsumerTarget { repository?: string; instanceName?: string }
 export type RegistryObservationSink = (step: string, fields: Readonly<Record<string, unknown>>) => unknown;

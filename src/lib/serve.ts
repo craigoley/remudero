@@ -2124,7 +2124,8 @@ function accessConfig(): { accessTeamDomain?: string; accessAudience?: string } 
 }
 
 /** W1-T4266: exact instance routes share the gateway's registry and state-root conventions. */
-export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
+export function buildOnboardingGoLiveRoutes(deps: ServeDeps,
+  selectedRegistryObserver = createSelectedRegistryObserver(deps.selectedRegistryObservation)): Route[] {
   const registryPath = deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot);
   let registry;
   try {
@@ -2147,7 +2148,7 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
       ? dirname(deps.ledgerPath)
       : dirname(instanceStateRoot(instance, deps.instances?.stateBase ?? DEFAULT_INSTANCE_STATE_BASE).ledgerPath);
     const prefix = `/v1/i/${instance.name}`;
-    return [
+    const routes: Route[] = [
       {
         method: "GET", path: `${prefix}/shadow-evidence`, scope: "read",
         handler: async (_req, res) => {
@@ -2177,6 +2178,10 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
         }),
       },
     ];
+    return selectedRegistryObserver === undefined ? routes : routes.map(route => ({ ...route,
+      handler: (req, res, context) => observeSelectedRegistry(selectedRegistryObserver,
+        route.method === "POST" ? "serve-go-live" : "serve-shadow-evidence",
+        { instanceName: instance.name, repository: instance.repo }, () => route.handler(req, res, context)) }));
   });
 }
 
@@ -3139,7 +3144,7 @@ function assembleServeRoutes(
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" },
     readModel && { source: readModel, instance: deps.instances?.coreInstance ?? CORE_INSTANCE });
-  routes.push(...buildOnboardingGoLiveRoutes(deps));
+  routes.push(...buildOnboardingGoLiveRoutes(deps, selectedRegistryObserver));
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
       registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
@@ -3152,6 +3157,7 @@ function assembleServeRoutes(
       }, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: instance ?? "instance" },
       readModel && { source: readModel, instance: instance ?? CORE_INSTANCE }),
       ...deps.instances,
+      selectedRegistryObserver,
       assistantClaimRoot: deps.fleetControlRoot,
       assistantBootSha: consoleSha,
       onAnalyticsCache: (cache, instance) => {
@@ -3433,7 +3439,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
   const startLedgerWriters = (): void => {
-    server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
+    server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances,
+      selectedRegistryObserver: routeAssembly.selectedRegistryObserver }));
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
     // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers. ONE close
     // listener stops both: the server already sits at its listener ceiling.
