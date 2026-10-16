@@ -1602,6 +1602,7 @@ import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefect
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
+import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
 import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
@@ -54474,12 +54475,13 @@ export interface AlertFixDispatchDeps {
    *  drive both the refusal and the positive-control branch without a real `gh` call — see the
    *  real binding ({@link checkAlertFixAcceptance}) and `PR_AUTHORING_PATHS`'s "alert-fix" row
    *  (lib/review.ts) for why THIS lane, specifically, cannot fall back to a plan-side lookup. */
-  checkAcceptance: (prUrl: string) => AcceptanceAuthorTimeResult;
+  checkAcceptance: AlertFixAcceptanceCheck;
   /** W1-T8625: the opened PR's body, which the dispatcher parses ITSELF for inert proofs — `checkAcceptance`'s trailer
    *  arm returns `ok` before it reads the block, and every alert-fix body carries a trailer. Optional so the dispatch
    *  fakes that predate it keep driving only what they drove; omitted, the inert-proof count does not run (no real
-   *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. */
-  readPrBody?: (prUrl: string) => string;
+   *  `gh` default fires under a fake). The real binding is {@link readAlertFixPrBody}. W1-T9698: the dispatch reads it
+   *  ONCE, awaited, and hands that body to `checkAcceptance`. */
+  readPrBody?: AlertFixBodyRead;
   /** W1-T8572: the main-repair fix dispatch's no-test-file open (that lane reuses this seam rather than declaring
    *  another): the REST PR create, the pushed branch's diff against origin/main and its head subject. Optional, so a
    *  fake that omits them gets the real reads; the alert-fix lane never calls them. */
@@ -54490,32 +54492,7 @@ export interface AlertFixDispatchDeps {
   readRemoteBranchHead?: (worktreePath: string, branch: string) => Promise<string | undefined>; // W1-T9667: `git ls-remote`
 }
 
-/** W1-T8625: the opened PR's body over `gh` — the ONE body read both {@link checkAlertFixAcceptance} and the
- *  dispatcher's inert-proof count go through. `read` is appended LAST and defaults to the real {@link ghJson}; an
- *  absent `body` field reads as `""`. */
-export function readAlertFixPrBody(prUrl: string, read: (args: string[]) => unknown = ghJson): string {
-  const view = read(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
-  return view.body ?? "";
-}
-
-/**
- * The REAL `checkAcceptance` binding: fetch the PR body {@link dispatchAlertFixRun} just stamped a
- * trailer onto, and run {@link "./lib/review.js".acceptanceAuthorTimeCheck} over it — the same
- * diagnostic `rmd check-acceptance` prints, reached here without an author ever having to know that
- * verb exists. `alertTaskId` never resolves in `plan/tasks.yaml` (it is a synthetic
- * `ALERT-<source>-<id>`-shaped id, not a filed task), so no `expectedTaskId` is passed — the general,
- * body-only check applies (a resolvable `Remudero-Task:` trailer OR a judgeable body-level block).
- */
-export function checkAlertFixAcceptance(
-  prUrl: string,
-  /** Injectable `gh` reader, appended LAST so no positional caller shifts (the W1-T268 shape).
-   *  Omitted ⇒ the real {@link ghJson}. Exists because every dispatch test injects
-   *  `deps.checkAcceptance` and would otherwise leave THIS binding — the only thing that actually
-   *  reads the PR body in production — unexecuted. */
-  read: (args: string[]) => unknown = ghJson,
-): AcceptanceAuthorTimeResult {
-  return acceptanceAuthorTimeCheck(readAlertFixPrBody(prUrl, read));
-}
+export { alertFixBodyDeps, checkAlertFixAcceptance, readAlertFixPrBody } from "./lib/alert-fix-body.js";
 
 const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
   worktreeAdd: worktreeAddAsync,
@@ -54525,8 +54502,7 @@ const REAL_ALERT_FIX_DISPATCH_DEPS: AlertFixDispatchDeps = {
   resolveMount,
   spawn: ledgeredNonDispatchSpawn("alert-fix"),
   ensureTaskTrailer,
-  checkAcceptance: checkAlertFixAcceptance,
-  readPrBody: readAlertFixPrBody,
+  ...alertFixBodyDeps(),
 };
 
 /**
@@ -54609,36 +54585,9 @@ export async function dispatchAlertFixRun(
       // PR back — before CI/review would pay a full cycle to discover the same thing (rationale
       // (2)). Best-effort: an unreadable PR (a `gh` hiccup) must never fail this lane over a
       // diagnostic read, so only the check itself is guarded, not `ensureTaskTrailer`/`pr_opened`
-      // above. The mutation check (test/acceptance-block-diagnostics.test.ts) targets THIS exact
-      // `deps.checkAcceptance` call — removing it must fail "a body with no acceptance header is
-      // refused at author time" without touching anything else in this lane.
-      try {
-        const check = deps.checkAcceptance(report.prUrl);
-        if (!check.ok) {
-          log("alert-fix.acceptance_defect", { pr_url: report.prUrl, defect: check.defect, message: check.message });
-        }
-      } catch (e) {
-        log("alert-fix.acceptance_check_error", { pr_url: report.prUrl, error: String((e as Error)?.message ?? e) });
-      }
-      // W1-T8625: THE INERT-PROOF COUNT, on the body itself. `deps.checkAcceptance` returns `ok` at its trailer arm
-      // before it reads the block, and only REPORTS an inert proof when it does read it, so a prose-proof body ledgered
-      // nothing. Separately guarded: a failed body read is a named check error, never a clean body.
-      if (deps.readPrBody) {
-        try {
-          const inert = inertAcceptanceProofs(deps.readPrBody(report.prUrl));
-          if (inert.length > 0) {
-            log("alert-fix.acceptance_defect", {
-              pr_url: report.prUrl,
-              defect: "inert-proofs",
-              inert_count: inert.length,
-              inert_proofs: inert,
-              message: `${inert.length} Acceptance proof(s) carry no executable \`unit test:\`/\`grep:\` dialect — the reviewer will not run them`,
-            });
-          }
-        } catch (e) {
-          log("alert-fix.acceptance_check_error", { pr_url: report.prUrl, check: "inert-proofs", error: String((e as Error)?.message ?? e) });
-        }
-      }
+      // above. W1-T9698: one awaited body read serves the check and the inert-proof count (W1-T8625);
+      // the mutation check (test/acceptance-block-diagnostics.test.ts) targets its call in lib/alert-fix-body.ts.
+      await judgeOpenedAlertFixBody(report.prUrl, deps.checkAcceptance, deps.readPrBody, log);
     } else if (!owned || landed !== undefined) {
       log("alert-fix.no_pr", { subtype: worker.subtype });
     }
