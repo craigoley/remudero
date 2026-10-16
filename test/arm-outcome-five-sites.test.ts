@@ -202,7 +202,7 @@ test("armAndLogOutcome ledgers automerge.armed only when the outcome actually ar
       // as armed (correctly — it succeeded), so it still writes `automerge.armed`, but it now ALSO
       // writes its own step. Folding a merge into "armed" is the conflation that step exists to end.
       r.steps.map((s) => s.step),
-      outcome === "direct-merged" ? ["automerge.armed", "automerge.clean_status_direct_merge"] : ["automerge.armed"],
+      outcome === "direct-merged" ? ["automerge.armed", "automerge.clean_status_direct_merge", "pr.terminal"] : ["automerge.armed"],
       `${outcome}: this did NOT turn every lane into a reporter of failure — a real arm still reads as one`,
     );
     assert.equal(r.steps[0].extra?.outcome, outcome);
@@ -418,7 +418,7 @@ test("W1-T1079: the clean-status case still routes to the direct merge", () => {
   );
 
   assert.equal(outcome, "direct-merged");
-  assert.deepEqual(r.steps.map((s) => s.step), ["automerge.armed", "automerge.clean_status_direct_merge"]);
+  assert.deepEqual(r.steps.map((s) => s.step), ["automerge.armed", "automerge.clean_status_direct_merge", "pr.terminal"]);
   assert.equal(r.steps[0].extra?.error, undefined, "a completed direct merge is a success, not an ignored error");
   assert.ok(said.some((m) => m.includes("clean_status_direct_merge")));
 });
