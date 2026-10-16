@@ -50,14 +50,120 @@ TOOL_ROOT_OWNERS = {"pip": "pip", "setuptools": "setuptools", "pkg_resources": "
                     "_distutils_hack": "setuptools", "packaging": "packaging", "wheel": "wheel"}
 RESERVED_COMMAND_OWNERS = {"pip": "pip", "pip3": "pip", "pip3.12": "pip", "wheel": "wheel",
                            "semgrep": "semgrep", "pysemgrep": "semgrep", "semgrep-core": "semgrep"}
-# No inferred namespace waiver. Actual original artifact inventory is needed before
-# any trusted, hash-bound shared-namespace allowance (e.g. OpenTelemetry) is reviewed.
-APPROVED_SHARED_NAMESPACES: dict[str, frozenset[str]] = {}
+# Exact original-artifact contributors; no name-only or inferred namespace allowance.
+APPROVED_SHARED_NAMESPACES = {
+    "google": frozenset({
+        ("googleapis-common-protos", "1.75.5", "d7285525c23039db98f2463e6d5a4f9b958b94d497f03a844ece3259c4e72d5d"),
+        ("protobuf", "6.33.6", "e9db7e292e0ab79dd108d7f1a94fe31601ce1ee3f7b79e0692043423020b0593"),
+    }),
+    "opentelemetry": frozenset({
+        ("opentelemetry-api", "1.37.0", "accf2024d3e89faec14302213bc39550ec0f4095d1cf5ca688e1bfb1c8612f47"),
+        ("opentelemetry-exporter-otlp-proto-common", "1.37.0", "53038428449c559b0c564b8d718df3314da387109c4d36bd1b94c9a641b0292e"),
+        ("opentelemetry-exporter-otlp-proto-http", "1.37.0", "54c42b39945a6cc9d9a2a33decb876eabb9547e0dcb49df090122773447f1aef"),
+        ("opentelemetry-instrumentation", "0.58b0", "50f97ac03100676c9f7fc28197f8240c7290ca1baa12da8bfbb9a1de4f34cc45"),
+        ("opentelemetry-instrumentation-requests", "0.58b0", "672a0be0bb5b52bea0c11820b35e27edcf4cd22d34abe4afc59a92a80519f8a8"),
+        ("opentelemetry-instrumentation-threading", "0.58b0", "eacc072881006aceb5b9b6831bcdce718c67ef6f31ac0b32bd6a23a94d979b4a"),
+        ("opentelemetry-proto", "1.37.0", "8ed8c066ae8828bbf0c39229979bdf583a126981142378a9cbe9d6fd5701c6e2"),
+        ("opentelemetry-sdk", "1.37.0", "8f3c3c22063e52475c5dbced7209495c2c16723d016d39287dfc215d1771257c"),
+        ("opentelemetry-semantic-conventions", "0.58b0", "5564905ab1458b96684db1340232729fce3b5375a06e140e8904c78e4f815b28"),
+        ("opentelemetry-util-http", "0.58b0", "6c6b86762ed43025fbd593dc5f700ba0aa3e09711aedc36fd48a13b23d8cb1e7"),
+    }),
+}
+# Exact path/body exceptions only inside an already approved whole artifact.
+APPROVED_SPECIAL_MEMBERS = {
+    ("opentelemetry-instrumentation", "0.58b0", "50f97ac03100676c9f7fc28197f8240c7290ca1baa12da8bfbb9a1de4f34cc45"): {
+        "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py": (673, "ddcfb83130a15563be3e97502e92073e9d0cf69643aa73c410dfa3721eafe265"),
+    },
+    ("setuptools", "84.0.0", "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"): {
+        "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/licenses/LICENSE": (10278, "458502e12d97bbf64438606a20044aa85eb05fb0a8a807bb35dbec253fd1fc04"),
+        "setuptools/_vendor/jaraco_context-6.1.0.dist-info/licenses/LICENSE": (1076, "9755a18519666e5f0f4cae3daad3d7012bcae48a600b31237d75e9fe134e6683"),
+        "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/licenses/LICENSE": (1076, "5a57cb4db85e2a2dd88c290628908add57e3451449e0a9a71fdfb38776fd759d"),
+        "setuptools/_vendor/more_itertools-10.8.0.dist-info/licenses/LICENSE": (1053, "09f1c8c9e941af3e584d59641ea9b87d83c0cb0fd007eb5ef391a7e2643c1a46"),
+        "setuptools/_vendor/packaging-26.0.dist-info/licenses/LICENSE": (197, "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"),
+        "setuptools/_vendor/packaging-26.0.dist-info/licenses/LICENSE.APACHE": (10174, "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"),
+        "setuptools/_vendor/packaging-26.0.dist-info/licenses/LICENSE.BSD": (1344, "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"),
+        "setuptools/_vendor/platformdirs-4.4.0.dist-info/licenses/LICENSE": (1089, "29e0fd62e929850e86eb28c3fdccf0cefdf4fa94879011cffb3d0d4bed6d4db6"),
+        "setuptools/_vendor/tomli-2.4.0.dist-info/licenses/LICENSE": (1072, "b80816b0d530b8accb4c2211783790984a6e3b61922c2b5ee92f3372ab2742fe"),
+        "setuptools/_vendor/wheel-0.46.3.dist-info/licenses/LICENSE.txt": (1107, "30c23618679108f3e8ea1d2a658c7ca417bdfc891c98ef1a89fa4ff0c9828654"),
+        "setuptools/_vendor/zipp-3.23.0.dist-info/licenses/LICENSE": (1076, "5a57cb4db85e2a2dd88c290628908add57e3451449e0a9a71fdfb38776fd759d"),
+        "setuptools/_vendor/autocommand-2.2.2.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/autocommand-2.2.2.dist-info/LICENSE": (7634, "ade78d04982d69972d444a8e14a94f87a2334dd3855cc80348ea8e240aa0df2d"),
+        "setuptools/_vendor/autocommand-2.2.2.dist-info/METADATA": (15006, "3800d9b91dceea2065a6ed6279383362e97ac38b8e56b9343f404ee531860099"),
+        "setuptools/_vendor/autocommand-2.2.2.dist-info/RECORD": (1072, "2bee6072cbcec6390c57107c8dfcb0422918a98ecdb5a2cc362187f13d42e96f"),
+        "setuptools/_vendor/autocommand-2.2.2.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/autocommand-2.2.2.dist-info/WHEEL": (92, "db07a93359e4e034b8785a58ad6d534ea3dca0635f1e184efe2e66e1c3a299ba"),
+        "setuptools/_vendor/autocommand-2.2.2.dist-info/top_level.txt": (12, "0337e180a292f04740c16513485f2681e5506d7398f64a241c1ea44aac30aaed"),
+        "setuptools/_vendor/backports.tarfile-1.2.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/backports.tarfile-1.2.0.dist-info/LICENSE": (1023, "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"),
+        "setuptools/_vendor/backports.tarfile-1.2.0.dist-info/METADATA": (2020, "8215c54ead77d9dc5a108a25c6bdc72b5999aa6f62c9499a440359412afa5a51"),
+        "setuptools/_vendor/backports.tarfile-1.2.0.dist-info/RECORD": (1056, "0f69db719b54220d6a4adff8bfb04ac98affea3dc8b54054a1a787a17567f4d1"),
+        "setuptools/_vendor/backports.tarfile-1.2.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/backports.tarfile-1.2.0.dist-info/WHEEL": (92, "189eedfe4581172c1b6a02b97a8f48a14c0b5baa3239e4ca990fbd8871553714"),
+        "setuptools/_vendor/backports.tarfile-1.2.0.dist-info/top_level.txt": (10, "7068da2cc3a8051d452b4029a23b73595995893b49ec91882bf1f05e212cbed5"),
+        "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/METADATA": (4670, "a3e38b9ee4326289d4864704f30e299ee769e2309ce9f4a75f0de1a50ad0a356"),
+        "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/RECORD": (1868, "52a6b8ee0de15cf7fd99625f43b97cd2e3942ac86f16054ea90de48e66f29355"),
+        "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/WHEEL": (91, "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b"),
+        "setuptools/_vendor/importlib_metadata-8.7.1.dist-info/top_level.txt": (19, "08eddf0fdcb29403625e4acca38a872d5fe6a972f6b02e4914a82dd725804fe0"),
+        "setuptools/_vendor/jaraco.text-4.0.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/jaraco.text-4.0.0.dist-info/LICENSE": (1023, "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"),
+        "setuptools/_vendor/jaraco.text-4.0.0.dist-info/METADATA": (3731, "5c2fd09012c954f139b10624978d5335a654c34014cd06f6f466ca683dbc9c56"),
+        "setuptools/_vendor/jaraco.text-4.0.0.dist-info/RECORD": (1157, "63b936c308d0fcbe1390e824567cc007536c32a849adb02278e95f1d4c736c31"),
+        "setuptools/_vendor/jaraco.text-4.0.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/jaraco.text-4.0.0.dist-info/WHEEL": (91, "5b287efe76740c9628947367d7f84c6b894ceee0de743fd1195c1b9938f222d9"),
+        "setuptools/_vendor/jaraco.text-4.0.0.dist-info/top_level.txt": (7, "d099cddcb7d71f82c845f5cbf9014e18227341664edc42f1e11d5dfe5a2ea103"),
+        "setuptools/_vendor/jaraco_context-6.1.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/jaraco_context-6.1.0.dist-info/METADATA": (4270, "0435ebfc52055c5a9974ed20c171b6454383eaf9dbb1508814ba7ad97c59d712"),
+        "setuptools/_vendor/jaraco_context-6.1.0.dist-info/RECORD": (777, "4599d876ceb42b7eef03aa39e235c4ebeab6aea2409dbe634496852393d1f837"),
+        "setuptools/_vendor/jaraco_context-6.1.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/jaraco_context-6.1.0.dist-info/WHEEL": (91, "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b"),
+        "setuptools/_vendor/jaraco_context-6.1.0.dist-info/top_level.txt": (7, "d099cddcb7d71f82c845f5cbf9014e18227341664edc42f1e11d5dfe5a2ea103"),
+        "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/METADATA": (2960, "2e79da8dc3469924abe3ac8b22a3feb5692a79bf9f47bbc86b6535d618641849"),
+        "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/RECORD": (882, "baafd2d6d94c1bde453e4c805ac05511dc53986e0a63b02f674ef0f788bec146"),
+        "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/WHEEL": (91, "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b"),
+        "setuptools/_vendor/jaraco_functools-4.4.0.dist-info/top_level.txt": (7, "d099cddcb7d71f82c845f5cbf9014e18227341664edc42f1e11d5dfe5a2ea103"),
+        "setuptools/_vendor/more_itertools-10.8.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/more_itertools-10.8.0.dist-info/METADATA": (39413, "6ab3515145abe58b067f087c867631cf4cf5d653fed81b9642ee12086c3904b8"),
+        "setuptools/_vendor/more_itertools-10.8.0.dist-info/RECORD": (1095, "9ed1b134c0aa83722f36e99f3918aa9610ce3a0a514d793bbb74a368d441a01d"),
+        "setuptools/_vendor/more_itertools-10.8.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/more_itertools-10.8.0.dist-info/WHEEL": (82, "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db"),
+        "setuptools/_vendor/packaging-26.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/packaging-26.0.dist-info/METADATA": (3309, "3362bb7d6a26da2962ba8daaa4785cd0bacac21aba908a1195cc8f59580a265a"),
+        "setuptools/_vendor/packaging-26.0.dist-info/RECORD": (2113, "f50503333aae9517807d2fb4d81fc27cb60aa644666f50176812626d6224ce5d"),
+        "setuptools/_vendor/packaging-26.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/packaging-26.0.dist-info/WHEEL": (82, "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db"),
+        "setuptools/_vendor/platformdirs-4.4.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/platformdirs-4.4.0.dist-info/METADATA": (12831, "bbc5216d5f4c77bfbc57227264d52e66bccde71ccf79e75e1a6046d029d30223"),
+        "setuptools/_vendor/platformdirs-4.4.0.dist-info/RECORD": (1218, "3d0d2f1cc018593c4d8baa2395baf0b1c1c645bbd8c18cd064f49cb4e4c95ea0"),
+        "setuptools/_vendor/platformdirs-4.4.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/platformdirs-4.4.0.dist-info/WHEEL": (87, "aad0b0a12256807936d52d4a6f88a1773236ae527564a688bab4e3fe780e8724"),
+        "setuptools/_vendor/tomli-2.4.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/tomli-2.4.0.dist-info/METADATA": (10567, "f5ac0a1f8fba908b4646cd655309e91aad969b6787616ac571ca462a3832ffce"),
+        "setuptools/_vendor/tomli-2.4.0.dist-info/RECORD": (822, "225430ce95640e8d4fcdb93cdae2fc38d685aec016d0e293d5fb99a695886fed"),
+        "setuptools/_vendor/tomli-2.4.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/tomli-2.4.0.dist-info/WHEEL": (82, "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db"),
+        "setuptools/_vendor/wheel-0.46.3.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/wheel-0.46.3.dist-info/METADATA": (2410, "22910aa97ca89cbcc20a019e27fe31360b7929a4bd66ca0d310f99a44f6ccd35"),
+        "setuptools/_vendor/wheel-0.46.3.dist-info/RECORD": (1734, "b0297c3ada17b8727e15ddd6d1e38c8a90a997f779fcf978996f6fec62ecb702"),
+        "setuptools/_vendor/wheel-0.46.3.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/wheel-0.46.3.dist-info/WHEEL": (82, "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db"),
+        "setuptools/_vendor/wheel-0.46.3.dist-info/entry_points.txt": (110, "24976d480193bcc2db2244d565400cbc628edfd16d59f09517c9a9fcd1fa7b88"),
+        "setuptools/_vendor/zipp-3.23.0.dist-info/INSTALLER": (2, "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"),
+        "setuptools/_vendor/zipp-3.23.0.dist-info/METADATA": (3563, "bdd67d4d16cf0bf3b893e7d18cd3d2d774adb82f37ed985bc7770c607226b35b"),
+        "setuptools/_vendor/zipp-3.23.0.dist-info/RECORD": (1078, "3bfab660a24704f84228e4bb1ce1f0e3fa9ff80e5c806352a626b2f460ead836"),
+        "setuptools/_vendor/zipp-3.23.0.dist-info/REQUESTED": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "setuptools/_vendor/zipp-3.23.0.dist-info/WHEEL": (91, "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b"),
+        "setuptools/_vendor/zipp-3.23.0.dist-info/top_level.txt": (5, "8806dda121df686a817d56f65ee47d26a4901c2a0eb0eb46eb2f42fcb4a9a85c"),
+    },
+}
 AUDIT_TEST_SOURCES = {
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "1060e91718d3efb3df276a277ff4e88c5c5d1f8ecb20e5ace497fceb10974db8",
+    "test_runtime_compatibility_audit.py": "5bdd68c18b7f5526cc8ba7f142d92751772f65a2b074ad01e77e19a500704c29",
 }
-AUDIT_TEST_INVENTORY = "f438f531230c419b5319fd33e12ae1a71609dc2cd3a08f618b663f5adc45b3d3"
+AUDIT_TEST_INVENTORY = "3ace2f7f45dfff9a2733b26941d74e3131400cf41bc191e59a893843d03b5b0c"
 
 
 class AuditBlocked(ValueError):
@@ -73,6 +179,24 @@ def need(condition: bool, code: str, detail: str) -> None:
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def approved_namespace_contributor(row: dict, root: str, destination: tuple) -> bool:
+    identity = (row["name"], row["version"], row["sha256"])
+    # The original reviewed contributors are implicit namespaces, not an
+    # executable root module or an __init__.py that takes over another package.
+    return (identity in APPROVED_SHARED_NAMESPACES.get(root, frozenset()) and
+            len(destination) >= 3 and destination[:2] == ("site", root) and
+            not (len(destination) == 3 and destination[2].lower() == "__init__.py"))
+
+
+def approved_special_member(name: str, version: str, artifact_sha: str, path: str,
+                            data: bytes, destination: tuple) -> bool:
+    expected = APPROVED_SPECIAL_MEMBERS.get((name, version, artifact_sha), {}).get(path)
+    # An install-scheme/case alias is not the reviewed archive path, even if its
+    # body or logical destination happens to match an approved member.
+    return (expected is not None and expected == (len(data), digest(data)) and
+            destination == ("site", *safe_member(path)))
 
 
 def _api_from_imported_pip(provenance: dict) -> SimpleNamespace:
@@ -233,11 +357,12 @@ def scan_wheel(filename: str, raw: bytes, api) -> dict:
         lower = tuple(p.lower() for p in destination)
         need(not (lower[0] == "bin" and (lower[1] == "pyvenv.cfg" or lower[1].endswith("._pth"))),
              "INTERPRETER_CONFIGURATION", path)
+        exact_special = approved_special_member(name, version, artifact_sha, path, _data, destination)
         metadata_parts = [i for i, part in enumerate(lower) if part.endswith((".dist-info", ".egg-info"))]
-        need(not metadata_parts or (metadata_parts == [1] and parts[0] == info_dir and destination[1] == info_dir),
+        need(exact_special or not metadata_parts or (metadata_parts == [1] and parts[0] == info_dir and destination[1] == info_dir),
              "FOREIGN_DISTRIBUTION_METADATA", path)
         need(not any(p.endswith((".pyc", ".pyo", ".egg-link")) or p == "__pycache__" for p in lower), "STARTUP_OR_BYTECODE", path)
-        need(not any(p.split(".", 1)[0] in {"sitecustomize", "usercustomize"} for p in lower), "STARTUP_CUSTOMIZE", path)
+        need(exact_special or not any(p.split(".", 1)[0] in {"sitecustomize", "usercustomize"} for p in lower), "STARTUP_CUSTOMIZE", path)
         if any(p.endswith(".pth") for p in lower):
             need(approved_setuptools_pth(name, version, artifact_sha, path), "UNAPPROVED_PTH", path)
         destinations.append((destination, path, "archive"))
@@ -313,8 +438,10 @@ def audit_distribution_set(rows: list[dict], api) -> dict:
                 need(TOOL_ROOT_OWNERS.get(root, name) == name, "TOOL_NAMESPACE_OVERWRITE", root)
                 if root in TOOL_ROOT_OWNERS:
                     need((row["version"], row["sha256"]) == APPROVED_TOOLS[name], "TOOL_ARTIFACT_NOT_APPROVED", name)
+                if root in APPROVED_SHARED_NAMESPACES:
+                    need(approved_namespace_contributor(row, root, destination), "UNAPPROVED_NAMESPACE_CONTRIBUTOR", root)
                 prior = root_owners.setdefault(root, set())
-                prior.add(name)
+                prior.add((name, row["version"], row["sha256"]))
                 need(len(prior) == 1 or prior <= APPROVED_SHARED_NAMESPACES.get(root, frozenset()), "NAMESPACE_OWNERSHIP", root)
             owners[key] = {"owner": name, "source": source, "kind": kind}
             directories.update(key[:i] for i in range(1, len(key)))
@@ -544,7 +671,7 @@ def _bootstrap_pip(root):
 def verify_unit_receipt(report, expected_sources):
     need(report.get("schema") == "semgrep-audit-unit-controls/v1" and
          report.get("state") == "SOURCE_MODULE_CONTROLS_PASS", "UNIT_RESULT", "wrong result type")
-    need(all(type(report.get(k)) is int and report[k] == 107 for k in ("selected", "executed", "pass")) and
+    need(all(type(report.get(k)) is int and report[k] == 117 for k in ("selected", "executed", "pass")) and
          all(type(report.get(k)) is int and report[k] == 0 for k in
              ("fail", "error", "skipped", "unrun", "expectedFailures", "unexpectedSuccesses")),
          "UNIT_COUNTS", "exact complete non-skipped inventory required")
@@ -553,8 +680,8 @@ def verify_unit_receipt(report, expected_sources):
          report.get("invariantErrors") == [] and report.get("failures") == [] and report.get("errors") == [],
          "UNIT_CLOSURE", "incomplete or failed source controls")
     ids = report.get("literalInventory")
-    need(isinstance(ids, list) and len(ids) == 107 and all(isinstance(v, str) for v in ids) and
-         len(set(ids)) == 107 and ids == sorted(ids) and
+    need(isinstance(ids, list) and len(ids) == 117 and all(isinstance(v, str) for v in ids) and
+         len(set(ids)) == 117 and ids == sorted(ids) and
          digest(("\n".join(ids) + "\n").encode()) == AUDIT_TEST_INVENTORY and
          report.get("inventorySha256") == AUDIT_TEST_INVENTORY and
          sorted(report.get("executedIds", [])) == ids and sorted(report.get("successfulIds", [])) == ids,
@@ -589,7 +716,7 @@ def phase_unit(root, workspace, head):
     report = json.loads(_regular(receipt, 65536))
     verify_unit_receipt(report, expected)
     summary = {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
-               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 107,
+               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 117,
                "pythonVersion": report["pythonVersion"], "productionLoader": production_loader.provenance,
                "runnerQualified": False}
     _json_once(root / "unit-audit.json", summary)

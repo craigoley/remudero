@@ -52,7 +52,7 @@ test('Semgrep Python audit has its own CodeQL language without importing candida
 
 test('Semgrep unit receipt rejects incomplete inventory source drift skips and qualification transfer',()=>{
  // Pure receipt/controller fixtures only: these claims are synthetic, NOT an
- // execution of Python 3.12.15 or of the 107 native artifact-audit controls.
+ // execution of Python 3.12.15 or of the 117 native artifact-audit controls.
  const script=String.raw`
 import ast, copy, hashlib, json, pathlib, sys, tempfile, types
 source=pathlib.Path(sys.argv[1]); raw=source.read_bytes()
@@ -65,7 +65,7 @@ expected=dict(p.AUDIT_TEST_SOURCES);expected[source.name]=p.digest(raw)
 for name, value in p.AUDIT_TEST_SOURCES.items():
     assert p.digest(source.with_name(name).read_bytes()) == value
 r={"schema":"semgrep-audit-unit-controls/v1","state":"SOURCE_MODULE_CONTROLS_PASS",
-   **{k:107 for k in ("selected","executed","pass")},
+   **{k:117 for k in ("selected","executed","pass")},
    **{k:0 for k in ("fail","error","skipped","unrun","expectedFailures","unexpectedSuccesses")},
    **{k:True for k in ("complete","successful","inventoryClosed","successfulInventoryClosed","isolated","noSite","exactTargetPatchObserved")},
    **{k:False for k in ("qualified","linuxQualification","pinnedRuntimeQualified","runnerQualified")},
@@ -111,6 +111,6 @@ print(json.dumps({"positive":1,"refusedMutants":blocked,"inventory":len(ids)}))
  const run=spawnSync('python3',['-I','-S','-',auditor.pathname,cases.pathname],
   {input:script,encoding:'utf8',timeout:10000,maxBuffer:1<<20});
  assert.equal(run.error,undefined);assert.equal(run.signal,null);assert.equal(run.status,0,run.stderr);
- const result=JSON.parse(run.stdout);assert.equal(result.positive,1);assert.equal(result.inventory,107);
+ const result=JSON.parse(run.stdout);assert.equal(result.positive,1);assert.equal(result.inventory,117);
  assert.ok(result.refusedMutants>=90);
 });

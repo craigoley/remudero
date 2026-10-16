@@ -58,6 +58,25 @@ References: [PyPA local versions](https://packaging.python.org/en/latest/specifi
 [wheel format](https://packaging.python.org/en/latest/specifications/binary-distribution-format/),
 and [core metadata](https://packaging.python.org/en/latest/specifications/core-metadata/).
 
+### Exact reviewed layout support
+
+The independent auditor identifies shared namespace contributors by distribution,
+version and whole-artifact SHA256, including a lone contributor. The reviewed
+`google` and `opentelemetry` roots remain implicit namespaces: root modules,
+root `__init__.py`, case aliases and unreviewed contributors are refused.
+
+Nested vendor metadata and the one nested OpenTelemetry customization member
+require exact owner/version/artifact/path/body-size/body-SHA tuples and the original
+install destination. A same-content `.data` alias or different destination is not
+the reviewed member. No general startup-hook, foreign-metadata, namespace, tool,
+stdlib, collision, dependency or RECORD guard is disabled.
+
+The 117-case source inventory retains the original 107 controls and adds ten exact
+layout controls. Synthetic tuple controls are not original-artifact proof; real
+approved-archive positives and wrong-owner/version/hash/path/body/destination
+negatives must be retained separately. Source controls do not establish installed
+closure, scanner operation, Python 3.12.15 qualification or pilot activation.
+
 ## Install boundary
 
 Operator-approved CE 1.180.0 replaces 1.167.0, whose dependency constraints forced

@@ -18,9 +18,9 @@ that evidence; this source file neither reruns nor rewrites its receipts.
 
 TAP wrapper PLAN, not an implemented or executed Node test: invoke this CLI with
 no selection/filter, require exit 0 and its exclusive JSON receipt, then verify
-literal IDs, selected/executed/pass=107, unrun/fail/error/skip/xfail/xpass=0,
+literal IDs, selected/executed/pass=117, unrun/fail/error/skip/xfail/xpass=0,
 source/tool hashes and invariantErrors=[]. Keep Node's wrapper count distinct
-from the 107 native Python cases. No green result from stdout text alone.
+from the 117 native Python cases. No green result from stdout text alone.
 """
 from __future__ import annotations
 
@@ -220,7 +220,94 @@ class AuditSyntheticModuleTests(unittest.TestCase):
 
     def test_unreviewed_shared_namespace_remains_blocked_not_waived(self):
         self.blocked("NAMESPACE_OWNERSHIP", H.wheel("one", files={"namespace/one.py": b"# one\n"}), H.wheel("two", files={"namespace/two.py": b"# two\n"}))
-        self.assertEqual(self.p.APPROVED_SHARED_NAMESPACES, {})
+        self.assertEqual(set(self.p.APPROVED_SHARED_NAMESPACES), {"google", "opentelemetry"})
+        self.assertNotIn("namespace", self.p.APPROVED_SHARED_NAMESPACES)
+
+    def test_reviewed_namespace_tuples_are_exact_lower_seam_not_artifact_evidence(self):
+        for root, identities in self.p.APPROVED_SHARED_NAMESPACES.items():
+            for name, version, artifact_sha in identities:
+                row = {"name": name, "version": version, "sha256": artifact_sha}
+                self.assertTrue(self.p.approved_namespace_contributor(row, root, ("site", root, "child", "__init__.py")))
+
+    def test_reviewed_namespace_rejects_wrong_owner_version_or_whole_artifact_hash(self):
+        root = "google"
+        name, version, artifact_sha = next(iter(self.p.APPROVED_SHARED_NAMESPACES[root]))
+        original = {"name": name, "version": version, "sha256": artifact_sha}
+        for field, value in [("name", "attack"), ("version", version + ".1"), ("sha256", "0" * 64)]:
+            changed = dict(original, **{field: value})
+            self.assertFalse(self.p.approved_namespace_contributor(changed, root, ("site", root, "child.py")))
+
+    def test_reviewed_namespace_rejects_root_module_init_and_case_aliases(self):
+        name, version, artifact_sha = next(iter(self.p.APPROVED_SHARED_NAMESPACES["google"]))
+        row = {"name": name, "version": version, "sha256": artifact_sha}
+        for destination in [("site", "google.py"), ("site", "google", "__init__.py"),
+                            ("site", "google", "__INIT__.py"), ("site", "Google", "child.py"),
+                            ("bin", "google", "child.py")]:
+            self.assertFalse(self.p.approved_namespace_contributor(row, "google", destination))
+
+    def test_unapproved_single_contributor_cannot_claim_a_reviewed_namespace(self):
+        self.blocked("UNAPPROVED_NAMESPACE_CONTRIBUTOR", H.wheel("attack", files={"google/child.py": H.payload(self.c)}))
+
+    def test_special_member_exact_tuple_fixture_is_not_original_artifact_proof(self):
+        data = H.payload(self.c)
+        path = "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py"
+        identity = ("fixture", "1.0", "a" * 64)
+        original = self.p.APPROVED_SPECIAL_MEMBERS
+        try:
+            self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
+            self.assertTrue(self.p.approved_special_member(*identity, path, data, ("site", *path.split("/"))))
+        finally:
+            self.p.APPROVED_SPECIAL_MEMBERS = original
+
+    def test_special_member_rejects_wrong_identity_path_and_body(self):
+        data = b"inert tuple control\n"
+        path = "setuptools/_vendor/fixture-1.0.dist-info/METADATA"
+        identity = ("fixture", "1.0", "a" * 64)
+        original = self.p.APPROVED_SPECIAL_MEMBERS
+        try:
+            self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
+            for args in [("other", "1.0", identity[2], path, data), ("fixture", "1.1", identity[2], path, data),
+                         ("fixture", "1.0", "b" * 64, path, data), (*identity, path.upper(), data),
+                         (*identity, path, data + b"changed")]:
+                self.assertFalse(self.p.approved_special_member(*args, ("site", *path.split("/"))))
+        finally:
+            self.p.APPROVED_SPECIAL_MEMBERS = original
+
+    def test_special_member_rejects_install_scheme_and_case_destination_aliases(self):
+        data = b"inert alias control\n"
+        path, identity = "setuptools/_vendor/fixture.dist-info/METADATA", ("fixture", "1.0", "a" * 64)
+        original = self.p.APPROVED_SPECIAL_MEMBERS
+        try:
+            self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
+            for destination in [("bin", *path.split("/")), ("site", *path.upper().split("/")),
+                                ("site", "fixture.data", "purelib", *path.split("/"))]:
+                self.assertFalse(self.p.approved_special_member(*identity, path, data, destination))
+        finally:
+            self.p.APPROVED_SPECIAL_MEMBERS = original
+
+    def test_special_member_default_policy_never_accepts_an_unreviewed_body(self):
+        identity, paths = next(iter(self.p.APPROVED_SPECIAL_MEMBERS.items()))
+        path = next(iter(paths))
+        self.assertFalse(self.p.approved_special_member(*identity, path, b"unreviewed", ("site", *path.split("/"))))
+        self.assertFalse(self.p.approved_special_member(*identity, "sitecustomize.py", b"unreviewed", ("site", "sitecustomize.py")))
+
+    def test_default_special_inventory_is_bounded_nested_and_digest_bound(self):
+        self.assertEqual(sum(map(len, self.p.APPROVED_SPECIAL_MEMBERS.values())), 83)
+        self.assertEqual({identity[0] for identity in self.p.APPROVED_SPECIAL_MEMBERS}, {"setuptools", "opentelemetry-instrumentation"})
+        for identity, paths in self.p.APPROVED_SPECIAL_MEMBERS.items():
+            self.assertRegex(identity[2], r"^[a-f0-9]{64}$")
+            for path, (size, member_sha) in paths.items():
+                self.assertGreaterEqual(size, 0)
+                self.assertRegex(member_sha, r"^[a-f0-9]{64}$")
+                self.assertTrue(path.startswith("setuptools/_vendor/") or path == "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py")
+
+    def test_default_namespace_inventory_is_two_roots_and_twelve_versioned_artifacts(self):
+        self.assertEqual(set(self.p.APPROVED_SHARED_NAMESPACES), {"google", "opentelemetry"})
+        self.assertEqual(sum(map(len, self.p.APPROVED_SHARED_NAMESPACES.values())), 12)
+        for identities in self.p.APPROVED_SHARED_NAMESPACES.values():
+            for name, version, artifact_sha in identities:
+                self.assertTrue(name and version)
+                self.assertRegex(artifact_sha, r"^[a-f0-9]{64}$")
 
     def test_archive_parent_traversal_blocks(self):
         self.blocked("ARCHIVE_TRAVERSAL", H.wheel("attack", files={"../pip/__main__.py": H.payload(self.c)}))
@@ -734,6 +821,8 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_archive_parent_traversal_blocks",
     "AuditSyntheticModuleTests.test_archive_symbolic_link_is_not_an_installable_regular_file",
     "AuditSyntheticModuleTests.test_case_alias_destination_collision_blocks",
+    "AuditSyntheticModuleTests.test_default_namespace_inventory_is_two_roots_and_twelve_versioned_artifacts",
+    "AuditSyntheticModuleTests.test_default_special_inventory_is_bounded_nested_and_digest_bound",
     "AuditSyntheticModuleTests.test_direct_url_dependency_is_rejected_without_fetch",
     "AuditSyntheticModuleTests.test_duplicate_distribution_identity_is_not_a_complete_set",
     "AuditSyntheticModuleTests.test_empty_population_is_not_positive_evidence",
@@ -760,6 +849,9 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_record_foreign_destination_blocks",
     "AuditSyntheticModuleTests.test_record_wrong_hash_is_not_a_byte_correct_wheel",
     "AuditSyntheticModuleTests.test_record_wrong_size_is_not_a_byte_correct_wheel",
+    "AuditSyntheticModuleTests.test_reviewed_namespace_rejects_root_module_init_and_case_aliases",
+    "AuditSyntheticModuleTests.test_reviewed_namespace_rejects_wrong_owner_version_or_whole_artifact_hash",
+    "AuditSyntheticModuleTests.test_reviewed_namespace_tuples_are_exact_lower_seam_not_artifact_evidence",
     "AuditSyntheticModuleTests.test_root_pth_marker_is_rejected_without_execution",
     "AuditSyntheticModuleTests.test_same_package_root_and_data_alias_destination_collides",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_data_path_alias",
@@ -767,13 +859,18 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_owner",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_version",
     "AuditSyntheticModuleTests.test_sitecustomize_marker_is_rejected_without_execution",
+    "AuditSyntheticModuleTests.test_special_member_default_policy_never_accepts_an_unreviewed_body",
+    "AuditSyntheticModuleTests.test_special_member_exact_tuple_fixture_is_not_original_artifact_proof",
+    "AuditSyntheticModuleTests.test_special_member_rejects_install_scheme_and_case_destination_aliases",
+    "AuditSyntheticModuleTests.test_special_member_rejects_wrong_identity_path_and_body",
     "AuditSyntheticModuleTests.test_synthetic_setuptools_archive_cannot_fake_approved_artifact_digest",
     "AuditSyntheticModuleTests.test_synthetic_wheel_has_actual_crc_and_byte_correct_record",
     "AuditSyntheticModuleTests.test_two_packages_cannot_own_same_destination_file",
+    "AuditSyntheticModuleTests.test_unapproved_single_contributor_cannot_claim_a_reviewed_namespace",
     "AuditSyntheticModuleTests.test_unreviewed_shared_namespace_remains_blocked_not_waived",
     "AuditSyntheticModuleTests.test_usercustomize_marker_is_rejected_without_execution",
 )
-EXPECTED_TEST_COUNT = 107
+EXPECTED_TEST_COUNT = 117
 
 
 def canonical_id(test):
@@ -792,8 +889,8 @@ def build_suite():
     first = unittest.defaultTestLoader.loadTestsFromTestCase(AuditSyntheticModuleTests)
     second = additionalCases(H, CONTEXT)
     third = unittest.defaultTestLoader.loadTestsFromTestCase(AuditLoaderMarkerRegressions)
-    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (44, 55, 8):
-        raise AssertionError("44+55+8 migration inventory changed")
+    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (54, 55, 8):
+        raise AssertionError("54+55+8 exact-layout inventory changed")
     suite = unittest.TestSuite([first, second, third])
     actual = tuple(sorted(canonical_id(test) for test in flatten_suite(suite)))
     if len(EXPECTED_TEST_IDS) != EXPECTED_TEST_COUNT or len(set(EXPECTED_TEST_IDS)) != EXPECTED_TEST_COUNT:
@@ -842,7 +939,7 @@ def json_once(path, value):
 
 def main():
     global H, CONTEXT
-    parser = argparse.ArgumentParser(description="107 literal-inventory source-module controls; no runtime qualification")
+    parser = argparse.ArgumentParser(description="117 literal-inventory source-module controls; no runtime qualification")
     parser.add_argument("--pip-wheel", required=True, type=pathlib.Path)
     parser.add_argument("--auditor-sha256", required=True, help="reviewed workflow/controller literal, never computed as an approval")
     parser.add_argument("--receipt", required=True, type=pathlib.Path, help="new JSON in an existing private neutral directory")
