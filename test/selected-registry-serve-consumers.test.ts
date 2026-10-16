@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import { buildOnboardingReadinessRoute } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { createSelectedRegistryObserver } from "../src/lib/selected-registry-consumers.js";
-import { registryFileIO } from "../src/lib/instance-registry-selection.js";
+import { readSelectedInstanceRegistry, registryFileIO } from "../src/lib/instance-registry-selection.js";
 
 interface Row { step: string; fields: Record<string, unknown> }
 function pendingValue<T>(): { promise: Promise<T>; resolve(value: T): void } {
@@ -168,4 +168,126 @@ test("selected consumer synchronous seams never claim fresh selected authority",
   assert.equal(observer.observeSync("inbox-discovery", { repository: "owner/repo" }, () => "legacy"), "legacy");
   assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown");
   assert.equal(f.rows.at(-1)?.fields.reason, "synchronous_seam");
+});
+
+test("selected consumer reads accessor-backed settings exactly once", async (t) => {
+  const f = fixture(t);
+  let reads = 0;
+  const observer = createSelectedRegistryObserver({ record: f.options.record, get settings() {
+    return ++reads === 1 ? f.options.settings : { ...f.options.settings, registryPath: join(f.root, "wrong.yaml") };
+  } })!;
+  t.after(() => observer.close());
+  assert.equal(reads, 1, "the mode check and selected source must come from ONE settings snapshot");
+  await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy");
+  await observer.settled();
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "ready");
+});
+
+test("selected consumer reads an explicit configured path exactly once", async (t) => {
+  const f = fixture(t);
+  let reads = 0;
+  const observer = createSelectedRegistryObserver({ ...f.options, input: { get configuredPath() {
+    return ++reads === 1 ? f.path : join(f.root, "wrong.yaml");
+  } } })!;
+  t.after(() => observer.close());
+  assert.equal(reads, 1, "the precedence check cannot re-read a mutable path accessor");
+  await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy");
+  await observer.settled();
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "ready");
+});
+
+test("selected consumer receipts retain public-safe source contract and capability identity", async (t) => {
+  const f = fixture(t);
+  for (const [selection, input] of [["configuration", {}], ["environment", { envPath: f.path }], ["cli", { cliPath: f.path }]] as const) {
+    const observer = createSelectedRegistryObserver({ ...f.options, input,
+      settings: { ...f.options.settings, contractVersion: 2 } })!;
+    t.after(() => observer.close());
+    await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy");
+    await observer.settled();
+    const fields = f.rows.at(-1)!.fields;
+    assert.equal(fields.selection_source, selection);
+    assert.equal(fields.contract_version, 2);
+    assert.deepEqual(fields.capabilities, ["identity", "mode", "primary"]);
+    assert.equal(Object.isFrozen(fields.capabilities), true);
+    assert.ok(!JSON.stringify(fields).includes(f.root));
+  }
+});
+
+test("selected consumer catches an unexpected reader rejection without changing legacy effects", async (t) => {
+  const f = fixture(t);
+  const reader: typeof readSelectedInstanceRegistry = async () => { throw new Error("private-reader-error-sentinel"); };
+  const observer = Reflect.apply(createSelectedRegistryObserver, undefined, [f.options, reader]) as NonNullable<ReturnType<typeof createSelectedRegistryObserver>>;
+  t.after(() => observer.close());
+  assert.equal(await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy"), "legacy");
+  await observer.settled();
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown");
+  assert.equal(f.rows.at(-1)?.fields.reason, "source_read_rejected");
+  assert.ok(!JSON.stringify(f.rows).includes("private-reader-error-sentinel"));
+});
+
+test("selected consumer catches a rejected final recheck without borrowing the original ready result", async (t) => {
+  const f = fixture(t), selected = await readSelectedInstanceRegistry({ configuredPath: f.path });
+  assert.equal(selected.kind, "ready");
+  if (selected.kind !== "ready") return;
+  const reader: typeof readSelectedInstanceRegistry = async () => ({ kind: "ready", binding: { ...selected.binding,
+    recheck: async () => { throw new Error("private-recheck-error-sentinel"); } } });
+  const observer = Reflect.apply(createSelectedRegistryObserver, undefined, [f.options, reader]) as NonNullable<ReturnType<typeof createSelectedRegistryObserver>>;
+  t.after(() => observer.close());
+  await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy");
+  await observer.settled();
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown");
+  assert.equal(f.rows.at(-1)?.fields.reason, "recheck_failed");
+  assert.equal(f.rows.at(-1)?.fields.binding_digest, selected.binding.digest);
+  assert.ok(!JSON.stringify(f.rows).includes("private-recheck-error-sentinel"));
+});
+
+test("selected consumer failed sinks are bounded unrecorded evidence and never effect permission", async (t) => {
+  const f = fixture(t), diagnostics: string[] = [];
+  const errors = mock.method(console, "error", (text: string) => { diagnostics.push(text); });
+  t.after(() => errors.mock.restore());
+  for (const kind of ["throw", "reject"] as const) {
+    const observer = createSelectedRegistryObserver({ ...f.options, record: () => {
+      if (kind === "throw") throw new Error("private-sink-error-sentinel");
+      return Promise.reject(new Error("private-sink-error-sentinel"));
+    } })!;
+    t.after(() => observer.close());
+    for (let n = 0; n < 2; n++) {
+      assert.equal(await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy"), "legacy");
+      await observer.settled();
+    }
+  }
+  assert.deepEqual(diagnostics, ["instance_registry.consumer_shadow_unrecorded", "instance_registry.consumer_shadow_unrecorded"]);
+});
+
+test("selected consumer distinguishes known row absence and retirement from an unreadable source", async (t) => {
+  const f = fixture(t), observer = createSelectedRegistryObserver(f.options)!;
+  t.after(() => observer.close());
+  await observer.observe("serve-readiness", { repository: "missing/repo" }, () => "legacy");
+  await observer.settled();
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "absent");
+  writeFileSync(f.path, selectedText() + "    retired: true\n");
+  const retired = createSelectedRegistryObserver(f.options)!;
+  t.after(() => retired.close());
+  await retired.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy");
+  await retired.settled();
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "retired");
+});
+
+test("selected consumer retries unknown only at a later real consumer event", async (t) => {
+  const f = fixture(t, false);
+  let reads = 0;
+  const observer = createSelectedRegistryObserver({ ...f.options, io: { ...registryFileIO,
+    lstat: async (path) => { reads++; return registryFileIO.lstat(path); } } })!;
+  t.after(() => observer.close());
+  await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy");
+  await observer.settled();
+  assert.equal(f.rows.at(-1)?.fields.reason, "missing");
+  const first = reads;
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(reads, first, "no retry scanner or timer");
+  writeFileSync(f.path, selectedText());
+  await observer.observe("serve-readiness", { repository: "owner/repo" }, () => "legacy");
+  await observer.settled();
+  assert.ok(reads > first);
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "ready");
 });
