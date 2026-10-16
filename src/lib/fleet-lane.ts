@@ -13,7 +13,9 @@ import { validInboxDismissalAudit, type InboxDismissalAudit } from "./inbox-dism
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import type { AttentionJudgment } from "./inbox-responder.js";
-import { readBandMeaningReplayStore, replayBandMeaningRefusals, type ReplayStranded } from "./inbox-replay.js";
+import { createBandMeaningReplayRegistryReader, readBandMeaningReplayStore, replayBandMeaningRefusals, replayBandMeaningRefusalsAsync,
+  type BandMeaningReplayInput, type BandMeaningReplayPass, type BandMeaningReplayRegistryReader, type ReplayStranded } from "./inbox-replay.js";
+import { appendLedger } from "./ledger.js";
 import { machineTokens, type PlainStore } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -64,6 +66,8 @@ export interface FleetLaneDeps<R extends number | Promise<number> = number> {
   /** W1-T9041: names a band-replay proposal no re-draft could clear (`escalateReplayStranded`); absent, the replay
    *  still writes its row, undelivered. */
   escalateReplayStranded?: (stranded: ReplayStranded) => void;
+  /** Awaited replay I/O; default held by this deps object, which the daemon resolves once for its lifetime. */
+  replayRegistryReader?: BandMeaningReplayRegistryReader;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -304,8 +308,27 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
   return runStepsSync(triageFleetLaneSteps(deps, (path, since) => readLedgerUnionRecordsSync(dirname(path), { since, step: HANDOFF_STEPS }).rows));
 }
 
+// The daemon closes over ONE deps object for its timer's life. Weak ownership keeps no per-root process memo;
+// a temporary caller's reader disappears with its deps, and a changed root replaces rather than grows the entry.
+const replayReaders = new WeakMap<FleetLaneDeps<number | Promise<number>>, { stateDir: string; reader: BandMeaningReplayRegistryReader }>();
+
+function replayRegistryReader(deps: FleetLaneDeps<number | Promise<number>>): BandMeaningReplayRegistryReader {
+  if (deps.replayRegistryReader) return deps.replayRegistryReader;
+  let held = replayReaders.get(deps);
+  if (!held || held.stateDir !== deps.stateDir) {
+    const clock = deps.clock ?? systemClock;
+    const reader = createBandMeaningReplayRegistryReader(deps.stateDir, { clock, log: (step, extra) => appendLedger(deps.ledgerPath, {
+      ts: clock.iso(), run_id: `REPLAY-${clock.now()}`, task_id: "DAEMON", step, reader: "band-replay", ...extra,
+    }) });
+    held = { stateDir: deps.stateDir, reader };
+    replayReaders.set(deps, held);
+  }
+  return held.reader;
+}
+
 export function triageFleetLaneAsync(deps: FleetLaneDeps<number | Promise<number>>): Promise<FleetLanePass> {
-  return runStepsAsync(triageFleetLaneSteps(deps, (path, since) => readLedgerUnionRecords(dirname(path), { since, step: HANDOFF_STEPS })));
+  return runStepsAsync(triageFleetLaneSteps(deps, (path, since) => readLedgerUnionRecords(dirname(path), { since, step: HANDOFF_STEPS }),
+    (input) => replayBandMeaningRefusalsAsync(input, replayRegistryReader(deps))));
 }
 
 /**
@@ -384,15 +407,16 @@ function replayReofferTimes(stateDir: string): Map<string, number> {
   return out;
 }
 
-function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, readRows: HandoffRows): Steps<FleetLanePass> {
+function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>, readRows: HandoffRows,
+  replay: (input: BandMeaningReplayInput) => BandMeaningReplayPass | Promise<BandMeaningReplayPass> = replayBandMeaningRefusals): Steps<FleetLanePass> {
   // W1-T8714: the one-shot replay of the proposals the band split lost. It only drops their cached drafts, so the
   // draft rung re-drafts them and the FILE step below hands each to `rmd approve` at this lane's own pace. W1-T9041:
   // each pass also re-lints its open entries' cached drafts, re-offering what a lint change cleared.
-  replayBandMeaningRefusals({
+  yield* step(() => replay({
     stateDir: deps.stateDir, ledgerPath: deps.ledgerPath, clock: deps.clock,
     classificationStates: () => readClassificationSnapshot(deps.stateDir)?.states,
     escalate: deps.escalateReplayStranded,
-  });
+  }));
   const now = (deps.clock ?? systemClock).now();
   const snapshot = readClassificationSnapshot(deps.stateDir);
   if (!snapshot) return { filed: [], merged: [], room: 0 };
