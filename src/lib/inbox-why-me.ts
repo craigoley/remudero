@@ -43,6 +43,7 @@ const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 const stableFacts = (facts: Original["sourceFacts"]) => facts.filter(f => f.source !== "judge");
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
+// BACKSTOP: cap receipt-verification I/O; oversize or growth remains explicitly unknown evidence.
 const MAX_RECEIPT_BYTES = 1024 * 1024;
 class OversizedReceiptError extends Error {}
 /** Check and read one opened regular file; a pathname replacement cannot change its identity. */
