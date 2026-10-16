@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: a 9-task filing spent 9 GitHub read slots, about an hour at the shared 180 s floor plus the slot left free"
   plan_refs: [W1-T1055, W1-T3091, W1-T4414]
   files: [src/run-task.ts, src/lib/task-id-reservation.ts, test/next-task-id-reserves-several-ids-with-one-open-pr-read.test.ts]
-  status: queued
+  status: merged
   priority: 2  # operator session friction, not fleet flow: the fleet's own minters reserve one id at a time
   attempts: 0
   rationale: |
