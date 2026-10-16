@@ -397,7 +397,7 @@ test("W1-T9617: the ledger and state files stay on the state disk", (t) => {
   assert.ok(existsSync(join(h.state, "remudero", ".git")), "the old checkout stays where it was");
 });
 
-test("W1-T9617: a recycle records the disk each checkout reads from and the outgoing generation's reads per disk", (t) => {
+test("W1-T9617: a recycle records disk reads and exact generation age on a hermetic Linux host fixture", (t) => {
   const h = host(t);
   const sys = join(h.root, "sys-dev-block");
   const cg = join(h.root, "cgroup");
@@ -411,27 +411,61 @@ test("W1-T9617: a recycle records the disk each checkout reads from and the outg
   writeFileSync(join(cg, "system.slice", `docker-${id}.scope`, "io.stat"), "259:1 rbytes=73570668544 wbytes=1 rios=2592899 wios=2 dbytes=0 dios=0\n259:7 rbytes=4096 wbytes=0 rios=1 wios=0 dbytes=0 dios=0\n8:0 garbage\n");
   const stubs = join(h.root, "io-stubs");
   mkdirSync(stubs, { recursive: true });
-  writeFileSync(join(stubs, "docker"), `#!/usr/bin/env bash\n[ "$STUB_DOCKER" = up ] || exit 1\necho "${id} 2026-10-15T10:36:52.114786881Z"\n`, { mode: 0o755 });
+  // This is a simulated Linux host, including its GNU tool protocol. Neither the wall clock nor
+  // the machine running the test determines the fixture's age or major:minor device identity.
+  const startedAt = "2026-10-15T10:36:52.114786881Z";
+  const startedSeconds = Math.floor(Date.parse(startedAt) / 1000);
+  const nowSeconds = startedSeconds + 600;
+  const calls = join(h.root, "io-tool-calls");
+  writeFileSync(join(stubs, "docker"), `#!/usr/bin/env bash\n[ "$STUB_DOCKER" = up ] || exit 1\necho "${id} ${startedAt}"\n`, { mode: 0o755 });
+  writeFileSync(join(stubs, "date"), `#!/usr/bin/env bash
+printf 'date %s\\n' "$*" >> "${calls}"
+if [ "$#" -eq 4 ] && [ "$1" = -u ] && [ "$2" = -d ] && [ "$4" = +%s ]; then
+  [ "$3" = '${startedAt}' ] && [ "\${STUB_DATE_PARSE:-ok}" = ok ] || exit 1
+  echo '${startedSeconds}'
+elif [ "$#" -eq 2 ] && [ "$1" = -u ] && [ "$2" = +%s ]; then
+  echo "\${STUB_DATE_NOW:-${nowSeconds}}"
+elif [ "$#" -eq 2 ] && [ "$1" = -u ] && [ "$2" = +%Y-%m-%dT%H:%M:%S.000Z ]; then
+  echo '${new Date(nowSeconds * 1000).toISOString()}'
+else
+  exit 64
+fi
+`, { mode: 0o755 });
+  writeFileSync(join(stubs, "stat"), `#!/usr/bin/env bash
+printf 'stat %s\\n' "$*" >> "${calls}"
+[ "$#" -eq 3 ] && [ "$1" = -c ] && [ "$2" = '%Hd:%Ld' ] && [ -e "$3" ] || exit 64
+echo '259:6'
+`, { mode: 0o755 });
   chmodSync(join(stubs, "docker"), 0o755);
+  chmodSync(join(stubs, "date"), 0o755);
+  chmodSync(join(stubs, "stat"), 0o755);
   const env = { PATH: `${stubs}:${process.env.PATH ?? ""}`, RMD_SYS_DEV_BLOCK: sys, RMD_CGROUP_ROOT: cg, STUB_DOCKER: "up" };
   const reads = lib(h, `scratch_outgoing_reads remudero-daemon`, [], env).stdout;
-  const parsed = JSON.parse(`{${reads}}`) as { outgoing_age_s: number; outgoing_reads: Record<string, { rios: number; rbytes: number }> };
+  const parsed = JSON.parse(`{${reads}}`) as { outgoing_age_s: number | null; outgoing_reads: Record<string, { rios: number; rbytes: number }> };
   assert.deepEqual(parsed.outgoing_reads, { nvme0n1: { rios: 2592899, rbytes: 73570668544 }, nvme1n1: { rios: 1, rbytes: 4096 } }, "whole disks, by name; a malformed line is skipped");
-  assert.ok(parsed.outgoing_age_s > 0, "the generation's age, so rios / age is its reads per second");
+  assert.equal(parsed.outgoing_age_s, 600, "the exact generation age, independent of host tools and wall time");
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
+    `date -u -d ${startedAt} +%s`, "date -u +%s", "date -u +%s",
+  ], "the real library must request the GNU parsing and clock protocol, not a canned age");
+  const unknownClocks: Record<string, string>[] = [{ STUB_DATE_PARSE: "unreadable" }, { STUB_DATE_NOW: String(startedSeconds - 1) }];
+  for (const clock of unknownClocks) {
+    const unknown = JSON.parse(`{${lib(h, "scratch_outgoing_reads remudero-daemon", [], { ...env, ...clock }).stdout}}`);
+    assert.equal(unknown.outgoing_age_s, null, "an unreadable or future start is unknown, never zero");
+    assert.deepEqual(unknown.outgoing_reads, parsed.outgoing_reads, "unknown age preserves actual fixture I/O counters");
+  }
   assert.equal(lib(h, `scratch_outgoing_reads remudero-daemon || echo unread`, [], { ...env, STUB_DOCKER: "down" }).stdout.trim(), "unread");
   assert.equal(lib(h, `scratch_outgoing_reads remudero-daemon || echo unread`, [], { ...env, RMD_CGROUP_ROOT: join(h.root, "no-cgroup") }).stdout.trim(), "unread");
 
   // A partition resolves to its whole disk; the row is one parseable line with the outgoing reads.
-  const realMm = execFileSync("stat", ["-c", "%Hd:%Ld", h.state], { encoding: "utf8" }).trim();
-  mkdirSync(join(sys, realMm), { recursive: true });
-  writeFileSync(join(sys, realMm, "uevent"), "DEVNAME=fakedisk1p1\n");
-  writeFileSync(join(sys, realMm, "partition"), "1\n");
+  writeFileSync(join(sys, "259:6", "uevent"), "DEVNAME=fakedisk1p1\n");
   writeFileSync(join(sys, "uevent"), "DEVNAME=fakedisk1\n"); // <sys>/<maj:min>/.. is the partition's disk
   const ledger = join(h.state, "state", "ledger.ndjson");
   mkdirSync(join(h.state, "remudero"));
   lib(h, `scratch_placement_row "$1" remudero-daemon "$2" false "$3"`, [ledger, join(h.state, "remudero"), reads], env);
   lib(h, `scratch_placement_row "$1" remudero-daemon "$2" maybe ""`, [ledger, join(h.base, "remudero")], { ...env, RMD_SYS_DEV_BLOCK: join(h.root, "no-sys") });
   const rows = placementRows(h.state);
+  assert.ok(readFileSync(calls, "utf8").includes(`stat -c %Hd:%Ld ${join(h.state, "remudero")}\n`), "the real disk reader queries the fixture's existing checkout");
+  assert.ok(readFileSync(calls, "utf8").includes("date -u +%Y-%m-%dT%H:%M:%S.000Z\n"), "the real placement writer requests its timestamp");
   assert.equal(rows.length, 2);
   assert.equal(rows[0].placement, "state-disk");
   assert.equal(rows[0].checkout_disk, "fakedisk1", "a partition is named by its whole disk, the unit io.stat counts");
