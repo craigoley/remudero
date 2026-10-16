@@ -11,6 +11,9 @@ const DEFAULT_MAX_LINE_BYTES = 512 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const OPEN_SNAPSHOT_SCHEMA = 1;
 export const OPEN_SNAPSHOT_RESAVE_MS = 60_000;
+const OBSERVATION_SCHEMA = 1;
+/** BACKSTOP: an observation is one small record; a larger sidecar is not one this module wrote. */
+const OBSERVATION_MAX_BYTES = 4096;
 
 /** CADENCE: successful board reads are rolled up every five minutes (W1-T4480). */
 export const BOARD_REFRESH_ROLLUP_MS = 5 * 60_000;
@@ -263,6 +266,19 @@ export function boardOpenSnapshotPath(root: string, owner: string, repo: string)
   return boardSnapshotPath(root, owner, repo).replace(/\.ndjson$/, ".open.json");
 }
 
+/** W1-T8912: the closed channel's last successful unchanged source read, bound to one data file's content. */
+export function boardObservationPath(root: string, owner: string, repo: string): string {
+  return boardSnapshotPath(root, owner, repo).replace(/\.ndjson$/, ".observed.json");
+}
+
+function stampMs(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.length > 64) return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && fixedClock(ms).iso() === value ? ms : undefined;
+}
+
+const reobservers = new WeakMap<BoardSnapshotCache, () => SharedBoardSnapshotRows>();
+
 export interface OpenBoardSnapshot {
   repository: string;
   savedAt: string;
@@ -332,7 +348,12 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
   const maxRows = options.bounds?.maxRows ?? DEFAULT_MAX_ROWS;
   const maxLineBytes = options.bounds?.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
   const maxStringBytes = Math.max(1, maxLineBytes - 256);
+  const clock = options.clock ?? systemClock;
+  const observationPath = boardObservationPath(root, owner, repo);
   let state: SnapshotState = {};
+  // W1-T8912: the content identity of the data file this instance last read or wrote, and that file's own clock.
+  let dataIdentity: SnapshotIdentity | undefined;
+  let headerObservedAt: string | undefined;
 
   const log = (
     event: string,
@@ -367,6 +388,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
 
     let fd: number | undefined;
     let bytes = 0;
+    const digest = createHash("sha256");
     let pending = Buffer.alloc(0);
     let header: SnapshotHeader | undefined;
     let footer: SnapshotFooter | undefined;
@@ -421,6 +443,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
         if (n === 0) break;
         bytes += n;
         if (bytes > maxBytes) throw new SnapshotRefusal("oversized");
+        digest.update(chunk.subarray(0, n));
         pending = pending.length === 0 ? Buffer.from(chunk.subarray(0, n)) : Buffer.concat([pending, chunk.subarray(0, n)]);
         if (pending.length > maxLineBytes && pending.indexOf(0x0a) < 0) throw new SnapshotRefusal("line_too_large");
         let newline = pending.indexOf(0x0a);
@@ -440,6 +463,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
         ...(typeof header.channels.closed.observedAt === "string" ? { closedObservedAt: header.channels.closed.observedAt } : {}),
         ...(header.channels.issues.complete ? { issues } : {}),
       };
+      dataIdentity = { sha256: digest.digest("hex"), bytes };
+      headerObservedAt = loaded.closedObservedAt;
       log("board_snapshot.loaded", "snapshot", closed.size + issues.size, bytes);
       return loaded;
     } catch (error) {
@@ -451,7 +476,102 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
   };
 
+  /** Certify the held data with its sidecar, or fall back to the data's own clock: never a later or foreign one. */
+  const readObservation = (): string | undefined => {
+    if (!dataIdentity || !state.closed) return headerObservedAt;
+    let size: number;
+    let isFile: boolean;
+    try {
+      ({ size, isFile } = io.stat(observationPath));
+    } catch {
+      // deliberate: no sidecar is the ordinary uncertified state of a legacy or freshly written snapshot.
+      return headerObservedAt;
+    }
+    let fd: number | undefined;
+    let bytes = 0;
+    try {
+      if (!isFile) throw new SnapshotRefusal("not_file");
+      if (!Number.isSafeInteger(size) || size > OBSERVATION_MAX_BYTES) throw new SnapshotRefusal("oversized");
+      fd = io.openRead(observationPath);
+      // BACKSTOP: one sentinel byte past the bound refuses growth after the stat.
+      const buffer = Buffer.alloc(OBSERVATION_MAX_BYTES + 1);
+      for (;;) {
+        const n = io.read(fd, buffer, bytes, buffer.length - bytes);
+        if (!Number.isSafeInteger(n) || n < 0 || n > buffer.length - bytes) throw new SnapshotRefusal("read_failed");
+        if (n === 0) break;
+        bytes += n;
+        if (bytes > OBSERVATION_MAX_BYTES) throw new SnapshotRefusal("oversized");
+      }
+      let value: Partial<ObservationRecord> & { schema?: unknown };
+      try {
+        value = JSON.parse(buffer.subarray(0, bytes).toString("utf8")) as typeof value;
+      } catch {
+        throw new SnapshotRefusal("invalid_json");
+      }
+      if (!value || typeof value !== "object") throw new SnapshotRefusal("invalid_schema");
+      if (typeof value.schema === "number" && value.schema > OBSERVATION_SCHEMA) throw new SnapshotRefusal("future_version");
+      if (value.type !== "board-snapshot-observation" || value.schema !== OBSERVATION_SCHEMA) throw new SnapshotRefusal("invalid_schema");
+      if (value.repository !== repository) throw new SnapshotRefusal("wrong_repository");
+      if (value.channel !== "closed") throw new SnapshotRefusal("wrong_channel");
+      if (value.snapshot?.sha256 !== dataIdentity.sha256 || value.snapshot?.bytes !== dataIdentity.bytes) {
+        throw new SnapshotRefusal("foreign_snapshot");
+      }
+      const observedMs = stampMs(value.observedAt);
+      if (observedMs === undefined) throw new SnapshotRefusal("invalid_schema");
+      if (observedMs > clock.now()) throw new SnapshotRefusal("future_observation");
+      const floor = stampMs(headerObservedAt);
+      if (floor !== undefined && observedMs < floor) throw new SnapshotRefusal("stale_observation");
+      return value.observedAt;
+    } catch (error) {
+      const reason = error instanceof SnapshotRefusal ? error.reason : fd === undefined ? "open_failed" : "read_failed";
+      log("board_snapshot.observation_refused", "closed", 0, bytes, reason);
+      return headerObservedAt;
+    } finally {
+      safeClose(io, fd);
+    }
+  };
+
+  const reobserve = (): SnapshotState => {
+    const observedAt = readObservation();
+    const { closedObservedAt: _previous, ...rest } = state;
+    state = observedAt === undefined ? rest : { ...rest, closedObservedAt: observedAt };
+    return state;
+  };
+
   state = load();
+  reobserve();
+
+  /** A successful complete read that matched the held rows: persist WHEN it was seen, never the rows again. */
+  const observeUnchangedClosed = (): void => {
+    if (!dataIdentity || !state.closed) return;
+    const rows = state.closed.size;
+    const nowMs = clock.now();
+    const prior = stampMs(state.closedObservedAt);
+    // CADENCE: coalesced on the open snapshot's resave interval; a rolled-back clock never moves it backwards.
+    if (prior !== undefined && !(nowMs - prior >= OPEN_SNAPSHOT_RESAVE_MS)) return;
+    const observedAt = fixedClock(nowMs).iso();
+    const record: ObservationRecord = { type: "board-snapshot-observation", schema: OBSERVATION_SCHEMA, repository,
+      channel: "closed", snapshot: dataIdentity, observedAt };
+    const body = Buffer.from(JSON.stringify(record), "utf8");
+    const stage = `${observationPath}.tmp-${process.pid}-${randomUUID()}`;
+    let fd: number | undefined;
+    try {
+      if (body.length > OBSERVATION_MAX_BYTES) throw new SnapshotRefusal("oversized");
+      io.mkdir(dirname(observationPath), 0o700);
+      fd = io.openWrite(stage, 0o600);
+      writeFully(io, fd, body);
+      io.fsync(fd);
+      io.close(fd);
+      fd = undefined;
+      io.rename(stage, observationPath);
+      state = { ...state, closedObservedAt: observedAt };
+    } catch (error) {
+      safeClose(io, fd);
+      safeUnlink(io, stage);
+      const reason = error instanceof SnapshotRefusal ? error.reason : "write_failed";
+      log("board_snapshot.observation_refused", "closed", rows, body.length, reason);
+    }
+  };
 
   const commit = (channel: keyof SnapshotRows, rows: readonly (BoardPrRest | BoardIssueRest)[]): boolean => {
     let nextRows: Map<number, BoardPrRest> | Map<number, BoardIssueRest>;
@@ -481,12 +601,13 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
         log("board_snapshot.unchanged", channel, rows.length, 0);
         unchangedWritten.add(channel);
       }
+      if (channel === "closed") observeUnchangedClosed();
       return true;
     }
 
     const nextState: SnapshotState =
       channel === "closed"
-        ? { ...state, closed: nextRows as Map<number, BoardPrRest>, closedObservedAt: (options.clock ?? systemClock).iso() }
+        ? { ...state, closed: nextRows as Map<number, BoardPrRest>, closedObservedAt: clock.iso() }
         : { ...state, issues: nextRows as Map<number, BoardIssueRest> };
     const header: SnapshotHeader = {
       type: "board-snapshot",
@@ -527,12 +648,14 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     const stage = `${path}.tmp-${process.pid}-${randomUUID()}`;
     let fd: number | undefined;
     let writtenBytes = 0;
+    const digest = createHash("sha256");
     try {
       io.mkdir(dirname(path), 0o700);
       fd = io.openWrite(stage, 0o600);
       for (const record of records()) {
         const buffer = lineBuffer(record, maxLineBytes);
         writeFully(io, fd, buffer);
+        digest.update(buffer);
         writtenBytes += buffer.length;
       }
       io.fsync(fd);
@@ -540,6 +663,9 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       fd = undefined;
       io.rename(stage, path);
       state = nextState;
+      // A replaced data file is a new identity: no earlier sidecar can certify it.
+      dataIdentity = { sha256: digest.digest("hex"), bytes: writtenBytes };
+      headerObservedAt = nextState.closedObservedAt;
       log("board_snapshot.committed", channel, rows.length, writtenBytes);
       return true;
     } catch {
@@ -583,7 +709,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     }
   };
 
-  return {
+  const cache: BoardSnapshotCache = {
     commitOpen,
     rows: () => state,
     closedSeed() {
@@ -599,6 +725,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
       return commit("issues", rows);
     },
   };
+  reobservers.set(cache, reobserve);
+  return cache;
 }
 
 interface SnapshotRows {
@@ -622,6 +750,10 @@ interface SnapshotReasons {
   duplicate_row: never;
   count_mismatch: never;
   write_failed: never;
+  wrong_channel: never;
+  foreign_snapshot: never;
+  future_observation: never;
+  stale_observation: never;
 }
 
 export interface BoardSnapshotIo {
@@ -652,25 +784,36 @@ export interface SharedBoardSnapshotRows {
   readonly issues?: ReadonlyMap<number, BoardIssueRest>;
 }
 
-/** One parse per file identity (inode, mtime, size; no mtime, no reuse), shared read-only by every caller in the thread (E33). */
+/** One parse per file identity (inode, mtime, size; no mtime, no reuse), shared read-only by every caller in the thread (E33).
+ *  W1-T8912: a changed observation sidecar alone is re-validated against the held content identity; history is not re-parsed. */
 export function createBoardSnapshotReader(options: SnapshotOptions = {}): (root: string, owner: string, repo: string) => SharedBoardSnapshotRows {
   const io = options.io ?? defaultIo;
-  const held = new Map<string, { identity: string; rows: SharedBoardSnapshotRows }>();
-  return (root, owner, repo) => {
-    const path = boardSnapshotPath(root, owner, repo);
-    let identity: string | undefined;
+  const held = new Map<string, { identity: string; observation: string | undefined; cache: BoardSnapshotCache; rows: SharedBoardSnapshotRows }>();
+  const identityOf = (path: string): string | undefined => {
     try {
       const st = io.stat(path);
-      identity = st.mtimeMs === undefined ? undefined : `${st.ino ?? "-"}:${st.mtimeMs}:${st.size}`;
+      return st.mtimeMs === undefined ? undefined : `${st.ino ?? "-"}:${st.mtimeMs}:${st.size}`;
     } catch {
       // deliberate: an absent file is an identity of its own; the load below logs the refusal with its reason.
-      identity = "missing";
+      return "missing";
     }
+  };
+  return (root, owner, repo) => {
+    const path = boardSnapshotPath(root, owner, repo);
+    const identity = identityOf(path);
+    const observation = identityOf(boardObservationPath(root, owner, repo));
     const hit = held.get(path);
-    if (hit && hit.identity === identity) return hit.rows;
-    const rows = createBoardSnapshotCache(root, owner, repo, options).rows!();
+    if (hit && hit.identity === identity) {
+      if (observation === undefined || hit.observation !== observation) {
+        hit.rows = reobservers.get(hit.cache)!();
+        hit.observation = observation;
+      }
+      return hit.rows;
+    }
+    const cache = createBoardSnapshotCache(root, owner, repo, options);
+    const rows = cache.rows!();
     if (identity === undefined) held.delete(path);
-    else held.set(path, { identity, rows });
+    else held.set(path, { identity, observation, cache, rows });
     return rows;
   };
 }
@@ -710,6 +853,20 @@ interface ClosedDiskRow {
   updatedAt: string;
   createdAt?: string;
   mergedAt?: string;
+}
+
+interface SnapshotIdentity {
+  sha256: string;
+  bytes: number;
+}
+
+interface ObservationRecord {
+  type: "board-snapshot-observation";
+  schema: number;
+  repository: string;
+  channel: "closed";
+  snapshot: SnapshotIdentity;
+  observedAt: string;
 }
 
 interface SnapshotState {
