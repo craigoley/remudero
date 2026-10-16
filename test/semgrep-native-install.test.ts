@@ -59,6 +59,12 @@ test("native Semgrep locks every build and runtime entry with an exact version a
   }
 });
 
+test("the mcp advisory ignore beside the Semgrep lock lives exactly as long as Semgrep's mcp 1.29.0 pin", () => {
+  const mcp = parseLock(read(runtimePath)).get("mcp")!.version;
+  const ignored = /^id = "GHSA-84m7-p3x7-pcfv"$/m.test(read(".github/semgrep/osv-scanner.toml"));
+  assert.equal(ignored, mcp === "1.29.0", `mcp ${mcp}: the GHSA-84m7-p3x7-pcfv ignore must exist only while Semgrep forces mcp 1.29.0`);
+});
+
 test("native Semgrep lock dialect rejects missing hashes, includes, ranges and duplicate packages", () => {
   const good = "semgrep==1.167.0 --hash=sha256:" + "a".repeat(64) + "\n";
   assert.equal(parseLock(good).size, 1); // Positive control before negative census.
