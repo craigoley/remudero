@@ -1,0 +1,69 @@
+- id: W1-T9855
+  title: "A RUN WORKTREE THAT GETS NO node_modules IS REFUSED BEFORE ITS WORKER, NOT RUN BLIND — worktreeAddAsync discards provisionWorktreeNodeModules' outcome, so on 2026-10-16 W1-T8827 and W1-T9327 (both P1) ran implement workers in worktrees with no node_modules: their store builds failed `esbuild is not installed`, and both runs then died at the pre-open gate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern, whether a run proceeds over a worktree its harness could not give an install
+  band_meaning: span
+  origin: "fan-out 2026-10-16 agent E1: the engine-store build failure behind W1-T8827 and W1-T9327 (investigator S1 lead)"
+  plan_refs: [W1-T9738, W1-T4193, W1-T2777, W1-T9374, W1-T9077, W1-T137]
+  files: [src/lib/worker.ts, test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts]
+  status: queued
+  priority: 2  # W1-T9738 removes today's trigger (a dangling engine link); this stops any other missing install from spending a worker
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 on the core daemon's ledger (host remudero, ~/rmd-state2/state), read-only and niced, over the
+    2026-10-13..16 rotations and the live file (63 forms, every one contributed rows: the coverage control).
+    - Run W1-T8827-1792163461259, a run child spawned from engine 6a34d2fd (sha 65f87ae06): worktree.add 15:13:44Z,
+      then child_entry.store_build_failed 15:13:45Z "CHILD-ENTRY HASH FAILED: esbuild is not installed under
+      /home/node/Remudero/worktrees/run-W1-T8827-1792163461259 ... run npm ci first". recon and implement still ran
+      (implement.done subtype success 15:15:46Z, $0.26). Run W1-T9327-1792163565718 did the same at 15:15:09Z
+      ($0.39 implement). No row says the worktree had no node_modules: worktree.workspace_node_modules covers only
+      packages/*, and the root link's outcome is not ledgered.
+    - Why it was empty: in a run child, worker.ts `resolveNodeModulesSource` falls back to the install root, which is
+      the engine tree the child runs from. That engine's node_modules linked to
+      /home/node/Remudero/worktrees/run-W1-T9124-1792160420189/node_modules, which W1-T8827's own run pruned at
+      15:13:40Z (worktree.prune). `existsSync` on the dangling link is false, so the source was `no-source`.
+      W1-T9738 (#12345, merged 2026-10-16T16:00Z) makes engines link the resolved install and skips dangling ones,
+      which removes this trigger. It does not make the run notice a missing install.
+    - Store failures 2026-10-13..16: 12 child_entry.store_build_failed rows, 10 "src/ changed while the child entries
+      were being built" and these 2. Both "esbuild is not installed" rows are in the 25 minutes run children were on.
+    READ at origin/main (symbols, not lines):
+    - worker.ts `worktreeAddAsync` awaits `provisionWorktreeNodeModules(...)` and drops the returned
+      `NodeModulesLinkOutcome`. The sync `worktreeAdd` drops `linkWorktreeNodeModules`'s the same way.
+      `linkWorktreeNodeModules` is best-effort by contract, and every outcome is a return value.
+    - The implement lane already opts into one refusal there: `refuseSamePackageLockfileMismatch` throws
+      `WorktreeNodeModulesRefusedError` (reasonClass blocked_toolchain). run-task.ts handles it as a deferral, not
+      a strike (worktree.node_modules_refused, endThrownRun stage worktree.node_modules, claim released, rethrown
+      for daemon.ts `isSpawnInfraBlocked`).
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the open heads for no-source and node_modules
+    refusals. W1-T9738 fixes where an engine links. W1-T4193 refuses a lockfile mismatch only when a source exists.
+    No shard covers a worktree that gets no install at all.
+  design: |
+    1. worker.ts: `worktreeAddAsync` and `worktreeAdd` ledger the root outcome as `worktree.node_modules`
+       {outcome, source} through `deps.log`, for every lane.
+    2. Under the implement lane's existing opt-in (`refuseSamePackageLockfileMismatch`, the flag W1-T4193 added), an
+       outcome of `no-source` or `failed` in a worktree that has a package.json throws the same
+       `WorktreeNodeModulesRefusedError` class with a reason naming the outcome. Then run-task.ts's existing
+       worktree.node_modules arm defers the run before recon or implement spend anything, with no new arm. A worktree
+       with no package.json is unchanged: no install is expected there.
+    3. No other lane's behaviour changes beyond the ledger row.
+    Tests go in a new file, test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts, with
+    `test(` titles verbatim as in the proofs below, over a gitRepo() fixture with a local git identity and an
+    injected `resolveSource` returning undefined.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts"
+    - claim: "an implement worktree with no install source is refused as a deferral"
+      proof: 'grep: test("W1-T9855: an implement worktree with no install source is refused as a deferral" in test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts'
+    - claim: "every lane ledgers the root node_modules outcome"
+      proof: 'grep: test("W1-T9855: every lane ledgers the root node_modules outcome" in test/a-run-worktree-without-node-modules-is-refused-before-its-worker.test.ts'
+  falsifier: |
+    Leave the outcome dropped, and the first test's worktreeAddAsync resolves with no node_modules and no refusal,
+    as the two runs on 2026-10-16 did before spending their workers.
+  note: |
+    EFFECT, measured after merge with no numeric pass mark: no child_entry.store_build_failed row with "esbuild is
+    not installed" is followed by an implement.done in the same run.

@@ -26,10 +26,14 @@
     covered while stricter evidence requirements remain open. — from W1-T5117 (run
     W1-T5117-1791436776050)
   risk_ruling:
-    verdict: "high"
+    verdict: "low"
     action: escalate
-    confidence: 0.91
+    confidence: 0.85
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The filed task requires reconciling incident evidence requirements, but the supplied material includes neither task's requirements nor supporting incident evidence; the reconciliation cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for “evidence requirements” in MASTER-PLAN.md, which does not establish alignment between W1-T5117 and W1-T5769."
-    judged_at: "2026-10-16T15:57:18.212Z"
-    pin: "dd9742e4b883e0bdd8b911a008faa521f86d7a84a605b9ff2d520c6928c055a4"
+      - "The task is a recon-type reconciliation of two incident records (W1-T5117 and W1-T5769) with a grep-based acceptance check, so it is read and analysis work rather than an action."
+      - "The declared files (MASTER-PLAN.md, LEARNINGS.md, plan/tasks.yaml) are documentation and plan records. Nothing in the description or files list touches secrets, credentials, auth, permissions, deploy, merge or review policy, or any deletion."
+      - "The gates state is clean: the author is the operator, the filing-time gate passed, all 3 declared files exist at the base, and the family track record is 3 merged against 1 declined. The task was ratified through rmd approve."
+      - "The acceptance is verifiable automatically by grep, and no operator-only decision is requested. The record cites no PR references, but that is a minor evidence gap that the task itself is meant to assess."
+      - "the judge said proceed, but W1-T9714: at verify: auto it fails lint (rule15-filing)"
+    judged_at: "2026-10-16T17:02:43.861Z"
+    pin: "0a10699876dadac05336f9cbf3393d5f7382c4199e726e08b571351d89de5b91"

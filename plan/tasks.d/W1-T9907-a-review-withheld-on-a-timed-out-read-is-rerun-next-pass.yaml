@@ -1,0 +1,89 @@
+- id: W1-T9907
+  title: "A REVIEW WITHHELD ON A TIMED-OUT GIT READ IS RE-RUN ON THE NEXT PASS, NOT AFTER THE PENDING CEILING — the withheld row carries no review_input_digest and the sweep folds it as a durable refusal under a key no live view reads, so the PR's pending status reads 'a review is already in flight, waiting' until the 60-min ceiling or a reboot: on 2026-10-16 five plan reviews withheld 'base read timed out' at 16:44-17:01Z were redone only by boot 3, 25-43 min end to end"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how a verdict withheld on a timed-out reservation read is recorded and retried; the withheld verdict itself is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16, verification agent V1 finding 3 / lead L3 (~/Remudero-notes/flow-verify-2026-10-16/RESULTS.txt), filed by agent F7"
+  plan_refs: [W1-T4414, W1-T9674, W1-T7850, W1-T913, W1-T1213, W1-T5813, W1-T9808, W1-T100, W1-T9748]
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/a-review-withheld-on-a-timed-out-read-is-rerun-next-pass.test.ts
+  status: queued
+  priority: 1  # it drove the plan-filing eligible-to-posted p90 to 41.6 min on 2026-10-16, and every filing holds the tasks it carries
+  attempts: 0
+  rationale: |
+    READ at origin/main c73ab052d. Symbols, not lines.
+    - src/lib/review.ts `reviewTaskIdEvidenceAsync`: a `ReviewGitTimeout` in the base read returns every added id as
+      `unknown` with reason `base-unreadable: <message>` (or `baseline-unreadable:` for the baseline read).
+      `failSummary` renders "id <id> reservation unreadable (UNKNOWN): base read timed out — verdict withheld"
+      (W1-T9674 named the step; it did not change what happens next).
+    - src/run-task.ts `runReview`, the `verdict.taskIdOwnershipWithheld` branch, logs `review.post_refused` with
+      head_sha, pr_url, reason and unknown_reservations, and returns `verdictWithheld`. It posts no terminal status,
+      so the `review.pending_posted` status stays on GitHub. The row has no `review_input_digest`, although
+      `inputDigest` is in scope there and the posted row carries it.
+    - src/lib/sweep.ts `priorActionsFromLedger` keys `review.post_refused` with `reviewOutcomeKey(task_id, pr_url,
+      head_sha, review_input_digest)`. With no digest that is the legacy `<task>@<head>` key. The row is not a
+      retryable throw, a host gap or a freshness refusal, so it falls to the last arm and enters `reviewRefused`.
+    - In `runSweep`, `refusedCurrentPending` sets `reviewPendingOwnerDead` only for a freshness or host-gap refusal
+      (W1-T7850) on the view's exact-input key after the current pending post. Neither applies, so the pending PR
+      matches the `wait` row "a review is already in flight, waiting" until `reviewPendingIsStale` (the 60-min
+      `pendingCeilingMinutes`) or a new boot proves the owner dead.
+    OBSERVED 2026-10-16, core ledger (V1's corpus; #12362 traced on the Mac):
+    - #12362: review_admitted 16:39:43Z, pending_posted 16:40:04Z, post_refused 16:44:19Z ("id W1-T9845 reservation
+      unreadable (UNKNOWN): base read timed out — verdict withheld"; unknown_reservations reason "base-unreadable: git
+      cat-file timed out after 120000ms and was killed"). `sweep.disposed` then read "remudero-review pending 13m ..
+      26m (< 60m ceiling) — a review is already in flight, waiting" at 16:54, 17:00 and 17:06Z. Boot 3 took it over
+      "owner proven dead" at 17:16:41Z, posted at 17:20:57Z and merged at 17:21:17Z.
+    - The same for #12363, #12367, #12369 and #12370: all five were withheld on base-read timeouts at 16:44-17:01Z
+      and redone at 17:19-17:25Z, 25-43 min end to end. Plan-filing eligible-to-posted p90 was 41.6 min (n=20).
+    - post_refused in 15:10-17:12Z: 5, all base-read timeouts. 07:40-15:07Z: 1.
+    The reviews were admitted after the 16:30:23Z restart latch, while the host was loaded. W1-T9808 (P1) stops
+    admissions after a latch; this task makes a timed-out read come back on the next pass wherever it happens.
+    NOT IN SCOPE, named so the builder does not widen the diff: why `git cat-file --batch` over the base shards took
+    over 120 s (host load during a drain); the ReviewGitTimeout bound; unknown reads with any other reason.
+    OVERLAP (lint duplicate-surface): W1-T100 routes blocked_ci to the ci-log fix path and W1-T9748 traces declared
+    files to the staging step. They share sweep.ts and run-task.ts as broad files only; neither touches the withheld
+    review row or how the sweep folds it.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and open heads updated since 2026-10-11 for
+    base-unreadable, ReviewGitTimeout, "reservation unreadable" and "already in flight, waiting". Only W1-T9674
+    (merged) matches.
+  design: |
+    1. src/run-task.ts: the withheld `review.post_refused` row in `runReview` also carries `review_input_digest`
+       (the `inputDigest` already in scope), so the sweep keys it to the PR's exact current input. Extract the row's
+       fields into one exported function (for example `withheldReviewRefusalRow`) so a test reads them directly.
+    2. src/lib/sweep.ts `priorActionsFromLedger`: a `review.post_refused` row whose `unknown_reservations` is
+       non-empty and whose every reason starts `base-unreadable:` or `baseline-unreadable:` is a TIMED-OUT READ.
+       It does not enter `reviewRefused`. It is kept with its time, as the W1-T7850 host-gap refusal is, and it
+       counts toward `reviewRetryableThrowCounts`, so the existing `strikeCap` escalation in
+       `postReviewFailureHistoryDisposition` bounds a read that keeps timing out. It does not enter
+       `reviewRetryableThrows`, whose backoff is the pending ceiling.
+    3. `refusedCurrentPending` in `runSweep` also reads it: a timed-out read on the view's exact input, at or after
+       the current pending post, proves the owner finished, so the post-review row re-runs on the next pass.
+    4. Unchanged: an unknown read with any other reason (ls-remote, fetch or log failed; no head ref or checkout)
+       folds as today; the verdict is still withheld and never passes; legacy rows without a digest fold as today.
+       No new constant.
+    5. Tests go in the new file, `test(` titles verbatim as in the proofs. Drive the sweep from ledger rows shaped
+       like #12362's: `review.pending_posted` at T and a `review.post_refused` at T+4m with the base-unreadable
+       reason and the view's digest, and a green PR whose remudero-review is pending 13 min. Drive it the way
+       test/a-review-refused-because-its-worktree-vanished-is-re-reviewed.test.ts drives the host-gap refusal.
+  acceptance:
+    - claim: "a review withheld on a timed-out base read is re-run on the next pass, not left waiting for the pending ceiling"
+      proof: 'grep: test("W1-T9907: a review withheld on a timed-out base read is re-run on the next pass" in test/a-review-withheld-on-a-timed-out-read-is-rerun-next-pass.test.ts'
+    - claim: "the withheld review.post_refused row carries the review input digest"
+      proof: 'grep: test("W1-T9907: the withheld review row carries the review input digest" in test/a-review-withheld-on-a-timed-out-read-is-rerun-next-pass.test.ts'
+    - claim: "a review withheld because a reservation fetch failed still waits as before"
+      proof: 'grep: test("W1-T9907: a review withheld on a failed reservation fetch still waits as before" in test/a-review-withheld-on-a-timed-out-read-is-rerun-next-pass.test.ts'
+    - claim: "timed-out withholds on one unchanged input escalate at the existing strike cap"
+      proof: 'grep: test("W1-T9907: repeated timed-out withholds on one input escalate at the strike cap" in test/a-review-withheld-on-a-timed-out-read-is-rerun-next-pass.test.ts'
+  falsifier: |
+    At origin/main the withheld row has no digest, so it folds into `reviewRefused` under `PR-<n>@<head>`, and
+    `refusedCurrentPending` is false. The 13-min pending PR matches the `wait` row "a review is already in flight,
+    waiting", so the first test fails. The row builder does not exist, so the second fails. Timed-out withholds are
+    not counted toward the strike cap, so the fourth fails. The third passes before and after; it guards against a
+    fix that retries every unknown read.

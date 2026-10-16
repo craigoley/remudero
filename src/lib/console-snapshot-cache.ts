@@ -284,8 +284,9 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     Math.max(periodOf(entry) + budgetMs, options.freshForMs ?? CONSOLE_SNAPSHOT_FRESH_FOR_MS[route.path] ?? 0);
   const viewed = (entry: SnapshotEntry): boolean => clock.now() - entry.lastReadAtMs <= CONSOLE_SNAPSHOT_VIEWER_IDLE_MS;
 
-  const entryFor = (req: IncomingMessage): SnapshotEntry => {
-    const key = `${req.headers ? bearerTokenId(req) : "unknown"} ${normalizedReadUrl(req.url ?? route.path)}`;
+  const entryFor = (req: IncomingMessage, sourceKey?: string): SnapshotEntry => {
+    const readerKey = `${req.headers ? bearerTokenId(req) : "unknown"} ${normalizedReadUrl(req.url ?? route.path)}`;
+    const key = sourceKey === undefined ? readerKey : JSON.stringify([readerKey, sourceKey]);
     let entry = entries.get(key);
     if (!entry) {
       entry = { key, generation: -1, lastReadAtMs: clock.now(), lastReq: req, computeMs: 0, warmArmed: false };
@@ -388,7 +389,13 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
 
   const handler: Route["handler"] = async (req, res) => {
     if (restored) await restored;
-    const entry = entryFor(req);
+    const qualified = route.cacheQualification?.(req);
+    if (qualified && "status" in qualified) {
+      res.writeHead(qualified.status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify(qualified.body));
+      return;
+    }
+    const entry = entryFor(req, qualified?.key);
     const wasViewed = viewed(entry) || entry.restoredFrom !== undefined;
     entry.lastReadAtMs = clock.now();
     entry.lastReq = req;

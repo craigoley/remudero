@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-16: agent F5, the 06:12:54Z light pass of DAEMON-1792125203347, read-only on the host"
   plan_refs: [W1-T100, W1-T9748, W1-T2379, W1-T463, W1-T5366, W1-T2744, W1-T1211, W1-T8086, W1-T9762, W1-T9761]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-light-pass-does-not-wait-out-a-memory-admission.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
