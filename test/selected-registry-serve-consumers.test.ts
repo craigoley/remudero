@@ -193,7 +193,8 @@ test("selected benchmark discovery preserves actual legacy roots and names synch
   assert.deepEqual(actual, expected);
   assert.deepEqual(actual, { roots: [{ instance: "core", stateDir: local }, { instance: "site", stateDir: join(base, "site", "state") }] });
   assert.equal(f.rows.at(-1)?.fields.action, "benchmark-discovery");
-  assert.equal(f.rows.at(-1)?.fields.reason, "synchronous_seam");
+  assert.equal(f.rows.at(-1)?.fields.reason, "target_unavailable");
+  assert.equal(f.rows.at(-1)?.fields.target_instance, undefined, "fleet discovery is not a configured single instance");
   assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
 });
 
@@ -204,7 +205,7 @@ test("selected inbox discovery preserves real registered repo defaults and unkno
   assert.deepEqual(Reflect.apply(knownPlanRepos, undefined, [f.root, observer]), new Set(["none", "repo"]));
   assert.equal(f.rows.at(-1)?.fields.action, "inbox-discovery");
   assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown");
-  assert.equal(f.rows.at(-1)?.fields.reason, "synchronous_seam");
+  assert.equal(f.rows.at(-1)?.fields.reason, "target_unavailable");
   writeFileSync(path, "instances: [invalid]");
   assert.equal(Reflect.apply(knownPlanRepos, undefined, [f.root, observer]), undefined, "legacy unreadable/malformed still refuses no repo");
 });

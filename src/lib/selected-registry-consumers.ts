@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { SelectedModeSettings } from "./config-schema.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
   type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
@@ -31,6 +32,28 @@ const unavailableIntent = (): SelectedRegistryIntent => Object.freeze({ kind: "u
 const unknown = (reason: string, digest?: string): Evidence => ({ selected_state: "unknown", reason,
   ...(digest === undefined ? {} : { binding_digest: digest }) });
 const LIMIT = 32;
+interface ConsumerScope { observer: SelectedRegistryObserver | undefined; active: boolean }
+const consumerScope = new AsyncLocalStorage<ConsumerScope>();
+
+/** Invocation-owned diagnostics only. An absent nested invocation masks, rather than inherits, opt-in. */
+export function selectedRegistryObserverInContext(): SelectedRegistryObserver | undefined {
+  const scope = consumerScope.getStore();
+  return scope?.active ? scope.observer : undefined;
+}
+
+export async function withSelectedRegistryContext<T>(observer: SelectedRegistryObserver | undefined,
+  operation: () => Promise<T>): Promise<T> {
+  const scope: ConsumerScope = { observer, active: true };
+  try { return await consumerScope.run(scope, operation); }
+  finally { scope.active = false; observer?.close(); }
+}
+
+/** Sync consumers stay sync; this neither waits for selected IO nor grants fresh authority. */
+export function withSelectedRegistryContextSync<T>(observer: SelectedRegistryObserver | undefined, operation: () => T): T {
+  const scope: ConsumerScope = { observer, active: true };
+  try { return consumerScope.run(scope, operation); }
+  finally { scope.active = false; observer?.close(); }
+}
 
 function capture(options: SelectedRegistryConsumerOptions | undefined): Captured {
   if (options === undefined) return { kind: "off" };

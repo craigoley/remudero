@@ -1186,6 +1186,13 @@ import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-com
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
+import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+  type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
+
+/** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
+function selectedRegistryIntentForConfig(config: Config) {
+  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } });
+}
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -51418,6 +51425,7 @@ export function buildInboxDraftSpawnArgs(args: {
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats;
 }): SpawnWorkerArgs {
+  const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
   return {
     cwd: args.cwd,
     permissionMode: "bypassPermissions",
@@ -51434,19 +51442,19 @@ export function buildInboxDraftSpawnArgs(args: {
     prompt: args.prompt,
     tools: INBOX_DRAFT_WORKER_TOOLS,
     onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
-    ...(args.draftRoutingLog && args.proposalId ? { draftRouting: {
+    ...(registryRecord && args.proposalId ? { draftRouting: {
       lane: "inbox-draft",
       proposalId: args.proposalId,
       log: args.draftRoutingLog,
       readStats: args.draftRoutingReadStats,
-      evaluate: (worker: WorkerResult) => {
+      evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
           clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,
             args.proposalId!, parsed.stampLine, undefined, facts.moduleExists, facts.readGrepProofFile,
             facts.pathIsDirectory, facts.pathExistsAtBase).length === 0) };
-      },
+      }),
     } } : {}),
   };
 }
@@ -51547,6 +51555,7 @@ export async function draftProposalBatch(
   rawSpawn: typeof spawnWorker = spawnWorker,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
+  const registryIntent = selectedRegistryIntentForConfig(config);
 
   // W1-T2559: the inbox-draft rung ships no code and supervises no worker, so G-17's Tier
   // Invariant — which exists to keep a supervisor strictly above what it reviews — does not bind
@@ -51573,7 +51582,7 @@ export async function draftProposalBatch(
 
   try {
     const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
-    return await runDraftRung(
+    return await withSelectedRegistryContext(selectedRegistryObserverFromIntent(registryIntent, log), () => runDraftRung(
       toDraft,
       planText,
       {
@@ -51610,7 +51619,7 @@ export async function draftProposalBatch(
         log,
       },
       runId,
-    );
+    ));
   } finally {
     worktreeRemove(repoDir, worktreePath);
     removeRunLock(worktreePath);
@@ -53442,6 +53451,7 @@ export async function approveCommand(
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
+  const registryIntent = selectedRegistryIntentForConfig(config);
 
   const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal || !classification) {
@@ -53597,12 +53607,12 @@ export async function approveCommand(
 
     // ONE SHARD PER DRAFTED TASK, never a monolith append (`monolith-filing`). W1-T4700: re-linted
     // WITH the stamp first, refusing before any write; returns only the paths it changed.
-    shardRelPaths = fileRatificationDraft(
+    shardRelPaths = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () => fileRatificationDraft(
       worktreePath,
       { fragmentYaml: materialized.fragmentYaml, proposalId: payload.proposalId, stampLine: materialized.stampLine },
       { mkdirSync, writeFileSync, readFileSync },
       join,
-    );
+    ));
     log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
 
     // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
@@ -54021,6 +54031,7 @@ async function approveBatchCommand(
 ): Promise<number> {
   const proposalIds = rest;
   const config = deps.config ?? loadConfig();
+  const registryIntent = selectedRegistryIntentForConfig(config);
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -54071,7 +54082,7 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
-      const filed = fileRatificationBatch(
+      const filed = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () => fileRatificationBatch(
         batchWorktree,
         payloads,
         (payload) => {
@@ -54119,7 +54130,7 @@ async function approveBatchCommand(
         },
         { mkdirSync, writeFileSync, readFileSync },
         join,
-      );
+      ));
       allWrittenPaths = filed.writtenPaths;
       allFiledTaskIds = filed.filedIds;
       log("approve.shards_written", { proposal_ids: payloads.map((p) => p.proposalId), paths: allWrittenPaths });
@@ -57808,7 +57819,8 @@ export function serviceFreshnessGate(
  * service-posture `emit` closure just above already keeps, never a reason a command that would
  * otherwise have worked now doesn't.
  */
-function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOverride?: string): void {
+function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOverride?: string): SelectedRegistryObserver | undefined {
+  let observer: SelectedRegistryObserver | undefined;
   try {
     // Do not create either HOME config or an override's state/ directory before deploy-run validates
     // the path. The supervisor's explicit-root path is intentionally not logged at this seam.
@@ -57817,6 +57829,9 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
     // A missing pause/resume root must reach target validation still missing. Invocation
     // telemetry must not recreate it and turn an unavailable state mount into a local target.
     if ((cmd === "pause" || cmd === "resume") && !existsSync(config.root)) return;
+    const ledgerPath = ledgerPathFor(config);
+    observer = selectedRegistryObserverFromIntent(selectedRegistryIntentForConfig(config), (step, fields) =>
+      appendLedger(ledgerPath, { run_id: "CLI", task_id: "CLI", step, ...fields }));
     appendLedger(ledgerPathFor(config), {
       run_id: `CLI-${Date.now()}`,
       task_id: "CLI",
@@ -57827,6 +57842,7 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
   } catch {
     // Telemetry-only — see this function's own doc.
   }
+  return observer;
 }
 
 /** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
@@ -58012,13 +58028,16 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
  *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
 export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
   const config = loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const observer = selectedRegistryObserverFromIntent(selectedRegistryIntentForConfig(config), (step, fields) =>
+    appendLedger(ledgerPath, { run_id: "BENCHMARK-AA", task_id: "BENCHMARK-AA", step, ...fields }));
   return { config, repo: githubRepoSlugOfCheckout(repoRoot),
     runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),
     loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
     dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
       spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
       clockBoundMs: workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon }),
-    defaultInstanceRoots: () => registryInstanceRoots(stateDir) };
+    defaultInstanceRoots: () => registryInstanceRoots(stateDir, undefined, undefined, observer) };
 }
 
 /**
@@ -58390,7 +58409,7 @@ export async function main(
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
   // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
   const invocationStateRoot = cmd === "deploy-run" && rest.includes("--state-root") ? flagValue(rest, "--state-root") ?? "" : undefined;
-  logCliInvocation(cmd, rest, invocationStateRoot);
+  const registryObserver = logCliInvocation(cmd, rest, invocationStateRoot);
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);
     process.exit(0);
@@ -58535,7 +58554,8 @@ export async function main(
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
   await flushThenExit(
-    deps.dispatch ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE),
+    await withSelectedRegistryContext(registryObserver, async () => deps.dispatch
+      ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE)),
   );
 }
 

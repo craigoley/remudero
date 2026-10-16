@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
+import { observeSelectedRegistrySync, selectedRegistryObserverInContext, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -2033,8 +2033,8 @@ export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
 /** W1-T4700: the names a task's `repo:` may carry — every fleet-registry instance, the managed set, and `none`
  *  (status.ts's no-repo sentinel). `undefined` on an unreadable registry, which leaves the repo rule silent. */
-export function knownPlanRepos(repoRoot: string, observer?: SelectedRegistryObserver): ReadonlySet<string> | undefined {
-  return observeSelectedRegistrySync(observer, "inbox-discovery", {}, () => {
+export function knownPlanRepos(repoRoot: string, observer: SelectedRegistryObserver | undefined = selectedRegistryObserverInContext()): ReadonlySet<string> | undefined {
+  return observeSelectedRegistrySync(observer, "inbox-discovery", { instanceName: undefined }, () => {
   const text = readInstanceRegistryText(repoRoot);
   if (text === undefined) return undefined;
   try {

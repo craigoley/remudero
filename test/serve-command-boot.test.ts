@@ -55,6 +55,7 @@ function instance(serve?: { host?: string; port?: number }): { home: string; roo
 
 test("selected loaded CLI config reaches benchmark delayed draft evaluation and actual offline lint without activation", async (t) => {
   const { home, root } = instance(), repo = gitRepo({ kind: "selected-cli-lint" });
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   const saved = { HOME: process.env.HOME, RMD_INSTANCE_REGISTRY: process.env.RMD_INSTANCE_REGISTRY, GH_TOKEN: process.env.GH_TOKEN };
   const configPath = join(home, ".config", "remudero", "config.json"), selectedPath = join(home, "selected.yaml");
   const planPath = join(repo.dir, "plan", "tasks.yaml"); mkdirSync(join(repo.dir, "plan")); writeFileSync(planPath, "[]\n");
@@ -88,7 +89,7 @@ test("selected loaded CLI config reaches benchmark delayed draft evaluation and 
         "the actual delayed evaluation must retain the loaded opt-in, but ambient env must not enable it");
       // Main's existing invocation config read, not a new read in the offline lint helper.
       process.argv = ["node", "rmd", "lint-plan", "--all"];
-      await assert.rejects(main({ checkFreshness: () => ({ kind: "guarded" } as never), dispatch: async () =>
+      await assert.rejects(main({ checkFreshness: () => ({ status: "guarded" } as never), dispatch: async () =>
         lintPlanCommand(["--all"], { repoRoot: repo.dir, offline: true }) }), error => (error as { code?: number }).code === 0);
       const observations = rows().filter(row => row.step === "instance_registry.consumer_shadow_observed").slice(before);
       assert.equal(observations.some(row => row.action === "benchmark-discovery"), enabled);

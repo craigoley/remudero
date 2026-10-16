@@ -121,7 +121,7 @@ export interface InstanceRoot { instance: string; stateDir: string }
  *  `stateBase`. An unreadable registry is a named gap, never a silent fall back to one root. */
 export function registryInstanceRoots(localStateDir: string, readRegistry = () => readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"),
   stateBase = DEFAULT_INSTANCE_STATE_BASE, observer?: SelectedRegistryObserver): { roots: InstanceRoot[] } | { reason: string } {
-  return observeSelectedRegistrySync(observer, "benchmark-discovery", {}, () => {
+  return observeSelectedRegistrySync(observer, "benchmark-discovery", { instanceName: undefined }, () => {
   try {
     return { roots: parseInstanceRegistry(readRegistry()).instances.filter((instance) => instance.live).map((instance) => ({
       instance: instance.name, stateDir: instance.name === CORE_INSTANCE ? localStateDir : join(stateBase, instance.name, "state") })) };

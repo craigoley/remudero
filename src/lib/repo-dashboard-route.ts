@@ -25,7 +25,7 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import type { Route } from "./service.js";
-import { observeSelectedRegistry, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
+import { observeSelectedRegistry, observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { sendJson } from "./panel-actions.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
@@ -835,6 +835,8 @@ function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome
  */
 export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
   { ok: true; summary: RepoDashboardResult; shadow?: Record<string, RepoShadowFacts>; fileReads: RepoSummaryFileReads } | { ok: false; reason: string } {
+  return observeSelectedRegistrySync(deps.selectedRegistryObserver, "repo-dashboard",
+    { instanceName: deps.ownInstance, repository: deps.instanceRepository && `${deps.instanceRepository.owner}/${deps.instanceRepository.repo}` }, () => {
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
   const replay = deps.fileReads;
   let text: string | undefined;
@@ -869,6 +871,7 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
     return facts ? [[`${identity.repo.owner}/${identity.repo.repo}`, { ...facts, condition }]] : [];
   }));
   return { ok: true, summary: dashboardResult(projectionDeps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}), fileReads: reads };
+  });
 }
 
 /**
