@@ -39944,22 +39944,17 @@ export async function daemonCommand(
   const bootChildPolicy = readRunChildPolicy(childPolicy);
   // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
   const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
-  const childUnion = childMode ? readRunChildModeUnion(dirname(ledgerPath)) : undefined;
-  const autoWindow = bootChildPolicy.mode === "auto" ? childUnion : undefined;
-  const childModeTracker = createRunChildModeTracker(autoWindow ? runChildModeWindow(autoWindow.rows) : bootLedgerLines,
-    undefined, autoWindow?.unread);
+  const childBoot = childMode
+    ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log }) : undefined;
+  const childModeTracker = childBoot?.tracker ?? createRunChildModeTracker(bootLedgerLines);
   const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
     log(step, extra);
     childModeTracker.observe(step, extra);
   };
   const adoptedRunIds = new Set<string>();
-  if (childUnion?.unread.length) {
-    if (autoWindow) childModeTracker.record(runChildModeFor("auto", childModeTracker.evidence()).decision, log, true);
-    throw new Error(`run child settlements unreadable: ${childUnion.unread.join(", ")}`);
-  }
-  const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
+  const adoptedChildren: AdoptedRunChild[] = childBoot ? adoptRunChildren({
     stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log: childLog,
-    settledRunIds: new Set((childUnion?.rows ?? []).flatMap((row) => row.step === "run_child.settled" && typeof row.run_id === "string" ? [row.run_id] : [])),
+    settledRunIds: childBoot.settledRunIds,
   }) : [];
   for (const child of adoptedChildren) {
     adoptedRunIds.add(child.runId);
@@ -57596,7 +57591,7 @@ import {
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
-import { createRunChildModeTracker, readRunChildModeUnion, readRunChildPolicy, runChildModeFor, runChildModeWindow, type RunChildModeEvidence } from "./lib/run-child-mode.js";
+import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 export { hashInstallInputs, installHashMarkerPath };
 

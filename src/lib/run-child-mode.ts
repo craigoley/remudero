@@ -231,6 +231,34 @@ export function readRunChildPolicy(read: () => RunChildMode): { mode: RunChildMo
   }
 }
 
+/** W1-T9816: every evidence row of the ledger union under `stateDir`, plus what could not be read. */
+export function readRunChildModeUnion(
+  stateDir: string, read: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+): { rows: Array<Record<string, unknown>>; unread: string[] } {
+  const union = read(stateDir, { step: [...RUN_CHILD_MODE_EVIDENCE_STEPS], pattern: RUN_CHILD_MODE_EVIDENCE_PATTERN, refuseIncomplete: true });
+  return { rows: union.rows, unread: union.ok ? [] : [...union.unread] };
+}
+
+/**
+ * W1-T9816: a boot under `on` or `auto` reads the union once, for the settled run ids adoption skips and, under `auto`, the
+ * tracker's window from the boot before the previous one. An unreadable union refuses the boot; under `auto` it first
+ * ledgers a forced decision to shadow that names the unread files.
+ */
+export function bootRunChildMode(a: {
+  stateDir: string; auto: boolean; liveRows: Iterable<Record<string, unknown>>;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  read?: typeof readLedgerUnionRecordsSync;
+}): { tracker: RunChildModeTracker; settledRunIds: Set<string> } {
+  const union = readRunChildModeUnion(a.stateDir, a.read);
+  const tracker = createRunChildModeTracker(a.auto ? runChildModeWindow(union.rows) : a.liveRows, undefined, a.auto ? union.unread : []);
+  if (union.unread.length) {
+    if (a.auto) tracker.record(runChildModeFor("auto", tracker.evidence()).decision, a.log, true);
+    throw new Error(`run child settlements unreadable: ${union.unread.join(", ")}`);
+  }
+  const settled = union.rows.flatMap((row) => (row.step === "run_child.settled" && typeof row.run_id === "string" ? [row.run_id] : []));
+  return { tracker, settledRunIds: new Set(settled) };
+}
+
 export interface RunChildModeTracker {
   /** Folds a row the daemon just ledgered; its `ts` is the tracker's clock. */
   observe(step: string, extra?: Record<string, unknown>): void;
@@ -247,13 +275,6 @@ export function runChildModeWindow(rows: Iterable<Record<string, unknown>>): Arr
   return ordered.slice(boots.length >= 3 ? boots[boots.length - 3] : 0);
 }
 
-/** W1-T9816: every evidence row of the ledger union under `stateDir`, plus what could not be read. */
-export function readRunChildModeUnion(
-  stateDir: string, read: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
-): { rows: Array<Record<string, unknown>>; unread: string[] } {
-  const union = read(stateDir, { step: [...RUN_CHILD_MODE_EVIDENCE_STEPS], pattern: RUN_CHILD_MODE_EVIDENCE_PATTERN, refuseIncomplete: true });
-  return { rows: union.rows, unread: union.ok ? [] : [...union.unread] };
-}
 
 /** A daemon's running evidence, seeded from the ledger it booted with and fed every row it writes since. Holds counts, never rows. */
 export function createRunChildModeTracker(
