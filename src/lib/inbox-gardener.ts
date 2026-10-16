@@ -217,7 +217,7 @@ function boundedFile(path: string, maxBytes: number): string {
   return fs.readFileSync(path, "utf8");
 }
 
-export function defaultInboxGardenerPorts(options: { stateDir: string; scope: InboxGardenerScope; planPath: string; codeSha: string;
+export function defaultInboxGardenerPorts(options: { stateDir: string; scope: InboxGardenerScope; planPath: string; codeSha: string; creditOverridePath?: string;
   clock?: Clock; githubJson?: typeof ghJsonAsync; judge?: InboxGardenerPorts["judge"] }): InboxGardenerPorts {
   const clock = options.clock ?? systemClock, githubJson = options.githubJson ?? ghJsonAsync;
   let plan: ReturnType<typeof loadPlan>;
@@ -233,7 +233,7 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
     const ledger = readInboxGardenerLedger(options.stateDir, options.scope, proposals.map(p => p.id));
     retainedRows = ledger.rows;
     if (!fs.statSync(join(options.stateDir, LEDGER_FILENAME)).isFile()) throw new Error("live ledger unavailable");
-    const overridePath = join(options.scope.root, "plan", "credit-overrides.yaml");
+    const overridePath = options.creditOverridePath ?? join(dirname(options.planPath), "credit-overrides.yaml");
     const rawOverrides = fs.existsSync(overridePath) ? parseYaml(fs.readFileSync(overridePath, "utf8")) : [];
     if (!Array.isArray(rawOverrides) || rawOverrides.some(o => !o || o.action !== "remove-credit" || typeof o.task !== "string" || !Number.isSafeInteger(o.pr) || o.pr < 1 || o.author_class !== "operator" || typeof o.reason !== "string" || !o.reason.trim())) throw new Error("credit override source unverified");
     overrides = rawOverrides;

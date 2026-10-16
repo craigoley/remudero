@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rmSync, renameSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { hostname } from "node:os";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -22,6 +22,8 @@ import { createService } from "../src/lib/service.js";
 import { world } from "./helpers/why-me-world.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { inboxGardenerRunTaskPorts } from "../src/run-task.js";
+import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 
 type T = Parameters<typeof world>[0];
 const TASK = "W1-T1200", ID = `proof-debt:${TASK}`;
@@ -51,10 +53,11 @@ async function fixture(t: T, count = 1, native = false) {
   const store = () => { const s = readInboxGardenerStore(w.state, scope); assert.equal(s.state, "observed"); return s.state === "observed" ? s.store : assert.fail(); };
   const source = () => readPersistedInbox(w.state)!;
   let mismatchQualifier = false;
+  let restoreAdmitHook: (() => void) | undefined;
   const restoreSources = native ? defaultInstanceInboxSources({ instance: w.instance, root: w.root, planPath: w.planPath, ledgerPath: w.ledgerPath }, w.repository, fakeGitHub()) : [buildInboxAttentionCensusRoute({ ...w.deps, inboxFromSlowLane: true })];
   const restoreCensus = restoreSources.find(r => r.path === "/v1/inbox/attention-census")!;
   const qualify = restoreCensus.cacheQualification!;
-  restoreCensus.cacheQualification = req => { const result = qualify(req); return mismatchQualifier && result && !("status" in result) ? { ...result, key: "f".repeat(64) } : result; };
+  restoreCensus.cacheQualification = req => { const result = qualify(req); restoreAdmitHook?.(); return mismatchQualifier && result && !("status" in result) ? { ...result, key: "f".repeat(64) } : result; };
   const restoreServer = createService({ tokens: { read: "read", write: "shared" }, providers: [{ name: "operator", grant: () => undefined,
     authorize(req) { return req.headers.authorization === "Bearer alice" ? { scopes: new Set(["read", "write"]), tier: "low", actor: "operator:alice" } : undefined; } }],
     routes: mountInstanceInboxRoutes({ instance: w.instance, repository: w.repository, stateDir: w.state, routes: restoreSources }) });
@@ -65,7 +68,7 @@ async function fixture(t: T, count = 1, native = false) {
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(input) });
     return { status: res.status, body: await res.json() as any };
   };
-  return { ...w, scope, ids, mergedIds, ports, run, store, source, githubCalls, restore, mismatch: (value: boolean) => { mismatchQualifier = value; }, advance: () => { now += 1000; }, now: () => now };
+  return { ...w, scope, ids, mergedIds, ports, run, store, source, githubCalls, restore, mismatch: (value: boolean) => { mismatchQualifier = value; }, onRestoreAdmit: (hook?: () => void) => { restoreAdmitHook = hook; }, advance: () => { now += 1000; }, now: () => now };
 }
 
 test("the inbox gardener retires a proven terminal ask once and can restore it", async t => {
@@ -449,4 +452,73 @@ test("default proof sources bind exact mechanical handoff and open successor own
   const handoff = await ports.proof(candidate); assert.equal(handoff?.kind, "handoff");
   assert.equal(validInboxTerminalProof(handoff, f.scope, original), true);
   assert.equal(validInboxTerminalProof({ ...handoff!, proposalId: predecessor.id } as InboxTerminalProof, f.scope, original), false);
+});
+
+
+test("the production gardener reads committed credit overrides from its separate source checkout", async t => {
+  const f = await fixture(t), repo = gitRepo({ kind: "inbox-credit-proof" }); t.after(() => repo.cleanup());
+  mkdirSync(join(repo.dir, "plan")); const plan = join(repo.dir, "plan", "tasks.yaml"), overrides = join(repo.dir, "plan", "credit-overrides.yaml");
+  writeFileSync(plan, readFileSync(f.planPath)); writeFileSync(overrides, "[]\n");
+  repo.git("add", "plan"); repo.git("commit", "-m", "fixture owned checkout plan");
+  const old = process.env.RMD_INSTANCE_NAME; process.env.RMD_INSTANCE_NAME = f.instance;
+  t.after(() => { if (old === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = old; });
+  const githubJson = async (args: string[]) => args[1] === "view" ? { files: [{ path: "src/fix.ts" }] } : [{ number: 1200,
+    url: `https://github.com/${f.repository}/pull/1200`, state: "MERGED", headRefName: `run-${TASK}-1234`, headRefOid: "a".repeat(40),
+    mergeCommit: { oid: "b".repeat(40) }, body: `Remudero-Task: ${TASK}` }];
+  const ctx = { config: { root: f.root, claudeBin: "/bin/false" }, repoRoot: repo.dir, owner: "owner", repo: "core",
+    codeSha: "c".repeat(40), log() {}, raiseDuplicate: () => "" } as Parameters<typeof inboxGardenerRunTaskPorts>[0];
+  const owned = async () => {
+    const wired = await inboxGardenerRunTaskPorts(ctx, { githubJson, spawn: async () => assert.fail("credit qualification never invokes a provider") });
+    const pack = await wired.ports.capture(), candidate = pack.candidates.find(c => c.proposal.id === ID)!;
+    return { ...wired, candidate };
+  };
+  let wired = await owned(); const initialPolicy = wired.candidate.sourcePolicy;
+  assert.equal((await wired.ports.proof(wired.candidate))?.kind, "merged-task", "owned checkout has a genuine merged-credit positive control");
+  const removal = [{ task: TASK, pr: 1200, action: "remove-credit", author_class: "operator", reason: "implementation did not ship" }];
+  writeFileSync(overrides, JSON.stringify(removal)); repo.git("add", "plan/credit-overrides.yaml"); repo.git("commit", "-m", "fixture operator removes wrong credit");
+  wired = await owned(); assert.equal(await wired.ports.proof(wired.candidate), undefined, "checkout removal invalidates the merge proof despite a separate state root");
+  assert.notEqual(wired.candidate.sourcePolicy, initialPolicy, "the exact operator source change reopens semantic evaluation");
+  const fallback = defaultInboxGardenerPorts({ stateDir: f.state, scope: wired.scope, planPath: plan, codeSha: "c".repeat(40), githubJson });
+  const fallbackCandidate = (await fallback.capture()).candidates.find(c => c.proposal.id === ID)!;
+  assert.equal(await fallback.proof(fallbackCandidate), undefined, "the direct maintained default also resolves policy beside planPath");
+  const result = await runInboxGardener({ stateDir: f.state, scope: wired.scope, ports: { ...wired.ports, judge: undefined }, mode: "act", clock: fixedClock(f.now()) });
+  assert.equal("retired" in result && result.retired, 0); assert.equal(f.store().events.length, 0);
+  writeFileSync(overrides, "{malformed"); await assert.rejects(owned(), /parse|YAML|flow|collection/i);
+  writeFileSync(overrides, "[]\n"); writeFileSync(join(f.root, "plan", "credit-overrides.yaml"), JSON.stringify(removal));
+  wired = await owned(); assert.equal((await wired.ports.proof(wired.candidate))?.kind, "merged-task", "an unrelated state-root copy cannot override authoritative checkout policy");
+  assert.equal(wired.candidate.sourcePolicy, initialPolicy);
+});
+
+
+test("an oversized relevant ledger row remains partial despite a proven terminal control", async t => {
+  const f = await fixture(t), ports = f.ports(), pack = await ports.capture(), candidate = pack.candidates.find(c => c.proposal.id === ID)!;
+  assert.equal(pack.coverage.ledger, "observed"); assert.equal((await ports.proof(candidate))?.kind, "merged-task");
+  appendFileSync(f.ledgerPath, JSON.stringify({ ts: new Date(f.now()).toISOString(), run_id: "oversized", step: "panel.proposal_declined",
+    task_id: ID, reason: "x".repeat(INBOX_GARDENER_SOURCE_LIMITS.rowBytes) }) + "\n");
+  const result = await f.run(); assert.equal(result.state, "source_partial");
+  assert.equal(readInboxGardenerStore(f.state).state, "absent", "an incomplete ledger cannot turn a positive candidate into an action");
+});
+
+test("the maintained producer exposes unknown lifecycle ownership and recovers the owned history", async t => {
+  const f = await fixture(t); await f.run(); await f.refresh();
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.state, "retired");
+  await refreshInboxClassification({ ...f.deps, inboxAuditScope: undefined }, {}, fixedClock(f.now())); const unknown = f.source().classifications.find(c => c.proposalId === ID)!;
+  assert.equal(unknown.state, "not_ready"); assert.match(unknown.needsTriageReason ?? "", /owned lifecycle/);
+  await f.refresh();
+  assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.state, "retired");
+  assert.equal(f.source().classifications.find(c => c.proposalId === "verify-human:W1-T216")?.state, "not_ready");
+});
+
+test("a real restore journal write failure is unknown and leaves the original acknowledgement history", async t => {
+  const f = await fixture(t); await f.run(); await f.refresh();
+  const retired = f.store().events[0]!.receipt, path = inboxGardenerPath(f.state), saved = path + ".saved", before = readFileSync(path, "utf8");
+  const input = { repository: f.repository, instance: f.instance, proposalId: ID, threadId: inboxThreadId(ID), intentId: "write-failure-001",
+    retirementId: retired.id, snapshotKey: retired.snapshotKey, taskId: TASK, reason: "Review after unavailable write" };
+  f.onRestoreAdmit(() => { f.onRestoreAdmit(); renameSync(path, saved); mkdirSync(path); });
+  try {
+    const failed = await f.restore(input); assert.equal(failed.status, 503); assert.equal(failed.body.error, "inbox_retirement_receipt_unavailable");
+    assert.equal(failed.body.delivery, "unknown"); assert.equal(readFileSync(saved, "utf8"), before);
+  } finally { rmSync(path, { recursive: true, force: true }); renameSync(saved, path); }
+  assert.equal(f.store().events.length, 1, "failed write never replaces the authoritative retirement");
+  const accepted = await f.restore(input); assert.equal(accepted.status, 200); assert.equal(f.store().events.length, 2);
 });

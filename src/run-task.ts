@@ -38765,7 +38765,8 @@ export async function inboxGardenerRunTaskPorts(ctx: GardenBuildContext, seams: 
     }
     catch (error) { ctx.log("inbox.gardener_source_unavailable", { reason: String(error) }); }
   }
-  return { scope, ports: defaultInboxGardenerPorts({ stateDir: join(ctx.config.root, "state"), scope, planPath: resolveRepoLayout(ctx.repoRoot).planMonolith, codeSha, githubJson: seams.githubJson,
+  return { scope, ports: defaultInboxGardenerPorts({ stateDir: join(ctx.config.root, "state"), scope, planPath: resolveRepoLayout(ctx.repoRoot).planMonolith,
+    creditOverridePath: join(resolveRepoLayout(ctx.repoRoot).planDir, "credit-overrides.yaml"), codeSha, githubJson: seams.githubJson,
     judge: async (prompt, candidate) => {
       const mount = seams.mount?.() ?? resolveVerifyHumanJudgeMount(loadMounts(mountsPath(ctx.repoRoot)));
       const spawn = seams.spawn ?? benchmarkNonDispatchSpawn("inbox-gardener");
