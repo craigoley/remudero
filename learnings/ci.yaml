@@ -286,7 +286,8 @@
 
 - id: claims-gate-lane
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire claims-gate-lane
+  lifecycle: superseded
   files: ["plan/claims.yaml", "plan/tasks.d/**", src/run-task.ts, "scripts/**", ".github/**"]
   fact: >-
     Before opening a PR from the task-authoring lane or changing the claims runner, scripts, or CI
