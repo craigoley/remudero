@@ -12,7 +12,7 @@
   plan_refs: [W1-T7728, W1-T8778, W1-T9092, W1-T9089]
   files: [src/daemon-main.ts, src/run-task.ts, bin/rmd, src/lib/garden-registry.ts, src/lib/measurement-cadence.ts, test/the-daemon-starts-from-a-narrow-entry.test.ts]
   status: queued
-  priority: 1.5
+  priority: 1  # operator-2026-10-16: restart idle is ~42% of lane slot-minutes; build the ADR 0007 cheap-restart chain first (W1-T9087 merged #12219)
   attempts: 0
   rationale: |
     ADR 0007 decision B.3 and offset 5 of decision C.
