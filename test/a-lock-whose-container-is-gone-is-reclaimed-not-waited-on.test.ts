@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -124,6 +124,8 @@ function runRecycle(opts: RunOpts = {}): Run {
   const dir = mkdtempSync(join(tmpdir(), "rmd-reclaim-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "rmd-reclaim-rec-"));
   const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "rmd-reclaim-state-"));
+  // A copied mutant must keep the real script's sibling dependency, or it stops before the wait.
+  if (opts.scriptPath) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
   writeStubs(dir);
   const cashKeyPath = join(rec, "openweight-api-key");
   writeFileSync(cashKeyPath, "fixture-cash-key\n", { mode: 0o600 });
@@ -341,7 +343,11 @@ test("W1-T2556: MUTANT: removing the reclaim step restores the deadlock — the 
   writeFileSync(join(inflightDir, "W1-T2525.lock"), JSON.stringify({ pid: 57, host: "8c8fc20029e2", startedAt: "2026-09-01T00:00:00Z" }));
 
   const mutantRun = runRecycle({ scriptPath: mutant, stateDir: state });
-  assert.notEqual(mutantRun.status, 0, "without the reclaim step, a provably-dead lock must deadlock the recycle again");
+  assert.equal(mutantRun.status, 1, "without the reclaim step, a provably-dead lock must deadlock the recycle again");
+  assert.match(mutantRun.stderr, /REFUSING — 1 lane-holding and 0 lane-less worker\(s\) still in flight after 1s\./,
+    "the mutant must reach the bounded inflight wait, not fail in unrelated setup");
+  assert.equal(readFileSync(join(inflightDir, "W1-T2525.lock"), "utf8"),
+    JSON.stringify({ pid: 57, host: "8c8fc20029e2", startedAt: "2026-09-01T00:00:00Z" }), "the refused mutant leaves the lock unchanged");
   assert.equal(mutantRun.calls.filter(isRm).length, 0, "the mutant must never reach docker rm");
 
   // …and the REAL script, on the identical fixture, proceeds — the same claim ACCEPTANCE 1 makes,
