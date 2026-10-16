@@ -714,8 +714,6 @@ out="$(docker run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
   # jq is not process inspection; it is the ci-gate workflow script the three ci-gate suites
   # extract and RUN. Absent, they exit 127 and 14 tests fail — measured on this image.
   jq --version >/dev/null 2>&1    || { echo "MISS jq";     fail=1; }
-  # Review executes Python helper proofs on Linux too. Isolate Python from host
-  # environment/site customizations and prove its required stdlib actually imports.
   python3 -I -c "import argparse, contextlib, hashlib, json, os, pathlib, plistlib, pwd, re, shutil, stat, subprocess, sys, tempfile, time, uuid; assert sys.version_info >= (3, 9); print(sys.version)" >/dev/null 2>&1 || { echo "MISS python3 stdlib"; fail=1; }
   [ "$fail" -eq 0 ] && echo ALL_RUNNABLE
 ' 2>&1)"

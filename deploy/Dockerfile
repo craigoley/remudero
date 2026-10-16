@@ -124,9 +124,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && lsof -v >/dev/null 2>&1 \
  && jq --version >/dev/null \
  && python3 -I -c "import argparse, contextlib, hashlib, json, os, pathlib, plistlib, pwd, re, shutil, stat, subprocess, sys, tempfile, time, uuid; assert sys.version_info >= (3, 9); print(sys.version)"
-# Python backs the real Mac janitor helper proofs even when review runs on Linux.
-# A missing interpreter produces spawnSync ENOENT before a safety assertion runs.
-# Execute its required stdlib here; verify-image repeats this as runtime uid1000.
 # The checks above use `>/dev/null` rather than `| head -1`: `A && B | C` parses as `A && (B | C)`
 # and a pipeline's status is its last stage, so a piped check passes for a missing binary.
 
