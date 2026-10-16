@@ -32,7 +32,6 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { writeAtomic } from "./fs-race-safe.js";
-import { readInflightLock } from "./inflight-lock.js";
 import { isAbsolute, join } from "node:path";
 import { stopDetail } from "./fleet-control.js";
 import { appendLedger } from "./ledger.js";
@@ -445,6 +444,17 @@ export function deriveDrainWait(
     quantile: DRAIN_WAIT_QUANTILE,
     lanes: reads,
   };
+}
+
+/** W1-T8138: a task's in-flight lock holder (`state/inflight/<task>.lock`), or null when absent or unshaped.
+ *  Read locally rather than through inflight-lock.ts: this file is deploy logic and must not import run logic. */
+function readLockHolder(inflightDir: string, taskId: string): { run_id: string; startedAt: string } | null {
+  try {
+    const o = JSON.parse(readFileSync(join(inflightDir, `${taskId}.lock`), "utf8")) as { run_id?: unknown; startedAt?: unknown };
+    return typeof o.run_id === "string" ? { run_id: o.run_id, startedAt: typeof o.startedAt === "string" ? o.startedAt : "" } : null;
+  } catch {
+    return null; // missing, unreadable, or garbage — no valid holder
+  }
 }
 
 /** W1-T8138: the observed `implement.done` run lengths, in ms, off a ledger's text. */
@@ -2589,7 +2599,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       for (const name of readdirSync(inflightDir)) {
         if (!name.endsWith(".lock")) continue;
         const taskId = name.slice(0, -".lock".length);
-        const holder = readInflightLock(inflightDir, taskId);
+        const holder = readLockHolder(inflightDir, taskId);
         if (!holder || settled.has(holder.run_id)) continue;
         const startedMs = Date.parse(holder.startedAt);
         const verdict = judged.get(holder.run_id);
@@ -3079,7 +3089,7 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
     blockerSettled: (blocker) => {
       try {
         if (blocker.kind === "lock") {
-          const holder = blocker.taskId ? readInflightLock(inflightDir, blocker.taskId) : null;
+          const holder = blocker.taskId ? readLockHolder(inflightDir, blocker.taskId) : null;
           if (!holder) return true; // the lock is gone
           if (blocker.runId !== undefined && holder.run_id !== blocker.runId) return true; // a later run of the task
           return readRunSettlement(readLedgerText()).settled.has(holder.run_id);
