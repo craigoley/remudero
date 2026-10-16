@@ -14,6 +14,10 @@ import type { Route } from "../src/lib/service.js";
 import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { createSelectedRegistryObserver } from "../src/lib/selected-registry-consumers.js";
+import * as registryConsumers from "../src/lib/selected-registry-consumers.js";
+import { createRepositoriesReadModelView } from "../src/lib/repositories-view.js";
+import { ledgerSource, readModelLaneViews } from "../src/lib/read-model-worker.js";
+import { createDemandBook } from "../src/lib/view-demand.js";
 import { readSelectedInstanceRegistry, registryFileIO } from "../src/lib/instance-registry-selection.js";
 
 interface Row { step: string; fields: Record<string, unknown> }
@@ -256,6 +260,53 @@ test("selected real serve CLI forwards loaded opt-in but environment alone never
     console.log = consoleLog; console.error = consoleError;
     for (const [key, value] of prior) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   }
+});
+
+test("selected trusted-worker intent snapshots data without carrying ports or granting authority", async (t) => {
+  const f = fixture(t), capture = Reflect.get(registryConsumers, "captureSelectedRegistryIntent");
+  assert.equal(typeof capture, "function");
+  const caps = ["identity"], options = { ...f.options, settings: { ...f.options.settings }, input: { requiredCapabilities: caps } };
+  const intent = capture(options) as { kind: string; version: number; input: { configuredPath: string; requiredCapabilities: string[] } };
+  options.settings.registryPath = join(f.root, "wrong.yaml"); caps[0] = "unsupported";
+  assert.equal(intent.kind, "shadow"); assert.equal(intent.version, 1);
+  assert.equal(intent.input.configuredPath, f.path); assert.deepEqual(intent.input.requiredCapabilities, ["identity"]);
+  assert.deepEqual(structuredClone(intent), intent, "a data-only trusted-worker contract, not an object carrying closures");
+  assert.equal(Object.isFrozen(intent.input.requiredCapabilities), true);
+  assert.equal(capture(undefined), undefined);
+  assert.equal(capture({ ...f.options, io: registryFileIO }).kind, "unknown", "custom ports must never silently become defaults in another thread");
+  assert.equal(capture({ ...f.options, input: { signal: new AbortController().signal } }).kind, "unknown");
+  const restore = Reflect.get(registryConsumers, "selectedRegistryObserverFromIntent"); assert.equal(typeof restore, "function");
+  const observer = restore(structuredClone(intent), f.options.record) as NonNullable<ReturnType<typeof createSelectedRegistryObserver>>;
+  t.after(() => observer.close());
+  await observer.observe("repositories-view", { instanceName: "fixture", repository: "owner/repo" }, () => "legacy");
+  await observer.settled(); assert.equal(f.rows.at(-1)?.fields.selected_state, "ready", "restored data uses the real bounded async reader");
+  assert.equal(f.rows.at(-1)?.fields.publication_permission, "not-granted");
+});
+
+test("selected repositories factory observes real synchronous materialization without changing its body", (t) => {
+  const f = fixture(t), observer = createSelectedRegistryObserver(f.options)!; t.after(() => observer.close());
+  const ctx = { now: 0, instances: [] };
+  const legacy = createRepositoriesReadModelView(ledgerSource).materialize(ctx);
+  const view = Reflect.apply(createRepositoriesReadModelView, undefined, [ledgerSource, observer]) as ReturnType<typeof createRepositoriesReadModelView>;
+  assert.deepEqual(view.materialize(ctx), legacy);
+  const row = f.rows.at(-1); assert.ok(row);
+  assert.equal(row.fields.action, "repositories-view"); assert.equal(row.fields.selected_state, "unknown");
+  assert.equal(row.fields.publication_permission, "not-granted"); assert.ok(!JSON.stringify(row).includes(f.path));
+});
+
+test("selected real view-lane factory consumes optional shadow intent while old data stays compatible", (t) => {
+  const f = fixture(t), clock = fixedClock(0), demand = createDemandBook({ clock });
+  const capture = Reflect.get(registryConsumers, "captureSelectedRegistryIntent"); assert.equal(typeof capture, "function");
+  const data = { instances: [], selectedRegistryIntent: capture(f.options) };
+  const list = readModelLaneViews(data, clock, f.options.record, demand);
+  const spec = list.find(view => view.name === "repositories"); assert.ok(spec && "create" in spec);
+  assert.deepEqual(spec.create().materialize({ now: 0, instances: [] }), []);
+  assert.equal(f.rows.at(-1)?.fields.action, "repositories-view");
+  assert.equal(f.rows.at(-1)?.fields.selected_state, "unknown");
+  f.rows.length = 0;
+  const old = readModelLaneViews({ instances: [] }, clock, f.options.record, demand).find(view => view.name === "repositories"); assert.ok(old && "create" in old);
+  assert.deepEqual(old.create().materialize({ now: 0, instances: [] }), []);
+  assert.deepEqual(f.rows, [], "an absent old contract does not opt in by upgrade");
 });
 
 test("selected readiness absent opt-in preserves legacy checks without a selected read or receipt", async (t) => {
