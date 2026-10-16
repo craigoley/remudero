@@ -13621,12 +13621,10 @@ export async function runFixRung(opts: {
     // enforces.
     const attempt = strikes + 1;
     const round: "resume" | "fresh" = attempt === 1 ? "resume" : "fresh";
-    // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet
-    // claim set the fix worker below is being sent to resolve — BEFORE
-    // `review` is reassigned to this round's freshly computed verdict, so
-    // `detectReviewFalseBlock` (after the review call, below) can tell a
-    // byte-identical re-block apart from real progress. Keyed on the SAME
-    // worker-visible unmet set the fix rung actually dispatches (W1-T166).
+    // W1-T168: snapshot THIS round's dispatch target — the head sha + unmet claim set the fix worker below is
+    // being sent to resolve — BEFORE `review` is reassigned to this round's freshly computed verdict, so
+    // `detectReviewFalseBlock` (after the review call, below) can tell a byte-identical re-block apart from real
+    // progress. Keyed on the SAME worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
     const refutedFlake = flakeClaimsForHead(roundLedger, opts.taskId, priorHeadSha, prNumber).length > 0;
@@ -14439,13 +14437,13 @@ export async function runFixRung(opts: {
       if (scopeMainOwned.length > 0) {
         amendment = { kind: "refused", reason: "main-owned",
           detail: `main changed ${scopeMainOwned.join(", ")} since this PR's merge base; refresh against main` };
-        let changed: string[] | undefined;
-        try { changed = readWorkerChanged(); } catch { changed = undefined; }
-        let mainSha: string | undefined;
-        try { mainSha = hostWorktreeGit(opts.worktreePath, ["rev-parse", "--verify", "refs/remotes/origin/main"]).trim(); } catch { mainSha = undefined; }
-        // The retry below needs both: the main this compared, and which requested paths the worker really changed.
+        let read: { paths: string[] } | { error: string };
+        try { read = { paths: readWorkerChanged() }; } catch (error) { read = { error: String(error) }; }
+        const changed = "paths" in read ? read.paths : undefined;
+        const mainTip = hostWorktreeGitResult(opts.worktreePath, ["rev-parse", "--verify", "refs/remotes/origin/main"]);
         deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha,
-          pr_number: prNumber, main_sha: mainSha, changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)) });
+          pr_number: prNumber, main_sha: mainTip.status === 0 ? mainTip.stdout.trim() : undefined,
+          changed_paths: changed && fixAction.paths.filter((path) => changed.includes(path)), changed_paths_error: "error" in read ? read.error : undefined });
       } else try {
         amendment = await amendScope(fixAction.paths, readWorkerChanged(), priorHeadSha);
       } catch (error) {
