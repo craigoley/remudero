@@ -1760,13 +1760,13 @@ export interface DeployResult {
 // Tiered, never one threshold: the first refusal keeps today's marker and `deploy.restart_refused`
 // row; a refusal recurring across consecutive ATTEMPTS (same instance, same reason — W1-T8138: an attempt,
 // not an hourly window, since a drain refusal now retries when its blockers settle) logs
-// `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT windows it opens ONE
+// `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT attempts it opens ONE
 // needs-human issue per instance and reason and updates it while it persists. A VERIFIED recycle
 // closes it. FALSIFIER: test/a-recycle-that-keeps-refusing-is-escalated.test.ts.
 
-/** Consecutive refused windows at which the refusal is logged as persisting. */
+/** Consecutive refused attempts at which the refusal is logged as persisting. */
 export const REFUSAL_PERSISTING_AT = 2;
-/** Consecutive refused windows at which the one needs-human issue is opened. */
+/** Consecutive refused attempts at which the one needs-human issue is opened. */
 export const REFUSAL_ESCALATE_AT = 3;
 
 /** The run of consecutive same-reason refusals for one instance. */
