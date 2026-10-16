@@ -38,7 +38,9 @@ test("coverage child environments disable Node compile caching and preserve nati
 test("uninstrumented coverage retries preserve the original compile-cache environment", () => {
   const env = Object.freeze({
     NODE_COMPILE_CACHE: "/ordinary/compile-cache",
-    NODE_DISABLE_COMPILE_CACHE: "0",
+    // Node v24 treats the nonempty string "0" as disabling too. The ordinary
+    // positive control must omit it, rather than assume shell-style booleans.
+    NODE_DISABLE_COMPILE_CACHE: coverage ? "0" : undefined,
     NODE_V8_COVERAGE: "/outer/coverage",
   });
   const retry = coverageRetryInvocation(process.execPath,
@@ -107,7 +109,7 @@ test("the real coverage first pass disables inherited and programmatic Node comp
 test("ordinary wrapper commands retain their original Node compile-cache environment", (t) => {
   const { cache, observed } = runProbe(t, false);
   assert.equal(observed.cache, cache);
-  assert.equal(observed.disabled, "0");
+  assert.equal(observed.disabled, null);
   assert.notEqual(observed.status, observed.disabledStatus);
   assert.equal(observed.coverage, process.env.NODE_V8_COVERAGE ?? "");
   assert.ok(observed.cacheDir?.startsWith(cache), "the ordinary child's cache remains enabled");
