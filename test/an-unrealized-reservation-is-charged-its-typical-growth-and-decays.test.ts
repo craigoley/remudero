@@ -13,14 +13,8 @@ import { test } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { type HostMemoryLedgerOptions, type HostMemoryReading, type ReadingEntry } from "../src/lib/host-memory-ledger.js";
-import {
-  classSurvival,
-  createTreePeakSampler,
-  openLearnedReservation,
-  readPeakSamples,
-  resetLearnedEstimateCacheForTests,
-  survivalAt,
-} from "../src/lib/host-memory-learning.js";
+// A namespace import, so a run at a base without the new exports still loads and each subtest fails on its own.
+import * as learning from "../src/lib/host-memory-learning.js";
 import {
   evaluateShadowMemory,
   gatherShadowInputs,
@@ -134,9 +128,9 @@ test("W1-T9762: an unseen start is charged its class typical, not its learned p9
 
 test("W1-T9762: a tree past its measured time to peak claims nothing above its resident", () => {
   resetShadowMemoryStateForTests();
-  resetLearnedEstimateCacheForTests();
+  learning.resetLearnedEstimateCacheForTests();
   const store = storeWith([5, 8, 12, 20, 30]);
-  const survival: ShadowMemoryPorts["survival"] = (cls, ageMs) => classSurvival(cls, ageMs, store);
+  const survival: ShadowMemoryPorts["survival"] = (cls, ageMs) => learning.classSurvival(cls, ageMs, store);
   // 40 minutes in and still under its median: every measured build had peaked by 30 minutes.
   const old = evaluateShadowMemory(gatherShadowInputs(GARDEN_START, ports({ residentMib: 300, ageMs: 40 * MIN }, { survival }), POLICY), POLICY);
   const build = old.claims[0]!;
@@ -150,20 +144,20 @@ test("W1-T9762: a tree past its measured time to peak claims nothing above its r
   assert.ok(old.numbers.hostClaimMib < old.numbers.hostClaimUndecayedMib);
 
   // 10 minutes in: two of five measured builds had peaked; the prior sits at the longest, 30 minutes.
-  resetLearnedEstimateCacheForTests();
+  learning.resetLearnedEstimateCacheForTests();
   const mid = evaluateShadowMemory(gatherShadowInputs(GARDEN_START, ports({ residentMib: 300, ageMs: 10 * MIN }, { survival }), POLICY), POLICY);
   const factor = mid.claims[0]!.decay.factor!;
   assert.ok(factor > 0.5 && factor < 1, `three of five samples and the prior are still ahead: ${factor}`);
   assert.equal(mid.claims[0]!.chargedMib, (723 - 300) * factor);
 
-  assert.deepEqual(survivalAt([{ peakAgeMs: 5 * MIN, at: NOW }], 0, NOW), { factor: 1, samples: 1 }, "a new tree has it all ahead");
+  assert.deepEqual(learning.survivalAt([{ peakAgeMs: 5 * MIN, at: NOW }], 0, NOW), { factor: 1, samples: 1 }, "a new tree has it all ahead");
 });
 
 test("W1-T9762: a class with no time-to-peak samples is charged undecayed and says so", () => {
   resetShadowMemoryStateForTests();
-  resetLearnedEstimateCacheForTests();
+  learning.resetLearnedEstimateCacheForTests();
   const store = storeWith(null);
-  const survival: ShadowMemoryPorts["survival"] = (cls, ageMs) => classSurvival(cls, ageMs, store);
+  const survival: ShadowMemoryPorts["survival"] = (cls, ageMs) => learning.classSurvival(cls, ageMs, store);
   const verdict = evaluateShadowMemory(gatherShadowInputs(GARDEN_START, ports({ residentMib: 300, ageMs: 40 * MIN }, { survival }), POLICY), POLICY);
   const build = verdict.claims[0]!;
   assert.deepEqual(build.decay, { factor: null, basis: "not decayed: no time-to-peak samples" });
@@ -203,17 +197,17 @@ function reservationSpace(): HostMemoryLedgerOptions {
 }
 
 test("W1-T9762: a recorded peak carries the age the tree reached it", () => {
-  resetLearnedEstimateCacheForTests();
+  learning.resetLearnedEstimateCacheForTests();
   let now = NOW;
   let rssMib = 200;
-  const sampler = createTreePeakSampler({
+  const sampler = learning.createTreePeakSampler({
     listProcesses: () => ({ complete: true, rows: [{ pid: 10, parent: 1, start: "proc:5" }] }),
     readFile: (path) => path.endsWith("/stat") ? `10 (node) S 1 ${"0 ".repeat(17)}5 0 0` : status(rssMib),
     setTimer: () => undefined, clearTimer: () => undefined, now: () => now,
   });
   const appended: string[] = [];
   const store = { list: () => [] as string[], append: (_p: string, line: string) => void appended.push(line), size: () => 0, clock: fixedClock(NOW) };
-  const reservation = openLearnedReservation({ workerClass: "implement" }, { ledger: reservationSpace(), store, sampler });
+  const reservation = learning.openLearnedReservation({ workerClass: "implement" }, { ledger: reservationSpace(), store, sampler });
   now = NOW + 1 * MIN;
   reservation.bindRoot(10);
   for (const [atMin, mib] of [[4, 900], [9, 1400], [15, 1100], [25, 1400]] as const) {
@@ -229,13 +223,13 @@ test("W1-T9762: a recorded peak carries the age the tree reached it", () => {
   assert.equal(row.p, 1400);
   assert.equal(row.ttp_ms, 9 * MIN, "the peak was last RAISED 9 minutes after the reservation opened; 25 only matched it");
 
-  const samples = readPeakSamples("implement", { list: () => ["state2.ndjson"], readTail: () => appended.join("") });
+  const samples = learning.readPeakSamples("implement", { list: () => ["state2.ndjson"], readTail: () => appended.join("") });
   assert.equal(samples[0]!.peakAgeMs, 9 * MIN, "the store reads the age back");
-  assert.equal(readPeakSamples("implement", { list: () => ["s.ndjson"], readTail: () => `{"c":"implement","p":5,"at":"${new Date(NOW).toISOString()}"}\n` })[0]!.peakAgeMs,
+  assert.equal(learning.readPeakSamples("implement", { list: () => ["s.ndjson"], readTail: () => `{"c":"implement","p":5,"at":"${new Date(NOW).toISOString()}"}\n` })[0]!.peakAgeMs,
     undefined, "an old sample is still a peak sample, never a time-to-peak one");
 
   // A tree tracked without its reservation's open time has no age to report.
-  const bare = createTreePeakSampler({
+  const bare = learning.createTreePeakSampler({
     listProcesses: () => ({ complete: true, rows: [{ pid: 10, parent: 1, start: "proc:5" }] }),
     readFile: (path) => path.endsWith("/stat") ? `10 (node) S 1 ${"0 ".repeat(17)}5 0 0` : status(400),
     setTimer: () => undefined, clearTimer: () => undefined, now: () => NOW,
