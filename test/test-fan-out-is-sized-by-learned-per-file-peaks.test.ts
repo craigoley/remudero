@@ -97,7 +97,7 @@ test("W1-T9102: the tree sampler records each file child's maximum once and excl
       if (!p) throw new Error("fixture process exited");
       if (path.endsWith("/stat")) return `${pid} (node) S ${p.parent} ${"0 ".repeat(17)}${p.start} 0`;
       if (path.endsWith("/cmdline")) return p.argv.join("\0");
-      return `VmHWM:\t${p.mib * 1024} kB\n`;
+      return `VmRSS:\t${p.mib * 1024} kB\nVmHWM:\t${p.mib * 1024} kB\n`;
     },
     setTimer: () => undefined, clearTimer: () => {},
   });

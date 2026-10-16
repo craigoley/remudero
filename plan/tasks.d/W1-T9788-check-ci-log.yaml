@@ -1,0 +1,39 @@
+- id: W1-T9788
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log cost 99.9 PR minute(s) across 38 round(s) on 36 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.08
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log"
+  files:
+    - src/run-task.ts
+    - test/check-ci-log.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log"
+      proof: "grep: test(\"W1-T9788: check:ci-log is prevented, not retried\" in test/check-ci-log.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log cost 99.9 PR minute(s) (seven-day half-life) across 38 fix round(s) on 36 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/run-task.ts: names "ci-log" (66 line(s))
+    - src/lib/sweep.ts: names "ci-log" (19 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #12080 at 2026-10-15T18:37:56Z: hand fix PR #12080: src/lib/base-reproduction.ts, src/lib/sweep.ts; minutes are the pass median proxy (6.154366666666666), not measured repair time
+    - PR #11734 at 2026-10-14T17:09:29Z: hand fix PR #11734: src/lib/sweep.ts; minutes are the pass median proxy (6.154366666666666), not measured repair time
+    - PR #11524 at 2026-10-14T04:08:03Z: hand fix PR #11524: scripts/coverage-merge-ratchet.mjs, scripts/security-merge-producer.mjs, src/lib/arm-auto-merge.ts, src/lib/code-scanning-merge-adapter.mjs, src/lib/code-scanning-merge-policy.mjs,
+    - PR #11385 at 2026-10-13T15:43:05Z: hand fix PR #11385: src/lib/sweep.ts; minutes are the pass median proxy (6.154366666666666), not measured repair time
+    - PR #11005 at 2026-10-12T04:21:07Z: hand fix PR #11005: src/lib/closing-reference-guard.ts, src/lib/sweep.ts, src/lib/worker.ts, src/spike.ts; minutes are the pass median proxy (6.154366666666666), not measured repair time
+
+    WHAT THE LAST RUNG TRIED: W1-T5132 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

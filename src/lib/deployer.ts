@@ -113,6 +113,9 @@ export interface TriggerInputs {
   lastFailedAtMs?: number;
   /** The decision's clock, for the failure back-off above. */
   nowMs?: number;
+  /** W1-T8138: the last failure was a drain refusal, with the blockers a tick has not seen settle. When set,
+   *  the recycle's hold is "a named blocker is unsettled", not the hour's back-off. */
+  drainRefusal?: DrainRefusalState;
 }
 
 export interface ResourcePolicyDrift {
@@ -283,6 +286,225 @@ export function readMountPlanDrift(
 
 /** An automatic image recycle does not follow a recorded deploy failure sooner than this. */
 export const IMAGE_RECYCLE_FAILURE_BACKOFF_MS = 60 * 60_000;
+
+// ── A REFUSED RECYCLE RETRIES WHEN ITS BLOCKERS SETTLE, AND WAITS AS LONG AS ITS LANES NEED (W1-T8138) ──
+// The fixed hour above was a clock: a drain refusal re-tried on it whether or not the lane that caused it
+// was still running, and the script's drain waited the same time for a fleet of 2-minute runs as for one
+// 90-minute run. Both bounds below are READ FROM DATA — the refusal's own blocker list, the ledger's rows,
+// the observed `implement.done` run lengths — and a case with no history says so (`no_history_fallback`).
+
+/** One thing the drain was still waiting on when it refused, as the script's `recycle-blockers-json:` line names it. */
+export interface DrainBlocker {
+  kind: "lock" | "worker";
+  /** A lock's task id. */
+  taskId?: string;
+  /** A lock's run id — the key the ledger's `verdict` / `run.freshness_handoff` rows settle it under. */
+  runId?: string;
+  /** A lane-less worker's pid. */
+  pid?: number;
+  /** A lane-less worker's kind. */
+  workerKind?: "review" | "retro" | "fix-rung" | "unknown";
+  /** How old it was when the script looked, in seconds. */
+  ageS: number;
+}
+
+/** The persisted record of the last drain refusal: when, for which head, and what it was waiting on. */
+export interface DrainRefusalRecord {
+  atMs: number;
+  toHead: string;
+  blockers: DrainBlocker[];
+}
+
+/** Parse the script's `recycle-blockers-json:` line out of a refusal message. `undefined` = the refusal is
+ *  not a drain refusal (no such line, unparseable, or an empty list), so today's back-off applies to it. */
+export function parseDrainBlockers(message: string): DrainBlocker[] | undefined {
+  const line = /^\s*recycle-blockers-json:\s*(\[.*\])\s*$/m.exec(message)?.[1];
+  if (line === undefined) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line);
+  } catch (err) {
+    // A torn or hand-edited line names no blockers: the refusal is then NOT a drain refusal (the hour's
+    // back-off applies), which is the conservative direction — never a retry on evidence we could not read.
+    void err;
+    return undefined;
+  }
+  if (!Array.isArray(raw)) return undefined;
+  const out: DrainBlocker[] = [];
+  for (const e of raw as Record<string, unknown>[]) {
+    const ageS = typeof e?.age_s === "number" && Number.isFinite(e.age_s) ? e.age_s : 0;
+    if (e?.kind === "lock" && typeof e.task_id === "string") {
+      out.push({ kind: "lock", taskId: e.task_id, ...(typeof e.run_id === "string" && e.run_id ? { runId: e.run_id } : {}), ageS });
+    } else if (e?.kind === "worker" && typeof e.pid === "number") {
+      const k = e.worker_kind;
+      out.push({
+        kind: "worker",
+        pid: e.pid,
+        workerKind: k === "review" || k === "retro" || k === "fix-rung" ? k : "unknown",
+        ageS,
+      });
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** "lock W1-T1 (run r1), worker pid 77 (review)" — for a reason line. */
+export function describeDrainBlockers(blockers: readonly DrainBlocker[]): string {
+  return blockers
+    .map((b) => (b.kind === "lock" ? `lock ${b.taskId}${b.runId ? ` (run ${b.runId})` : ""}` : `worker pid ${b.pid} (${b.workerKind ?? "unknown"})`))
+    .join(", ");
+}
+
+/** A drain-refused recycle, with the blockers a tick has NOT seen settle. */
+export interface DrainRefusalState {
+  blockers: DrainBlocker[];
+  unsettled: DrainBlocker[];
+}
+
+/** The automatic recycle's hold after a recorded failure: a drain refusal holds while a named blocker is
+ *  still unsettled and releases the moment none is; every other failure keeps the hour's back-off. */
+function failureHold(i: TriggerInputs): { hold: boolean; why: string } {
+  if (i.drainRefusal !== undefined) {
+    const hold = i.drainRefusal.unsettled.length > 0;
+    return {
+      hold,
+      why: `the last recycle was refused on its drain wait and still waits on ${describeDrainBlockers(i.drainRefusal.unsettled)}`,
+    };
+  }
+  const hold = i.lastFailedAtMs !== undefined && i.nowMs !== undefined && i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
+  return { hold, why: "a deploy failed under an hour ago" };
+}
+
+/** The quantile of the observed run lengths a lane is expected to finish within. A statistical level, not a duration. */
+export const DRAIN_WAIT_QUANTILE = 0.95;
+/** The drain's poll granularity in seconds (the script's default poll interval): a wait is never shorter. */
+export const DRAIN_WAIT_GRANULARITY_S = 5;
+/** What the script waits when nothing supplies a wait; labelled `no_history_fallback` wherever it is used. */
+export const DRAIN_WAIT_FALLBACK_S = 3000;
+
+/** One in-flight lane as the supervisor reads it. */
+export interface DrainWaitLane {
+  runId: string;
+  taskId?: string;
+  ageS: number;
+  /** The quiet-worker watchdog's verdict on this lane (`worker.recycle_yield` decision): `ended` = it ended its
+   *  round, `end_failed` = it tried and the round did not end. Absent = never judged. */
+  judged?: "ended" | "end_failed";
+}
+
+export interface DrainWaitLaneRead {
+  run_id: string;
+  task_id?: string;
+  age_s: number;
+  judged?: "ended" | "end_failed";
+  remaining_s: number;
+  /** `ended`: not waited for. `conditioned_quantile`: the high quantile of runs at least this old, less its age.
+   *  `beyond_history`: older than every observed run, so nothing observed bounds it — the fallback applies. */
+  basis: "ended" | "conditioned_quantile" | "beyond_history";
+}
+
+export interface DerivedDrainWait {
+  waitS: number;
+  source: "observed" | "observed_with_fallback_lane" | "no_history_fallback";
+  samples: number;
+  quantile: number;
+  lanes: DrainWaitLaneRead[];
+}
+
+function quantileOf(sorted: readonly number[], q: number): number {
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]!;
+}
+
+/** The drain wait the in-flight lanes need: over all lanes, the largest of each lane's expected remainder,
+ *  where a lane's remainder is the {@link DRAIN_WAIT_QUANTILE} of the observed run lengths that were at least
+ *  as old as the lane, less its age. A lane that ended its round is not waited for; one whose end failed is
+ *  waited for like any other. No lane in flight reads as one that dispatches now (age 0). */
+export function deriveDrainWait(
+  durationsMs: readonly number[],
+  lanes: readonly DrainWaitLane[],
+  fallbackS: number = DRAIN_WAIT_FALLBACK_S,
+): DerivedDrainWait {
+  const sorted = durationsMs.filter((d) => Number.isFinite(d) && d > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) {
+    return { waitS: fallbackS, source: "no_history_fallback", samples: 0, quantile: DRAIN_WAIT_QUANTILE, lanes: [] };
+  }
+  const considered: DrainWaitLane[] = lanes.length > 0 ? [...lanes] : [{ runId: "(none in flight)", ageS: 0 }];
+  let beyond = false;
+  const reads = considered.map((lane): DrainWaitLaneRead => {
+    const base = { run_id: lane.runId, ...(lane.taskId ? { task_id: lane.taskId } : {}), age_s: lane.ageS, ...(lane.judged ? { judged: lane.judged } : {}) };
+    if (lane.judged === "ended") return { ...base, remaining_s: 0, basis: "ended" };
+    const older = sorted.filter((d) => d >= lane.ageS * 1000);
+    if (older.length === 0) {
+      beyond = true;
+      return { ...base, remaining_s: fallbackS, basis: "beyond_history" };
+    }
+    return { ...base, remaining_s: Math.max(0, Math.ceil(quantileOf(older, DRAIN_WAIT_QUANTILE) / 1000 - lane.ageS)), basis: "conditioned_quantile" };
+  });
+  return {
+    waitS: Math.max(DRAIN_WAIT_GRANULARITY_S, ...reads.map((r) => r.remaining_s)),
+    source: beyond ? "observed_with_fallback_lane" : "observed",
+    samples: sorted.length,
+    quantile: DRAIN_WAIT_QUANTILE,
+    lanes: reads,
+  };
+}
+
+/** W1-T8138: a task's in-flight lock holder (`state/inflight/<task>.lock`), or null when absent or unshaped.
+ *  Read locally rather than through inflight-lock.ts: this file is deploy logic and must not import run logic. */
+function readLockHolder(inflightDir: string, taskId: string): { run_id: string; startedAt: string } | null {
+  try {
+    const o = JSON.parse(readFileSync(join(inflightDir, `${taskId}.lock`), "utf8")) as { run_id?: unknown; startedAt?: unknown };
+    return typeof o.run_id === "string" ? { run_id: o.run_id, startedAt: typeof o.startedAt === "string" ? o.startedAt : "" } : null;
+  } catch {
+    return null; // missing, unreadable, or garbage — no valid holder
+  }
+}
+
+/** W1-T8138: the observed `implement.done` run lengths, in ms, off a ledger's text. */
+export function readImplementDurationsMs(ledgerText: string): number[] {
+  const out: number[] = [];
+  for (const line of ledgerText.split("\n")) {
+    if (!line.includes('"step":"implement.done"') || !line.includes("worker_duration_ms")) continue;
+    try {
+      const ms = (JSON.parse(line) as { worker_duration_ms?: unknown }).worker_duration_ms;
+      if (typeof ms === "number" && Number.isFinite(ms) && ms > 0) out.push(ms);
+    } catch {
+      continue; // a torn or foreign line is not a sample
+    }
+  }
+  return out;
+}
+
+/** W1-T8138: which runs the ledger shows as finished or yielded, and what the quiet-worker watchdog judged.
+ *  Settled = a `verdict` row, a `run.freshness_handoff` row, or an acted `worker.recycle_yield` row.
+ *  Judged `end_failed` = a `worker.recycle_yield` whose round end failed (and no settling row followed). */
+export function readRunSettlement(ledgerText: string): { settled: Set<string>; judged: Map<string, "ended" | "end_failed"> } {
+  const settled = new Set<string>();
+  const judged = new Map<string, "ended" | "end_failed">();
+  for (const line of ledgerText.split("\n")) {
+    const isVerdict = line.includes('"step":"verdict"');
+    const isHandoff = line.includes('"step":"run.freshness_handoff"');
+    const isYield = line.includes('"step":"worker.recycle_yield"');
+    if (!isVerdict && !isHandoff && !isYield) continue;
+    try {
+      const row = JSON.parse(line) as { run_id?: unknown; decision?: unknown };
+      if (typeof row.run_id !== "string") continue;
+      if (isYield) {
+        if (row.decision === "acted") {
+          judged.set(row.run_id, "ended");
+          settled.add(row.run_id);
+        } else if (!judged.has(row.run_id)) {
+          judged.set(row.run_id, "end_failed");
+        }
+      } else {
+        settled.add(row.run_id);
+      }
+    } catch {
+      continue; // a torn line settles nothing
+    }
+  }
+  return { settled, judged };
+}
 
 export interface Decision {
   deploy: boolean;
@@ -846,10 +1068,9 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
     if (stopUnknownOrSet) {
       return { deploy: false, reason: `${what}, but STOP is set or unknown — no automatic recycle` };
     }
-    const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
-      i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
-    if (recentFailure) {
-      return { deploy: false, reason: `${what}; a deploy failed under an hour ago — the automatic recycle backs off` };
+    const failure = failureHold(i);
+    if (failure.hold) {
+      return { deploy: false, reason: `${what}; ${failure.why} — the automatic recycle backs off` };
     }
     return { deploy: true, reason: createDrift.map((d) => `${d.recycle}: ${d.details.join(", ")}`).join("; "), recycle: "create-drift" };
   }
@@ -903,10 +1124,9 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   if (i.imageDriftOnly === true && imageStale && !i.autoMode && i.imageRecycleManual !== true) {
     if (stopUnknownOrSet) return { deploy: false, reason: `${why}, but STOP is set or unknown — no automatic recycle` };
     const image = i.newestBakedSha ? `the image for ${i.newestBakedSha.slice(0, 9)}` : "the new image";
-    const recentFailure = i.lastFailedAtMs !== undefined && i.nowMs !== undefined &&
-      i.nowMs - i.lastFailedAtMs < IMAGE_RECYCLE_FAILURE_BACKOFF_MS;
-    if (recentFailure) {
-      return { deploy: false, reason: `${why}; a deploy failed under an hour ago — the automatic image recycle backs off` };
+    const failure = failureHold(i);
+    if (failure.hold) {
+      return { deploy: false, reason: `${why}; ${failure.why} — the automatic image recycle backs off` };
     }
     if (i.imagePublished === true) {
       return { deploy: true, reason: `automatic image recycle: ${why}, and ${image} is published`, recycle: "image" };
@@ -1456,6 +1676,14 @@ export interface DeployDeps {
   // ── PERSISTING REFUSAL (W1-T6062) ── a backend that refuses every recycle used to leave only
   // state/DEPLOY_FAILED and an hourly `deploy.restart_refused` row (site and console, 2026-10-04 to
   // 10-06). All OPTIONAL: an omitting caller keeps today's single marker and row, nothing more.
+  // ── W1-T8138 ── a drain refusal names its blockers, and the retry is driven by their settling. All OPTIONAL:
+  // an omitting caller keeps the hour's back-off for every failure.
+  /** The last drain refusal's blockers, persisted because each cycle is a fresh process. */
+  drainRefusal?: () => DrainRefusalRecord | undefined;
+  /** Store the drain refusal, or clear it with `undefined`. */
+  setDrainRefusal?: (record: DrainRefusalRecord | undefined) => void;
+  /** Has this blocker yielded or finished since the refusal? `undefined` = could not tell, which holds the retry. */
+  blockerSettled?: (blocker: DrainBlocker, refusal: DrainRefusalRecord) => boolean | undefined;
   /** The streak of consecutive same-reason refusals, persisted because each cycle is a fresh process. */
   refusalStreak?: () => RefusalStreak | undefined;
   /** Store the streak, or clear it with `undefined`; false reports a failed removal. */
@@ -1530,14 +1758,15 @@ export interface DeployResult {
 
 // ── A RECYCLE THAT KEEPS REFUSING IS ESCALATED (W1-T6062) ──────────────────────────────────────
 // Tiered, never one threshold: the first refusal keeps today's marker and `deploy.restart_refused`
-// row; a refusal recurring across consecutive backoff windows (same instance, same reason) logs
-// `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT windows it opens ONE
+// row; a refusal recurring across consecutive ATTEMPTS (same instance, same reason — W1-T8138: an attempt,
+// not an hourly window, since a drain refusal now retries when its blockers settle) logs
+// `deploy.refusal_persisting`; once it has persisted REFUSAL_ESCALATE_AT attempts it opens ONE
 // needs-human issue per instance and reason and updates it while it persists. A VERIFIED recycle
 // closes it. FALSIFIER: test/a-recycle-that-keeps-refusing-is-escalated.test.ts.
 
-/** Consecutive refused windows at which the refusal is logged as persisting. */
+/** Consecutive refused attempts at which the refusal is logged as persisting. */
 export const REFUSAL_PERSISTING_AT = 2;
-/** Consecutive refused windows at which the one needs-human issue is opened. */
+/** Consecutive refused attempts at which the one needs-human issue is opened. */
 export const REFUSAL_ESCALATE_AT = 3;
 
 /** The run of consecutive same-reason refusals for one instance. */
@@ -1572,14 +1801,14 @@ export interface PersistingRefusal {
 /** Stable key for "the same refusal": digits and whitespace are normalised so a changing worker
  *  count or timestamp inside the message does not read as a different reason. */
 export function refusalReasonKey(message: string): string {
-  const reason = message.split(/\r?\n/).filter((line) => !/^\s*smoke-output\|/.test(line)).join("\n");
+  const reason = message.split(/\r?\n/).filter((line) => !/^\s*(smoke-output\||recycle-blockers-json:)/.test(line)).join("\n");
   const norm = reason.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
   return createHash("sha256").update(norm).digest("hex").slice(0, 10);
 }
 
 /** The refusal's own remedy: a line it labels as one, else its last non-empty line. */
 export function refusalRemedyLine(message: string): string {
-  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("smoke-output|"));
+  const lines = message.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("smoke-output|") && !l.startsWith("recycle-blockers-json:"));
   const labelled = lines.find((l) => /^(remedy|fix|to fix|next|hint|run|re-?run|declared)\b/i.test(l));
   return labelled ?? lines[lines.length - 1] ?? "(the refusal carried no message)";
 }
@@ -1641,6 +1870,7 @@ function recordRefusal(deps: DeployDeps, refusal: { toHead: string; backend: str
 
 /** A verified healthy daemon ends the streak: close the issue it opened and forget the count. */
 function retractRefusal(deps: DeployDeps, toHead: string, failedHead?: string): void {
+  deps.setDrainRefusal?.(undefined); // a verified recycle ends the drain refusal's blocker list too
   const prior = deps.refusalStreak?.();
   if (!prior) return;
   const instance = deps.refusalInstance?.() ?? "default";
@@ -1805,6 +2035,16 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     }
   }
   const stopPresent = deps.stopPresent?.();
+  // W1-T8138: only a refusal whose own record names blockers (and only when something can read their state)
+  // leaves the hour's back-off. An unreadable blocker is unsettled — it holds the retry, never releases it.
+  const drainRecord = deps.lastFailedKind?.() === "restart-refused" ? deps.drainRefusal?.() : undefined;
+  const drainRefusal: DrainRefusalState | undefined =
+    drainRecord && drainRecord.blockers.length > 0 && deps.blockerSettled
+      ? {
+          blockers: drainRecord.blockers,
+          unsettled: drainRecord.blockers.filter((b) => deps.blockerSettled!(b, drainRecord) !== true),
+        }
+      : undefined;
   const decision = decideDeployTrigger({
     markerPresent: markerWasPresent,
     autoMode,
@@ -1827,6 +2067,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     imageRecycleManual: deps.imageRecycleManual?.(),
     lastFailedAtMs: deps.lastFailedAtMs?.(),
     nowMs: deps.now(),
+    ...(drainRefusal ? { drainRefusal } : {}),
   });
   if (!decision.deploy) {
     deps.clearDeferredSince?.(); // nothing being deferred — no active deploy attempt
@@ -1996,6 +2237,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // place (never consumed) so a later tick — on this host or once a backend becomes usable —
     // retries automatically, exactly like the idle-gate deferrals above.
     deps.log("deploy.no_restart_backend", { to: short(toHead), reason: selection.reason });
+    deps.setDrainRefusal?.(undefined);
     deps.alert(`deploy of ${toHead} was pulled but could not be restarted: ${selection.reason}`, toHead, "restart-refused");
     return { deployed: false, reason: `restart-refused: ${selection.reason}`, fromHead, toHead, pulledPendingRestart: true };
   }
@@ -2009,7 +2251,16 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     // mismatch throws exactly like this. Reported verbatim; never retried past, suppressed, or
     // replaced by a different backend or a bare `docker restart`.
     const message = err instanceof Error ? err.message : String(err);
-    deps.log("deploy.restart_refused", { to: short(toHead), backend: selection.backend.name, message });
+    const drainBlockers = parseDrainBlockers(message);
+    deps.log("deploy.restart_refused", {
+      to: short(toHead),
+      backend: selection.backend.name,
+      message,
+      ...(drainBlockers ? { blockers: drainBlockers } : {}),
+    });
+    // W1-T8138: the refusal's blocker list is what the next tick's retry is decided on; a refusal that names
+    // none (pull, smoke, health) clears a stale one and keeps the hour's back-off.
+    deps.setDrainRefusal?.(drainBlockers ? { atMs: deps.now(), toHead, blockers: drainBlockers } : undefined);
     deps.alert(`deploy of ${toHead} was pulled but ${selection.backend.name} refused the restart: ${message}`, toHead, "restart-refused");
     recordRefusal(deps, { toHead, backend: selection.backend.name, message });
     return { deployed: false, reason: `restart-refused: ${message}`, fromHead, toHead, pulledPendingRestart: true };
@@ -2104,6 +2355,11 @@ export function deployIdleDeferredSincePath(stateRoot: string): string {
 /** Accumulated daemon-impact score for merged changes not yet picked up by a healthy restart. */
 export function deployRestartPressurePath(stateRoot: string): string {
   return join(stateRoot, "state", "DEPLOY_RESTART_PRESSURE");
+}
+
+/** W1-T8138: the last drain refusal's named blockers, the evidence the next tick's retry is decided on. */
+export function deployDrainRefusalPath(stateRoot: string): string {
+  return join(stateRoot, "state", "DEPLOY_DRAIN_REFUSAL");
 }
 
 /** W1-T6062: the persisted run of consecutive same-reason refused recycles. */
@@ -2335,6 +2591,42 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
         return undefined;
       }
     })();
+  const inflightDir = join(o.stateRoot, "state", "inflight");
+  const readLedgerText = (): string => readFileSync(ledgerPath, "utf8");
+  /** W1-T8138: derive the drain wait from the ledger and the in-flight locks, and ledger what it read. */
+  const deriveWaitFromState = (): DerivedDrainWait | undefined => {
+    try {
+      const text = readLedgerText();
+      const { settled, judged } = readRunSettlement(text);
+      const lanes: DrainWaitLane[] = [];
+      for (const name of readdirSync(inflightDir)) {
+        if (!name.endsWith(".lock")) continue;
+        const taskId = name.slice(0, -".lock".length);
+        const holder = readLockHolder(inflightDir, taskId);
+        if (!holder || settled.has(holder.run_id)) continue;
+        const startedMs = Date.parse(holder.startedAt);
+        const verdict = judged.get(holder.run_id);
+        lanes.push({
+          runId: holder.run_id,
+          taskId,
+          ageS: Number.isFinite(startedMs) ? Math.max(0, Math.floor((clock() - startedMs) / 1000)) : 0,
+          ...(verdict ? { judged: verdict } : {}),
+        });
+      }
+      const derived = deriveDrainWait(readImplementDurationsMs(text), lanes);
+      log("deploy.recycle_wait_derived", {
+        wait_s: derived.waitS,
+        source: derived.source,
+        samples: derived.samples,
+        quantile: derived.quantile,
+        lanes: derived.lanes,
+      });
+      return derived;
+    } catch (err) {
+      log("deploy.recycle_wait_derive_failed", { error: err instanceof Error ? err.message : String(err) });
+      return undefined; // unreadable ledger or lock dir: the script's labelled fallback applies
+    }
+  };
   const recycleContainerBackend: RestartBackend = {
     name: "recycle-container",
     // Section 5 of the script: PAUSE, then a bounded wait for in-flight workers, refusing past it.
@@ -2362,7 +2654,17 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // `deploy.restart_refused`, "Declared: core site console", after the image had already been
       // pulled. An unresolved instance still invokes the script bare, so the refusal stands wherever
       // there is no answer rather than being replaced by a guess.
-      exec("bash", recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript]);
+      const script = recycleInstance ? [recycleContainerScript, "--instance", recycleInstance] : [recycleContainerScript];
+      // W1-T8138: the drain wait comes from the lanes in flight, not a constant. With no run history to read
+      // (or an operator's own RMD_RECYCLE_WAIT_S) the script keeps its labelled fallback.
+      const derived = deriveWaitFromState();
+      if (derived && derived.source !== "no_history_fallback") {
+        // The derived wait is a DEFAULT: a RMD_RECYCLE_WAIT_S already in the supervisor's environment (an
+        // operator's explicit choice) wins, decided by the shell so this file reads no environment itself.
+        exec("bash", ["-c", 'export RMD_RECYCLE_WAIT_S="${RMD_RECYCLE_WAIT_S:-$1}"; shift; exec bash "$@"', "recycle-wait", String(derived.waitS), ...script]);
+        return;
+      }
+      exec("bash", script);
     },
   };
 
@@ -2767,6 +3069,46 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       }
     },
     refusalInstance: () => recycleInstance,
+    drainRefusal: () => {
+      try {
+        const r = JSON.parse(readFileSync(deployDrainRefusalPath(o.stateRoot), "utf8")) as Partial<DrainRefusalRecord>;
+        if (typeof r.atMs !== "number" || typeof r.toHead !== "string" || !Array.isArray(r.blockers)) return undefined;
+        return r as DrainRefusalRecord;
+      } catch {
+        return undefined; // absent or unreadable: no blocker list, so the hour's back-off applies
+      }
+    },
+    setDrainRefusal: (record) => {
+      if (record === undefined) {
+        try {
+          unlinkSync(deployDrainRefusalPath(o.stateRoot));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            log("deploy.failure_retraction_failed", { marker: "DEPLOY_DRAIN_REFUSAL", error: String(error) });
+          }
+        }
+        return;
+      }
+      writeAtomic(deployDrainRefusalPath(o.stateRoot), JSON.stringify(record, null, 2));
+    },
+    blockerSettled: (blocker) => {
+      try {
+        if (blocker.kind === "lock") {
+          const holder = blocker.taskId ? readLockHolder(inflightDir, blocker.taskId) : null;
+          if (!holder) return true; // the lock is gone
+          if (blocker.runId !== undefined && holder.run_id !== blocker.runId) return true; // a later run of the task
+          return readRunSettlement(readLedgerText()).settled.has(holder.run_id);
+        }
+        // A lane-less worker: its pid is gone, or the pid now belongs to a younger process than the blocker was.
+        const out = exec("docker", [
+          "exec", imageShaContainer, "sh", "-c", `ps -o etimes= -p ${Math.trunc(blocker.pid ?? 0)} 2>/dev/null; echo done`,
+        ]);
+        const etimes = Number(out.split("\n")[0]!.trim());
+        return !Number.isFinite(etimes) || out.split("\n")[0]!.trim() === "" || etimes < blocker.ageS;
+      } catch {
+        return undefined; // docker or the ledger could not be read — not proof of settling
+      }
+    },
     refusalStreak: () => {
       try {
         const parsed = JSON.parse(readFileSync(deployRefusalStreakPath(o.stateRoot), "utf8")) as Partial<RefusalStreak>;

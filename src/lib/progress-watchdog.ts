@@ -13,15 +13,17 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, rea
 import { join } from "node:path";
 import { fixedClock } from "./clock.js";
 
-export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "CRASH_LOOP" | "UNKNOWN";
+export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "IN_PASS" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
 /** W1-T9702: where the open-PR count came from. A light pass writes one `sweep.pass` per PR, so only a full one counts. */
 export type OpenPrCountSource = "full_pass" | "full_pass_raised" | "max_over_window";
 
 /** The steps that count as progress. `daemon.*` / `runtime.*` are deliberately absent. */
 export const PROGRESS_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "review.posted", "verdict.merged"]);
+/** W1-T9779: the daemon's own full-pass marker (runGatedSweep, daemon.ts) and its loop's pulse. */
+export const PASS_MARKER_STEPS: readonly string[] = ["daemon.sweep.started", "daemon.sweep.settled", "daemon.sweep.abandoned", "daemon.pulse"];
 /** Steps the verb must read from the ledger union to feed the verdict. */
-export const PROGRESS_WATCHDOG_READ_STEPS: readonly string[] = [...PROGRESS_STEPS, "daemon.paths", "daemon.boot"];
+export const PROGRESS_WATCHDOG_READ_STEPS: readonly string[] = [...PROGRESS_STEPS, "daemon.paths", "daemon.boot", ...PASS_MARKER_STEPS];
 
 /** bound kind: calibrated — progress older than this captures a diagnostics bundle (the 45-min and 51-min gaps all pass it). */
 export const STALL_DIAGNOSE_AFTER_MS = 15 * 60_000;
@@ -219,6 +221,35 @@ export function readRevivalLogTail(path: string | undefined): string {
   }
 }
 
+/**
+ * W1-T9779 — 2026-10-16 06:45:28Z, A PASS WAITING ON MEMORY ADMISSION WAS RECYCLED AS STALLED. The full pass that
+ * logged `daemon.sweep.started` at 06:10:59Z wrote no progress row for 30 min while two reviews and a fix waited for
+ * memory, and it settled at 07:00:42Z, after the recycle had begun. The newest started row is IN FLIGHT when it
+ * belongs to this generation (no boot after it), nothing ended it (no settled or abandoned row with its run_id), it
+ * is still inside its own learned bound_ms (W1-T9563), and its daemon pulsed within STALL_DIAGNOSE_AFTER_MS, so a
+ * frozen loop never reads as a waiting pass. No new bound. Returns the pass's start and bound, or undefined.
+ */
+export function inFlightPass(rows: ReadonlyArray<Record<string, unknown>>, nowMs: number):
+  { startedMs: number; boundMs: number } | undefined {
+  let started: { ms: number; runId: unknown; boundMs: unknown } | undefined;
+  for (const row of rows) {
+    const ms = row.step === "daemon.sweep.started" ? rowMs(row) : undefined;
+    if (ms !== undefined && (started === undefined || ms >= started.ms)) started = { ms, runId: row.run_id, boundMs: row.bound_ms };
+  }
+  if (started === undefined || typeof started.boundMs !== "number" || !Number.isFinite(started.boundMs) || started.boundMs <= 0) return undefined;
+  if (nowMs - started.ms > started.boundMs) return undefined;
+  const pulseFloorMs = Math.max(started.ms, nowMs - STALL_DIAGNOSE_AFTER_MS);
+  let pulsed = false;
+  for (const row of rows) {
+    const ms = rowMs(row);
+    if (ms === undefined) continue;
+    if ((row.step === "daemon.boot" || row.step === "daemon.paths") && ms > started.ms) return undefined;
+    if ((row.step === "daemon.sweep.settled" || row.step === "daemon.sweep.abandoned") && row.run_id === started.runId && ms >= started.ms) return undefined;
+    if (row.step === "daemon.pulse" && row.run_id === started.runId && ms > pulseFloorMs) pulsed = true;
+  }
+  return pulsed ? { startedMs: started.ms, boundMs: started.boundMs } : undefined;
+}
+
 export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWatchdogVerdict {
   const { rows, nowMs, openPrCount, openPrCountSource } = input;
   const failedBoots15m = failedBootTimes(rows, nowMs).filter((ms) => nowMs - ms <= CRASH_LOOP_WINDOW_MS).length;
@@ -262,6 +293,12 @@ export function decideProgressWatchdog(input: ProgressWatchdogInput): ProgressWa
   if (progressAgeMs === null) return verdict("UNKNOWN", "none", "no sweep.pass, review.posted or verdict.merged row was read");
   const minutes = Math.floor(progressAgeMs / 60_000);
   if (progressAgeMs > STALL_RECYCLE_AFTER_MS) {
+    const pass = inFlightPass(rows, nowMs);
+    if (pass) {
+      return verdict("IN_PASS", "capture-diagnostics", `newest progress row is ${minutes} min old, but the full pass started ` +
+        `${Math.floor((nowMs - pass.startedMs) / 60_000)} min ago is in flight inside its own learned bound ` +
+        `(${Math.floor(pass.boundMs / 60_000)} min) and its daemon is pulsing; not recycled`);
+    }
     return verdict("STALLED", "recycle", `newest progress row is ${minutes} min old with ${openPrCount} open PR(s)${counted}; daemon.* rows are not progress`);
   }
   if (progressAgeMs > STALL_DIAGNOSE_AFTER_MS) {
