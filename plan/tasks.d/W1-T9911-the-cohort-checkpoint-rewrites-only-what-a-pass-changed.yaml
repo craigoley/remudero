@@ -1,0 +1,82 @@
+- id: W1-T9911
+  title: "THE BENCHMARK COHORT CHECKPOINT REWRITES ONLY WHAT A PASS CHANGED — writeCheckpoint JSON.stringifies every source's projected rows into one benchmark-cohort-v1.json on every pass, so a pass that folds ~100 KB of live tail rewrites 37.77 MB (and readCheckpoint re-reads and parses it first); since the 17:11Z boot the daemon's off-loop pass (W1-T9845) does this every ~16 min for 88-116 s each, ~3.4 GB written and ~3.4 GB read per day: sealed sources are written once as their own segments and a pass rewrites only a small index and the rows it appended"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the checkpoint's storage layout and what a pass rewrites; the pass's computation, its snapshot and when it runs are unchanged
+  band_meaning: blast-radius
+  origin: "coordinator fan-out 2026-10-15 brief B21 follow-up named in W1-T9845's design ('an incremental or append checkpoint format'); filing agent F6"
+  plan_refs: [W1-T9845, W1-T8876, W1-T9912, W1-T4554, W1-T4598]
+  files:
+    - src/lib/benchmark-cohort.ts
+    - test/the-cohort-checkpoint-rewrites-only-what-a-pass-changed.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the Azure host's core ledger (live file, read-only). The daemon booted 17:11:32Z with
+    W1-T9845 and W1-T8876 live. Its `benchmark_cohort.detached` → `benchmark_cohort.ran` pairs are:
+    17:24:25 → 17:26:22 (117 s, 2 sources), 17:40:21 → 17:42:03 (103 s, 1 source) and 17:57:34 → 17:59:02 (88 s,
+    1 source). Each is `state: quarantined`, `pending_sources: 0` and `tail_pending_bytes` 78-123 KB. Across them
+    `checkpoint_bytes` goes 37,731,808 → 37,760,537 → 37,770,881: each pass adds 10-29 KB of state and rewrites all
+    ~37.77 MB. state/benchmark-cohort-v1.json is 37,770,881 bytes (mtime 17:59:01Z). It was 29.6 MB on 10-12 and
+    37.15 MB on the morning of 10-16.
+    At one pass per ~16 min that is ~90 passes a day, ~3.4 GB written and ~3.4 GB read and parsed, to record a few
+    MB of new evidence. The host runs at load ~15 (18:09Z) with I/O pressure already named by W1-T8876.
+    deploy/entrypoint.sh's idle-starved pulse runs the same pass under `timeout -k 5s 120s`, while the daemon's pass
+    already takes 88-117 s. So the growing whole-file read is about to push that pulse past its own bound.
+    READ at origin/main d6f6dddf3 (src/lib/benchmark-cohort.ts; symbols, not lines):
+    - `Checkpoint` holds `sources: SourceRecord[]`, and each `SourceRecord` carries its projected `rows`.
+    - `readCheckpoint` does `JSON.parse(readFileSync(checkpointPath))` of the whole file. `writeCheckpoint` does
+      `JSON.stringify(checkpoint)` of the whole object and an atomic rename, on every return path that reports
+      `checkpointBytes`.
+    - A sealed source (a rotated `ledger.*.ndjson.gz`) is immutable once its sha256 is recorded, yet its rows are
+      re-serialized on every pass. Only the live source's rows and `lastGood` move.
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and all 432 origin heads for an incremental or append-only
+    checkpoint: main reads 1 shard, W1-T9845, which names this as a follow-up and does not file it. No head reads more.
+    W1-T8876 (merged) and W1-T9912 (filed beside this) own when a pass runs; this task owns what a pass writes.
+    W1-T4554 and W1-T4598 (merged) built the incremental rollup and the live-prefix hash this keeps.
+  design: |
+    No new constant, cap or policy key. The snapshot a pass returns is unchanged.
+    1. Sealed sources live in their own segment files under the state directory, one per source, named by the
+       source's name and sha256. A segment is written once, when its source is first folded, and never rewritten.
+       It is removed when its source leaves the manifest.
+    2. The live source's rows go to an append-only segment keyed by the live file's identity (the audited prefix
+       hash the pass already verifies). A pass appends the rows of the tail it read. A live file whose prefix no
+       longer verifies (rotation, compaction) starts a new segment and drops the old one.
+    3. A small index holds the version, the per-source metadata (name, form, size, mtimeMs, sha256, segment),
+       sourceFaults, baselineSources and lastGood. It is rewritten atomically each pass and carries no per-row
+       evidence.
+    4. A pass that folds only a live-tail delta writes the index plus the appended rows. Its bytes written are
+       proportional to the delta, not to the history. The pass ledgers how many bytes it read and wrote beside the
+       existing `checkpoint_bytes`, so the saving is measured on the host after merge.
+    5. A v1 checkpoint is migrated on its first read: its sealed sources become segments and its live rows become the
+       live segment, with no rescan of the ledger, and the v1 file is then removed. A missing, torn or
+       sha-mismatched segment rescans its source through the existing rescan path. It is never read as an empty
+       source.
+    6. Readers keep one entry point. benchmark-aa's in-process pass and the idle pass get the same result through
+       the unchanged `runBenchmarkCohortPass`.
+    The builder reports, from a profile on a fixture with history, whether the pass's remaining time sits in reading
+    the segments or in `deriveSnapshot`'s whole-history `indexEvidence`. If it is the latter, the builder names that
+    as a follow-up and does not grow this task.
+    Tests go in test/the-cohort-checkpoint-rewrites-only-what-a-pass-changed.test.ts, titled verbatim as in the
+    proofs. Use a real state directory with sealed .gz rotations and a live file. To show the sealed segments were not
+    written, assert their inode and mtime are unchanged after a tail-only pass. Assert the bytes the pass wrote are
+    below the sealed rows' bytes. Positive control: the first pass does write every segment.
+  acceptance:
+    - claim: "a pass that folds only a live-tail delta leaves every sealed segment unwritten, and writes fewer bytes than the sealed rows it keeps"
+      proof: 'grep: test("W1-T9911: a tail-only pass rewrites no sealed segment" in test/the-cohort-checkpoint-rewrites-only-what-a-pass-changed.test.ts'
+    - claim: "the segmented checkpoint yields the same snapshot the whole-file v1 checkpoint yields over the same ledger"
+      proof: 'grep: test("W1-T9911: the segmented checkpoint yields the whole-file snapshot" in test/the-cohort-checkpoint-rewrites-only-what-a-pass-changed.test.ts'
+    - claim: "a v1 checkpoint is migrated once without rescanning the ledger"
+      proof: 'grep: test("W1-T9911: a v1 checkpoint is migrated once without a rescan" in test/the-cohort-checkpoint-rewrites-only-what-a-pass-changed.test.ts'
+    - claim: "a missing or corrupt segment rescans its source and is never read as empty"
+      proof: 'grep: test("W1-T9911: a corrupt segment rescans its source, never reads as empty" in test/the-cohort-checkpoint-rewrites-only-what-a-pass-changed.test.ts'
+  falsifier: |
+    At origin/main a second pass after ~100 KB of live growth calls writeCheckpoint, which re-serializes every
+    sealed source's rows into benchmark-cohort-v1.json. There are no segment files, and the bytes written exceed the
+    sealed rows' bytes, so the first test fails. The second test passes before and after. It guards against a layout
+    change that alters the computed snapshot.
