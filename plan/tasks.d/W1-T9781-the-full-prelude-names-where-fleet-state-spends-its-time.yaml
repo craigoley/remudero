@@ -1,0 +1,53 @@
+- id: W1-T9781
+  title: "THE FULL PRELUDE NAMES WHERE fleet_state SPENDS ITS TIME — it is the prelude's largest sequential stage (p50 184 s, p90 360 s, max 824 s over 20 passes on 2026-10-15/16) and sweep.full_prelude times it as one number, so its ledger-union scan of 373 archives, its main-commit GitHub walk and its deploy rows cannot be told apart"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # Rule 19: one concern — telemetry fields on an existing row, no behaviour change
+  band_meaning: span
+  origin: "operator session 2026-10-16: agent F5, the 06:15:10Z and 05:32:39Z sweep.full_prelude rows, read-only on the host"
+  plan_refs: [W1-T9564, W1-T4817, W1-T6275, W1-T9552, W1-T6248]
+  files: [src/lib/sweep.ts, test/the-full-prelude-names-where-fleet-state-spends-its-time.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger union (every rotation from 10-14 plus the live ledger, read-only):
+    - sweep.full_prelude, 20 passes from 10-15T19:32Z to 10-16T06:15Z: elapsed p50 417 s, p90 773 s, max 1,248 s.
+      Stages, p50 / p90 / max: fleet_state 184 / 360 / 824 s; tick_read 100 / 202 / 410 s; escalation_answers
+      86 / 152 / 188 s; reader_agreement 28 / 54 / 162 s.
+    - tick_read, escalation_answers, main_health and triage_evidence run under one Promise.all, so
+      escalation_answers is usually hidden behind tick_read (06:15Z: 76 s beside 100 s). fleet_state runs ALONE, inside
+      runSweep before the walk. It is the largest cost on the prelude's critical path: 104.7 s at 06:15Z, 94.2 s at 05:32Z.
+    READ at origin/main 4a64661fb, buildSweepEffects' readFleetState (src/lib/sweep.ts). In sequence it does:
+      (a) a readLedgerUnionRawLinesAsync scan of the whole union for five rare steps. The host holds 373 rotations,
+          255 MB gzip. On the Mac, the same call over 34 of them took 1.15 s, so the full union is about 10 s
+          Mac-equivalent;
+      (b) mainWorkflowStateRows over MAIN_RUN_GAP_LOOKBACK (15) commits. Each commit makes one sequential
+          countRunsForSha REST read. Each commit older than one with runs makes a changedFiles read and then one
+          countWorkflowRuns per triggered workflow inside observe(). None of it is cached across passes;
+      (c) deployStateRows over realDeployDeps (W1-T9552, queued, attributes 29.9 s of sync git and gh there).
+    (a) explains a small part of 184 s. Nothing on the row says how the rest divides between (b) and (c), so a cache
+    or a cut chosen now would be a guess. This task measures first.
+    OVERLAP CHECKED. W1-T9564 (merged) built the prelude timer. W1-T9552 (queued) moves (c)'s git and gh off the loop
+    and adds no timing. W1-T6275 (merged) moved (a) off the loop. Swept plan/ on origin/main and the 3 open run- PR heads
+    for readFleetState and fleet_state.
+  design: |
+    1. readFleetState times its three parts and counts its GitHub reads: union_ms, union_rotations, commits_walked,
+       commit_reads, commit_read_ms, deploy_ms.
+    2. The parts ride sweep.full_prelude as one `fleet_state_parts` object beside `stages`. There is no new step and
+       no new row, and nothing in the pass's behaviour changes.
+    3. A test drives readFleetState with injected readers and asserts each part is named and the counts match the
+       calls made.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-full-prelude-names-where-fleet-state-spends-its-time.test.ts"
+    - claim: "sweep.full_prelude carries fleet_state's parts"
+      proof: "grep: fleet_state_parts in src/lib/sweep.ts"
+    - claim: "the suite names the GitHub read count"
+      proof: "grep: W1-T9781: fleet_state counts its main-commit GitHub reads in test/the-full-prelude-names-where-fleet-state-spends-its-time.test.ts"
+  falsifier: |
+    At origin/main, sweep.full_prelude carries no fleet_state_parts, and the grep reads 0.
