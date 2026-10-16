@@ -1,8 +1,8 @@
 /** Changed-input, bounded Inbox revalidation. Only a verified mechanical terminal proof can retire. */
 import fs from "node:fs";
 import { join, dirname, relative } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { systemClock, type Clock } from "./clock.js";
 import { appendLedger } from "./ledger.js";
 import { readPersistedInbox } from "./fleet-lane.js";
@@ -20,6 +20,7 @@ import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, valid
   inboxOperatorIntent, inboxMechanicalTaskDigest, inboxGardenerSource, inboxGardenerTaskFact, inboxGardenerMode, type InboxGardenerMode, sameInboxGardenerScope, type InboxGardenerTaskFact, type InboxTerminalProof, type RetirementProposal } from "./inbox-retirement.js";
 
 export const INBOX_GARDENER_INTERVAL_MS = 15 * 60_000;
+/** PRIMARY CONTROL: each pass admits bounded candidate, proof, judge and transition work. */
 export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerBudgetMs: 25, ledgerChunkBytes: 64 * 1024 } as const;
 export { inboxGardenerMode } from "./inbox-retirement.js";
 export interface InboxGardenerCandidate {
@@ -53,7 +54,7 @@ export function inboxGardenerSemanticInput(c: InboxGardenerCandidate, proof?: In
 const protectedCandidate = (c: InboxGardenerCandidate, scope: InboxGardenerScope) => c.task?.id === "W1-T216" || c.task?.dispatch_hold === true ||
   c.task?.repo !== scope.repository.split("/")[1] || !mechanicalAskPurpose(c.proposal) || !c.task || mechanicalAskPurpose(c.proposal)?.taskDigest !== inboxMechanicalTaskDigest(c.task);
 const qualified = (p: InboxGardenerPack, scope: InboxGardenerScope, now: number) =>
-  sameInboxGardenerScope(p.scope, scope) && /^[a-f0-9]{64}$/.test(p.snapshotKey) &&
+  sameInboxGardenerScope(p.scope, scope) && /^[a-f0-9]{40}$/.test(p.codeSha) && /^[a-f0-9]{64}$/.test(p.snapshotKey) &&
   Number.isFinite(Date.parse(p.generatedAt)) && now - Date.parse(p.generatedAt) >= 0 && now - Date.parse(p.generatedAt) <= INBOX_STALE_AFTER_MS &&
   Object.values(p.coverage).every(x => x === "observed");
 
@@ -152,6 +153,7 @@ export async function runInboxGardener(options: { stateDir: string; scope: Inbox
 }
 
 const RELEVANT_STEPS = ["panel.proposal_reframe_requested", "panel.proposal_declined", "panel.proposal_restored", "ratify.reframed", "ratify.approved", "inbox.gardener_retired", "inbox.gardener_restored", "inbox.gardener_outcome"];
+/** BACKSTOP: refuse oversized unverified sources; never label a capped source complete. */
 export const INBOX_GARDENER_SOURCE_LIMITS = { registryBytes: 512 * 1024, threadBytes: 1024 * 1024,
   proposals: 2048, relevantRows: 4096, relevantBytes: 512 * 1024, rowBytes: 16 * 1024 } as const;
 const relevantProjection: LedgerRowProjection = { name: "inbox-gardener-evidence", version: 2,
@@ -185,7 +187,7 @@ export function readInboxGardenerLedger(stateDir: string, scope: InboxGardenerSc
       projections: [relevantProjection], chunkBytes: INBOX_GARDENER_LIMITS.ledgerChunkBytes }).tick({ budgetMs: INBOX_GARDENER_LIMITS.ledgerBudgetMs });
     const quarantined = Number(db.prepare("SELECT COUNT(*) AS n FROM quarantine").get()?.n ?? 0);
     if (tick.torn || tick.quarantined) withWriteTransaction(db, acquired.lease, () => db.prepare("INSERT OR REPLACE INTO meta(k, v) VALUES('inbox-source-fault', 'torn-or-quarantined')").run());
-    const live = fs.openSync(join(stateDir, "ledger.ndjson"), "r");
+    const live = fs.openSync(join(stateDir, LEDGER_FILENAME), "r");
     let unfinishedTail = false;
     try { const size = fs.fstatSync(live).size; if (size) { const last = Buffer.alloc(1); fs.readSync(live, last, 0, 1, size - 1); unfinishedTail = last[0] !== 10; } }
     finally { fs.closeSync(live); }
@@ -230,7 +232,7 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
     const threads = readAllThreads({ threadStorePath: join(options.stateDir, "inbox-threads.jsonl") });
     const ledger = readInboxGardenerLedger(options.stateDir, options.scope, proposals.map(p => p.id));
     retainedRows = ledger.rows;
-    if (!fs.statSync(join(options.stateDir, "ledger.ndjson")).isFile()) throw new Error("live ledger unavailable");
+    if (!fs.statSync(join(options.stateDir, LEDGER_FILENAME)).isFile()) throw new Error("live ledger unavailable");
     const overridePath = join(options.scope.root, "plan", "credit-overrides.yaml");
     const rawOverrides = fs.existsSync(overridePath) ? parseYaml(fs.readFileSync(overridePath, "utf8")) : [];
     if (!Array.isArray(rawOverrides) || rawOverrides.some(o => !o || o.action !== "remove-credit" || typeof o.task !== "string" || !Number.isSafeInteger(o.pr) || o.pr < 1 || o.author_class !== "operator" || typeof o.reason !== "string" || !o.reason.trim())) throw new Error("credit override source unverified");
@@ -252,8 +254,8 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
           ...(/^proof-debt:[^:]+:\d+$/.test(proposal.id) ? { successor: { proposal: proposals.find(p => p.id === proposal.id.replace(/:\d+$/, ""))!,
             open: proposals.some(p => p.id === proposal.id.replace(/:\d+$/, "") && !verdicts.isRatified(p.id) && verdicts.isDeclined(p.id) === undefined && snapshot?.classifications.find(c => c.proposalId === p.id)?.state !== "retired") } } : {}),
           ...(task ? { dependencies: task.depends_on.flatMap(id => plan.byId.has(id) ? [inboxGardenerTaskFact(plan.byId.get(id)!)] : []),
-            dependencyMerge: task.depends_on.map(id => ({ id, merged: !plan.byId.has(id) || !snapshot?.gardenerDependencyEvidence ? null : snapshot.gardenerDependencyEvidence.find(value => value.id === id)?.merged ?? null })) } : {}),
-          operatorIntent: inboxOperatorIntent(messages), unansweredReply: last?.role === "reply" && !last.extra?.event,
+            dependencyMerge: task.depends_on.map(id => ({ id, merged: !plan.byId.has(id) || snapshot?.gardenerDependencyEvidence === undefined ? null : snapshot.gardenerDependencyEvidence.find(value => value.id === id)?.merged ?? null })) } : {}),
+          operatorIntent: inboxOperatorIntent(messages), unansweredReply: last?.role === "reply" && last.extra?.event === undefined,
           resolvedByOperator: verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined };
       }), ledgerEventIds: new Set(ledger.rows.flatMap(row => typeof row.dismissalAuditReceipt?.id === "string" ? [row.dismissalAuditReceipt.id] : [])) };
   };
@@ -264,13 +266,13 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
       if (candidate.task.retirement && candidate.task.status === "blocked") {
         const path = plan.byId.get(purpose.taskId)?.sourcePath;
         if (!path) throw new Error("plan retirement blob unavailable");
-        const gitRoot = dirname(dirname(options.planPath)), run = promisify(execFile);
-        const [commit, blob, current] = await Promise.all([run("git", ["-C", gitRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 5000 }),
-          run("git", ["-C", gitRoot, "rev-parse", `HEAD:${relative(gitRoot, path)}`], { encoding: "utf8", timeout: 5000 }),
-          run("git", ["-C", gitRoot, "hash-object", "--", path], { encoding: "utf8", timeout: 5000 })]);
-        if (blob.stdout.trim() !== current.stdout.trim()) throw new Error("plan retirement differs from its authoritative committed blob");
+        const gitRoot = dirname(dirname(options.planPath));
+        const [commit, blob, current] = await Promise.all([hostWorktreeGitAsync(gitRoot, ["rev-parse", "HEAD"], { timeout: 5000 }),
+          hostWorktreeGitAsync(gitRoot, ["rev-parse", `HEAD:${relative(gitRoot, path)}`], { timeout: 5000 }),
+          hostWorktreeGitAsync(gitRoot, ["hash-object", "--", path], { timeout: 5000 })]);
+        if (blob.trim() !== current.trim()) throw new Error("plan retirement differs from its authoritative committed blob");
         return { kind: "plan-retirement", taskId: purpose.taskId, repository: options.scope.repository, instance: options.scope.instance,
-          commit: commit.stdout.trim(), blob: blob.stdout.trim(), retirement: candidate.task.retirement };
+          commit: commit.trim(), blob: blob.trim(), retirement: candidate.task.retirement };
       }
       if (candidate.successor?.open && candidate.successor.proposal && mechanicalAskPurpose(candidate.successor.proposal) &&
         candidate.proposal.evidenceAnchors.every(a => candidate.successor!.proposal.evidenceAnchors.some(b => inboxSemanticDigest(a) === inboxSemanticDigest(b))))
@@ -306,11 +308,11 @@ export function defaultInboxGardenerPorts(options: { stateDir: string; scope: In
       const step = `inbox.gardener_${event.receipt.kind === "retire" ? "retired" : event.receipt.kind === "restore" ? "restored" : "outcome"}`;
       const row = { ts: event.receipt.at, run_id: `INBOX-GARDENER-${event.receipt.id}`, step, task_id: event.receipt.scope.proposalId,
         origin: event.receipt.kind === "restore" ? event.operator : "inbox-gardener", reason: event.reason, dismissalAuditReceipt: event.receipt };
-      if (!pack.ledgerEventIds.has(event.receipt.id) && !hasLedgerMirror(options.stateDir, options.scope, event.receipt.id)) { appendLedger(join(options.stateDir, "ledger.ndjson"), row); pack.ledgerEventIds.add(event.receipt.id); }
+      if (!pack.ledgerEventIds.has(event.receipt.id) && !hasLedgerMirror(options.stateDir, options.scope, event.receipt.id)) { appendLedger(join(options.stateDir, LEDGER_FILENAME), row); pack.ledgerEventIds.add(event.receipt.id); }
       recordRowThreadEvents(row, undefined, { threadStorePath: join(options.stateDir, "inbox-threads.jsonl") }, () => {});
       // Unlike best-effort legacy mirrors, a missing mirror is explicitly retryable here.
       const threads = readAllThreads({ threadStorePath: join(options.stateDir, "inbox-threads.jsonl") });
       const expected = threadEventsForRow(row);
-      if (threads.status !== "ok" || expected.some(e => !threads.threads.get(inboxThreadId(e.proposalId))?.some(m => m.extra?.event?.key === e.event.key))) throw new Error("lifecycle thread mirror unavailable");
+      if (threads.status !== "ok" || expected.some(e => threads.threads.get(inboxThreadId(e.proposalId))?.some(m => m.extra?.event?.key === e.event.key) !== true)) throw new Error("lifecycle thread mirror unavailable");
     } };
 }

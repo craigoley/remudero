@@ -26,6 +26,7 @@ export interface MechanicalAskPurpose {
   taskId: string;
   criteriaDigest: string;
   taskDigest: string;
+  proposalDigest: string;
 }
 export interface RetirementProposal {
   id: string; summary: string; evidenceAnchors: unknown[]; reframeHistory?: unknown[];
@@ -43,16 +44,16 @@ export function proofDebtPopulationPermit(unmergedTasks: readonly InboxGardenerT
 export function stampMechanicalAsk<T extends RetirementProposal>(proposal: T, taskId: string, permit?: object): T {
   if (permit && proofDebtPopulations.get(permit)?.has(taskId)) {
     proposal.automaticRetirement = { producer: "proof-queue-audit-v1", kind: "mechanical-task", taskId,
-      criteriaDigest: inboxSemanticDigest(proposal.evidenceAnchors), taskDigest: proofDebtPopulations.get(permit)!.get(taskId)! };
+      criteriaDigest: inboxSemanticDigest(proposal.evidenceAnchors), proposalDigest: inboxMechanicalProposalDigest(proposal), taskDigest: proofDebtPopulations.get(permit)!.get(taskId)! };
     mechanicalProducerObjects.add(proposal);
   }
   return proposal;
 }
 export const isMechanicalProducerObject = (proposal: object): boolean => mechanicalProducerObjects.has(proposal);
 /** Only a real code producer stamps this capability; a parsed client/model object cannot supply it. */
-export function stampVerificationAsk<T extends RetirementProposal>(proposal: T, taskId: string): T & { verificationAsk: { producer: "verify-human-judge-v1"; taskId: string } } {
+export function stampVerificationAsk<T extends RetirementProposal>(proposal: T, taskId: string, producer: "verify-human-judge-v1" | "machine-filing-judge-v1" = "verify-human-judge-v1"): T & { verificationAsk: { producer: "verify-human-judge-v1" | "machine-filing-judge-v1"; taskId: string; proposalDigest: string } } {
   verificationProducerObjects.add(proposal);
-  return Object.assign(proposal, { verificationAsk: { producer: "verify-human-judge-v1" as const, taskId } });
+  return Object.assign(proposal, { verificationAsk: { producer, taskId, proposalDigest: inboxMechanicalProposalDigest(proposal) } });
 }
 export const isVerificationProducerObject = (proposal: object): boolean => verificationProducerObjects.has(proposal);
 export type InboxTerminalProof =
@@ -96,12 +97,15 @@ const hash = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 export const sameInboxGardenerScope = (a: InboxGardenerScope, b: InboxGardenerScope): boolean =>
   a.repository === b.repository && a.instance === b.instance && a.root === b.root;
+export function inboxMechanicalProposalDigest(p: RetirementProposal): string {
+  return inboxSemanticDigest([p.id, p.summary, p.evidenceAnchors, p.reframeHistory ?? []]);
+}
 export function mechanicalAskPurpose(p: RetirementProposal): MechanicalAskPurpose | undefined {
   const purpose = p.automaticRetirement;
   return purpose?.producer === "proof-queue-audit-v1" && purpose.kind === "mechanical-task" &&
     typeof purpose.taskId === "string" && purpose.taskId.length <= 160 && /^W\d+-T[A-Za-z0-9]+$/.test(purpose.taskId) &&
     typeof p.id === "string" && new RegExp(`^proof-debt:${purpose.taskId}(?::\\d+)?$`).test(p.id) && Array.isArray(p.evidenceAnchors) && p.evidenceAnchors.length > 0 &&
-    hash(purpose.taskDigest) && hash(purpose.criteriaDigest) && purpose.criteriaDigest === inboxSemanticDigest(p.evidenceAnchors) ? purpose : undefined;
+    hash(purpose.taskDigest) && purpose.proposalDigest === inboxMechanicalProposalDigest(p) && hash(purpose.criteriaDigest) && purpose.criteriaDigest === inboxSemanticDigest(p.evidenceAnchors) ? purpose : undefined;
 }
 export function validInboxTerminalProof(proof: InboxTerminalProof | undefined, scope: InboxGardenerScope, p: RetirementProposal): proof is InboxTerminalProof {
   const purpose = mechanicalAskPurpose(p);
@@ -125,7 +129,7 @@ export function validInboxTerminalProof(proof: InboxTerminalProof | undefined, s
 }
 export const inboxProposalRevision = (p: RetirementProposal): string => inboxSemanticDigest([p.id, p.summary, p.evidenceAnchors, p.reframeHistory ?? [], p.automaticRetirement ?? null]);
 export function inboxOperatorIntent(messages: readonly { role: string; body: string; seq: number; ts: number; extra?: { event?: unknown } }[]): string {
-  return inboxSemanticDigest(messages.filter(m => m.role === "reply" && !m.extra?.event));
+  return inboxSemanticDigest(messages.filter(m => m.role === "reply" && m.extra?.event === undefined));
 }
 export interface InboxGardenerTaskFact { id: string; title: string; repo: string; verify: string; depends_on: string[]; dispatch_hold?: boolean; retirement?: string; status?: string; risk?: string; acceptance?: unknown[] }
 export function inboxMechanicalTaskDigest(task: InboxGardenerTaskFact): string {
@@ -193,7 +197,7 @@ export async function withInboxGardenerLock<T>(stateDir: string, run: () => T | 
   try { acquire(); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const result = reclaimStaleLock(path, { parseHolder: raw => { try { const p = JSON.parse(raw); return typeof p?.pid === "number" ? p : null; } catch { return null; } },
+    const result = reclaimStaleLock(path, { parseHolder: raw => { try { const p = JSON.parse(raw); return typeof p?.pid === "number" ? p : null; } catch (error) { /* Malformed holder identity is unknown; the stale-lock helper must refuse reclamation. */ return null; } },
       isStale: held => isHolderStale(held, { isPidAlive: defaultIsPidAlive }) });
     if (result.outcome !== "reclaimed" && result.outcome !== "missing") return { state: "busy" };
     try { acquire(); } catch (race) { if ((race as NodeJS.ErrnoException).code === "EEXIST") return { state: "busy" }; throw race; }

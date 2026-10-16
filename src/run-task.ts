@@ -1,3 +1,4 @@
+import { loadedHarnessRevision } from "./lib/benchmark-run.js";
 import {
   checkProofCommand, checkProofTimeoutMs,
   CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
@@ -38754,10 +38755,16 @@ export function issueRevalidationRunTaskPorts(
 }
 
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
-export function inboxGardenerRunTaskPorts(ctx: GardenBuildContext, seams: { spawn?: typeof spawnWorker; mount?: () => Mount; githubJson?: typeof ghJsonAsync } = {}) {
+export async function inboxGardenerRunTaskPorts(ctx: GardenBuildContext, seams: { spawn?: typeof spawnWorker; mount?: () => Mount; githubJson?: typeof ghJsonAsync; readCodeSha?: () => Promise<string> } = {}) {
   const scope = { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${ctx.owner}/${ctx.repo}`, root: ctx.config.root };
-  const pin = ctx.codeSha ? undefined : executingHarnessRevision(fileURLToPath(import.meta.url));
-  const codeSha = ctx.codeSha ?? (pin && "revision" in pin ? pin.revision : "unknown");
+  let codeSha = ctx.codeSha ?? "unknown";
+  if (ctx.codeSha === undefined) {
+    try {
+      const pin = loadedHarnessRevision();
+      codeSha = seams.readCodeSha ? (await seams.readCodeSha()).trim() : pin && "revision" in pin ? pin.revision : "unknown";
+    }
+    catch (error) { ctx.log("inbox.gardener_source_unavailable", { reason: String(error) }); }
+  }
   return { scope, ports: defaultInboxGardenerPorts({ stateDir: join(ctx.config.root, "state"), scope, planPath: resolveRepoLayout(ctx.repoRoot).planMonolith, codeSha, githubJson: seams.githubJson,
     judge: async (prompt, candidate) => {
       const mount = seams.mount?.() ?? resolveVerifyHumanJudgeMount(loadMounts(mountsPath(ctx.repoRoot)));
@@ -38801,7 +38808,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   switch (name) {
     case "inbox": {
       return withDue(async () => {
-        const { scope, ports } = inboxGardenerRunTaskPorts(ctx);
+        const { scope, ports } = await inboxGardenerRunTaskPorts(ctx);
         const result = await runInboxGardener({ stateDir, scope, mode: inboxGardenerMode(), ports });
         log("inbox.gardener_pass", result);
       }, () => registeredGardenEnabled("inbox", true));

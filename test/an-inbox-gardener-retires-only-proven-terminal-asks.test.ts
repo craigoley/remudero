@@ -10,7 +10,7 @@ import { fixedClock } from "../src/lib/clock.js";
 import { readPersistedInbox, triageFleetLane } from "../src/lib/fleet-lane.js";
 import { runInboxGardener, defaultInboxGardenerPorts, inboxGardenerSemanticInput, readInboxGardenerLedger, INBOX_GARDENER_SOURCE_LIMITS, type InboxGardenerPack, type InboxGardenerPorts } from "../src/lib/inbox-gardener.js";
 import { readInboxGardenerStore, inboxGardenerPath, inboxSemanticDigest, inboxProposalRevision, validInboxTerminalProof, inboxRetirementFor,
-  restoreInboxRetirement, writeInboxGardenerStore, proofDebtPopulationPermit, stampVerificationAsk, mechanicalAskPurpose, inboxGardenerMode, type InboxGardenerScope, type InboxTerminalProof } from "../src/lib/inbox-retirement.js";
+  restoreInboxRetirement, writeInboxGardenerStore, proofDebtPopulationPermit, stampMechanicalAsk, stampVerificationAsk, mechanicalAskPurpose, inboxGardenerMode, type InboxGardenerScope, type InboxTerminalProof } from "../src/lib/inbox-retirement.js";
 import { mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
 import { parseProposalRegistry, anchorFingerprint, updateProposalRegistry, type Proposal } from "../src/lib/inbox.js";
 import { buildInboxDismissalAudit } from "../src/lib/inbox-dismissal-audit.js";
@@ -139,7 +139,7 @@ test("generic parsed proposals cannot claim the mechanical or verification produ
   const real = parseProposalRegistry(readFileSync(f.registry, "utf8")).find(p => p.id === ID)!;
   const forged = JSON.parse(JSON.stringify({ ...real, id: "proof-debt:W1-T9999", automaticRetirement: { ...real.automaticRetirement, taskId: "W1-T9999" } }));
   assert.throws(() => updateProposalRegistry(f.registry, all => [...all, forged]), /maintained proof-audit producer/);
-  assert.throws(() => updateProposalRegistry(f.registry, all => [...all, { id: "verify-human:W1-T9999", summary: "budget approval", evidenceAnchors: [], verificationAsk: { producer: "verify-human-judge-v1", taskId: "W1-T9999" } }]), /maintained verification producer/);
+  assert.throws(() => updateProposalRegistry(f.registry, all => [...all, { id: "verify-human:W1-T9999", summary: "budget approval", evidenceAnchors: [], verificationAsk: { producer: "verify-human-judge-v1", taskId: "W1-T9999", proposalDigest: "a".repeat(64) } }]), /maintained verification producer/);
   const restarted = defaultInboxGardenerPorts({ stateDir: f.state, scope: f.scope, planPath: f.planPath, codeSha: "c".repeat(40), githubJson: async () => [] });
   const reread = (await restarted.capture()).candidates.find(c => c.proposal.id === ID)!;
   assert.equal(mechanicalAskPurpose(reread.proposal)?.criteriaDigest, real.automaticRetirement?.criteriaDigest);
@@ -158,7 +158,7 @@ test("semantic input excludes own bookkeeping and reopens a residual judge only 
   await f.run({ proof: async () => undefined, judge }); await f.run({ proof: async () => undefined, judge });
   assert.equal(judged, 1); assert.equal(f.store().entries[ID]?.digest, digest);
   assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.needsTriageReason?.includes("needs triage"), true);
-  updateProposalRegistry(f.registry, all => all.map(p => p.id === ID ? { ...p, summary: p.summary + " New concrete ask evidence." } : p));
+  updateProposalRegistry(f.registry, all => all.map(p => p.id === ID ? stampMechanicalAsk({ ...p, summary: p.summary + " New concrete ask evidence." }, TASK, proofDebtPopulationPermit(loadPlan(f.planPath).tasks.filter(task => task.id === TASK))) : p));
   await f.refresh(); assert.notEqual(f.source().snapshotKey, changedKey);
   await f.run({ proof: async () => undefined, judge }); assert.equal(judged, 2);
   await f.run({ proof: async () => undefined, judge }); assert.equal(judged, 2);
@@ -246,7 +246,7 @@ test("default dependency merge evidence reopens one judgment without unrelated-m
 });
 
 test("a residual mechanical followup reaches the existing fleet gates and durable dedup", async t => {
-  const f = await fixture(t); let judgments = 0;
+  const f = await fixture(t); f.mergedIds.delete(TASK); await f.refresh(); f.advance(); let judgments = 0;
   const judge = async () => { judgments++; return { decision: "mechanical_followup" as const, reason: "draft a normal proof repair" }; };
   await f.run({ proof: async () => undefined, judge }); await f.refresh();
   assert.equal(f.store().entries[ID]?.decision, "mechanical_followup");

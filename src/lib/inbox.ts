@@ -42,7 +42,7 @@ import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stri
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
-import { mechanicalAskPurpose, inboxMechanicalTaskDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
+import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
 
 /**
@@ -84,7 +84,7 @@ export interface ReframeRecord {
 export interface Proposal {
   /** Explicit mechanical producer purpose; never backfilled from human wording or verify mode. */
   automaticRetirement?: MechanicalAskPurpose;
-  verificationAsk?: { producer: "verify-human-judge-v1"; taskId: string };
+  verificationAsk?: { producer: "verify-human-judge-v1" | "machine-filing-judge-v1"; taskId: string; proposalDigest: string };
   /** e.g. "P25" */
   id: string;
   summary: string;
@@ -1359,6 +1359,8 @@ export function classifyProposal(
   if (proposal.automaticRetirement && !purpose || purpose && (!purposeTask || purpose.taskDigest !== inboxMechanicalTaskDigest(purposeTask)))
     return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: mechanical producer task facts changed" }], needsTriageReason: "Mechanical purpose no longer matches current task ownership or criteria" };
   const lifecycle = ctx.retirement?.(proposal);
+  if (held) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: current task dispatch hold requires operator review" }], needsTriageReason: "Current security or dispatch hold preserves this ask for operator review" };
+
   if (lifecycle && !held) {
     if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown };
     if (lifecycle.state === "retired" && lifecycle.proofKind === "merged-task" &&
@@ -1369,6 +1371,10 @@ export function classifyProposal(
     if (lifecycle.state === "retired") return { proposalId: proposal.id, state: "retired", reasons: [], retiredReason: lifecycle.reason, retirement: lifecycle };
     return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: restored ask requires operator review" }], needsTriageReason: lifecycle.reason, retirement: lifecycle };
   }
+  const currentTaskReferent = taskIdForProtection ? ctx.plan.byId.get(taskIdForProtection) : undefined;
+  if (currentTaskReferent && ((currentTaskReferent.status === "blocked" && currentTaskReferent.retirement) ||
+    ctx.depsUnobservable?.(currentTaskReferent.id) === undefined && ctx.isMerged(currentTaskReferent)))
+    return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: terminal task facts require an exact reversible ask receipt" }], needsTriageReason: "A task's terminal state alone does not answer an unqualified operator ask; source revalidation is required" };
   // Typed mechanical asks retire through the reversible journal. Untyped human asks never gain
   // terminal authority from their ID, changed verification mode, or a related task's merge.
   const automaticTerminal = !held && !proposal.automaticRetirement && !taskIdForProtection;
@@ -1452,8 +1458,10 @@ export function classifyProposal(
   // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
   // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
   const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
-  if (!held && releasedTaskId && proposal.verificationAsk?.producer === "verify-human-judge-v1" && proposal.verificationAsk.taskId === releasedTaskId &&
-    proposal.id === `verify-human:${releasedTaskId}` && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
+  const verifiedFamily = proposal.verificationAsk?.producer === "verify-human-judge-v1" ? `verify-human:${releasedTaskId}`
+    : proposal.verificationAsk?.producer === "machine-filing-judge-v1" ? `machine-judge:${releasedTaskId}` : undefined;
+  if (!held && releasedTaskId && proposal.verificationAsk?.taskId === releasedTaskId &&
+    proposal.verificationAsk.proposalDigest === inboxMechanicalProposalDigest(proposal) && proposal.id === verifiedFamily && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
     return {
       proposalId: proposal.id,
       state: "retired",

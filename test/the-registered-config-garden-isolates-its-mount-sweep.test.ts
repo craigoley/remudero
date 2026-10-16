@@ -105,7 +105,7 @@ test("the actual registered Inbox garden defaults off and supplies a governed bo
   const instanceBefore = process.env.RMD_INSTANCE_NAME; process.env.RMD_INSTANCE_NAME = "core";
   t.after(() => { if (instanceBefore === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = instanceBefore; });
   const calls: any[] = [];
-  const wired = inboxGardenerRunTaskPorts({ ...f.ctx, config: { ...f.ctx.config, root: w.root }, repoRoot: w.root, owner: "owner", repo: "core" }, { mount: () => ({ model: "fixture-model", effort: "low", provider: "fixture-provider" } as any),
+  const wired = await inboxGardenerRunTaskPorts({ ...f.ctx, config: { ...f.ctx.config, root: w.root }, repoRoot: w.root, owner: "owner", repo: "core" }, { mount: () => ({ model: "fixture-model", effort: "low", provider: "fixture-provider" } as any),
     githubJson: async () => [], spawn: async options => { calls.push(options); return { text: JSON.stringify({ decision: "mechanical_followup", reason: "normal fleet repair" }) } as any; } });
   await runInboxGardener({ stateDir: join(f.root, "state"), scope: wired.scope, ports: wired.ports, mode: "off" });
   assert.equal(calls.length, 0, "the actual production provider wrapper is never invoked while off");
@@ -117,4 +117,10 @@ test("the actual registered Inbox garden defaults off and supplies a governed bo
   assert.equal(calls[0].model, "fixture-model"); assert.equal(calls[0].effort, "low"); assert.equal(calls[0].mountProvider, "fixture-provider");
   assert.equal(receiptIdentity(calls[0]).taskId, "INBOX-GARDENER");
   assert.match(calls[0].prompt, /no approval|untrusted/i);
+  const missingPin = await inboxGardenerRunTaskPorts({ ...f.ctx, config: { ...f.ctx.config, root: w.root }, repoRoot: w.root, owner: "owner", repo: "core" },
+    { readCodeSha: async () => { throw new Error("loaded source unavailable"); }, githubJson: async () => [], spawn: async () => assert.fail("unqualified code cannot spend") });
+  const unknown = await runInboxGardener({ stateDir: w.state, scope: missingPin.scope, ports: missingPin.ports, mode: "shadow" });
+  assert.equal(unknown.state, "source_partial");
+  assert.equal(f.events.some(e => e.step === "inbox.gardener_source_unavailable"), true);
+
 });
