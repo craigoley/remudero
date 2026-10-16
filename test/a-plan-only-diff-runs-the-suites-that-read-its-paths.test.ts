@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { withTempDir } from "../src/lib/tmp.js";
 
 const SCRIPT = new URL("../scripts/diff-class.mjs", import.meta.url);
-const { planReadingSuiteFiles, censusSuiteFiles, REPO_ROOT } = await import(SCRIPT.href) as {
+const { planReadingSuiteFiles, censusSuiteFiles, enumeratesPopulation, withoutRelativePathLiterals, REPO_ROOT } = await import(SCRIPT.href) as {
   planReadingSuiteFiles: (root?: string, changed?: string[]) => string[];
   censusSuiteFiles: (changed: string[], root?: string) => string[];
+  enumeratesPopulation: (content: string) => boolean;
+  withoutRelativePathLiterals: (content: string) => string;
   REPO_ROOT: string;
 };
 const SHARD = "plan/tasks.d/W1-T5698-a-plan-only-diff-runs-the-suites-that-read-its-paths.yaml";
@@ -144,4 +146,22 @@ test("a suite walking a bare plan or docs segment runs for a plan or docs edit",
   });
   const real = planReadingSuiteFiles(REPO_ROOT, ["plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml"]);
   assert.ok(real.includes("test/a-retired-index-line-keeps-its-frozen-bullet.test.ts"), "the doctrine-citation census runs for a filed shard");
+});
+
+// THE CENSUS THAT KEEPS DISCOVERY HONEST: its detector is deliberately broader than the selector's, spotting a plan
+// path in ANY literal spelling (a bare segment, `x/plan/y`, a template), so a walker spelled in a way the selector
+// does not parse reddens here instead of going unselected on a plan-only diff.
+test("every suite that walks the repository and spells a plan path in any literal form runs for a filed shard", () => {
+  const PLAN_LITERAL = /["'`](?:[^"'`\n]*\/)?plan(?:\/[^"'`\n]*)?["'`]/;
+  const selected = new Set(planReadingSuiteFiles(REPO_ROOT, ["plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml"]));
+  const walkers = readdirSync(join(REPO_ROOT, "test"))
+    .filter((name) => name.endsWith(".test.ts"))
+    .map((name) => `test/${name}`)
+    .filter((rel) => {
+      const content = readFileSync(join(REPO_ROOT, rel), "utf8");
+      return enumeratesPopulation(content) && PLAN_LITERAL.test(withoutRelativePathLiterals(content));
+    });
+  // POSITIVE CONTROL: the census measures real plan walkers, not an empty set.
+  assert.ok(walkers.length >= 5, `expected real plan walkers; got ${walkers.length}`);
+  assert.deepEqual(walkers.filter((rel) => !selected.has(rel)), [], "a plan walker the plan-reading lane does not select");
 });
