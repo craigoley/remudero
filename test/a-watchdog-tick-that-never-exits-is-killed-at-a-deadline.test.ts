@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -45,10 +45,18 @@ function executable(path: string, text: string) {
   chmodSync(path, 0o755);
 }
 
-/** A real timeout on Linux; only Mac's missing GNU utility gets this equivalent fixture shim. */
-function timeoutOnMac(stubbin: string) {
-  if (spawnSync("timeout", ["--version"]).status === 0) return;
-  assert.equal(process.platform, "darwin", "the Linux fixture must exercise the real GNU timeout");
+/** Qualify GNU semantics, including on images whose default timeout is the uutils alternative. */
+function timeoutForFixture(stubbin: string) {
+  const version = (name: string) => spawnSync(name, ["--version"], { encoding: "utf8" });
+  const defaultTimeout = version("timeout");
+  if (defaultTimeout.status === 0 && defaultTimeout.stdout.includes("GNU coreutils")) return;
+  const namedGnu = version("gnutimeout");
+  if (namedGnu.status === 0 && namedGnu.stdout.includes("GNU coreutils")) {
+    executable(join(stubbin, "timeout"), '#!/usr/bin/env bash\nexec gnutimeout "$@"\n');
+    return;
+  }
+  assert.equal(process.platform, "darwin", `the Linux fixture requires GNU timeout: ${defaultTimeout.stdout}`);
+  // Mac has no GNU utility here. This is a fixture wiring proof, never native GNU runtime proof.
   executable(join(stubbin, "timeout"), `#!/usr/bin/env python3
 import os, signal, subprocess, sys
 args = sys.argv[1:]
@@ -79,7 +87,7 @@ function healthyFixture(t: TestContext, result: "hang" | "kill" | "ok" | "fail" 
   executable(join(stubbin, "docker"), `#!/usr/bin/env bash
 case "$1" in ps) echo fixture-daemon ;; inspect) echo 1 ;; esac
 `);
-  timeoutOnMac(stubbin);
+  timeoutForFixture(stubbin);
   const calls = join(h.root, "calls");
   const sleepers = join(h.root, "sleepers");
   executable(join(stubbin, "sleep"), `#!/usr/bin/env bash
@@ -115,7 +123,24 @@ function tick(h: ReturnType<typeof healthyFixture>): Promise<{ stdout: string; s
     child.stderr.on("data", b => { stderr += String(b); });
     const harnessDeadline = setTimeout(() => {
       expired = true;
-      if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      if (child.pid !== undefined) {
+        // GNU timeout owns a separate process group. The detached fixture owns its Linux session;
+        // kill only that session's members, including an unexpected orphan retaining an output pipe.
+        if (process.platform === "linux") {
+          for (const pid of readdirSync("/proc").filter(name => /^[0-9]+$/.test(name))) {
+            let stat: string;
+            try { stat = readFileSync(`/proc/${pid}/stat`, "utf8"); }
+            catch { continue; } // A process can exit between enumeration and its stat read.
+            const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+            if (fields[3] === String(child.pid)) {
+              try { process.kill(Number(pid), "SIGKILL"); } catch { /* Already exited. */ }
+            }
+          }
+        }
+        try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ }
+      }
+      child.stdout.destroy();
+      child.stderr.destroy();
     }, 8_000);
     child.once("error", e => { clearTimeout(harnessDeadline); reject(e); });
     child.once("close", code => {
