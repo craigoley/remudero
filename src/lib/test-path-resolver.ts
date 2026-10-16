@@ -45,7 +45,7 @@ export interface TestBasenameIndex {
 }
 
 /** A path the basename fallback may resolve: a `.test.ts` under test/, outside test/fixtures/, with no traversal. */
-const ELIGIBLE_TEST_PATH_RE = /^test\/(?:[^/]+\/)*[^/]+\.test\.ts$/;
+export const ELIGIBLE_TEST_PATH_RE = /^test\/(?:[^/]+\/)*[^/]+\.test\.ts$/;
 
 export function isBasenameEligibleTestPath(path: string): boolean {
   return ELIGIBLE_TEST_PATH_RE.test(path) && !path.startsWith("test/fixtures/") && !path.split("/").includes("..");
@@ -76,29 +76,29 @@ export function buildTestBasenameIndex(trackedPaths: readonly string[]): TestBas
   return { paths, byBasename };
 }
 
-function indexFor(opts: ResolveTestPathOptions): TestBasenameIndex | string {
+function indexFor(opts: ResolveTestPathOptions): { index: TestBasenameIndex } | { reason: string } {
   const git = opts.git ?? defaultGit;
   const cache = opts.cache ?? processCache;
   // A directory with no `.git` entry of its own is no checkout: never let git walk up to an enclosing repository.
-  if (opts.git === undefined && !existsSync(join(opts.root, ".git"))) return "no git checkout at the root";
+  if (opts.git === undefined && !existsSync(join(opts.root, ".git"))) return { reason: "no git checkout at the root" };
   let sha: string;
   try {
     sha = git.treeSha(opts.root, opts.tree ?? "HEAD");
   } catch (e) {
-    return `the tree could not be read (${String((e as Error)?.message ?? e).split("\n")[0]})`;
+    return { reason: `the tree could not be read (${String((e as Error)?.message ?? e).split("\n")[0]})` };
   }
-  if (!sha) return "the tree could not be read (no tree sha)";
+  if (!sha) return { reason: "the tree could not be read (no tree sha)" };
   const cached = cache.get(sha);
-  if (cached) return cached;
+  if (cached) return { index: cached };
   let listed: string[];
   try {
     listed = git.listTestTree(opts.root, sha);
   } catch (e) {
-    return `the tree's test files could not be listed (${String((e as Error)?.message ?? e).split("\n")[0]})`;
+    return { reason: `the tree's test files could not be listed (${String((e as Error)?.message ?? e).split("\n")[0]})` };
   }
   const index = buildTestBasenameIndex(listed);
   cache.set(sha, index);
-  return index;
+  return { index };
 }
 
 /**
@@ -112,8 +112,9 @@ export function resolveTestPath(pathOrBasename: string, opts: ResolveTestPathOpt
     return { path: cited, how: "exact" };
   }
   if (!eligible) return { unresolved: "absent", candidates: [], reason: "not a test/**.test.ts path" };
-  const index = indexFor(opts);
-  if (typeof index === "string") return { unresolved: "absent", candidates: [], reason: index };
+  const read = indexFor(opts);
+  if ("reason" in read) return { unresolved: "absent", candidates: [], reason: read.reason };
+  const { index } = read;
   if (opts.tree !== undefined && index.paths.has(cited)) return { path: cited, how: "exact" };
   const candidates = [...(index.byBasename.get(posix.basename(cited)) ?? [])].sort();
   if (candidates.length === 1) return { path: candidates[0]!, how: "basename" };

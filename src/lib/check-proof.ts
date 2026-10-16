@@ -9,6 +9,7 @@ import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 import { grepOnlyBaseTargets, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./proof-base-stale.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { hostWorktreeGit, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./worktree-git.js";
+import { resolveTestPath } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
   parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath,
@@ -536,11 +537,18 @@ export function checkProofCommand(
     // still reports exec_error and exit 4 exactly as before (no caller shifts), it simply gains
     // this line. Checked with existsSync rather than the classifier: there is no file text to
     // read at all, so classifyGrepZeroHit has nothing to classify.
-    if (w.kind === "grep" && grepTargetPath !== undefined && !existsSync(join(process.cwd(), grepTargetPath)))
+    if (w.kind === "grep" && grepTargetPath !== undefined && !existsSync(join(process.cwd(), grepTargetPath))) {
       console.log(
         `cause:      path-absent — ${grepTargetPath} does not exist; grep could not even look (a\n` +
           "            renamed/missing target, or a permission error).",
       );
+      // W1-T9860: say what the basename lookup found, so a moved test's ambiguity is named rather than silent.
+      const lookup = resolveTestPath(grepTargetPath, { root: process.cwd() });
+      if ("unresolved" in lookup && lookup.reason === undefined) {
+        const named = lookup.candidates.length > 0 ? ` (${lookup.candidates.join(", ")})` : "";
+        console.log(`            basename lookup: ${lookup.unresolved}${named} — never guessed`);
+      }
+    }
     if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
     return CHECK_PROOF_EXIT.execError;
   }
