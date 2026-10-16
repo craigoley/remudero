@@ -734,8 +734,8 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
       stale: false,
       notStale: {
         arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha,
-        ...(closure?.status === "read" ? { basis: "closure", outsideClosure: closure.outside } : {}),
-        ...(closure?.status === "unreadable" ? { basis: "prefix", closureUnreadable: closure.reason } : {}),
+        ...(closure?.status === "read" ? { basis: "closure" as const, outsideClosure: closure.outside } : {}),
+        ...(closure?.status === "unreadable" ? { basis: "prefix" as const, closureUnreadable: closure.reason } : {}),
       },
     } as const;
   }
