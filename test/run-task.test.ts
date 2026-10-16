@@ -5332,6 +5332,57 @@ function fakeFixDeps(): FixDeps & {
   };
 }
 
+function w9682RepairCases() {
+  return [
+    { name: "blocked CI", pr: fixPr({ reviewState: "none", checksState: "red",
+      ciFailures: [{ name: "ci", logTail: "actual check failure" }] }), policy: DEFAULT_SWEEP_POLICY },
+    { name: "captured conflict", pr: fixPr({ reviewState: "success", checksState: "green",
+      mergeState: "dirty", headRefName: "run-W1-TX-1789468055864",
+      mergeConflict: { files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
+        oursLog: "abc1234 ours", theirsLog: "def5678 theirs" } }),
+      policy: { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true } },
+  ];
+}
+
+test("W1-T9682 a declined fix request reports the owner refusal in both repair arms", async (t) => {
+  for (const { name, pr, policy } of w9682RepairCases()) {
+    for (const reason of ["process_cwd_probe_unreadable", "process_cwd_owner"]) {
+      await t.test(`${name}: ${reason}`, async () => {
+        const deps = fakeFixDeps();
+        const result = await routeFix("OPEN", pr, { ...deps, dispatchFix: async (p, evidence) => {
+          deps.fixed.push({ pr: p, evidence });
+          return { claimDeclined: true, ownerRecoveryReason: reason };
+        } }, policy);
+        assert.equal(deps.fixed.length, 1, "the real repair arm attempted its dispatch once");
+        assert.deepEqual(deps.escalated, [], "an owner refusal is not an invented escalation");
+        assert.equal(result.outcome, "refused", "a declined owner claim is not a dispatched fix");
+        assert.ok(result.reason.includes(reason), "retain the exact owner refusal, including unknown");
+      });
+    }
+  }
+});
+
+test("W1-T9682 fix request outcomes preserve unspent thrown and admitted contracts", async (t) => {
+  for (const { name, pr, policy } of w9682RepairCases()) {
+    for (const value of [false, undefined, true]) {
+      await t.test(`${name}: ${String(value)}`, async () => {
+        const deps = fakeFixDeps();
+        const result = await routeFix("OPEN", pr, { ...deps, dispatchFix: () => value }, policy);
+        assert.equal(result.outcome, value === false ? "refused" : "fixed");
+        assert.deepEqual(deps.escalated, []);
+        if (value === false) assert.doesNotMatch(result.reason, /registered.*owner|process_cwd/,
+          "a bare unspent result cannot invent an owner recovery reason");
+      });
+    }
+    await t.test(`${name}: rejected dispatch`, async () => {
+      const error = new Error("dispatcher failed before acceptance");
+      await assert.rejects(routeFix("OPEN", pr, { ...fakeFixDeps(), dispatchFix: async () => {
+        throw error;
+      } }, policy), (caught) => caught === error);
+    });
+  }
+});
+
 test("routeFix: a blocked-fixable PR dispatches via the SAME dispatchFix effect `rmd sweep` wires — one rung, three callers, no duplicated dispatch logic", async () => {
   const deps = fakeFixDeps();
   const unmet = [criterion({ claim: "does the thing", met: false })];

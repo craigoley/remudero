@@ -1,0 +1,115 @@
+- id: W1-T9723
+  title: "A REAL CONTENT CONFLICT IS ESCALATED AS 'files: none captured' ONE PASS AFTER THE SWEEP CAPTURED ITS FILES — W1-T4470 inherits a head's last known `dirty` when mergeability goes unread, but the conflict evidence is hydrated only for PRs read dirty THIS pass and is never carried, so the inheriting pass falls to blocked-ambiguous 'no valid conflicting-file evidence was captured' with no word on why; #11991 and #12116 escalated this way on 2026-10-15 and were merged by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what conflict evidence a dirty head disposes with on a pass that did not read it; high because carried evidence admits the bounded merge-conflict worker to write a run branch
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: #11991 (W1-T9627) escalated about 18:53Z-19:18Z and #12116 (W1-T9670) at 20:15Z as blocked-ambiguous 'files: none captured' while `git merge origin/main` showed one real content conflict each; hand-merged at bff18be34 and 650f7a3bb"
+  plan_refs: [W1-T4470, W1-T984, W1-T5908, W1-T9454, W1-T9627, W1-T9670, W1-T9651, W1-T100]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/open-prs-rest.ts
+    - src/run-task.ts
+    - test/a-real-conflict-always-names-its-files.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ on origin/main a2deb09de. Symbols, not lines.
+    REPRODUCED WITH GIT. `git merge-tree --write-tree` of #11991's head c94ea474f against main 6bdb26420 (main at
+    19:12Z) reports one `CONFLICT (content)` in deploy/install-host-units.sh. The same for #12116's head e1560196c
+    against main c11dafa25 (main at 20:15Z) reports one in src/lib/plan-pr-merge-safety.ts. That file conflicts with
+    W1-T9651's execFileLoopBounded change, which merged at 1902d67a4. Both compares were small: 250 and 120 files on
+    main's side, under GitHub's 300-file compare cap. So the REST evidence producer was not truncated.
+    LEDGER (sweep.disposed rows for both PRs, from the 17-18Z and 19-17Z archives and the live ledger, streamed off
+    the host):
+    - #11991, head c94ea47. At 18:22:55Z and 18:34:46Z the row is `conflicted`: "rmd-owned branch has captured
+      deletion evidence on deploy/install-host-units.sh (ours -4, theirs -25), src/lib/config-schema.ts". Each was
+      not dispatched, because host capacity was exhausted. At 18:53:58Z, 18:55:19Z, 19:12:29Z, 19:17:27Z and
+      19:18:26Z the row is `blocked-ambiguous`: "no valid conflicting-file evidence was captured — not dispatched —
+      files: none captured — escalating — mergeability unread this pass; inherited last known "dirty" observed
+      18:34:46Z for this exact head c94ea47 (W1-T4470)".
+    - #12116, head e156019. At 19:36:33Z, 19:38:23Z and 19:38:52Z the row is `conflicted`, with captured deletion
+      evidence on src/lib/plan-pr-merge-safety.ts (ours -13, theirs -5). This is the contrast case the operator saw.
+      At 19:51Z there are two `wait` rows (mergeability-unknown), each "inherited last known dirty". At 20:15:34Z the
+      row is `blocked-ambiguous` "files: none captured", again "inherited last known dirty observed 19:52:25Z".
+    ROOT CAUSE. src/run-task.ts builds `dirtyPrs` from the mergeStates THIS pass read, and calls
+    hydrateMergeConflictEvidenceSteps (src/lib/open-prs-rest.ts, W1-T984) for that subset only. Later, the sweep's
+    walk (src/lib/sweep.ts, runSweep) calls withInheritedMergeState. That function gives an unread head the
+    `merge_state` of its last sweep.disposed row (lastKnownMergeStateFromLedger), but it carries nothing else. So
+    every pass that inherits `dirty` has `mergeConflict` undefined. The `conflicted` row needs
+    hasCapturedMergeConflictEvidence, and the `wait` row needs mergeable_state `unknown` with passes left (#11991
+    never read `unknown`). The PR therefore lands on the `blocked-ambiguous` row. W1-T4470 made `dirty` sticky for
+    an exact head and left its evidence behind, and the sweep.disposed row does not record the files, so a later
+    pass has nothing to inherit.
+    THE CAPTURE IS SILENT ABOUT WHY. hydrateMergeConflictEvidenceSteps swallows a failed compare ("best-effort: this
+    PR keeps the pre-existing undefined") and drops PRs over MERGE_STATE_HYDRATION_CAP without a note.
+    conflictRefusalCause says only "no valid conflicting-file evidence was captured". Several different things all
+    read the same: an inherited state with no read scoped to the PR, a failed compare, a PR over the cap, and a
+    compare whose two sides share no path.
+    NOT COVERED ELSEWHERE. Swept plan/ on origin/main for withInheritedMergeState, lastKnownMergeStateFromLedger,
+    conflict_files, "none captured", "conflicting-file evidence" and W1-T4470. Swept the added and modified plan
+    files of all 450 origin heads for the same terms; the only hits were W1-T5908 edits on two stale
+    gh-readonly-queue refs, which is the positive control. No open run- branch touches withInheritedMergeState,
+    conflictRefusalCause, hydrateMergeConflictEvidence or `mergeConflicts.get`.
+    W1-T9454 (queued, P1) is the nearest task. It feeds the local merge probe's conflict paths to a PR whose compare
+    evidence is absent, ordering probe slots by mergeable_state `unknown`. It does not cover this case. The probe
+    re-probes only when the head or main moved, takes 3 PRs a pass, and never ran on #11991 in this window; #12116's
+    one probe (19:26Z, conflict_paths [src/lib/plan-pr-merge-safety.ts]) was 49 minutes before its escalation.
+    The two compose: this task keeps evidence a pass already captured, and W1-T9454 supplies evidence no compare
+    captured. Both edit the conflict-evidence path of src/lib/sweep.ts and src/run-task.ts, so whichever lands
+    second merges main. lint-plan pairs this task with W1-T100 (tasks.yaml, queued) on src/lib/sweep.ts and
+    src/run-task.ts. That task routes blocked_ci to the ci-log fix path, a different concern; this one touches only
+    the conflict-evidence path of those files and adds src/lib/open-prs-rest.ts.
+  design: |
+    No new bound and no new GitHub read.
+    1. THE ROW RECORDS THE FILES. When a pass disposes a dirty head with captured evidence
+       (hasCapturedMergeConflictEvidence), the sweep.disposed row also carries `conflict_files`: one
+       {path, ours_deleted, theirs_deleted} per ConflictFileDiff. Write it through one exported helper,
+       conflictEvidenceRowFields(pr), spread beside `merge_state`, so the field and its reader cannot drift.
+    2. INHERITANCE CARRIES THE FILES. lastKnownMergeStateFromLedger also returns that row's `conflict_files` when its
+       state is `dirty`. It keeps today's rules: exact pr_number plus head_sha, last row wins, and nothing carries
+       across a head change. withInheritedMergeState gives that evidence to a PR whose effective mergeState is
+       `dirty` and whose own mergeConflict is not captured. That covers both an inherited state and a dirty state
+       read this pass whose compare failed. The carried evidence has empty oursLog/theirsLog, which renderFixPrompt
+       already prints as "(not captured)". Evidence a pass read itself always wins over carried evidence. A row
+       written by an inheriting pass carries the files forward again, so consecutive unread passes compose as
+       W1-T4470's merge_state does.
+    3. AN EMPTY CAPTURE NAMES WHY. OpenPrView gains `mergeConflictGap?: string`.
+       - hydrateMergeConflictEvidenceSteps takes an optional gaps map. A failed compare records "the compare read
+         failed: <first line of the error>", and a PR past the cap records "over the <cap>-PR conflict-evidence cap
+         this pass". src/run-task.ts passes the map and sets the field, with no new comment prose (that file is near
+         its comment-load ceiling).
+       - withInheritedMergeState sets "mergeability was unread this pass, so no compare was read for this PR, and no
+         prior pass recorded conflict files for head <sha7>" when it inherits `dirty` with nothing to carry.
+       - The blocked-ambiguous row then reads "no valid conflicting-file evidence was captured: <why>". A capture
+         with no file names "GitHub's compare found no path changed on both sides since the merge base".
+         Malformed entries name "the captured file list was malformed".
+       - conflictRefusalCause takes the gap as an optional last argument. Called without it, its sentence is
+         unchanged, so the existing exact-match tests stay green.
+    4. TESTS go in the new file test/a-real-conflict-always-names-its-files.test.ts, with the `test(` titles exactly
+       as in the proofs below. Reproduce #11991 with a real throwaway repo (gitRepo(), with a local user.name and
+       user.email set in the fixture): main and the head each edit the same line of deploy/install-host-units.sh,
+       and `git merge-tree` reports the conflict. Answer the producer's compare and contents reads from that repo
+       (merge base, `git diff --numstat`, `git log`). Pass one reads dirty and disposes `conflicted`. Build its row
+       with conflictEvidenceRowFields. Pass two has the same head, mergeability unread and no evidence, and must
+       also dispose `conflicted` and name the file.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-real-conflict-always-names-its-files.test.ts"
+    - claim: "a dirty head whose mergeability goes unread keeps the conflicting files a prior pass captured and reaches the conflicted row"
+      proof: 'grep: test("W1-T9723: a dirty head whose mergeability goes unread keeps the conflicting files a prior pass captured" in test/a-real-conflict-always-names-its-files.test.ts'
+    - claim: "an empty conflict capture names why it is empty"
+      proof: 'grep: test("W1-T9723: an empty conflict capture names why it is empty" in test/a-real-conflict-always-names-its-files.test.ts'
+    - claim: "a failed or capped compare read is recorded as that PR's evidence gap"
+      proof: 'grep: test("W1-T9723: a failed or capped compare read is recorded as the evidence gap" in test/a-real-conflict-always-names-its-files.test.ts'
+  falsifier: |
+    On main, pass two of the #11991 reproduction (same head, mergeability unread, ledger row from pass one) disposes
+    `blocked-ambiguous` "files: none captured", so the first test fails. If the row writes `conflict_files` but
+    inheritance ignores it, or inheritance reads a field the row never writes, it still fails. Carry evidence across
+    a head change, and the test's new-head case disposes conflicted when it must not. Leave the gap unnamed, and the
+    second and third tests fail on the reason text.

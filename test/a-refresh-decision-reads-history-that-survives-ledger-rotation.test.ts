@@ -1,3 +1,4 @@
+// @census-reads: src/
 // @source-text-subject: the refresh census inventories literal and constant ledger-step reads.
 import assert from "node:assert/strict";
 import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";

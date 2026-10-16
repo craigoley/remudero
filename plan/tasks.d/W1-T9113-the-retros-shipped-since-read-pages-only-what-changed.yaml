@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/the-retro-shipped-read-pages-only-what-changed.test.ts
-  status: queued
+  status: merged
   priority: 1.5  # operator session 2026-10-13: 91 REST pages (about 150 MB) per retro check, inline in the daemon tick before the dispatch pick, once ledger pressure stops deferring the check
   attempts: 0
   rationale: |

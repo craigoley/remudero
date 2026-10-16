@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
+import { boundChildByLoopTime, childLoopBound, execFileLoopBounded } from "./loop-bounded-child.js";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { accessSync, constants as fsConstants, mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -215,6 +215,12 @@ export function withGhKillEscalation<T extends { stdout: string; stderr: string 
   if (child === undefined || !(timeoutMs > 0)) return execPromise;
   const graceMs = opts.graceMs ?? DEFAULT_GH_KILL_GRACE_MS;
   const warn = opts.warn ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const primary = childLoopBound(child);
+  if (primary !== undefined && graceMs > 0) {
+    primary.escalateAfter(graceMs, () => logGhKillEscalated(args, warn));
+    return execPromise;
+  }
+  // Compatibility for injected/legacy execFile promises whose primary is not owned by the helper.
   // W1-T9651: loop-available time, so a held loop never escalates a child whose exit is already waiting.
   const clearEscalation = loopAvailableDeadline(systemClock, timeoutMs + graceMs, () => {
     if (child.exitCode === null && child.signalCode === null) {

@@ -67,6 +67,7 @@ import {
   tallyDispatchFilters,
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
+  laneCredentialRefusal,
   laneDeliveryFailure,
   type PriorityBackfillEstimates,
   type PriorityDeferral,
@@ -133,7 +134,8 @@ import type { GithubPostureFinding } from "./github-posture.js";
 // `() => Date` / `() => string` shapes (many tests inject those directly), so the adapters below
 // convert them into a `Clock` at the read site instead of forcing every caller to change; the
 // headroom sampler is internal-only, so it is migrated onto `Clock` outright, no adapter needed.
-import { clockFromDateFn, clockFromIsoFn, fixedClock, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
+import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 import {
@@ -225,7 +227,7 @@ export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
  *  {@link SWEEP_BOUND_WINDOW} settled durations x {@link SWEEP_BOUND_HEADROOM}. On 10-14 12-24Z's sample that is 3 x 33.7 = 101.1 min: 2.9x the slowest
  *  settled pass (35.3 min), 0.61x the shortest confirmed hang (165.5 min); on 10-13 00-12Z, 3 x 9.8 = 29.4 min still
  *  clears that window's slowest (15.0 min). Never clamped to the policy row's max: no fixed ceiling. A hang never
- *  settles, so it never widens the sample. Below {@link SWEEP_BOUND_MIN_SAMPLES} the policy value is the bound. */
+ *  settles, so it never widens the sample. Below {@link SWEEP_BOUND_MIN_SAMPLES}, see {@link learnedSweepBound}. */
 export const SWEEP_BOUND_QUANTILE = 0.9;
 /** PRIMARY CONTROL: headroom over the quantile; the 10-14 12-24Z sample admits 1.05x (slowest settled) to 4.9x (shortest hang). */
 export const SWEEP_BOUND_HEADROOM = 3;
@@ -235,14 +237,26 @@ export const SWEEP_BOUND_WINDOW = 40;
 /** BACKSTOP: fewest settled passes the quantile is read from; below it nearest-rank p90 is only the newest few maxima. */
 export const SWEEP_BOUND_MIN_SAMPLES = 5;
 
-/** The learner's state: the policy cold-start value and the most recent settled full-pass durations, oldest first. */
-export interface SweepBoundLearner { fallbackMs: number; settledMs: number[] }
+/** The learner's state: the policy cold-start value and the most recent settled full-pass durations, oldest first;
+ *  `seededFrom` is the boot seed's source, logged once with the first pass (W1-T9632). */
+export interface SweepBoundLearner { fallbackMs: number; settledMs: number[]; seededFrom?: "ledger_union" | "live_ledger" }
 
-export interface LearnedSweepBound { boundMs: number; basis: "observed_passes" | "no_history_fallback"; samples: number }
+export interface LearnedSweepBound { boundMs: number; basis: "observed_passes" | "settled_max_fallback" | "no_history_fallback"; samples: number }
 
+/** The step every settled full pass writes, and the restart-history union read carries for the boot seed (W1-T9632). */
+export const SWEEP_SETTLED_STEP = "daemon.sweep.settled";
+
+/** W1-T9632: below {@link SWEEP_BOUND_MIN_SAMPLES} the bound never falls under the longest held pass x the same
+ *  headroom (`settled_max_fallback`), else the policy value (`no_history_fallback`). On 10-15 settled passes of
+ *  1,384-4,995 s left the learner at 0-2 samples per boot and every pass was abandoned at 559 s. */
 export function learnedSweepBound(learner: SweepBoundLearner): LearnedSweepBound {
   const samples = learner.settledMs.length;
-  if (samples < SWEEP_BOUND_MIN_SAMPLES) return { boundMs: learner.fallbackMs, basis: "no_history_fallback", samples };
+  if (samples < SWEEP_BOUND_MIN_SAMPLES) {
+    const longest = Math.round(Math.max(0, ...learner.settledMs) * SWEEP_BOUND_HEADROOM);
+    return longest > learner.fallbackMs
+      ? { boundMs: longest, basis: "settled_max_fallback", samples }
+      : { boundMs: learner.fallbackMs, basis: "no_history_fallback", samples };
+  }
   const sorted = [...learner.settledMs].sort((a, b) => a - b);
   const p = sorted[Math.min(samples, Math.max(1, Math.ceil(SWEEP_BOUND_QUANTILE * samples))) - 1];
   return { boundMs: Math.round(p * SWEEP_BOUND_HEADROOM), basis: "observed_passes", samples };
@@ -255,15 +269,21 @@ export function recordSettledSweep(learner: SweepBoundLearner, elapsedMs: number
   if (learner.settledMs.length > SWEEP_BOUND_WINDOW) learner.settledMs.splice(0, learner.settledMs.length - SWEEP_BOUND_WINDOW);
 }
 
-/** The boot seed: `daemon.sweep.settled` durations from the live ledger file's raw lines (never the union). */
+/** The boot seed: settled durations from the restart-history union's rows, else the live file's (W1-T9632), in `ts`
+ *  order when every row has one, so the window keeps the newest whatever order the union read returned. */
 export function settledSweepDurations(rawLines: readonly string[]): number[] {
   const out: number[] = [];
+  const at: number[] = [];
   for (const raw of rawLines) {
-    if (!raw.includes('"daemon.sweep.settled"')) continue;
+    if (!raw.includes(`"${SWEEP_SETTLED_STEP}"`)) continue;
     let row: Record<string, unknown>;
     try { row = JSON.parse(raw); } catch (error) { /* a torn ledger row supplies no measurement */ continue; }
-    if (row?.step === "daemon.sweep.settled" && typeof row.elapsed_ms === "number" && row.elapsed_ms > 0) out.push(row.elapsed_ms);
+    if (row?.step === SWEEP_SETTLED_STEP && typeof row.elapsed_ms === "number" && row.elapsed_ms > 0) {
+      out.push(row.elapsed_ms);
+      at.push(typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
+    }
   }
+  if (at.every(Number.isFinite)) return out.map((ms, i) => ({ ms, at: at[i] })).sort((a, b) => a.at - b.at).map(({ ms }) => ms);
   return out;
 }
 
@@ -311,6 +331,18 @@ export type RestartWorkHistory = { yieldCost: RestartEstimate; remaining: Readon
 export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 /** W1-T8927: a seven-day sampling window, not a yield threshold; durations come only from completed observations. */
+/** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail;
+ *  it carries the settled full passes too, so the sweep-bound seed survives a restart (W1-T9632). */
+export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
+  const read = readLedgerUnionRecordsSync(stateDir, {
+    refuseIncomplete: true, sinceTs: fixedClock(nowMs - RESTART_HISTORY_WINDOW_MS).iso(),
+    rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
+    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP],
+  });
+  if (!read.ok) throw new Error(`restart history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}`);
+  return read.rows.map((row) => JSON.stringify(row));
+}
+
 export function restartWorkHistory(rawLines: readonly string[], nowMs: number): RestartWorkHistory {
   const since = nowMs - RESTART_HISTORY_WINDOW_MS;
   const rows: Array<{ row: Record<string, unknown>; at: number }> = [];
@@ -1245,7 +1277,7 @@ export interface DaemonDeps {
    *  the drain and is refused from the console. Same seam and same contract as `DrainDeps`'s.
    *  ABSENT = today's behaviour exactly, an empty released set. */
   readLedgerLines?: () => readonly string[];
-  /** Complete archive union for the boot-time restart estimates; an unreadable union disables holdouts. */
+  /** Complete archive union for the boot-time restart estimates and sweep-bound seed (W1-T9632); unreadable disables holdouts. */
   readRestartHistory?: () => readonly string[];
   /** Re-read the plan from the same source the boot used, returning the fresh plan or `null` when
    *  nothing changed; omitted means the plan stays frozen at boot. The dep owns change detection
@@ -1297,6 +1329,9 @@ export interface DaemonDeps {
    *  parsed by `runBranchTaskIds`. Injected for the same reason it is on `DrainDeps`: this module reads
    *  its world through deps (W1-T916). A promised read is awaited; a throw or rejection is ledgered. */
   readPushedRunBranches?: () => string | Promise<string>;
+  /** W1-T9680: is the fleet's push credential alive? Asked before one lane's credential refusal can stop the
+   *  daemon. Absent reads `unreadable`, so the refusal stays fatal as before W1-T9680. */
+  probeFleetPushCredential?: () => Promise<FleetCredentialProbe>;
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
@@ -1811,6 +1846,57 @@ function runBranchDispatchOpts(
     // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
     // row, which has three emitters and no reader.
     onSkipRunBranch: (t: Task) => log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+  };
+}
+
+/** W1-T9680: the fleet credential probe's answer. Only `alive` makes a lane's credential refusal lane-local. */
+export type FleetCredentialProbe = { state: "alive" } | { state: "refused" | "unreadable"; detail: string };
+
+/** W1-T9680: where the probe's push token comes from — a mint like the credential socket's, or a fixed token. */
+export type PushTokenSource = () => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
+
+/** W1-T9680: the token a worker push sends — the credential socket's scoped mint while it listens, else GH_TOKEN. */
+export function daemonPushTokenSource(
+  repo: string,
+  mint: ((repo: string) => ReturnType<PushTokenSource>) | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): PushTokenSource {
+  return async () => {
+    if (mint) return mint(repo);
+    const token = env.GH_TOKEN;
+    return token ? { ok: true, token } : { ok: false, reason: "GH_TOKEN is not set" };
+  };
+}
+
+/**
+ * W1-T9680 — the fleet push credential probe: receive-pack discovery at `originUrl` with the token a worker push
+ * sends. The repo is public, so an upload-pack read (`git ls-remote`) answers 200 with no credential at all;
+ * receive-pack answers 401 to a missing or wrong token and pushes nothing. Bounded by loop-available time.
+ */
+export function receivePackCredentialProbe(opts: {
+  originUrl: string;
+  token: PushTokenSource;
+  timeoutMs?: number;
+  clock?: Clock;
+}): () => Promise<FleetCredentialProbe> {
+  return async () => {
+    const minted = await opts.token().catch((error: unknown) => ({ ok: false as const, reason: String((error as Error)?.message ?? error) }));
+    if (!minted.ok) return { state: "refused", detail: `no push token: ${minted.reason}` };
+    const controller = new AbortController();
+    const cancel = loopAvailableDeadline(opts.clock ?? systemClock, opts.timeoutMs ?? 15_000, () => controller.abort());
+    try {
+      const auth = Buffer.from(`x-access-token:${minted.token}`).toString("base64");
+      const url = `${opts.originUrl.replace(/\/+$/, "")}/info/refs?service=git-receive-pack`;
+      const response = await fetch(url, { headers: { Authorization: `Basic ${auth}` }, signal: controller.signal });
+      await response.body?.cancel();
+      if (response.status === 200) return { state: "alive" };
+      const state = response.status === 401 || response.status === 403 ? "refused" : "unreadable";
+      return { state, detail: `receive-pack discovery answered HTTP ${response.status}` };
+    } catch (error) {
+      return { state: "unreadable", detail: `receive-pack discovery failed: ${String((error as Error)?.message ?? error)}` };
+    } finally {
+      cancel();
+    }
   };
 }
 
@@ -2667,6 +2753,8 @@ async function runGatedSweep(
   let outcome: SweepCycleOutcome | undefined;
   try {
     const bound = learnedSweepBound(sweepBound);
+    if (sweepBound.seededFrom) log("daemon.sweep.seeded", { samples: bound.samples, source: sweepBound.seededFrom });
+    sweepBound.seededFrom = undefined;
     log("daemon.sweep.started", { bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
     const continueReviewAdmissions = (() =>
       deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
@@ -2849,7 +2937,7 @@ export function detectDaemonCrashLoop(
  * never touches the filesystem; run once here; logged either way, so the step's own pass or fail is part of the boot
  * record; and omitted means no step and behaviour unchanged. A failure is logged and the boot continues — the T197
  * doctrine, that the daemon sleeps through problems. Forensics: docs/forensics/daemon.md. */
-export function daemonBoot(
+export async function daemonBoot(
   log: (step: string, extra?: Record<string, unknown>) => void,
   env: NodeJS.ProcessEnv = process.env,
   sweepTmp?: () => { removed: string[]; kept: string[] },
@@ -2882,9 +2970,9 @@ export function daemonBoot(
    *  which is consumed by anyone who pulls first and left the daemon running stale code silently. */
   bootHeadSha?: string,
   /** The boot-time half of the feedback-landing backstop, so a pre-existing stranded entry is picked
-   *  up when the daemon comes up rather than only on its next per-poll pass. Synchronous, like the
-   *  orphan sweep above. Appended last so no positional caller shifts (W1-T530 part ii). */
-  sweepFeedbackLanding?: () => LandFeedbackResult,
+   *  up when the daemon comes up rather than only on its next per-poll pass. Awaited, so its plan-PR
+   *  preflight runs off the loop (W1-T9695). Appended last so no positional caller shifts (W1-T530 part ii). */
+  sweepFeedbackLanding?: () => Promise<LandFeedbackResult> | LandFeedbackResult,
   /** The runtime reading the boot assertion now also carries. Defaults to this process's own values so a real boot
    * needs no caller change; a test overrides it to prove drift without a real foreign-account install (W1-T991). */
   nodeRuntime: { execPath: string; version: string } = { execPath: process.execPath, version: process.version },
@@ -2895,7 +2983,7 @@ export function daemonBoot(
    *  the filesystem. Why: a shallow clone breaks every history read silently — log searches, follows and
    *  merge-base checks all stay plausible over a truncated corpus — and nothing asked (W1-T2332). */
   checkoutDepth?: { shallow: boolean; commitCount: number },
-): BootAssertion {
+): Promise<BootAssertion> {
   const assertion = assertCleanBoot(env, allowApiKey, nodeRuntime, declaredNodeVersion);
   log("daemon.boot", {
     env_clean: assertion.env_clean,
@@ -2992,7 +3080,7 @@ export function daemonBoot(
   // boot continues rather than dying over a git or GitHub hiccup (W1-T530 part ii).
   if (sweepFeedbackLanding) {
     try {
-      const result = sweepFeedbackLanding();
+      const result = await sweepFeedbackLanding();
       log("daemon.feedback_landing_sweep", {
         landed: result.landed,
         pushed: result.pushed ?? false,
@@ -3634,7 +3722,6 @@ export async function runDaemon(
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
   const measuredRuns: MeasuredRun[] = [];
   const runLengths = dispatchRunHistory(bootLedgerLines, measuredRuns);
-  for (const ms of settledSweepDurations(bootLedgerLines)) recordSettledSweep(sweepBound, ms);
   // W1-T8514: the measured run lengths behind a priority reservation's backfill release. The lane clock is the
   // current dispatch phase's, bound once that phase exists; before it, no task is in flight.
   let laneElapsedMs: (taskId: string) => number | undefined = () => undefined;
@@ -3655,11 +3742,16 @@ export async function runDaemon(
   // sample ends it), at the idle slots that record left.
   idleLaneAccount = chargeRestartGap(idleLaneAccount, lastIdleLaneRecord(bootLedgerLines));
   let restartHistoryLines: readonly string[] = bootLedgerLines;
+  let sweepSeedSource: "ledger_union" | "live_ledger" = deps.readRestartHistory ? "ledger_union" : "live_ledger";
   try { restartHistoryLines = deps.readRestartHistory?.() ?? bootLedgerLines; }
   catch (error) {
     restartHistoryLines = [];
+    sweepSeedSource = "live_ledger";
     log("daemon.restart_history_unreadable", { error: String((error as Error)?.message ?? error) });
   }
+  // W1-T9632: the union holds the live file too, so ONE source seeds the learner and no live row counts twice.
+  for (const ms of settledSweepDurations(sweepSeedSource === "ledger_union" ? restartHistoryLines : bootLedgerLines)) recordSettledSweep(sweepBound, ms);
+  sweepBound.seededFrom = sweepSeedSource;
   const restartHistory = restartWorkHistory(restartHistoryLines, clockFromDateFn(deps.now).now());
   const resumableHandoffs = pendingWorkerBoundaryHandoffs(bootLedgerLines);
   // W1-T8676: a settled run may have written or consumed its task's receipt; re-fold that task's rows so the next
@@ -3687,6 +3779,17 @@ export async function runDaemon(
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
   const laneDeliveryParks = priorLaneDeliveryParks(bootLedgerLines);
+  // W1-T9680: one probe per credential refusal, shared by its lane's refill and the settle loop.
+  const credentialProbes = new WeakMap<object, Promise<FleetCredentialProbe>>();
+  const fleetCredentialFor = (err: object): Promise<FleetCredentialProbe> => {
+    let probe = credentialProbes.get(err);
+    if (probe === undefined) {
+      const ask = deps.probeFleetPushCredential ?? (async (): Promise<FleetCredentialProbe> => ({ state: "unreadable", detail: "no fleet credential probe is wired" }));
+      probe = ask().catch((error: unknown): FleetCredentialProbe => ({ state: "unreadable", detail: String((error as Error)?.message ?? error) }));
+      credentialProbes.set(err, probe);
+    }
+    return probe;
+  };
   // Needs-human escalation dedup for the same recurrence, keyed on sha so a sustained pin notifies
   // once rather than once per tick, mirroring `starvationEscalated`'s own discipline.
   let staleReviewerNeedsHumanSha: string | undefined;
@@ -6441,7 +6544,18 @@ export async function runDaemon(
       if (inFlightFreshness) laneIdleSince.set(lane, daemonClock.now());
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
-        if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
+        if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) {
+          // W1-T9680: a credential refusal closes refill only once the fleet credential probe does not read alive.
+          if (laneCredentialRefusal(outcome.reason) !== undefined) {
+            return fleetCredentialFor(outcome.reason as object).then((probe) => {
+              if (probe.state !== "alive") refillClosed ??= "a lane rejected";
+              const decision = decideRefill(lane, finished);
+              wakeParkedLanes(true);
+              return decision;
+            });
+          }
+          refillClosed ??= "a lane rejected";
+        }
       }
       // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
@@ -6945,7 +7059,7 @@ export async function runDaemon(
         // unprefixed throw (rmd's own TypeError) still reaches `fatalError` and still exits 1.
         const delivery =
           !spawnInfra && transientTransport === undefined && ghRead === undefined ? laneDeliveryFailure(err) : undefined;
-        if (delivery !== undefined) {
+        const parkLane = (failureClass: string, firstLine: string, extra: Record<string, unknown> = {}): void => {
           const prior = laneDeliveryParks.get(t.id);
           const revision = preDispatchContractRevision(t);
           const consecutive = prior !== undefined && prior.revision === revision ? prior.consecutive + 1 : 1;
@@ -6954,14 +7068,31 @@ export async function runDaemon(
           laneDeliveryParks.set(t.id, { consecutive, parkedUntilMs, revision });
           reporting.report("daemon.lane_failed", {
             task: t.id,
-            class: delivery.failureClass,
-            error: delivery.firstLine,
+            class: failureClass,
+            error: firstLine,
             consecutive,
             backoff_ms: backoffMs,
             parked_until_ms: parkedUntilMs,
             revision,
+            ...extra,
           });
+        };
+        if (delivery !== undefined) {
+          parkLane(delivery.failureClass, delivery.firstLine);
           return;
+        }
+        // W1-T9680: one lane's credential refusal stops the daemon only when the fleet credential probe agrees.
+        const credential =
+          !spawnInfra && transientTransport === undefined && ghRead === undefined ? laneCredentialRefusal(err) : undefined;
+        if (credential !== undefined) {
+          const probe = await fleetCredentialFor(err as object);
+          if (probe.state === "alive") {
+            parkLane("push_credential_missing", credential.firstLine, { stderr: credential.stderr, fleet_credential: probe.state });
+            return;
+          }
+          const message = String((err as Error)?.message ?? err);
+          const named = `${message}\nfleet credential probe: ${probe.state} (${probe.detail})`;
+          return { taskId: t.id, message: phase ? `${phase}: ${named}` : named };
         }
         if (!spawnInfra && transientTransport === undefined && ghRead === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other

@@ -17,7 +17,7 @@
     - src/run-task.ts
     - test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 2  # operator-2026-10-15: W1-T9615 measured this preflight holding the loop 60-190 s per landing
   attempts: 0
   rationale: |

@@ -16,7 +16,7 @@
     - plan/policy.yaml
     - test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts
     - test/the-sweep-bound-keeps-learning-across-restarts.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

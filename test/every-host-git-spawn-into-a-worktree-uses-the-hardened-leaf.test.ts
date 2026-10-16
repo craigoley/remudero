@@ -201,6 +201,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/serve-slots.ts": { count: 9, reason: "CHECKOUT: slotUnfit/createSlotPreparer cut and read serve's own slot checkouts" },
   "src/lib/serve-supervisor-main.ts": { count: 1, reason: "CHECKOUT: runServeSupervisor reads the supervised checkout" },
   "src/lib/serve.ts": { count: 5, reason: "CHECKOUT: serve's console/gateway checkout reads (-C dir/repoDir)" },
+  "src/lib/source-text-readers.ts": { count: 1, reason: "CHECKOUT: discoverSourceTextReaders reads the repo root (cwd: repoRoot)" },
   "src/lib/sre-lane.ts": { count: 1, reason: "CHECKOUT: mergedPrsSince reads origin/main in the managed checkout" },
   "src/lib/sre-runbooks.ts": { count: 1, reason: "CHECKOUT: daemonSreRunbookHost reads the managed checkout" },
   "src/lib/status-board.ts": { count: 4, reason: "CHECKOUT: status-board ref reads of the managed checkout (-C repoDir)" },

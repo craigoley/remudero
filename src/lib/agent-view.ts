@@ -197,9 +197,10 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
   name: string;
   version: number;
   qualificationGeneration: string;
+  perInstance: true;
   snapshotSourced: true;
   prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }, more: () => boolean): boolean;
-  materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): Array<{ key: string; data: AgentViewData; sources: ViewSource[] }>;
+  materialize(ctx: { now: number; sourceStore?: ReadModelDb; instances: ReadonlyArray<{ state: S; db?: ReadModelDb; lease?: ReadModelLease }> }): Array<{ key: string; data: AgentViewData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
   const folds = opts.folds ?? AGENT_FOLDS;
@@ -217,12 +218,14 @@ export function createAgentView<S extends { instance: string; tickedAt?: number 
     name: AGENT_VIEW_NAME,
     version: AGENT_VIEW_VERSION,
     qualificationGeneration: AGENT_QUALIFICATION_GENERATION,
+    // Measure and schedule each repository independently, including its first cold build.
+    perInstance: true,
     // A committed analytics snapshot makes the proposals part due at once.
     snapshotSourced: true,
     prepare: ({ instances }, more) => slotsOf(instances).every((slot) => folds.advance(foldSlot(slot), more)),
-    materialize: ({ now, instances }) => {
-      // The analytics snapshots live in the home store, as the analytics view reads them.
-      const home = instances[0]?.db;
+    materialize: ({ now, sourceStore, instances }) => {
+      // Scoping a build must not move the shared analytics store to that repository's DB.
+      const home = sourceStore ?? instances[0]?.db;
       if (home === undefined) return [];
       const parsed = held.get(home) ?? new Map<string, AgentAnalytics>();
       held.set(home, parsed);

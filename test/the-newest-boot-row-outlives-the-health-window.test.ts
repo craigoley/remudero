@@ -1,3 +1,4 @@
+// @census-reads: none — it reads a fixture ledger
 // @source-text-subject: lib/ledger.ts's PASS 2 retention of the newest `daemon.boot` row.
 
 import assert from "node:assert/strict";

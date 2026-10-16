@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15 flow re-measure (~/Remudero-notes/flow-remeasure-2026-10-15/RESULTS.txt section 8 and finding 4): a W1-T9558 / W1-T3901 follow-up"
   plan_refs: [W1-T9558, W1-T3901, W1-T5839, W1-T5713]
   files: [src/run-task.ts, src/lib/review.ts, test/a-cheap-review-finds-its-prior-verdict-by-pr-url.test.ts, test/review-reuse-discrimination-outcome.test.ts, test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts]
-  status: queued
+  status: merged
   priority: 2  # operator-2026-10-15: costs review lane time, not correctness; every cheap head still gets a full review
   attempts: 0
   rationale: |
