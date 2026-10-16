@@ -123,7 +123,7 @@ test("W1-T9913: the terminal dep-review dedup stands aside for an armed blocked 
   const pr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
     prNumber: 11968, prUrl: "https://github.com/craigoley/remudero/pull/11968", headSha: HEAD,
     headRefName: "dependabot/github_actions/actions-minor-and-patch-0123", isDependabot: true,
-    reviewState: "pass", checksState: "green", unmetCriteria: [], priorStrikes: 0,
+    reviewState: "success", checksState: "green", unmetCriteria: [], priorStrikes: 0,
     lastActivityAt: "2026-10-16T17:00:00Z", autoMergeArmed: false, mergeState: "clean", changedFiles: [".github/workflows/scan.yml"], ...over,
   });
   await runSweep([pr()], deps, DEFAULT_SWEEP_POLICY);
