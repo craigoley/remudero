@@ -52,10 +52,11 @@ function fixture(nonce: string, pending: number) {
     events.push(`sync:${args[0]}`);
     return execFileSyncGit(clone.dir, args, opts?.env);
   };
-  /** The awaited seam: each network verb is held `holdMs` in flight, so a timer can only fire inside it by a loop turn. */
+  /** The awaited seam: each network verb is held `holdMs` in flight, so a timer can only fire inside it by a loop turn.
+   *  Since W1-T9638 the local verbs come through this seam too; they are not held, so the timer lands in the fetch. */
   const gitAsync = (holdMs: number) => async (args: string[], opts?: { env?: NodeJS.ProcessEnv }): Promise<string> => {
     events.push(`async:${args[0]}:start`);
-    if (holdMs > 0) await new Promise((resolve) => setTimeout(resolve, holdMs));
+    if (holdMs > 0 && NETWORK_VERBS.has(args[0]!)) await new Promise((resolve) => setTimeout(resolve, holdMs));
     const out = (await execFileAsync("git", ["-C", clone.dir, ...args], { encoding: "utf8", env: opts?.env ?? process.env })).stdout;
     events.push(`async:${args[0]}:end`);
     return out;
@@ -74,7 +75,9 @@ test("a per-poll landing lets a timer fire while its git fetch is in flight, ret
   await t.test("a timer set before the sweep fires between the awaited fetch's start and end", async () => {
     const f = fixture("timer", 1);
     const order = f.events;
-    const timer = setTimeout(() => order.push("timer"), 20);
+    // W1-T9638: the local verbs before the fetch are awaited too, so a single 20 ms timer may fire before the fetch
+    // starts; an interval set before the sweep keeps turning, and one of its turns must land inside the fetch.
+    const timer = setInterval(() => order.push("timer"), 10);
     try {
       const result = await withLiveWritesAllowed(() =>
         sweepFeedbackLandingAsync(f.clone.dir, { gh: f.gh, gitAsync: f.gitAsync(120), planPrPreflight: async () => GREEN }),
@@ -82,12 +85,12 @@ test("a per-poll landing lets a timer fire while its git fetch is in flight, ret
       assert.equal(result.landed, true, JSON.stringify(result));
       assert.equal(result.pushed, true);
     } finally {
-      clearTimeout(timer);
+      clearInterval(timer);
     }
 
     const fetchStart = order.indexOf("async:fetch:start");
     const fetchEnd = order.indexOf("async:fetch:end");
-    const tick = order.indexOf("timer");
+    const tick = order.indexOf("timer", fetchStart);
     assert.ok(fetchStart >= 0 && fetchEnd > fetchStart, `the fetch ran through the awaited seam: ${JSON.stringify(order)}`);
     assert.ok(tick > fetchStart && tick < fetchEnd, `the timer fired while the fetch was in flight: ${JSON.stringify(order)}`);
   });
@@ -145,7 +148,10 @@ test("a per-poll landing lets a timer fire while its git fetch is in flight, ret
     assert.deepEqual(result, { landed: false, files: [] });
     const verbs = f.events.map((e) => e.split(":")[1] as string);
     assert.deepEqual(verbs.filter((v) => NETWORK_VERBS.has(v)), [], `no network verb: ${JSON.stringify(f.events)}`);
-    assert.equal(f.events.filter((e) => e.startsWith("async:")).length, 0, "the awaited seam was never asked");
+    // W1-T9638: the idle scan's two local reads are awaited too; no verb that leaves the machine is.
+    const awaited = f.events.filter((e) => e.startsWith("async:") && e.endsWith(":start")).map((e) => e.split(":")[1]);
+    assert.equal(awaited.length, 2, `the awaited seam was asked only for the idle scan's two reads: ${JSON.stringify(awaited)}`);
+    assert.ok(awaited.includes("diff") && awaited.every((v) => !NETWORK_VERBS.has(v!)), JSON.stringify(awaited));
     assert.equal(f.ghCalls.length, 0, "no PR call");
   });
 
