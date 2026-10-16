@@ -20,7 +20,7 @@ jobs:
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       # Trusted workflow literal binds committed auditor bytes without extra API reads.
-      AUDITOR_SHA256: 2859688d6470c7325846b34d80ded92a7f397e78c1c1676e5aca8aa0373bcf14
+      AUDITOR_SHA256: 719e61894321cc89e809d12ef80f445cf270aac96e213dcd73e04fbdce188191
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,24 +44,36 @@ jobs:
             echo 'Runtime locks unchanged; explicit success without downloads/build/install.'
             echo 'changed=false' >> "$GITHUB_OUTPUT"
           fi
+          # Use Git's complete diff, not API filename pagination or workflow path
+          # filters. Policy-only changes still exercise the exact pinned runtime.
+          git -c core.fsmonitor=false diff --no-ext-diff --no-textconv --name-only \
+            "$BASE_SHA...$HEAD_SHA" -- .github/semgrep/requirements.txt \
+            .github/semgrep/build-requirements.txt .github/semgrep/runtime-compatibility-audit.py \
+            .github/semgrep/runtime_audit_test_fixtures.py .github/semgrep/test_runtime_compatibility_audit.py \
+            .github/workflows/semgrep-runtime-compatibility.yml > "$RUNNER_TEMP/runtime-policy-changes"
+          if test -s "$RUNNER_TEMP/runtime-policy-changes"; then
+            echo 'test-policy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'test-policy=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up pinned Python
-        if: steps.scope.outputs.changed == 'true'
+        if: steps.scope.outputs.test-policy == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12.15"
           architecture: x64
       - name: Create neutral private audit root
-        if: steps.scope.outputs.changed == 'true'
+        if: steps.scope.outputs.test-policy == 'true'
         shell: bash
         run: |
           set -euo pipefail
           AUDIT_ROOT="$(mktemp -d "${RUNNER_TEMP}/semgrep-audit.XXXXXX")"
           echo "AUDIT_ROOT=$AUDIT_ROOT" >> "$GITHUB_ENV"
-      - name: Download original artifacts without candidate execution
-        if: steps.scope.outputs.changed == 'true'
+      - name: Test Semgrep artifact audit policy
+        if: steps.scope.outputs.test-policy == 'true'
         shell: bash
         env:
-          AUDIT_PHASE: download
+          AUDIT_PHASE: unit
         run: &staged_auditor_phase |
           set -euo pipefail
           # Restage exact committed bytes for EACH phase. Never execute a mutable
@@ -71,7 +83,7 @@ jobs:
           import hashlib, os, pathlib, re, subprocess, sys, tempfile
           head, expected, phase, root, workspace, scratch = sys.argv[1:]
           assert re.fullmatch(r"[a-f0-9]{40}", head) and re.fullmatch(r"[a-f0-9]{64}", expected)
-          assert phase in {"download", "original", "build", "built", "install", "verify"}
+          assert phase in {"unit", "download", "original", "build", "built", "install", "verify"}
           env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
           env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
           def git(*args):
@@ -87,7 +99,7 @@ jobs:
           raw = git("cat-file", "blob", blob)
           assert len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob
           assert hashlib.sha256(raw).hexdigest() == expected, "auditor differs from trusted workflow literal"
-          stage = pathlib.Path(tempfile.mkdtemp(prefix="semgrep-audit-code-", dir=scratch)) / "auditor.py"
+          stage = pathlib.Path(tempfile.mkdtemp(prefix="semgrep-audit-code-", dir=scratch)) / "runtime-compatibility-audit.py"
           with stage.open("xb") as sink:
               sink.write(raw)
               sink.flush()
@@ -95,6 +107,12 @@ jobs:
           os.execv(sys.executable, [sys.executable, "-I", "-S", str(stage), "--phase", phase,
                                    "--root", root, "--workspace", workspace, "--head", head])
           PY
+      - name: Download original artifacts without candidate execution
+        if: steps.scope.outputs.changed == 'true'
+        shell: bash
+        env:
+          AUDIT_PHASE: download
+        run: *staged_auditor_phase
       - name: Audit original artifact metadata before candidate execution
         if: steps.scope.outputs.changed == 'true'
         shell: bash

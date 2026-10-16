@@ -53,6 +53,11 @@ RESERVED_COMMAND_OWNERS = {"pip": "pip", "pip3": "pip", "pip3.12": "pip", "wheel
 # No inferred namespace waiver. Actual original artifact inventory is needed before
 # any trusted, hash-bound shared-namespace allowance (e.g. OpenTelemetry) is reviewed.
 APPROVED_SHARED_NAMESPACES: dict[str, frozenset[str]] = {}
+AUDIT_TEST_SOURCES = {
+    "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
+    "test_runtime_compatibility_audit.py": "1060e91718d3efb3df276a277ff4e88c5c5d1f8ecb20e5ace497fceb10974db8",
+}
+AUDIT_TEST_INVENTORY = "f438f531230c419b5319fd33e12ae1a71609dc2cd3a08f618b663f5adc45b3d3"
 
 
 class AuditBlocked(ValueError):
@@ -510,6 +515,81 @@ def _metadata_signature(row, api):
             "providesExtra": sorted(api.canonicalize_name(str(v)) for v in msg.get_all("Provides-Extra", []))}
 
 
+def _committed_blob(root, workspace, head, path, limit):
+    need(re.fullmatch(r"[a-f0-9]{40}", head) is not None, "HEAD", head)
+    def git(*args):
+        return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(workspace), *args],
+                              env=_environment(root), check=True, capture_output=True, timeout=15).stdout
+    need(git("rev-parse", "HEAD").decode().strip() == head, "HEAD", "checkout drift")
+    record = git("ls-tree", "-z", head, "--", path)
+    need(re.fullmatch(rb"100644 blob [a-f0-9]{40}\t" + re.escape(path.encode()) + rb"\x00", record) is not None,
+         "SOURCE_GIT_BLOB", path)
+    blob = record.split(b"\t", 1)[0].split()[2].decode()
+    size = int(git("cat-file", "-s", blob))
+    need(0 < size <= limit, "SOURCE_BOUND", path)
+    raw = git("cat-file", "blob", blob)
+    need(len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob,
+         "SOURCE_GIT_BYTES", path)
+    return raw
+
+
+def _bootstrap_pip(root):
+    path = root / "pip-26.2.1-py3-none-any.whl"
+    if not path.exists() and not path.is_symlink():
+        _raw_release("pip", "26.2.1", path.name, APPROVED_TOOLS["pip"][1], path)
+    need(digest(_regular(path)) == APPROVED_TOOLS["pip"][1], "TOOL_HASH", "bootstrap drift")
+    return path
+
+
+def verify_unit_receipt(report, expected_sources):
+    need(report.get("schema") == "semgrep-audit-unit-controls/v1" and
+         report.get("state") == "SOURCE_MODULE_CONTROLS_PASS", "UNIT_RESULT", "wrong result type")
+    need(all(type(report.get(k)) is int and report[k] == 107 for k in ("selected", "executed", "pass")) and
+         all(type(report.get(k)) is int and report[k] == 0 for k in
+             ("fail", "error", "skipped", "unrun", "expectedFailures", "unexpectedSuccesses")),
+         "UNIT_COUNTS", "exact complete non-skipped inventory required")
+    need(all(report.get(k) is True for k in
+             ("complete", "successful", "inventoryClosed", "successfulInventoryClosed", "isolated", "noSite", "exactTargetPatchObserved")) and
+         report.get("invariantErrors") == [] and report.get("failures") == [] and report.get("errors") == [],
+         "UNIT_CLOSURE", "incomplete or failed source controls")
+    ids = report.get("literalInventory")
+    need(isinstance(ids, list) and len(ids) == 107 and all(isinstance(v, str) for v in ids) and
+         len(set(ids)) == 107 and ids == sorted(ids) and
+         digest(("\n".join(ids) + "\n").encode()) == AUDIT_TEST_INVENTORY and
+         report.get("inventorySha256") == AUDIT_TEST_INVENTORY and
+         sorted(report.get("executedIds", [])) == ids and sorted(report.get("successfulIds", [])) == ids,
+         "UNIT_INVENTORY", "literal test inventory mismatch")
+    need(report.get("sourceHashes") == expected_sources and
+         report.get("expectedAuditorSha256") == expected_sources["runtime-compatibility-audit.py"] and
+         report.get("pipWheelSha256") == APPROVED_TOOLS["pip"][1], "UNIT_SOURCE_BINDING", "source/tool drift")
+    need(report.get("pythonVersion") == "3.12.15" and report.get("platform") == "linux" and
+         report.get("machine") == "x86_64", "UNIT_TARGET", "actual pinned runtime required")
+    # Unit success cannot mint production, full-author or constrained-runner proof.
+    need(all(report.get(k) is False for k in
+             ("qualified", "linuxQualification", "pinnedRuntimeQualified", "runnerQualified")),
+         "UNIT_ASSURANCE", "unexpected qualification transfer")
+
+
+def phase_unit(root, workspace, head):
+    stage = pathlib.Path(tempfile.mkdtemp(prefix="unit-code-", dir=root))
+    expected = dict(AUDIT_TEST_SOURCES)
+    expected["runtime-compatibility-audit.py"] = digest(_regular(pathlib.Path(__file__), 65536))
+    for name, sha256 in expected.items():
+        raw = _committed_blob(root, workspace, head, ".github/semgrep/" + name, 262144)
+        need(digest(raw) == sha256, "UNIT_SOURCE_HASH", name)
+        _once(stage / name, raw)
+    wheel = _bootstrap_pip(root)
+    receipt = stage / "unit-result.json"
+    _run(root, [sys.executable, "-I", "-S", stage / "test_runtime_compatibility_audit.py",
+                "--pip-wheel", wheel, "--auditor-sha256", expected["runtime-compatibility-audit.py"],
+                "--receipt", receipt], seconds=90)
+    report = json.loads(_regular(receipt, 65536))
+    verify_unit_receipt(report, expected)
+    _json_once(root / "unit-audit.json", {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
+               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 107,
+               "pythonVersion": report["pythonVersion"], "runnerQualified": False})
+
+
 def phase_download(root, workspace, head):
     need(re.fullmatch(r"[a-f0-9]{40}", head) is not None, "HEAD", head)
     for name in ("home", "tmp", "artifacts", "built"):
@@ -530,7 +610,7 @@ def phase_download(root, workspace, head):
         need(len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob, "LOCK_GIT_BYTES", path)
         _once(root / filename, raw)
     _, _, pins = _locked_inputs(root)  # grammar/fixed tool policy BEFORE any download
-    _raw_release("pip", "26.2.1", "pip-26.2.1-py3-none-any.whl", APPROVED_TOOLS["pip"][1], root / "pip-26.2.1-py3-none-any.whl")
+    _bootstrap_pip(root)  # reuse ONLY independently hash-verified unit-phase tool bytes
     # Wheels ONLY. Do not invoke pip download on Peewee or ANY sdist: pip may
     # execute backend/metadata hooks even with --no-deps.
     wheel_lock = "".join(f"{n}=={v} --hash=sha256:{h}\n" for n, (v, h) in sorted(pins.items()) if n != "peewee")
@@ -610,7 +690,7 @@ def phase_verify(root):
 
 def main():
     parser = argparse.ArgumentParser(description="Independently audit locked Semgrep artifact metadata and layout")
-    parser.add_argument("--phase", choices=["download", "original", "build", "built", "install", "verify"], required=True)
+    parser.add_argument("--phase", choices=["unit", "download", "original", "build", "built", "install", "verify"], required=True)
     parser.add_argument("--root", required=True)
     parser.add_argument("--workspace")
     parser.add_argument("--head")
@@ -620,7 +700,9 @@ def main():
     root = pathlib.Path(args.root)
     need(root.is_absolute() and root.is_dir() and not root.is_symlink() and root.resolve() == root and
          root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0, "PRIVATE_ROOT", str(root))
-    if args.phase == "download":
+    if args.phase == "unit":
+        phase_unit(root, pathlib.Path(args.workspace), args.head)
+    elif args.phase == "download":
         phase_download(root, pathlib.Path(args.workspace), args.head)
     else:
         api = load_approved_pip_wheel(str(root / "pip-26.2.1-py3-none-any.whl"))

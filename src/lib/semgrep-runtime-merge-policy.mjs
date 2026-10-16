@@ -67,6 +67,7 @@ export function* semgrepRuntimeMetadataRequests(input) {
   if (check.conclusion === 'failure') return {state:'blocked',mergeAllowed:false,reason:'semgrep-runtime-incompatible-or-install-failed'};
   if (check.conclusion !== 'success') return unknown('semgrep-runtime-compatibility-not-successful');
   for (const name of ['Detect runtime lock changes','Set up pinned Python','Create neutral private audit root',
+    'Test Semgrep artifact audit policy',
     'Download original artifacts without candidate execution','Audit original artifact metadata before candidate execution',
     'Build only approved Peewee after original audit','Audit built Peewee metadata and destinations before install',
     'Install only audited hash-bound wheel set','Verify installed pip closure and scanner bootstrap additionally']) {

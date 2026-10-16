@@ -18,6 +18,7 @@ import {securityMetadataGhArgs} from '../src/lib/security-metadata-gh-args.mjs';
 
 const head='a'.repeat(40),base='b'.repeat(40),blob='c'.repeat(40),foreign='d'.repeat(40);
 const workflow='.github/workflows/semgrep-runtime-compatibility.yml',context='semgrep-runtime-compatibility';
+const auditUnitStep='Test Semgrep artifact audit policy';
 const prefix='repos/craigoley/remudero',prPath=prefix+'/pulls/11468';
 const target={owner:'craigoley',repo:'remudero',prNumber:11468,expectedHead:head};
 function fixture(){
@@ -36,6 +37,7 @@ function fixture(){
  const job:any={id:55,run_id:44,run_attempt:1,head_sha:head,name:context,
   check_run_url:'https://api.github.com/'+prefix+'/check-runs/22',status:'completed',conclusion:'success',
   steps:['Detect runtime lock changes','Set up pinned Python','Create neutral private audit root',
+   auditUnitStep,
    'Download original artifacts without candidate execution','Audit original artifact metadata before candidate execution',
    'Build only approved Peewee after original audit','Audit built Peewee metadata and destinations before install',
    'Install only audited hash-bound wheel set','Verify installed pip closure and scanner bootstrap additionally']
@@ -134,9 +136,10 @@ const mutations:[string,(f:ReturnType<typeof fixture>)=>void][]=[
  ['old associated head',f=>{f.run.pull_requests[0].head.sha=foreign;}],['missing PR association',f=>{f.run.pull_requests=[];}],
  ['ambiguous PR association',f=>{f.run.pull_requests.push(f.run.pull_requests[0]);}],
  ['foreign associated base',f=>{f.run.pull_requests[0].base.repo.url='https://api.github.com/repos/attacker/repo';}],
- ['missing steps',f=>{delete f.job.steps;}],['installation skipped',f=>{f.job.steps[7].conclusion='skipped';}],
- ['duplicate installation step',f=>{f.job.steps.push({...f.job.steps[7]});}],
- ['unfinished installation step',f=>{f.job.steps[7].status='in_progress';}],['invalid step number',f=>{f.job.steps[7].number=0;}],
+ ['missing steps',f=>{delete f.job.steps;}],['installation skipped',f=>{f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set').conclusion='skipped';}],
+ ['duplicate installation step',f=>{f.job.steps.push({...f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set')});}],
+ ['unfinished installation step',f=>{f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set').status='in_progress';}],
+ ['invalid step number',f=>{f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set').number=0;}],
  ['generation bound',f=>{for(let i=0;i<8;i++)f.checks.push({...f.runtime,id:30+i});}],
  ['missing workflow node',f=>{delete f.run.node_id;}],['malformed workflow node',f=>{f.run.node_id='bad" query';}],
  ['GraphQL errors',f=>{(f.executed as any).errors=[{message:'unavailable'}];}],
@@ -163,6 +166,47 @@ for(const name of ['Audit original artifact metadata before candidate execution'
    {state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
  });
 }
+
+test('artifact audit policy unit success is required in the trusted exact-head job for both merge effectors',async()=>{
+ const f=fixture(),steps=f.job.steps.filter((s:any)=>s.name===auditUnitStep);
+ assert.equal(steps.length,1);
+ assert.equal(steps[0].status,'completed');assert.equal(steps[0].conclusion,'success');
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
+ assert.deepEqual(sync,asyncResult);
+ assert.deepEqual(sync.decision,{state:'safe',mergeAllowed:true,reason:'trusted-exact-head-security-and-runtime-compatible'});
+});
+
+const auditUnitMutations:[string,(f:ReturnType<typeof fixture>,step:any)=>void][]=[
+ ['missing',(f)=>{f.job.steps=f.job.steps.filter((s:any)=>s.name!==auditUnitStep);}],
+ ['skipped',(_f,step)=>{step.conclusion='skipped';}],
+ ['duplicate',(f,step)=>{f.job.steps.push({...step});}],
+ ['duplicate with failure',(f,step)=>{f.job.steps.push({...step,conclusion:'failure'});}],
+ ['failure',(_f,step)=>{step.conclusion='failure';}],
+ ['error',(_f,step)=>{step.conclusion='error';}],
+ ['cancelled',(_f,step)=>{step.conclusion='cancelled';}],
+ ['neutral',(_f,step)=>{step.conclusion='neutral';}],
+ ['missing conclusion',(_f,step)=>{delete step.conclusion;}],
+ ['queued',(_f,step)=>{step.status='queued';}],
+ ['in progress',(_f,step)=>{step.status='in_progress';}],
+ ['missing status',(_f,step)=>{delete step.status;}],
+ ['zero step number',(_f,step)=>{step.number=0;}],
+ ['fractional step number',(_f,step)=>{step.number=1.5;}],
+ ['missing step number',(_f,step)=>{delete step.number;}],
+];
+for(const [label,mutate] of auditUnitMutations)test('artifact audit policy unit metadata refuses '+label+' despite a green job',async()=>{
+ const f=fixture(),step=f.job.steps.find((s:any)=>s.name===auditUnitStep);mutate(f,step);
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
+ assert.deepEqual(sync,asyncResult);
+ assert.deepEqual(sync.decision,{state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
+});
+
+test('a successful audit policy check outside the trusted runtime job cannot replace the mandatory unit step',async()=>{
+ const f=fixture();f.job.steps=f.job.steps.filter((s:any)=>s.name!==auditUnitStep);
+ f.checks.push({...f.runtime,id:23,name:auditUnitStep});
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async p=>f.read(p));
+ assert.deepEqual(sync,asyncResult);
+ assert.deepEqual(sync.decision,{state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
+});
 
 test('a genuine incompatible runtime is blocked but compatibility does not waive security alerts',()=>{
  const f=fixture();f.runtime.conclusion=f.run.conclusion=f.job.conclusion='failure';
