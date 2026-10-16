@@ -153,6 +153,8 @@ export interface components {
       workerStateSince?: string;
       /** Bounded worker observability. It names the active role/provider/model and the current or last tool, but never carries prompts, tool arguments, or tool output. */
       workerTelemetry?: {
+        /** Proven by this task's current run start, never inferred from task id or another event. */
+        runId?: string;
         role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
         provider?: string;
         requestedModel?: string;
@@ -4028,16 +4030,7 @@ export interface components {
         /** Blocked PRs and merge holds, most urgent tone first. */
         actions: (NowAction)[];
         recent: {
-          entries: ({
-            ts: string;
-            /** A RecentActivityEntry verb; a consumer renders an unknown one. */
-            verb: string;
-            taskId: string;
-            title: string;
-            detail?: string;
-            costUsd?: number;
-            prUrl?: string;
-          })[];
+          entries: (RecentActivityEntry)[];
           /** Exact merges today (UTC), one per task and pull request, over full history. */
           mergedToday: {
             count: number;
@@ -4208,7 +4201,13 @@ export interface components {
         unverified?: true;
         openedAt?: string;
       };
+      /** Stable current-dispatch identity; event timing and tool activity stay on recent entries. */
       worker?: {
+        /** Proven by this instance task's current run start; absent when no dispatch identity is evidenced. */
+        runId?: string;
+        role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+        provider?: string;
+        /** Only an explicit receipt from this run, never an assignment or requested model. */
         servedModel?: string;
         requestedModel?: string;
       };
