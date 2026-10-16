@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { resolveMergedRuleId } from "../src/lib/knowledge-gardener.js";
 import { slugifyRuleId } from "../src/lib/doctrine-lifecycle.js";
 import { lookupWorkerRule, parseRuleBodyPointer, parseRuleHeadlines, type RuleHeadline } from "../src/lib/learnings.js";
+import { loadPlan } from "../src/lib/plan.js";
 
 // ── 2026-10-11: AN INDEX LINE CAN RETIRE WITHOUT ITS FROZEN RULE BEING LOST ─────────────────────
 //
@@ -129,6 +130,11 @@ function citedDoctrinePaths(texts: string[], sections: Set<string>): Set<string>
   return new Set(texts.flatMap((t) => t.match(DOCTRINE_PATH_RE) ?? []).filter((p) => sections.has(p.split("/")[1])));
 }
 
+/** The doctrine bodies a plan task declares in `files:`: a filing names the body its build will write (#12389). */
+function plannedDoctrinePaths(tasks: Array<{ files?: string[] }>): Set<string> {
+  return new Set(tasks.flatMap((t) => t.files ?? []).filter((f) => /^doctrine\/[a-z0-9-]+\/[a-z0-9._-]+\.md$/.test(f)));
+}
+
 function unresolvedDoctrineCitations(texts: string[], sections: Set<string>, resolves: (path: string) => boolean): string[] {
   return [...citedDoctrinePaths(texts, sections)].filter((path) => !resolves(path)).sort();
 }
@@ -138,7 +144,9 @@ test("a doctrine path cited outside doctrine/ still reaches its rule — on disk
   const rootDocs = readdirSync(REPO_ROOT).filter((f) => f.endsWith(".md") && f !== "CLAUDE.md").map((f) => join(REPO_ROOT, f));
   const texts = [...roots.flatMap(citingFiles), ...rootDocs].map((f) => readFileSync(f, "utf8"));
   const source = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
-  const resolves = (path: string) => existsSync(join(REPO_ROOT, path)) || lookupWorkerRule(path, source, readStore, []) !== undefined;
+  const planned = plannedDoctrinePaths(loadPlan(join(REPO_ROOT, "plan", "tasks.yaml")).tasks);
+  const resolves = (path: string) =>
+    existsSync(join(REPO_ROOT, path)) || lookupWorkerRule(path, source, readStore, []) !== undefined || planned.has(path);
   const doctrine = join(REPO_ROOT, "doctrine");
   const sections = new Set(readdirSync(doctrine).filter((e) => statSync(join(doctrine, e)).isDirectory()));
   // POSITIVE CONTROL: the sweep must be reading real citations, not an empty corpus.
@@ -153,4 +161,16 @@ test("a doctrine path cited outside doctrine/ — CONTROL: a path with no file a
   const aliased = new Set(["doctrine/s/old-long-name.md"]);
   // `doctrine/x/y.md` names no real section, so it is an example and never a miss.
   assert.deepEqual(unresolvedDoctrineCitations(texts, new Set(["s"]), (p) => onDisk.has(p) || aliased.has(p)), ["doctrine/s/nowhere.md"]);
+});
+
+test("a doctrine body a queued task declares in files: is a planned output, not a dangling citation", () => {
+  const planned = plannedDoctrinePaths([
+    { files: ["src/lib/plan.ts", "doctrine/s/to-be-written.md"] },
+    { files: ["CLAUDE.md"] },
+    {},
+  ]);
+  assert.deepEqual([...planned], ["doctrine/s/to-be-written.md"]);
+  const texts = ["files: doctrine/s/to-be-written.md", "typo: doctrine/s/to-be-writen.md"];
+  // Only the declared path resolves; a near-miss spelling is still caught.
+  assert.deepEqual(unresolvedDoctrineCitations(texts, new Set(["s"]), (p) => planned.has(p)), ["doctrine/s/to-be-writen.md"]);
 });
