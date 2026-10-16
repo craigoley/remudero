@@ -1,0 +1,62 @@
+- id: W1-T9754
+  title: "THE DAEMON MEASURES WHAT EACH CHILD SPAWN COSTS ITS LOOP, AND SPAWNS THROUGH A SMALL LONG-LIVED HELPER ONCE THE COST IS SHOWN — an execFile('true') round trip grows with the parent's resident size (p50 0.74 ms at 51 MB, 23 ms at 567 MB, 48 ms at 1.08 GB, 78 ms at 2.1 GB, offline), and the core daemon runs at 1.5-2 GB RSS while spawning hundreds of awaited children per landing pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, the per-spawn cost the daemon's own size adds to its loop; which children run and their results are unchanged
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9638 builder report (PR 12228), item W'
+  plan_refs: [W1-T9638, W1-T9577, W1-T7745, W1-T9361, W1-T9647, W1-T9106]
+  files:
+    - src/lib/spawn-helper.ts
+    - src/lib/read-plane.ts
+    - src/lib/daemon.ts
+    - test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED offline by the W1-T9638 builder (logs-8864/W1-T9638-bench/spawn-cost.mjs, spawn-cost.ndjson): one
+    process holding N MB of ballast awaits 40 sequential `execFile("true")` calls. p50 round trip: 0.74 ms at RSS
+    51 MB, 23.2 ms at 567 MB, 48.1 ms at 1.08 GB, 78 ms at 2.1 GB (p90 up to ~60 ms at 1.08 GB).
+    INFERRED, NOT YET SEPARATED: most of that growth is the synchronous part of the spawn (copying the parent's page
+    tables for the child) on the calling thread, i.e. on the daemon loop. The bench timed the whole round trip, so
+    step 1 below measures the synchronous share before anything moves.
+    OBSERVED (operator session, 2026-10-15): the core daemon process holds 1.5-2.0 GB RSS (plus swap). Its landing
+    pass makes ~518 git children (W1-T9638's count), and daemon.loop_lag rows name hundreds of spawns per window
+    (e.g. sre-lane 256-259 calls). At ~50-80 ms each that is tens of seconds of loop time per pass even when every
+    child is awaited.
+    READ at origin/main 3ce249c80: read-plane.ts meters SYNC spawns (spawnSync/execFileSync) by caller (W1-T7745,
+    W1-T9577). An ASYNC spawn's synchronous fork cost is not metered anywhere.
+  design: |
+    1. Measure first. Meter the synchronous time of every async child_process spawn the daemon makes (the time
+       inside spawn/execFile before it returns), by caller, beside the existing sync-spawn meter, and add
+       `async_spawn_sync_ms` and its by-caller list to daemon.loop_lag and daemon.alive. This alone ships the
+       evidence for step 2.
+    2. A small long-lived spawn helper: a child process started once at boot, with a tiny heap, that runs commands on
+       the daemon's behalf over a pipe (argv, cwd, env, stdin; it returns exit code, stdout, stderr). Forking from it
+       costs its small RSS, not the daemon's. Callers already awaiting a child (execFile/spawn wrappers used by the
+       landing, git leaves and gh transport) route through it when it is healthy; any doubt falls back to a direct
+       spawn, named on the row. Stdio streaming and kill-on-timeout semantics stay those of the direct path.
+    3. Whether step 2 is switched on by default is an OPERATOR DECISION, made from step 1's rows; the switch and its
+       default are named in the PR, not chosen.
+    4. Each routed spawn's row says `via: helper | direct` and its synchronous loop ms, so the saving is read from the
+       ledger.
+    Tests go in test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts, titled verbatim as in the proofs; one
+    test starts the real helper and runs `git --version` through it.
+  acceptance:
+    - claim: "an awaited async spawn's synchronous loop time is metered by caller on the lag row"
+      proof: 'grep: test("W1-T9754: an async spawn meters its synchronous loop time by caller" in test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts'
+    - claim: "a command run through the helper returns the same exit code, stdout and stderr as a direct spawn, and a dead helper falls back to a direct spawn with the reason named"
+      proof: 'grep: test("W1-T9754: the spawn helper matches a direct spawn and falls back when dead" in test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts'
+    - claim: "with 1 GB of ballast in the parent, a spawn through the helper costs the parent's loop less than a direct spawn"
+      proof: 'grep: test("W1-T9754: a large parent spawns through the helper for less loop time" in test/the-daemon-measures-and-offloads-its-spawn-cost.test.ts'
+    - claim: "the daemon's boot starts the spawn helper"
+      proof: 'grep: startSpawnHelper( in src/lib/daemon.ts'
+  falsifier: |
+    On origin/main, an execFile in the daemon process leaves no row naming its synchronous loop time, so the first
+    test fails. Route through a helper that is itself started per call (not long-lived): its own spawn costs the
+    parent the same fork, and the third test's comparison fails.
