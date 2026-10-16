@@ -349,6 +349,15 @@ test("selected mode unknown catches and sinks preserve the exact independent ope
         assert.deepEqual(errors, [["instance_mode.shadow_observation_unrecorded"]]);
       } finally { consoleSpy.mock.restore(); }
     });
+    await t.test("unavailable sink diagnostic", async () => {
+      const consoleSpy = t.mock.method(console, "error", () => { throw new Error("diagnostic unavailable"); });
+      try {
+        const q = createSelectedModeQualification(fx.settings, "owner/repo", {}, () => { throw new Error(fx.root); })!;
+        assert.equal(await q.observe("arm", () => "armed", pr.prUrl), "armed");
+        const original = new Error("independent operation");
+        await assert.rejects(q.observe("arm", () => { throw original; }, pr.prUrl), error => error === original);
+      } finally { consoleSpy.mock.restore(); }
+    });
     assert.equal(JSON.stringify(rows).includes(fx.root), false);
   } finally { fx.cleanup(); }
 });
