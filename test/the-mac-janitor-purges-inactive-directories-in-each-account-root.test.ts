@@ -37,7 +37,8 @@ exit 0
 }
 function roots(fx: Fixture) {
   return [join(fx.home, "Remudero"), join(fx.home, "Remudero/lanes-wt"),
-    join(fx.home, "Remudero/remudero"), join(fx.home, "rmd-work"), fx.scratch];
+    join(fx.home, "Remudero/remudero"), join(fx.home, "rmd-work"),
+    join(fx.home, "Developer/remudero-operator-worktrees"), fx.scratch];
 }
 function setup() {
   const fx = fixture();
@@ -77,11 +78,33 @@ test("six-hour directory purge reaches every account root and preserves each sca
 test("the default account policy includes Remudero, lanes-wt, the canonical checkout and rmd-work", () => {
   const fx = setup();
   try {
-    const old = roots(fx).slice(0, 4).map(root => data(root, "default-scope-data"));
+    const old = roots(fx).slice(0, -1).map(root => data(root, "default-scope-data"));
     const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: "" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     for (const path of old) assert.equal(existsSync(path), false, r.stdout);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("each Mac account's default operator-worktrees root retains young, active and evidence-bearing children", () => {
+  for (const account of ["craigoley", "craigoleyagent"]) {
+    const fx = setup();
+    try {
+      fx.home = join(fx.root, account);
+      const root = join(fx.home, "Developer/remudero-operator-worktrees");
+      mkdirSync(root, { recursive: true });
+      const old = data(root, "old-idle-data");
+      const young = data(root, "five-hour-data", 5);
+      const held = data(root, "active-data");
+      const evidence = data(root, "uncommitted-evidence");
+      writeFileSync(join(evidence, "repair.patch"), "keep original work\n"); age(evidence, 8);
+      writeFileSync(fx.lsofList, held + "\n");
+      const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: "" });
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      assert.equal(existsSync(old), false, account + r.stdout);
+      for (const path of [root, young, held, evidence]) assert.equal(existsSync(path), true, account + path + r.stdout);
+      assert.match(r.stdout, new RegExp(`scratch-directory-scan: ${root}`));
+    } finally { rmSync(fx.root, { recursive: true, force: true }); }
+  }
 });
 
 test("unversioned source, reports, history, credentials and dependency seeds survive regardless of age", () => {

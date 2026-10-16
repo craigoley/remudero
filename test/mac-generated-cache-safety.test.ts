@@ -8,6 +8,12 @@ import { test } from "node:test";
 
 const script = resolve("deploy/mac/cache-reclaim.py");
 const retire = resolve("deploy/mac/retire-legacy-sweeper.py");
+function receipt(result: ReturnType<typeof spawnSync>) {
+  assert.equal(result.status, 0, String(result.stderr) + String(result.stdout));
+  const line = String(result.stdout).split("\n").find(line => line.startsWith("cache-reclaim: "));
+  assert.ok(line, String(result.stdout));
+  return JSON.parse(line.slice("cache-reclaim: ".length));
+}
 function fixture() {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "rmd-cache-safety-")));
   mkdirSync(join(home, "tmp"));
@@ -119,6 +125,151 @@ test("artifact cache dry run and inspection budget never delete generated data",
     assert.match(preview.stdout, /would-remove/); assert.ok(existsSync(cache));
     const bounded = fx.run("ns['main'].__globals__['MAX_ENTRIES']=1"); assert.equal(bounded.status, 0, bounded.stderr + bounded.stdout);
     assert.match(bounded.stdout, /inspection-budget/); assert.ok(existsSync(cache));
+  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+});
+
+test("artifact cache streaming scan charges flat-directory children and reports entry exhaustion", () => {
+  const fx = fixture();
+  try {
+    for (let n = 0; n < 40; n++) writeFileSync(join(fx.root, `entry-${n}`), "untouched");
+    const report = receipt(fx.run("ns['main'].__globals__['MAX_ENTRIES']=12", true, false));
+    assert.equal(report.entriesInspected, 12);
+    assert.equal(report.bytesRead, 0);
+    assert.equal(report.inspection.discoveryComplete, false);
+    assert.equal(report.inspection.exhausted.limit, "entries");
+    assert.equal(report.inspection.exhausted.stage, "discovery");
+    assert.equal(report.inspection.undiscoveredCandidateCount, null);
+    const scans = report.inspection.scans;
+    assert.equal(scans.reduce((sum: number, row: any) => sum + row.entriesInspected, 0), 12);
+    assert.ok(scans[0].childrenEnumerated > 0 && scans[0].childrenEnumerated <= 12);
+    assert.equal(scans[0].complete, false);
+    assert.equal(readFileSync(join(fx.root, "entry-39"), "utf8"), "untouched");
+  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+});
+
+test("artifact cache streaming scan checks wall budget within one flat directory", () => {
+  const fx = fixture();
+  try {
+    for (let n = 0; n < 40; n++) writeFileSync(join(fx.root, `entry-${n}`), "untouched");
+    const report = receipt(fx.run(String.raw`clock=[0.0];ns['time'].monotonic=lambda:clock[0]
+original=ns['os'].scandir
+class TimedEntries:
+ def __init__(self,fd):self.entries=original(fd)
+ def __enter__(self):self.entries.__enter__();return self
+ def __exit__(self,*args):return self.entries.__exit__(*args)
+ def __iter__(self):return self
+ def __next__(self):
+  entry=next(self.entries);clock[0]+=20;return entry
+ns['os'].scandir=TimedEntries`, true, false));
+    assert.equal(report.inspection.exhausted.limit, "seconds");
+    assert.equal(report.inspection.discoveryComplete, false);
+    assert.ok(report.inspection.scans[0].childrenEnumerated <= 3);
+    assert.ok(report.entriesInspected < 10);
+  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+});
+
+test("artifact cache interrupted discovery retains known candidate rows without reference clearance", () => {
+  const fx = fixture();
+  try {
+    const modules = fx.packages(fx.workspace("candidate"), "private result");
+    const report = receipt(fx.run(String.raw`g=ns['main'].__globals__;original=g['directory_entries']
+def interrupted(*args,**kwargs):
+ for row in original(*args,**kwargs):
+  yield row
+  if row[0].name=='node_modules':raise ns['Hold']('inspection-budget')
+g['directory_entries']=interrupted
+def forbidden(*args):raise AssertionError('incomplete discovery reached reference or removal inspection')
+g['references']=forbidden;g['old_owned']=forbidden`));
+    assert.equal(report.inspection.discoveryComplete, false);
+    assert.equal(report.inspection.discoveredCandidateCount, 1);
+    assert.equal(report.inspection.deferredCandidateCount, 1);
+    assert.equal(report.inspection.undiscoveredCandidateCount, null);
+    const row = report.decisions.find((row: any) => row.path === modules);
+    assert.equal(row.reason, "discovery-incomplete"); assert.equal(row.deferred, true);
+    assert.ok(existsSync(join(modules, "pkg/index.js")));
+  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+});
+
+test("artifact cache incomplete reference corpus defers every candidate before payload inspection", () => {
+  const fx = fixture();
+  try {
+    const cache = fx.cache(fx.workspace("candidate"));
+    const flat = join(fx.home, "Remudero/flat"); mkdirSync(flat, { recursive: true });
+    for (let n = 0; n < 40; n++) writeFileSync(join(flat, `entry-${n}`), "reference corpus");
+    symlinkSync(cache, join(fx.home, "tmp/late-shared-cache"));
+    const report = receipt(fx.run(String.raw`g=ns['main'].__globals__;original=g['references']
+def bounded(home,candidates,budget):
+ g['MAX_ENTRIES']=budget.entries+8
+ return original(home,candidates,budget)
+def forbidden(*args):raise AssertionError('partial references reached payload inspection')
+g['references']=bounded;g['old_owned']=forbidden`));
+    assert.equal(report.inspection.discoveryComplete, true);
+    assert.equal(report.inspection.referencesRequired, true);
+    assert.equal(report.inspection.referencesComplete, false);
+    assert.equal(report.inspection.exhausted.stage, "references");
+    assert.equal(report.inspection.exhausted.root, join(fx.home, "Remudero"));
+    assert.equal(report.inspection.deferredCandidateCount, 1);
+    assert.equal(report.decisions.find((row: any) => row.path === cache).reason, "reference-corpus-incomplete");
+    assert.ok(existsSync(cache)); assert.equal(report.bytesRead, 0);
+  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+});
+
+test("artifact cache reference errors and directory symlink swaps fail closed without following the replacement", () => {
+  for (const variant of ["error", "swap", "changed"]) {
+    const fx = fixture();
+    try {
+      const cache = fx.cache(fx.workspace("candidate"));
+      mkdirSync(join(fx.home, "Developer/consumer"), { recursive: true });
+      mkdirSync(join(fx.home, "external")); writeFileSync(join(fx.home, "external/private.txt"), "unpublished");
+      const report = receipt(fx.run(String.raw`g=ns['main'].__globals__;home=pathlib.Path(os.environ['CACHE_HOME'])
+external=home/'external';consumer=home/'Developer/consumer';original_scan=os.scandir;original_open=os.open
+external_inode=external.stat().st_ino;consumer_inode=consumer.stat().st_ino;swapped=[False]
+def scanned(fd):
+ inode=os.fstat(fd).st_ino
+ assert inode!=external_inode,'followed swapped directory symlink'
+ if ${JSON.stringify(variant)}=='error' and inode==consumer_inode:raise PermissionError('private-reference-unreadable')
+ if ${JSON.stringify(variant)}=='changed' and inode==consumer_inode:(consumer/'new-private.txt').write_text('concurrent source')
+ return original_scan(fd)
+def opened(path,flags,*args,**kwargs):
+ if ${JSON.stringify(variant)}=='swap' and path=='consumer' and not swapped[0]:
+  swapped[0]=True;consumer.rename(consumer.with_name('held-consumer'));consumer.symlink_to(external,target_is_directory=True)
+  assert flags & os.O_NOFOLLOW
+ return original_open(path,flags,*args,**kwargs)
+os.scandir=scanned;os.open=opened
+def forbidden(*args):raise AssertionError('incomplete references reached payload inspection')
+g['old_owned']=forbidden`));
+      assert.equal(report.inspection.referencesComplete, false, variant);
+      assert.equal(report.inspection.blockedStage, "references", variant);
+      assert.equal(report.inspection.blockedRoot, join(fx.home, "Developer"), variant);
+      assert.equal(report.inspection.deferredCandidateCount, 1, variant);
+      assert.equal(report.decisions.find((row: any) => row.path === cache).reason, "reference-corpus-incomplete");
+      assert.equal(readFileSync(join(fx.home, "external/private.txt"), "utf8"), "unpublished");
+      assert.ok(existsSync(cache));
+    } finally { rmSync(fx.home, { recursive: true, force: true }); }
+  }
+});
+
+test("artifact cache young KEEP avoids global references while complete scans retain the final-root shared target", () => {
+  const fx = fixture();
+  try {
+    const cache = fx.cache(fx.workspace("candidate"));
+    const young = receipt(fx.run(String.raw`def forbidden(*args):raise AssertionError('young KEEP scanned global references')
+ns['main'].__globals__['references']=forbidden`, false));
+    assert.equal(young.inspection.prefilterKeepCount, 1);
+    assert.equal(young.inspection.referencesRequired, false);
+    assert.equal(young.inspection.referencesComplete, false);
+    assert.equal(young.inspection.candidateEvaluationComplete, true);
+    assert.equal(young.inspection.deferredCandidateCount, 0);
+    assert.ok(!young.inspection.scans.some((row: any) => row.stage === "references"));
+    symlinkSync(cache, join(fx.home, "tmp/last-root-shared-cache"));
+    const shared = receipt(fx.run());
+    assert.equal(shared.inspection.referencesComplete, true);
+    assert.equal(shared.inspection.candidateEvaluationComplete, true);
+    const roots = shared.inspection.scans.filter((row: any) => row.stage === "references");
+    assert.deepEqual(roots.map((row: any) => row.root), ["Remudero", "rmd-work", "Developer", ".codex/work-artifacts", "tmp"].map(path => join(fx.home, path)));
+    assert.ok(roots.every((row: any) => row.complete && row.elapsedMs >= 0));
+    assert.equal(shared.decisions.find((row: any) => row.path === cache).reason, "shared-reference");
+    assert.ok(existsSync(cache));
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 });
 

@@ -25,7 +25,12 @@ suffix. It never stops a running process, changes cron entries, or retires an
 unknown/replaced job. Ordinary code-only installation does not change schedules.
 
 The scan includes `~/Remudero`, nested disposable checkouts below the protected
-operator checkout `~/Remudero/remudero`, `~/rmd-work`, and temporary roots. Git
+operator checkout `~/Remudero/remudero`, `~/rmd-work`, and temporary roots.
+On macOS it also includes each running account's
+`~/Developer/remudero-operator-worktrees`, including non-Git scratch children.
+That container itself remains in place; young descendants, active/open paths,
+dirty or unpublished Git state, evidence and unknown visibility still retain a
+child. No other Developer directory becomes a whole-directory cleanup root. Git
 discovery is bounded to eight levels and reports incomplete scans. It never
 deletes tracked source directories merely because they are old. Empty or unknown
 non-repository containers remain classified as data, not silently ignored.
@@ -64,6 +69,17 @@ for exact ignored package duplicates and `.next/cache/turbopack` compiler data.
 Each invocation uses one account lock and serial probes. Inspection is bounded
 to 45 seconds, 500,000 entries and 2 GiB of content reads; budget exhaustion is
 a typed keep decision. Already admitted staging finishes or restores safely.
+Discovery and reference traversal stream physical directory entries with
+no-follow, parent-fd-bound descent and directory identity checks. Every child
+enumerated for inspection consumes the entry budget, including ordinary files
+in a single flat directory; wall checks occur between children. This is an
+honest inspection ceiling, not a directory-only counter. A corpus larger than
+500,000 inspected entries can still yield no reclaim in this bounded pass.
+Discovery retains known candidates when interrupted. Incomplete discovery or
+any incomplete/unreadable reference root never clears a candidate for removal.
+All original reference roots and depth limits remain in scope. A cheap root
+observation can only KEEP a recent, foreign or flagged target; only when every
+candidate is already kept can the reference phase be unnecessary.
 Duplicate package removal requires equal complete byte/mode/symlink namespaces
 and an unchanged full payload anchor retained in place. Unique `.vite` results
 and `.rmd-dependency-seed.json` receipts remain at their original paths. Source,
@@ -83,6 +99,15 @@ data or an absent helper has no generic deletion fallback.
 
 `cache-reclaim:` JSON receipts include inspection duration, bytes/entries read,
 per-target removal/retention reasons and filesystem free bytes before/after.
+The `inspection` object reports stage/root, each root's elapsed time, inspected
+entries, enumerated children/directories, symlinks, completeness and errors,
+plus the exhausted limit. An enumerated child rejected at the entry boundary
+is counted as enumerated but not inspected. Discovery/reference/evaluation
+completeness are separate; `referencesRequired: false` is not a successful
+reference scan. Known unprocessed targets have explicit `deferred` KEEP rows
+and a deferred count. Incomplete discovery reports an unknown (`null`)
+undiscovered-candidate count, not zero. These receipts show bounded progress,
+not proof of real-world reclaim effectiveness or cross-account visibility.
 Listed path allocation and net free-space change are separate measurements.
 Staging races restore data; a completed deletion whose final source verification
 is unavailable is reported as `removed-unverified` with a nonzero exit, never as

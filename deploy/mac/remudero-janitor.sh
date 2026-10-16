@@ -11,7 +11,8 @@
 # their old regenerable caches can still be cleaned.
 #
 # Also removes inactive non-Git scratch directories in the account's explicit
-# Remudero/rmd-work roots (and Craig's /private/tmp). Every descendant must be
+# Remudero/rmd-work and Mac operator-worktree roots (and Craig's /private/tmp).
+# Every descendant must be
 # idle for six hours; unversioned source/reports and persistent data are retained.
 #
 # WHAT IT NEVER DOES: it never removes unpushed commits or uncommitted source, never
@@ -228,6 +229,11 @@ done
 # scan container, never a removal target; tracked children remain protected.
 DIRECTORY_SCAN_ROOTS=("$USER_HOME/Remudero" "$USER_HOME/Remudero/lanes-wt"
   "$USER_HOME/Remudero/remudero" "$USER_HOME/rmd-work")
+if [ "$OS_NAME" = "Darwin" ]; then
+  # Operator tools use this account-local namespace outside Remudero/rmd-work.
+  # The container is never a target; each child gets the same Git/activity guards.
+  DIRECTORY_SCAN_ROOTS+=("$USER_HOME/Developer/remudero-operator-worktrees")
+fi
 if [ "$RUN_USER" = craigoley ]; then
   if [ -n "${REMUDERO_JANITOR_SCAN_ROOTS:-}" ]; then DIRECTORY_SCAN_ROOTS+=("${SCAN_ROOTS[@]}")
   else DIRECTORY_SCAN_ROOTS+=("/private/tmp")
@@ -423,7 +429,7 @@ if [ "$COVERAGE_AGE_HOURS" -lt "$MINIMUM_AGE_HOURS" ]; then
 fi
 
 log "=== janitor start: apply=$APPLY age>=${AGE_HOURS}h coverage-age>=${COVERAGE_AGE_HOURS}h free=${BEFORE}GiB ==="
-log "checkout-scan: $USER_HOME/Remudero (including remudero descendants), $USER_HOME/rmd-work; Git discovery depth<=8"
+log "checkout-scan: ${CHECKOUT_SCANNED_ROOTS[*]+${CHECKOUT_SCANNED_ROOTS[*]}}; Git discovery depth<=8"
 for failed_root in "${SCAN_FAILURES[@]+"${SCAN_FAILURES[@]}"}"; do log "SKIP repository scan failed (unknown) $failed_root"; done
 
 reclaimed_kb=0; removed=0; planned=0; estimated_kb=0
@@ -1161,7 +1167,9 @@ fi
 # Missing worktrees can retain the only reflog of an unpublished detached
 # HEAD. Do not prune their metadata merely because the directory disappeared.
 # Report non-repository children rather than silently treating them as caches.
-for parent in "$USER_HOME/Remudero" "$USER_HOME/Remudero/remudero" "$USER_HOME/rmd-work" "$USER_HOME/Remudero/.session-scratch"; do
+REPORT_PARENT_ROOTS=("$USER_HOME/Remudero" "$USER_HOME/Remudero/remudero" "$USER_HOME/rmd-work" "$USER_HOME/Remudero/.session-scratch")
+if [ "$OS_NAME" = "Darwin" ]; then REPORT_PARENT_ROOTS+=("$USER_HOME/Developer/remudero-operator-worktrees"); fi
+for parent in "${REPORT_PARENT_ROOTS[@]}"; do
   [ -d "$parent" ] && [ ! -L "$parent" ] || continue
   for child in "$parent"/* "$parent"/.[!.]*; do
     [ -d "$child" ] && [ ! -L "$child" ] || continue

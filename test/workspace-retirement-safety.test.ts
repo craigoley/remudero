@@ -121,7 +121,8 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
     mkdirSync(join(fx.home, "Remudero"));
     const operator = join(fx.home, "Remudero/remudero");
     git(fx.root, "clone", join(fx.root, "origin.git"), operator);
-    const roots = [join(fx.home, "Remudero"), join(fx.home, "Remudero/remudero/.session-scratch"), join(fx.home, "rmd-work")];
+    const roots = [join(fx.home, "Remudero"), join(fx.home, "Remudero/remudero/.session-scratch"),
+      join(fx.home, "rmd-work"), join(fx.home, "Developer/remudero-operator-worktrees")];
     const removed: string[] = [];
     for (const [i, root] of roots.entries()) {
       mkdirSync(root, { recursive: true });
@@ -135,18 +136,18 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
       mkdirSync(join(wt, "node_modules")); writeFileSync(join(wt, "node_modules/data"), "cache");
       age(wt, 7); removed.push(wt);
     }
-    const privateWt = join(roots[2], "unpushed");
+    const privateWt = join(roots[3], "unpushed");
     git(main, "worktree", "add", "-b", "private", privateWt, "main");
     git(privateWt, "commit", "--allow-empty", "-m", "unpublished"); age(privateWt, 7);
-    const dirty = join(roots[0], "dirty");
+    const dirty = join(roots[3], "dirty");
     git(main, "worktree", "add", "-b", "dirty", dirty, "main");
     writeFileSync(join(dirty, "work.txt"), "keep me"); age(dirty, 7);
-    const young = join(roots[2], "young");
+    const young = join(roots[3], "young");
     git(main, "worktree", "add", "-b", "young", young, "main"); age(young, 5);
-    const nestedRecent = join(roots[2], "old-root-young-child");
+    const nestedRecent = join(roots[3], "old-root-young-child");
     git(main, "worktree", "add", "-b", "child", nestedRecent, "main"); age(nestedRecent, 7);
     age(join(nestedRecent, "README"), 1);
-    const held = join(roots[2], "held");
+    const held = join(roots[3], "held");
     git(main, "worktree", "add", "-b", "held", held, "main"); age(held, 7);
     // An ordinary shell in the canonical operator checkout must not hold
     // every unrelated nested worktree. The specific held child still stays.
@@ -154,7 +155,7 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
     const tracked = join(operator, "tracked-gitlink");
     git(main, "worktree", "add", "-b", "tracked-child", tracked, "main");
     git(operator, "add", "tracked-gitlink"); git(operator, "commit", "-m", "tracked nested source"); age(tracked, 7);
-    const orphan = join(roots[2], "broken"); mkdirSync(orphan);
+    const orphan = join(roots[3], "broken"); mkdirSync(orphan);
     writeFileSync(join(orphan, ".git"), "gitdir: /missing/.git/worktrees/only-work\n"); age(orphan, 7);
     // Inactive unmarked scratch is now eligible; important unversioned data can opt out explicitly.
     const unknown = join(roots[2], "data"); mkdirSync(unknown); writeFileSync(join(unknown, "important"), "keep");

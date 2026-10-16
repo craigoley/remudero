@@ -6,7 +6,7 @@ Each pass has one serial owner, at most 45 seconds of admission/inspection,
 finishes or restores its staging even when the inspection budget expires.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -46,19 +46,102 @@ class Budget:
         self.started = time.monotonic()
         self.entries = 0
         self.read_bytes = 0
+        self.stage, self.root = "admission", None
+        self.scans, self.current = [], None
+        self.tick = self.started
+        self.exhausted = None
+
+    def phase(self, stage, root):
+        self.finish_interval()
+        self.stage, self.root = stage, str(root)
+        self.current = {"stage": stage, "root": str(root), "elapsedMs": 0,
+                        "entriesInspected": 0, "childrenEnumerated": 0,
+                        "directoriesEnumerated": 0, "symlinksSeen": 0, "complete": False}
+        self.scans.append(self.current)
+
+    def finish_interval(self):
+        now = time.monotonic()
+        if self.current is not None:
+            self.current["elapsedMs"] += (now - self.tick) * 1000
+        self.tick = now
+
+    def count(self, key):
+        if self.current is not None:
+            self.current[key] += 1
+
+    def exhaust(self, limit):
+        self.exhausted = {"stage": self.stage, "root": self.root, "limit": limit}
+        raise Hold("inspection-budget")
 
     def check(self, entries=0, read_bytes=0):
-        if (time.monotonic() - self.started > MAX_SECONDS
-                or self.entries + entries > MAX_ENTRIES
-                or self.read_bytes + read_bytes > MAX_READ_BYTES):
-            raise Hold("inspection-budget")
+        limit = ("seconds" if time.monotonic() - self.started > MAX_SECONDS else
+                 "entries" if self.entries + entries > MAX_ENTRIES else
+                 "content-bytes" if self.read_bytes + read_bytes > MAX_READ_BYTES else None)
+        if limit:
+            self.exhaust(limit)
         self.entries += entries
         self.read_bytes += read_bytes
+        if self.current is not None:
+            self.current["entriesInspected"] += entries
 
 
 def identity(s):
     return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_size,
             s.st_mtime_ns, s.st_ctime_ns, s.st_nlink)
+
+
+@contextmanager
+def checked_directory(path, budget, parent_fd=None, name=None, expected=None):
+    """Pin each descent to its physical parent; a changed namespace is a hold."""
+    budget.check(entries=1)
+    operand = path if parent_fd is None else name
+    before = os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode) or expected is not None and identity(before) != expected:
+        raise Hold("scan-directory-changed")
+    fd = os.open(operand, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        if identity(os.fstat(fd)) != identity(before):
+            raise Hold("scan-directory-changed")
+        yield fd
+        budget.check()
+        if (identity(os.fstat(fd)) != identity(before)
+                or identity(os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)) != identity(before)):
+            raise Hold("scan-directory-changed")
+    finally:
+        os.close(fd)
+
+
+def directory_entries(path, budget, parent_fd=None, name=None, expected=None):
+    with checked_directory(path, budget, parent_fd, name, expected) as fd:
+        budget.count("directoriesEnumerated")
+        with os.scandir(fd) as children:
+            while True:
+                budget.check()  # A wide flat directory must not evade the wall bound.
+                try:
+                    child = next(children)
+                except StopIteration:
+                    break
+                budget.count("childrenEnumerated")
+                budget.check(entries=1)  # Charge every child before inspecting its type.
+                yield child, path / child.name, fd
+
+
+def cache_target(path, entry, parent_fd, budget):
+    """Probe .next/cache/turbopack without following any component symlink."""
+    with ExitStack() as stack:
+        fd = stack.enter_context(checked_directory(path, budget, parent_fd, entry.name,
+                                                   identity(entry.stat(follow_symlinks=False))))
+        for name in ("cache", "turbopack"):
+            budget.check(entries=1)
+            try:
+                observed = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            if not stat.S_ISDIR(observed.st_mode):
+                return None
+            path = path / name
+            fd = stack.enter_context(checked_directory(path, budget, fd, name, identity(observed)))
+        return path
 
 
 @contextmanager
@@ -99,7 +182,7 @@ def regular_digest(path, budget):
         while remaining:
             room = MAX_READ_BYTES - budget.read_bytes
             if not room:
-                raise Hold("inspection-budget")
+                budget.exhaust("content-bytes")
             block = os.read(fd, min(1024 * 1024, room, remaining))
             if not block:
                 break
@@ -114,16 +197,21 @@ def regular_digest(path, budget):
 
 
 def walk(root, budget, exclude=()):
-    todo = [root]
-    while todo:
-        p = todo.pop()
-        if p in exclude:
-            continue
-        budget.check(entries=1)
-        s = p.lstat()
-        yield p, s
-        if stat.S_ISDIR(s.st_mode):
-            todo.extend(sorted(p.iterdir(), reverse=True))
+    def visit(path, parent_fd=None, name=None, observed=None):
+        if path in exclude:
+            return
+        if observed is None:
+            budget.check(entries=1)
+            observed = path.lstat()
+        yield path, observed
+        if stat.S_ISDIR(observed.st_mode):
+            for entry, child, fd in directory_entries(path, budget, parent_fd, name, identity(observed)):
+                if child not in exclude:
+                    yield from visit(child, fd, entry.name, entry.stat(follow_symlinks=False))
+    try:
+        yield from visit(root)
+    except RecursionError as error:
+        raise Hold("scan-depth-unavailable") from error
 
 
 def old_owned(root, budget):
@@ -285,23 +373,27 @@ def workspace_guard(workspace, target, budget):
     inactive(workspace)
 
 
-def discovery(root, budget):
-    todo, candidates = [(root, 0)], []
-    while todo:
-        p, depth = todo.pop()
-        budget.check(entries=1)
-        if not p.is_dir() or p.is_symlink() or depth > 6:
-            continue
-        for child in sorted(p.iterdir(), reverse=True):
-            if child.is_symlink():
+def discovery(root, budget, candidates=None):
+    candidates = [] if candidates is None else candidates
+    budget.phase("discovery", root)
+    def visit(path, depth, parent_fd=None, name=None, expected=None):
+        for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected):
+            if entry.is_symlink():
+                budget.count("symlinksSeen")
                 continue
-            if child.name == "node_modules" and child.is_dir():
+            directory = entry.is_dir(follow_symlinks=False)
+            if entry.name == "node_modules" and directory:
                 candidates.append((child.parent, child, "packages"))
-            elif child.name == ".next" and (child / "cache/turbopack").is_dir():
-                candidates.append((child.parent, child / "cache/turbopack", "turbopack"))
-            elif child.is_dir() and child.name not in PRUNE and not child.name.endswith(".git"):
-                todo.append((child, depth + 1))
-    return sorted(candidates, key=lambda row: (row[2] != "turbopack", str(row[1])))
+            elif entry.name == ".next" and directory:
+                target = cache_target(child, entry, fd, budget)
+                if target is not None:
+                    candidates.append((child.parent, target, "turbopack"))
+            elif directory and depth < 6 and entry.name not in PRUNE and not entry.name.endswith(".git"):
+                visit(child, depth + 1, fd, entry.name, identity(entry.stat(follow_symlinks=False)))
+    visit(root, 0)
+    budget.current["complete"] = True
+    candidates.sort(key=lambda row: (row[2] != "turbopack", str(row[1])))
+    return candidates
 
 
 def references(home, candidates, budget):
@@ -310,29 +402,41 @@ def references(home, candidates, budget):
     if home == Path(pwd.getpwuid(os.getuid()).pw_dir):
         roots.append(Path("/private/tmp"))
     shared = set()
-    for root in set(roots):
-        if not root.is_dir() or root.is_symlink():
+    def visit(path, depth, parent_fd=None, name=None, expected=None):
+        for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected):
+            if entry.is_symlink():
+                budget.count("symlinksSeen")
+                before = identity(entry.stat(follow_symlinks=False))
+                referent = Path(os.readlink(entry.name, dir_fd=fd))
+                if not referent.is_absolute():
+                    referent = path / referent
+                try:
+                    referent = referent.resolve(strict=False)
+                except RuntimeError as error:
+                    raise Hold("reference-symlink-unresolvable") from error
+                budget.check()
+                if identity(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) != before:
+                    raise Hold("reference-symlink-changed")
+                for workspace, target, _kind in candidates:
+                    budget.check()
+                    if (referent == target or referent.is_relative_to(target)
+                            or referent.is_relative_to(workspace) and target.is_relative_to(referent)
+                            or referent == workspace):
+                        shared.add(target)
+            elif entry.is_dir(follow_symlinks=False) and depth < 8 and entry.name not in PRUNE and not entry.name.endswith(".git"):
+                visit(child, depth + 1, fd, entry.name, identity(entry.stat(follow_symlinks=False)))
+    for root in dict.fromkeys(roots):
+        budget.phase("references", root)
+        budget.check(entries=1)
+        try:
+            observed = root.lstat()
+        except FileNotFoundError:
+            budget.current.update(complete=True, absent=True)
             continue
-        todo = [(root, 0)]
-        while todo:
-            p, depth = todo.pop()
-            budget.check(entries=1)
-            try:
-                children = list(p.iterdir())
-            except PermissionError:
-                if p.stat().st_uid == os.getuid():
-                    raise Hold("owned-reference-corpus-unreadable")
-                continue
-            for child in children:
-                if child.is_symlink():
-                    referent = child.resolve(strict=False)
-                    for workspace, target, _kind in candidates:
-                        if (referent == target or referent.is_relative_to(target)
-                                or referent.is_relative_to(workspace) and target.is_relative_to(referent)
-                                or referent == workspace):
-                            shared.add(target)
-                elif child.is_dir() and depth < 8 and child.name not in PRUNE and not child.name.endswith(".git"):
-                    todo.append((child, depth + 1))
+        if not stat.S_ISDIR(observed.st_mode):
+            raise Hold("reference-root-not-physical-directory")
+        visit(root, 0, expected=identity(observed))
+        budget.current["complete"] = True
     return shared
 
 
@@ -345,7 +449,7 @@ def remove_target(workspace, target, kind, metadata, budget, anchor=None):
     seal = source_seal(workspace, target, budget)
     # Reserve both pre-deletion and final verification reads before staging.
     if budget.read_bytes + 2 * (budget.read_bytes - before_read) > MAX_READ_BYTES:
-        raise Hold("inspection-budget")
+        budget.exhaust("content-read-reservation")
     workspace_guard(workspace, target, budget)
     unchanged(target, metadata, packages)
     if anchor:
@@ -476,6 +580,89 @@ def reclaim_node_compile(root, budget, apply):
     return row
 
 
+def reclaim_artifacts(home, root, budget, apply, decisions, inspection):
+    candidates, pending, anchors, rows = [], [], {}, {}
+    try:
+        discovery(root, budget, candidates)
+        inspection["discoveryComplete"] = True
+        for workspace, target, kind in candidates:
+            row = {"path": str(target), "kind": kind, "action": "keep", "deferred": True}
+            rows[target] = row
+            decisions.append(row)
+        # This root-only observation can prove KEEP, never eligibility. If all
+        # roots are young/foreign/flagged, no global reference scan is needed.
+        for workspace, target, kind in candidates:
+            budget.phase("keep-prefilter", target)
+            budget.check(entries=1)
+            try:
+                observed = target.lstat()
+                if (observed.st_uid != os.getuid() or getattr(observed, "st_flags", 0)
+                        or max(observed.st_mtime, observed.st_ctime) > time.time() - AGE_SECONDS):
+                    rows[target].update(reason="recent-foreign-or-flagged", deferred=False, prefilterKeep=True)
+                else:
+                    pending.append((workspace, target, kind))
+                budget.current["complete"] = True
+            except OSError as error:
+                rows[target].update(reason=str(error), deferred=False, prefilterKeep=True)
+        inspection["referencesRequired"] = bool(pending)
+        if pending:
+            shared = references(home, pending, budget)
+            inspection["referencesComplete"] = True
+        for workspace, target, kind in pending:
+            row = rows[target]
+            budget.phase("candidate-inspection", target)
+            try:
+                budget.check()
+                if target in shared:
+                    raise Hold("shared-reference")
+                metadata, allocated = old_owned(target, budget)
+                workspace_guard(workspace, target, budget)
+                anchor = None
+                if kind == "packages":
+                    signature = hashlib.sha256(json.dumps(payload(target, budget), sort_keys=True).encode()).hexdigest()
+                    if signature not in anchors:
+                        anchors[signature] = (target, metadata)
+                        raise Hold("retained-complete-payload-anchor")
+                    anchor = anchors[signature]
+                if apply:
+                    remove_target(workspace, target, kind, metadata, budget, anchor)
+                row.update(action="removed" if apply else "would-remove", pathAllocatedBytes=allocated)
+                budget.current["complete"] = True
+            except RemovedUnverified as error:
+                row.update(action="removed-unverified", reason=str(error), deferred=False)
+                return
+            except (Hold, OSError) as error:
+                if str(error) == "inspection-budget":
+                    raise
+                row["reason"] = str(error)
+            row["deferred"] = False
+        inspection["candidateEvaluationComplete"] = True
+    except (Hold, OSError) as error:
+        if budget.current is not None:
+            budget.current["error"] = str(error)
+        inspection["blockedStage"] = budget.stage
+        inspection["blockedRoot"] = budget.root
+        inspection["reason"] = str(error)
+        decisions.append({"action": "keep", "reason": str(error), "stage": budget.stage, "root": budget.root})
+    finally:
+        # Discovery is streaming: even an interrupted pass retains every
+        # candidate already found, without pretending the unseen count is zero.
+        for _workspace, target, kind in candidates:
+            if target not in rows:
+                rows[target] = {"path": str(target), "kind": kind, "action": "keep", "deferred": True}
+                decisions.append(rows[target])
+        for row in rows.values():
+            if row["deferred"]:
+                row.update(reason=("discovery-incomplete" if not inspection["discoveryComplete"] else
+                                   "reference-corpus-incomplete" if inspection["referencesRequired"]
+                                   and not inspection["referencesComplete"] else "candidate-inspection-incomplete"),
+                           detail=inspection.get("reason", "evaluation-stopped"))
+        inspection.update(discoveredCandidateCount=len(candidates),
+                          undiscoveredCandidateCount=0 if inspection["discoveryComplete"] else None,
+                          deferredCandidateCount=sum(row["deferred"] for row in rows.values()),
+                          prefilterKeepCount=sum(row.get("prefilterKeep", False) for row in rows.values()))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, default=Path.home())
@@ -484,62 +671,37 @@ def main(argv=None):
     args = parser.parse_args(argv)
     home = args.home.resolve()
     root = home / ".codex/work-artifacts"
-    budget, anchors, decisions = Budget(), {}, []
+    budget, decisions = Budget(), []
+    inspection = {"mode": "artifacts", "discoveryComplete": False,
+                  "referencesRequired": False, "referencesComplete": False,
+                  "candidateEvaluationComplete": False, "discoveredCandidateCount": 0,
+                  "undiscoveredCandidateCount": None, "deferredCandidateCount": 0,
+                  "prefilterKeepCount": 0}
     before = shutil.disk_usage(home).free
     if args.node_compile_cache:
+        inspection["mode"] = "node-compile"
+        budget.phase("node-compile", args.node_compile_cache)
         try:
             with cache_owner(home):
                 decisions.append(reclaim_node_compile(args.node_compile_cache, budget, args.apply))
         except (Hold, OSError) as error:
             decisions.append({"action": "keep", "reason": str(error)})
     elif root.is_dir() and not root.is_symlink() and root.resolve() == root:
-        lock = home / ".cache/remudero-generated-cache.lock"
-        lock.parent.mkdir(parents=True, exist_ok=True)
         try:
-            lock.mkdir(mode=0o700)
-        except FileExistsError:
-            decisions.append({"action": "keep", "reason": "another-cache-owner"})
-        else:
-            inode = lock.stat().st_ino
-            try:
-                candidates = discovery(root, budget)
-                shared = references(home, candidates, budget)
-                for workspace, target, kind in candidates:
-                    row = {"path": str(target), "kind": kind, "action": "keep"}
-                    decisions.append(row)
-                    try:
-                        budget.check()
-                        if target in shared:
-                            raise Hold("shared-reference")
-                        metadata, allocated = old_owned(target, budget)
-                        workspace_guard(workspace, target, budget)
-                        anchor = None
-                        if kind == "packages":
-                            signature = hashlib.sha256(json.dumps(payload(target, budget), sort_keys=True).encode()).hexdigest()
-                            if signature not in anchors:
-                                anchors[signature] = (target, metadata)
-                                raise Hold("retained-complete-payload-anchor")
-                            anchor = anchors[signature]
-                        if args.apply:
-                            remove_target(workspace, target, kind, metadata, budget, anchor)
-                        row.update(action="removed" if args.apply else "would-remove", pathAllocatedBytes=allocated)
-                    except RemovedUnverified as error:
-                        row.update(action="removed-unverified", reason=str(error))
-                        break
-                    except (Hold, OSError) as error:
-                        row["reason"] = str(error)
-                        if str(error) == "inspection-budget":
-                            break
-            except (Hold, OSError) as error:
-                decisions.append({"action": "keep", "reason": str(error)})
-            finally:
-                if lock.stat().st_ino == inode:
-                    lock.rmdir()
+            with cache_owner(home):
+                reclaim_artifacts(home, root, budget, args.apply, decisions, inspection)
+        except (Hold, OSError) as error:
+            decisions.append({"action": "keep", "reason": str(error)})
+    budget.finish_interval()
+    for scan in budget.scans:
+        scan["elapsedMs"] = round(scan["elapsedMs"], 3)
+    inspection.update(stage=budget.stage, root=budget.root, scans=budget.scans,
+                      exhausted=budget.exhausted)
     result = {"version": 1, "ageHours": 6, "apply": args.apply,
               "durationMs": int((time.monotonic() - budget.started) * 1000),
               "entriesInspected": budget.entries, "bytesRead": budget.read_bytes,
               "beforeAvailableBytes": before, "afterAvailableBytes": shutil.disk_usage(home).free,
-              "decisions": decisions, "sourceOrGitRetired": False}
+              "inspection": inspection, "decisions": decisions, "sourceOrGitRetired": False}
     print("cache-reclaim: " + json.dumps(result, separators=(",", ":")))
     return 2 if any(row["action"] == "removed-unverified" for row in decisions) else 0
 
