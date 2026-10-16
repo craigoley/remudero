@@ -2,6 +2,62 @@
 
 Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.
 
+## Current compatibility block
+
+The committed lock is not presently a compatible environment: Semgrep 1.180.0
+requires `mcp==1.29.0`, while the security refresh locks MCP 1.30.0. Semgrep 1.181.0
+has the same upstream constraint. The real Scan fails at `pip check`; neither an
+OSV result nor a matching hash overrides that incompatibility. Do not downgrade MCP,
+ignore an advisory, suppress `pip check`, or edit an upstream wheel's METADATA.
+
+The independent exact-head artifact/runtime boundary merged separately. Its source
+unit controls and a source PR's required-CI success are not evidence that the scanner
+installed or that a whole-repository scan completed.
+
+## Scoped downstream source preparation (not wired into Scan)
+
+`.github/semgrep/prepare-source-build.py` prepares a distinctly versioned
+`semgrep==1.181.0+remudero.1` distribution. It hash-checks the exact original sdist
+and Linux x86_64 wheel against `source-build-policy.json`. The only source changes
+are the pyproject distribution version and the exact MCP requirement to 1.30.0.
+Python/package payloads are sourced from the sdist and must match the upstream
+wheel's installed `.data/purelib` payloads. The approved CE engine and its complete
+native-library inventory retain their original bytes and modes. The engine is not
+recompiled; the Python protocol/engine version remains 1.181.0, separately recorded
+from the local distribution version.
+
+Preparation is inert: no package import, build hook, child process, network request,
+install, scanner invocation, login or publication. All candidate inputs must already
+be local. The output parent must be private and owned, and the output directory must
+not exist. No existing output or input is overwritten. Example after independently
+obtaining and verifying the approved archives:
+
+```sh
+python3 -I -S .github/semgrep/prepare-source-build.py \
+  --source-archive /private/inputs/semgrep-1.181.0.tar.gz \
+  --engine-donor /private/inputs/semgrep-1.181.0-cp310.cp311.cp312.cp313.cp314.py310.py311.py312.py313.py314-none-manylinux_2_34_x86_64.whl \
+  --output-dir /private/owned-parent/new-build
+```
+
+The output includes a wheel, explicit source patch, patched pyproject, payload-origin
+manifest, original licenses and a `SOURCE_ASSEMBLED_NOT_RUNTIME_QUALIFIED` receipt.
+DEFLATE level, ordering, timestamps and modes are fixed. Reproduce twice on the
+same recorded Python/zlib profile and compare full wheel hashes; no cross-profile
+bit-identity is claimed. The existing 256-MiB artifact bound remains intact.
+
+This preparation does not change the runtime locks, Scan workflow, findings policy,
+merge policy, pilot, runner services or fleet configuration. Before wiring it into
+Scan, independently qualify its original/built metadata and layout, the complete
+hash-locked dependency closure, standard `pip check`, MCP API compatibility, actual
+CLI/engine identity, baseline and invalid-rule sentinels, and full JSON/SARIF target
+and error inventories on CPython 3.12.15/Linux x86_64. An assembled artifact or an
+inert unit receipt cannot substitute for any of those checks. No package publication
+or old native-runner/SDK/eval grant is authorized by this preparation.
+
+References: [PyPA local versions](https://packaging.python.org/en/latest/specifications/version-specifiers/#local-version-identifiers),
+[wheel format](https://packaging.python.org/en/latest/specifications/binary-distribution-format/),
+and [core metadata](https://packaging.python.org/en/latest/specifications/core-metadata/).
+
 ## Install boundary
 
 Operator-approved CE 1.180.0 replaces 1.167.0, whose dependency constraints forced
