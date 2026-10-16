@@ -1,0 +1,100 @@
+- id: W1-T9795
+  title: Selected registry shell lifecycle and heartbeat qualification remains shadow only
+  repo: remudero
+  depends_on: [W1-T9793, W1-T9571]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator instruction 2026-10-16: qualify real shell and heartbeat consumers before private ops staging, no live replacement or new schedules"
+  plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T9793]
+  files: [deploy/install-host-units.sh, deploy/recycle-container.sh, deploy/serve-container.sh, deploy/host-update.sh, deploy/field-trials-refresh.sh, deploy/registry-shadow.sh, scripts/fleet-heartbeat.sh, src/selected-registry-shadow-main.ts, src/lib/selected-registry-consumers.ts, src/lib/child-entry-argv.ts, src/run-task.ts, test/selected-registry-shell-consumers.test.ts, test/host-units-install.test.ts, test/recycle-container.test.ts, test/serve-launch-uniformity.test.ts, test/fleet-heartbeat.test.ts, test/field-trials-flow.test.ts, test/cli-registry-dispatches.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  status: queued
+  attempts: 0
+  rationale: |
+    At actual main ec0eb2ce2, installer/recycler mode grammar is merged, but their
+    selected path and generated child forwarding are independently resolved.
+    serve-container and host-update have their own registry selection; heartbeat's
+    MEM_REGISTRY reads state/container rows independently. field-trials-refresh
+    also uses RMD_INSTANCE_REGISTRY and derives private source mounts; omission
+    would leave a consequential reader outside the census. These are not certified
+    by accepting a mode field or by W9572's run/sweep receipts. Existing W6095
+    credential-mount work remains distinct and uncredited in the exact named
+    search; do not take it over or use it as activation authority. Current own
+    open-head diffs do not implement selected shell qualification.
+  design: |
+    1. Re-census the real shell readers and trusted generated launcher/child
+       arguments across install, recycle, serve, host update, heartbeat and
+       field-trials refresh. Reuse W9793's bounded public reader/observation
+       vocabulary through a small shared data-only adapter if needed. It is not
+       a daemon, scanner, new scheduler or a second permissive YAML parser.
+       A new entry must use the maintained entry contract, real defaults and
+       controlled Bash3.2/Linux fixtures, not production-only fake call text.
+       The actual maintained run-task command dispatch must invoke the bounded
+       selectedRegistryShadowMain entry; test real CLI dispatch and supported
+       argv alongside script effects. A dummy call added for grep is not wiring.
+    2. Require an explicit SHADOW qualification option; environment path presence
+       alone never enables policy or observations. Preserve true absence versus
+       explicit invalid selection in observations while leaving the independent
+       legacy command/output/effects unchanged. Snapshot bounded selected bytes,
+       digest/capabilities and actual instance identity; recheck at the real
+       attempted launch/write/measurement observation, including generated
+       launchers and later heartbeat reads, not only a parent process's startup.
+    3. Keep host/container/repository-relative namespaces distinct and name
+       unsupported mappings unknown. Propagate private selected input only to
+       explicitly trusted readers through their supported transport; do not add
+       it to the blanket worker environment/mount list or public heartbeat fields.
+       A readonly mount is not secrecy. Redact private paths, raw registry values,
+       state roots and credential material from diagnostics/publication/worker
+       inputs. A digest or admitted actor never grants publication permission.
+    4. Compare old/new compatible readers, supported grammar/capabilities,
+       explicit empty/missing/malformed/truncated/symlink/revised input, cancelled
+       reads, failed observer and sink, same-named different instances and healthy
+       legacy traps. SHADOW observes would-refuse alongside actual unchanged
+       legacy outcomes; it must not block/restart/remount/retarget them. Test
+       actual scripts and rendered launchers with recording Docker/Azure/GitHub/
+       systemctl transports, temporary HOME/state/lock/output roots and a real
+       default reader. No genuine installer, heartbeat job, field-trial scan,
+       mount, credential read or container operation is run against live data.
+    5. Cover every new catch/default, immutable mutation during waits and all
+       independent children; delete real forwarding/binding/recheck arms and
+       observe failures, then exact restoration. Shell qualification uses actual
+       effect/argument receipts; TS mapped coverage must instrument every changed
+       source SF. Commit before verified-path/tsx/tmp/shipped-slot tests. Retain
+       every native failure and reproduce each title on its actual unchanged
+       pinned base before repair; unknown causes remain unknown, never waived.
+    6. Refresh both scope-time checks, ALL OPEN-head subjects, actual package
+       selector and ordinary ownership before build/publication. No contested
+       reclaim or duplicate W6095/fix-lane work. A demonstrated extra source,
+       environment-registration or entry-census edit requires a normally merged
+       files-only amendment first; no baseline widening or detector exemption.
+       Record automatic build/self-update implications without calling source
+       merge a deployment or enabling the new opt-in.
+    7. WORKERS CONTINUE for isolated source/tests. No schedules, production
+       selection or admission activation. Live launcher/mount/image replacement
+       needs separate human exact-instance drain; incompatible shared state,
+       claims, credentials/config/access needs FULL AFFECTED WRITER STOP, ALL
+       only if ALL affected. Preserve owner/admin override, trusted PR flow,
+       scoped services and the complete public Apache implementation/templates.
+  acceptance:
+    - claim: Maintained CLI dispatch reaches the bounded data-only shell observer entry
+      proof: 'grep: selectedRegistryShadowMain( in src/run-task.ts'
+    - claim: Actual scripts and generated trusted launchers observe one bounded selected binding
+      proof: 'unit test: selected shell shadow reaches real lifecycle and heartbeat consumers'
+    - claim: Later child and measurement observations detect changed or unsupported selection
+      proof: 'unit test: selected shell revisions invalidate generated child and heartbeat observations'
+    - claim: Supported old and new scripts preserve no-option output and legacy effects
+      proof: 'unit test: selected shell qualification preserves mixed version legacy effects'
+    - claim: Private selection never reaches public heartbeat fields or untrusted worker transports
+      proof: 'unit test: selected shell qualification does not disclose private inputs'
+    - claim: Real bounded defaults and catches execute only disposable recording transports
+      proof: 'unit test: selected shell defaults and failures remain shadow only without live effects'
+  falsifier: |
+    Existing scripts select paths independently and have no shared bounded
+    qualification at generated-child/heartbeat effect boundaries. Behavioral
+    tests must fail when their real binding or forwarding is removed, not simply
+    find a helper string. Restored output/effects equal legacy controls even when
+    the observation would refuse. Qualification is not live blocking or staging.
