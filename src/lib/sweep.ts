@@ -12740,7 +12740,8 @@ export interface SweepDeps {
   /** W1-T2584 — time-bounded gate for a next review admission; it never interrupts a running reviewer. */
   continueReviewAdmissions?: () => boolean;
   /** W1-T3491 — fleet hold checked before review or repair admission; direct CLI/test callers omit it. */
-  workerAdmissionHold?: () => string | undefined;
+  workerAdmissionHold?: (kind?: "review") => string | undefined;
+  restartAdmission?: (kind: "review", surface: "light" | "light-refill") => boolean;
   /** Dispatch the W1-T76 fix rung carrying the mode-appropriate evidence at once — the FULL unmet
    *  set for a review dispatch, or ci-log evidence for a blocked_ci one. W1-T2231: MAY return
    *  whether this call demonstrably SPENT a strike; `undefined` reads as spent, so this widening
@@ -15136,10 +15137,10 @@ function stackParentHold(deps: SweepDeps, pr: OpenPrView): { reason?: string; fi
   return reason ? { reason, fields: { stack_parent_hold: check.openParentNumbers } } : {};
 }
 
-function workerAdmissionHoldReason(deps: SweepDeps): string | undefined {
+function workerAdmissionHoldReason(deps: SweepDeps, kind?: "review"): string | undefined {
   if (!deps.workerAdmissionHold) return undefined;
   try {
-    return deps.workerAdmissionHold();
+    return deps.workerAdmissionHold(kind);
   } catch (error) {
     // Reason: an unreadable fleet-control check is held, never interpreted as permission to admit.
     return `worker admission control check failed closed (${String((error as Error)?.message ?? error)})`;
@@ -19642,7 +19643,7 @@ export async function runSweep(
 
   const takeNextReview = (): (typeof orderedReviews)[number] | undefined => {
     if (admissionStopReason !== undefined) return undefined;
-    const workerHold = workerAdmissionHoldReason(deps);
+    const workerHold = workerAdmissionHoldReason(deps, "review");
     if (workerHold) {
       closeAdmissions(workerHold);
       return undefined;
@@ -20309,7 +20310,7 @@ export async function runSweepLightPass(
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
     return [await runSweep([], deps, policy)];
   }
-  lightPassRefillsClosed = false;
+  if (!deps.restartAdmission) lightPassRefillsClosed = false;
   // W1-T526/W1-T2792 — THE QUEUE-ADMISSION RULE. The light pass admits at most the existing
   // `reviewLanes` semantic width, never the old hidden hard-coded one. Every other PR's own
   // `deps.actionable` is wrapped so its disposition is still reconciled and its loss attributable.
@@ -20355,10 +20356,14 @@ export async function runSweepLightPass(
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const availablePlanFilings = Math.max(0, policy.planFilingAdmissionBound - lightPassPlanFilingReservations);
-  const { spawning, planFilings } = selectReviewAdmissions(
+  const selected = selectReviewAdmissions(
     openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr))),
     { ...policy, planFilingAdmissionBound: availablePlanFilings }, now, outcomes, semanticBound,
   );
+  const latchHeld = new Set<number>();
+  const admitAfterLatch = (pr: OpenPrView): boolean => deps.restartAdmission?.("review", "light") !== false || !latchHeld.add(pr.prNumber);
+  const spawning = selected.spawning.filter(admitAfterLatch);
+  const planFilings = selected.planFilings.filter(admitAfterLatch);
   publishLightPassReviewDemand(demandCandidates, spawning, policy, now, outcomes, deps);
   // W1-T7734: what this pass leaves waiting is what an idle daemon should keep a light pass running for.
   noteIdleReviewDemand(Math.max(0, queueDepth - spawning.length), openPrs.length, now);
@@ -20501,7 +20506,9 @@ export async function runSweepLightPass(
               // light pass never runs, and both used to write the same sentence.
               standDownReasonFor: (d) =>
                 isReviewLaneDisposition(d)
-                  ? (heldElsewhere.has(lightPassHeadKey(pr))
+                  ? (latchHeld.has(pr.prNumber)
+                      ? "not admitted this pass: restart latched, and the review would outlast its drain"
+                      : heldElsewhere.has(lightPassHeadKey(pr))
                       // W1-T7955: the review is running, admitted by an overlapping pass — not a lost admission.
                       ? "review already in flight for this head (admitted by an overlapping light pass)"
                       : pr.isPlanFiling === true
@@ -20607,7 +20614,7 @@ export async function runSweepLightPass(
     },
   });
   const admitOneRefill = async (): Promise<boolean> => {
-    if (refillTail.length === 0 || providerFloorMet) return false;
+    if (refillTail.length === 0 || providerFloorMet || deps.restartAdmission?.("review", "light-refill") === false) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
     const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines,
       (deps.readActiveWorkerCount ?? activeWorkerCount)());

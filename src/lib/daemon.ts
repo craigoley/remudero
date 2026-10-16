@@ -343,10 +343,34 @@ export function medianReviewRunMs(rawLines: readonly string[]): number | undefin
     started.delete(pr);
     if (at > startedAt) lengths.push(at - startedAt);
   }
+  return medianOf(lengths);
+}
+
+function medianOf(lengths: number[]): number | undefined {
   if (lengths.length === 0) return undefined;
   lengths.sort((a, b) => a - b);
   const mid = lengths.length >> 1;
   return lengths.length % 2 === 1 ? lengths[mid] : (lengths[mid - 1]! + lengths[mid]!) / 2;
+}
+
+/** W1-T9808: the median fix round length, from its start (the `fix.dispatch` row less its spawn's `elapsed_ms`) to
+ *  the `fix.done` row for the same round, or undefined with no pair. */
+export function medianFixRoundMs(rawLines: readonly string[]): number | undefined {
+  const started = new Map<string, number>();
+  const lengths: number[] = [];
+  for (const raw of rawLines) {
+    if (!raw.includes('"fix.dispatch"') && !raw.includes('"fix.done"')) continue;
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw); } catch (error) { /* a torn ledger row supplies no measurement */ continue; }
+    const at = typeof row?.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isFinite(at) || typeof row.round_id !== "string") continue;
+    if (row.step === "fix.dispatch") started.set(row.round_id, at - (typeof row.elapsed_ms === "number" ? row.elapsed_ms : 0));
+    const startedAt = row.step === "fix.done" ? started.get(row.round_id) : undefined;
+    if (startedAt === undefined) continue;
+    started.delete(row.round_id);
+    if (at > startedAt) lengths.push(at - startedAt);
+  }
+  return medianOf(lengths);
 }
 
 export interface RestartBoundaryContext { waitingOn: string; runId: string }
@@ -1287,7 +1311,7 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
 }
 
 export type ReviewAdmissionGate = (() => boolean) & {
-  workerAdmissionHold?: () => string | undefined;
+  workerAdmissionHold?: (kind?: "review") => string | undefined;
 };
 
 export interface DaemonDeps {
@@ -2025,7 +2049,12 @@ export const INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS = 1_000;
  * would detach one more action into the very drain it runs beside. `reviewOnly` closes every lane but review. */
 export interface LightPassScope {
   readonly reviewOnly: boolean;
+  /** W1-T9808: present only while a restart is latched; the pass asks it before each review or fix it admits. */
+  readonly admit?: RestartAdmission;
 }
+
+/** W1-T9808: a latched restart's admission predicate. A call without `surface` is a probe: no hold row, no count. */
+export type RestartAdmission = (kind: "review" | "fix-dispatch", surface?: "light" | "light-refill" | "full-sweep") => boolean;
 
 interface InterphaseReviewClock {
   /** Stops new admission, lets an already-started pass settle, and reports whether this clock
@@ -2172,13 +2201,14 @@ export type InterphaseReviewClockScope = "drain" | "pause";
  *  beside a slow pass, while further wakes coalesce until a slot opens. Forensics: docs/forensics/daemon.md.
  *  W1-T4053: `scope: "drain"` runs it beside a freshness drain, ledgering `during_drain: true`; W1-T4429:
  *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts.
- *  W1-T8172: `admitPass`, when given, is asked before each due pass; a refusal spends the slot and counts as `held`. */
+ *  W1-T8172: `admit`, when given, is probed before each due pass; a refusal spends the slot and counts as `held`.
+ *  W1-T9808: an admitted pass carries it, so the pass asks it again for each review. */
 export function startInterphaseReviewClock(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
   scope?: InterphaseReviewClockScope,
-  admitPass?: () => boolean,
+  admit?: RestartAdmission,
 ): InterphaseReviewClock {
   let active = true;
   let eventWakeSeen = false;
@@ -2236,14 +2266,14 @@ export function startInterphaseReviewClock(
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
-          if (admitPass && !admitPass()) {
+          if (admit && !admit("review")) {
             held += 1;
             continue;
           }
           passes += 1;
           const pass = (async () => {
             try {
-              await (reviewOnly ? deps.sweepLight!({ reviewOnly: true }) : deps.sweepLight!());
+              await (reviewOnly ? deps.sweepLight!(admit ? { reviewOnly: true, admit } : { reviewOnly: true }) : deps.sweepLight!());
               if (reviewOnly) log("daemon.review_clock.pass", { trigger, ...scopeTag, review_only: true });
               if (trigger === "github-event") log("daemon.review_clock.wake_consumed", { trigger, ...scopeTag });
             } catch (e) {
@@ -2721,7 +2751,8 @@ function startInFlightTicker(
                   interval_ms: sweepRetrigger.intervalMs,
                 });
                 // W1-T5366: started, never awaited, so a pass that overruns cannot hold this tick's light pass.
-                sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined, sweepRetrigger.liveness));
+                sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined,
+                  sweepRetrigger.liveness, undefined, sweepRetrigger.latchedAdmission));
                 eventWakePending = false;
               }
             }
@@ -2730,6 +2761,7 @@ function startInFlightTicker(
           // ORDINARY pass while the batch drains. Withheld, never aborted: work already in flight finishes.
           // The main loop owns STOP; this clock must keep serving an already admitted retro until it settles.
           const lightHalt = deps.checkPause?.();
+          const admit = owner.sweepRetrigger?.latchedAdmission?.();
           if (lightHalt) {
             // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
             // 11 dispatch-phase pauses once held ~210 min with 0 reviews. So run ONE review-only pass at a time,
@@ -2753,7 +2785,7 @@ function startInFlightTicker(
             log("daemon.sweep_light.review_only", { phase: owner.phase, detail: lightHalt });
             const pass = (async () => {
               try {
-                await deps.sweepLight!({ reviewOnly: true });
+                await deps.sweepLight!(admit ? { reviewOnly: true, admit } : { reviewOnly: true });
               } catch (e) {
                 log("daemon.sweep_light.failed", { phase: owner.phase, review_only: true, error: String((e as Error)?.message ?? e) });
               }
@@ -2765,7 +2797,7 @@ function startInFlightTicker(
             continue;
           }
           try {
-            await deps.sweepLight?.();
+            await (admit ? deps.sweepLight?.({ reviewOnly: false, admit }) : deps.sweepLight?.());
           } catch (e) {
             log("daemon.sweep_light.failed", { error: String((e as Error)?.message ?? e) });
           }
@@ -2798,6 +2830,8 @@ interface SweepRetrigger {
   /** W1-T5366: the main loop's ONE `backgroundSweep` slot. A retrigger starts only when `busy()` is false
    *  and hands its unawaited pass to `adopt`, which feeds the completed-pass queue the loop reads. */
   slot: { busy: () => boolean; adopt: (pass: Promise<SweepCycleOutcome | undefined>) => void };
+  /** W1-T9808: the restart's admission predicate while one is latched, else undefined. */
+  latchedAdmission?: () => RestartAdmission | undefined;
 }
 
 /** The gate itself, extracted so the bound and the light-pass ticker apply identically at every call
@@ -2835,6 +2869,8 @@ async function runGatedSweep(
   // W1-T5804: a pass run BECAUSE of a recycle PAUSE holds worker admission on the live STOP/PAUSE
   // read even where `deps.workerAdmissionHold` is unwired, so it can never start a fix worker.
   recyclePause?: true,
+  // W1-T9808: a pass after a restart latched asks the predicate per review and per fix admission.
+  latchedAdmission?: () => RestartAdmission | undefined,
 ): Promise<SweepCycleOutcome | undefined> {
   // Decline, do not duplicate. Checked before the ticker starts, so a declined pass costs nothing at
   // all. This one gate closes both routes into a concurrent pass, because all three call sites pass
@@ -2857,11 +2893,12 @@ async function runGatedSweep(
     if (sweepBound.seededFrom) log("daemon.sweep.seeded", { samples: bound.samples, source: sweepBound.seededFrom });
     sweepBound.seededFrom = undefined;
     log("daemon.sweep.started", { bound_ms: bound.boundMs, bound_basis: bound.basis, samples: bound.samples });
-    const continueReviewAdmissions = (() =>
-      deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
-    const workerAdmissionHold = (): string | undefined => {
+    const continueReviewAdmissions = (() => deps.checkStop?.() === undefined && deps.checkPause?.() === undefined &&
+      latchedAdmission?.()?.("review", "full-sweep") !== false) as ReviewAdmissionGate;
+    const workerAdmissionHold = (kind?: "review"): string | undefined => {
       const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
-      if (!hold) return undefined;
+      if (!hold) return kind === undefined && latchedAdmission?.()?.("fix-dispatch", "full-sweep") === false
+        ? "restart latched: a fix round would outlast the time left in the restart's drain" : undefined;
       const reason = `fleet ${hold.control} hold: ${hold.detail}`;
       log("daemon.admission_held", { surface: "full-sweep", control: hold.control, detail: hold.detail, reason });
       return reason;
@@ -3514,6 +3551,7 @@ export async function runDaemon(
     intervalMs: opts.sweepRetriggerIntervalMs ?? DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS,
     state: sweepRetriggerState,
     liveness: sweepLiveness,
+    latchedAdmission: () => latchedAdmission(),
     slot: {
       busy: () => backgroundSweep !== undefined || sweepLiveness.inFlight,
       adopt: (started) => {
@@ -4262,8 +4300,26 @@ export async function runDaemon(
   // latch, and the exit waits only on what has not settled. Work admitted after the latch keeps the exit's own bound.
   type LatchDrain = { latchAtMs: number; reviews: ReadonlySet<Promise<void>>; detached: number; started: boolean; done?: true };
   let latchDrain: LatchDrain | undefined;
+  // W1-T9808 — A LATCHED RESTART ADMITS NO WORK ITS DRAIN WOULD ABANDON. 2026-10-15 fixes for W1-T9113 and W1-T7699
+  // started at 19:02 inside the 18:59:45 drain and were abandoned at its bound. From the latch to the exit, every
+  // surface that admits a review or a fix asks this, per admission: does the kind's measured length fit the time left?
+  type RestartWindow = { deadlineMs: number; lengths: { review?: number; "fix-dispatch"?: number }; held: number };
+  let restartWindow: RestartWindow | undefined;
+  const restartAdmission: RestartAdmission = (kind, surface) => {
+    const lengthMs = restartWindow?.lengths[kind];
+    if (restartWindow === undefined || lengthMs === undefined) return true;
+    const leftMs = restartWindow.deadlineMs - daemonClock.now();
+    if (leftMs > lengthMs) return true;
+    if (surface === undefined) return false;
+    restartWindow.held++;
+    log("daemon.admission_held", { surface, kind, reason: "restart latched", time_left_ms: Math.max(0, leftMs), measured_length_ms: lengthMs });
+    return false;
+  };
+  const latchedAdmission = (): RestartAdmission | undefined => restartWindow && restartAdmission;
   const beginLatchDrain = (latchAtMs: number): void => {
     if (latchDrain?.latchAtMs === latchAtMs) return;
+    const lengths = measuredReviewLength();
+    restartWindow = { deadlineMs: latchAtMs + sweepWallClockBoundMs, lengths: { review: lengths.ms, "fix-dispatch": lengths.fixMs }, held: 0 };
     const reviews = new Set(inFlightReviewRunsNow());
     const detached = detachedSweepActionCount();
     latchDrain = { latchAtMs, reviews, detached, started: reviews.size > 0 || detached > 0 };
@@ -4271,10 +4327,12 @@ export async function runDaemon(
       detached_sweep_actions: detached, in_flight_reviews: reviews.size });
   };
   // W1-T8172 design 2: the drain's clock admits a pass only while the time left exceeds the measured review length.
-  const measuredReviewLength = (): { ms?: number; source: "measured" | "no_history" | "unreadable" } => {
+  const measuredReviewLength = (): { ms?: number; fixMs?: number; source: "measured" | "no_history" | "unreadable" } => {
     try {
-      const ms = medianReviewRunMs(deps.readLedgerLines?.() ?? []);
-      return ms === undefined ? { source: "no_history" } : { ms, source: "measured" };
+      const lines = deps.readLedgerLines?.() ?? [];
+      const ms = medianReviewRunMs(lines);
+      const fixMs = medianFixRoundMs(lines);
+      return ms === undefined ? { fixMs, source: "no_history" } : { ms, fixMs, source: "measured" };
     } catch (error) {
       // An unreadable ledger is no history: the clock admits as before W1-T8172, and the completion row says why.
       return { source: "unreadable" };
@@ -4325,10 +4383,9 @@ export async function runDaemon(
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
       // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
-      const reviewMs = reviewLength?.ms;
-      const admitPass = reviewMs === undefined ? undefined : () => deadlineMs - daemonClock.now() > reviewMs;
+      if (reviewLength) restartWindow = { deadlineMs, lengths: { review: reviewLength.ms, "fix-dispatch": reviewLength.fixMs }, held: restartWindow?.held ?? 0 };
       const drainReviewClock =
-        detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", admitPass) : undefined;
+        detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", latchedAdmission()) : undefined;
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
       let abandonedReviews: number;
       let reviewPasses = 0;
@@ -4379,6 +4436,7 @@ export async function runDaemon(
           review_passes_held: reviewPassesHeld,
           review_length_ms: reviewLength?.ms ?? null,
           review_length_source: reviewLength?.source,
+          admissions_held_after_latch: restartWindow?.held ?? 0,
         } : {}),
         ...(fromLatch ? {
           admitted_after_latch: afterLatch().length,
@@ -4412,7 +4470,7 @@ export async function runDaemon(
       preExitPass = "skipped_ran_since_latch";
     } else if (deps.sweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      await runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness);
+      await runGatedSweep(deps, pollIntervalMs, sweepBound, log, diskHeadroomLatch, headroomSampler, sweepLiveness, undefined, latchedAdmission);
     }
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
     // The caller stops its interphase clock before the final pass (W1-T2865).
@@ -7413,6 +7471,7 @@ export async function runDaemon(
       });
       return stopForFreshness(inFlightFreshness, restartWait.decidedAtMs);
     }
+    restartWindow = undefined;
 
     if (apiWindowHoldMs > 0) {
       // Consecutive different-task transient refusals at or above the floor: hold dispatch rather than let
