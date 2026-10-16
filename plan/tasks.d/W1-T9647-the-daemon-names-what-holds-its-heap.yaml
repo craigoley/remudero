@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-15 (verbatim: "go with all … think deeply and do research to get it right and innovate; lean into automation and self improvement"): box CPU/memory plan, 2026-10-15 swap-owner census'
   plan_refs: [W1-T6782, W1-T7092, W1-T9105, W1-T5175, W1-T5355, W1-T8883, W1-T9106, W1-T9091, W1-T9117]
   files: [src/lib/daemon-memory-census.ts, src/lib/ledger-union.ts, src/run-task.ts, scripts/daemon-heap-census.mts, test/the-daemon-names-what-holds-its-heap.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

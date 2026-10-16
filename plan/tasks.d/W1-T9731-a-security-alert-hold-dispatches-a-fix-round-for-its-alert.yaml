@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/lib/pr-blocker.ts
     - test/a-security-alert-hold-dispatches-a-fix-round-for-its-alert.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a real high alert held a green PR for hours with nothing acting on it
   attempts: 0
   rationale: |

@@ -17,7 +17,7 @@
     - test/feedback-landing.test.ts
     - test/feedback-landing-deleted-ref.test.ts
     - test/feedback-landing-union-writer.test.ts
-  status: queued
+  status: merged
   priority: 0.5  # first: possible data loss; every landing kind that carries forward shares the path
   attempts: 0
   rationale: |

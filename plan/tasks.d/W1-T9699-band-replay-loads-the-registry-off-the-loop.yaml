@@ -11,7 +11,7 @@
   origin: "operator-approved bounded stall follow-up 2026-10-15 after #12030 and #12045 runtime adoption"
   plan_refs: [W1-T9443, W1-T8714, W1-T9041, W1-T9324, W1-T1270]
   files: [src/lib/inbox.ts, src/lib/inbox-replay.ts, src/lib/fleet-lane.ts, src/run-task.ts, test/band-replay-loads-the-registry-off-the-loop.test.ts, test/the-fleet-triages-its-own-findings.test.ts, test/the-band-replay-re-offers-what-a-lint-change-clears.test.ts, test/the-band-replay-judges-a-re-draft-that-never-got-an-outcome.test.ts, test/no-garden-pass-runs-on-a-sync-driver-beside-the-async-port.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

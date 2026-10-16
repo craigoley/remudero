@@ -12,7 +12,7 @@
   files:
     - src/lib/flake-incident-gardener.ts
     - test/a-flake-incident-reopens-only-on-ci-runs-newer-than-its-filing.test.ts
-  status: queued
+  status: merged
   priority: 2  # with W1-T9729 holding a superseded origin, this is what reopens it again the moment the superseding task lands
   attempts: 0
   rationale: |
