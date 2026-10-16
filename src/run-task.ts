@@ -52468,13 +52468,10 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   ledgerPath: string;
   runId: string;
   shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
-  /** Reads "now" for the shard's age; the system clock when absent. */
   clock?: Clock;
 };
 
-/** The real age of a lifetime-pressure task (W1-T8827), never a placeholder 0: the shard's first
- *  commit, else the task's earliest ledger row (a record embedded in plan/tasks.yaml has no shard
- *  file to date), else an unknown age that says why. */
+// W1-T8827: first commit, else earliest ledger row, else unknown; never 0.
 function lifetimeShardAge(
   taskId: string,
   root: string,
