@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Task } from "../src/lib/plan.js";
-import { doctrineCitationViolations, lintTask } from "../src/lib/task-linter.js";
+import { lintTask, type LintOpts } from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
 import { isolatedCheckout } from "./helpers/isolated-checkout.js";
 
@@ -41,6 +41,10 @@ const facts = {
   sections: new Set(["plan-and-task-hygiene"]),
   resolves: (path: string) => path === KEPT,
 };
+
+/** Through `lintTask`, the aggregate every caller runs, so the check is proven wired and not only defined. */
+const doctrineCitationViolations = (t: Task, opts: LintOpts = {}) =>
+  lintTask(t, opts).violations.filter((v) => v.check === "doctrine-citation-unresolved");
 
 test("a filed shard citing a doctrine page that neither exists nor is aliased is refused", () => {
   const found = doctrineCitationViolations(task(), { doctrineCitations: facts });
