@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-15: never block merges (made while filing the agent-catalogs scan, MASTER-PLAN §4G)"
   plan_refs: [W1-T1066, W1-T5016]
   files: [hooks/deny-floor.sh, test/deny-floor.test.ts, test/an-operator-session-is-never-refused-a-merge.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
