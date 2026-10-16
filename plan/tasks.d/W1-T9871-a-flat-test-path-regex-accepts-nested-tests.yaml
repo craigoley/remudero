@@ -1,0 +1,47 @@
+- id: W1-T9871
+  title: "THE FIXTURE-COPY CENSUS AND THE ADDED-TEST DETECTOR SEE NESTED TESTS — listFixtureCopyFiles walks only the top level, census-precheck's FIXTURE_SCOPE_RE and run-task's addedTestFilesAtHead accept only test/<name>.test.ts, so a moved file leaves the census and a nested new test reads as no test at all (test restructure, letter D, part 3)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, three flat test-path regexes and walks; spans a census script and run-task
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter D (part 3 of 5)'
+  plan_refs: [W1-T9876]
+  files:
+    - scripts/fixture-copy-census.mjs
+    - scripts/census-precheck.mjs
+    - src/run-task.ts
+    - test/a-flat-test-path-regex-accepts-nested-tests.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Citations re-verified at origin/main 889966ea5 (2026-10-16). (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section B, rows 4 and 6)
+    - scripts/fixture-copy-census.mjs listFixtureCopyFiles (~67) reads `readdirSync(join(root, "test"), { withFileTypes:
+      true })` at ~69, the top level only. Its ratchet is `live <= baseline`, so the shrink passes.
+    - scripts/census-precheck.mjs FIXTURE_SCOPE_RE = /^test\/[^/]+\.test\.ts$/ (~106), used at ~178, takes only flat
+      paths into the precheck's scope.
+    - src/run-task.ts addedTestFilesAtHead (~6795) filters with /^test\/[^/]+\.test\.ts$/ (~6809). Body repair then
+      reads "diff adds no test file" for a PR whose new test is nested.
+  design: |
+    1. listFixtureCopyFiles walks test/**/*.test.ts recursively, with fixtures excluded.
+    2. FIXTURE_SCOPE_RE and the addedTestFilesAtHead filter accept test/**/<name>.test.ts and still exclude
+       test/fixtures/**.
+    3. The fixture-copy census asserts its inspected count is > 0 and equals `git ls-files -- 'test/**/*.test.ts'`
+       with fixtures excluded, so the census cannot shrink silently.
+    New test flat in test/. Delete each fix and confirm the matching test goes red.
+  acceptance:
+    - claim: 'the fixture-copy census reads a nested test file'
+      proof: 'grep: test("W1-T9871: the fixture-copy census reads a nested test file" in test/a-flat-test-path-regex-accepts-nested-tests.test.ts'
+    - claim: 'the census precheck takes a nested test into scope'
+      proof: 'grep: test("W1-T9871: the census precheck takes a nested test into scope" in test/a-flat-test-path-regex-accepts-nested-tests.test.ts'
+    - claim: 'a nested new test counts as an added test file at head'
+      proof: 'grep: test("W1-T9871: a nested new test counts as an added test file" in test/a-flat-test-path-regex-accepts-nested-tests.test.ts'
+    - claim: 'a fixture test under test/fixtures is still excluded'
+      proof: 'grep: test("W1-T9871: a test under test/fixtures is still excluded" in test/a-flat-test-path-regex-accepts-nested-tests.test.ts'
+  falsifier: |
+    On origin/main all three readers use a top-level readdir or /^test\/[^/]+\.test\.ts$/, so a planted
+    test/x/y.test.ts is invisible to each of them and the first three tests fail.

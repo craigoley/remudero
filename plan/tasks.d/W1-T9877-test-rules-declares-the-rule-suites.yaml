@@ -1,0 +1,68 @@
+- id: W1-T9877
+  title: "test/rules/ DECLARES THE RULE SUITES — listRuleSuites selects test/rules/**, its roster, and legacy BASENAMES matching census|ratchet|baseline, instead of an unanchored regex over the whole path that would enrol any folder named like a rule (test restructure, letter G, part 1)"
+  repo: remudero
+  depends_on: [W1-T9860, W1-T9869, W1-T9871]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which suites are rule suites; it changes the population of a required CI step
+  band_meaning: blast-radius
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter G (part 1 of 2)'
+  plan_refs: [W1-T9876, W1-T9878, W1-T9895]
+  files:
+    - src/lib/ci-parity.ts
+    - src/lib/task-linter.ts
+    - scripts/diff-class.mjs
+    - test/ci/gates/test-rules-declares-the-rule-suites.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 6 (2026-10-16): test/rules/ becomes the rule-suite declaration.
+    Citations re-verified at origin/main 889966ea5 (2026-10-16).
+    - src/lib/ci-parity.ts:
+      - RULE_SUITE_NAME_RE (~2874);
+      - listRuleSuites (~2887) runs `git ls-files -- test` and tests RULE_SUITE_NAME_RE against `path.slice("test/".length)`
+        at ~2902, which is unanchored and includes folders;
+      - CENSUS_POPULATION holds 12 testFile literals;
+      - censusPopulationDrift (~3103);
+      - censusJobSlug (~2426) turns a path into a job slug, and a nested path would put "/" into it.
+    - src/lib/task-linter.ts newShardRuleSuiteViolations (~1819, test at ~1829) uses the same path slice.
+    - scripts/diff-class.mjs censusSuiteFiles (~540) picks census suites by name.
+    MEASURED (plan/seeds/test-restructure-2026-10-16/taxonomy.md section 5):
+    - 88 suites are enrolled today, 226 s serial;
+    - of those, 40 are tests OF the census machinery, which belong in ci/gates/ and keep their enrolment by name;
+    - 206 structural suites are not enrolled at all, because their names lack the words;
+    - by folder the lane becomes 254 suites and 759 s serial, which W1-T9878 handles.
+  design: |
+    1. One predicate, isRuleSuitePath(path, header), exported from ci-parity.ts. A path is a rule suite when any of
+       these holds:
+       - it is under test/rules/;
+       - it is in the CENSUS_POPULATION roster;
+       - its BASENAME (never a folder segment) matches RULE_SUITE_NAME_RE and its header has no @not-a-rule-suite.
+       The 40 machinery tests therefore keep today's enrolment wherever they live (taxonomy.md section 5.3).
+    2. listRuleSuites, newShardRuleSuiteViolations and diff-class's censusSuiteFiles all call isRuleSuitePath; there is
+       one definition.
+    3. censusJobSlug flattens "/" so a nested rule suite gets a valid slug, and censusPopulationDrift resolves roster
+       entries through resolveTestPath (W1-T9860).
+    4. Until the rules wave (W1-T9895) lands, the population changes only by the files already in test/rules/. The test
+       proves a planted test/rules/x.test.ts is enrolled and test/ci/census-y/z.test.ts (folder name only) is not.
+    New test under test/ci/gates/ (this task depends on the recursive readers).
+  acceptance:
+    - claim: 'a suite under test/rules is a rule suite whatever its name'
+      proof: 'grep: test("W1-T9877: a suite under test/rules is a rule suite whatever its name" in test/ci/gates/test-rules-declares-the-rule-suites.test.ts'
+    - claim: 'a folder named like a rule suite enrols nothing'
+      proof: 'grep: test("W1-T9877: a folder named like a rule suite enrols nothing" in test/ci/gates/test-rules-declares-the-rule-suites.test.ts'
+    - claim: 'a legacy basename match keeps its enrolment in any folder'
+      proof: 'grep: test("W1-T9877: a legacy basename match keeps its enrolment in any folder" in test/ci/gates/test-rules-declares-the-rule-suites.test.ts'
+    - claim: 'a nested rule suite gets a job slug without a slash'
+      proof: 'grep: test("W1-T9877: a nested rule suite gets a job slug without a slash" in test/ci/gates/test-rules-declares-the-rule-suites.test.ts'
+    - claim: 'the shard linter uses the shared rule-suite predicate'
+      proof: 'grep: isRuleSuitePath( in src/lib/task-linter.ts'
+    - claim: 'diff-class uses the shared rule-suite predicate'
+      proof: 'grep: isRuleSuitePath( in scripts/diff-class.mjs'
+  falsifier: |
+    On origin/main listRuleSuites tests the unanchored regex against the whole path after test/. A planted
+    test/rules/x.test.ts is not enrolled, test/ci/census-y/z.test.ts is enrolled, and censusJobSlug keeps the slash. No
+    isRuleSuitePath exists.
