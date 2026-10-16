@@ -54,7 +54,7 @@ function branchBehindMain() {
   return { repo, mainSha };
 }
 
-function harness(repo: ReturnType<typeof gitRepo>) {
+function harness(repo: ReturnType<typeof gitRepo>, update: () => { ok: boolean; error?: string } = () => ({ ok: true })) {
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   const amendment = amendmentPorts();
   const updates: number[] = [];
@@ -86,7 +86,7 @@ function harness(repo: ReturnType<typeof gitRepo>) {
           } satisfies WorkerResult;
         },
         scopeAmendmentWritePorts: amendment.deps,
-        updateBranch: (n) => { updates.push(n); return { ok: true }; },
+        updateBranch: (n) => { updates.push(n); return update(); },
         fetchPrDiffFiles: async () => ["src/declared.ts"],
         waitForCiGreen: async () => "green",
         runReview: async () => review,
@@ -147,4 +147,15 @@ test("W1-T9807: a main-owned refusal is retried once its main is merged", async 
   assert.equal(retried?.outcome, "created");
   assert.deepEqual(retried?.paths, ["src/shared.ts"]);
   assert.equal(retried?.head_sha, repo.git("rev-parse", "HEAD"));
+});
+
+test("W1-T9807: a refresh GitHub refuses is ledgered as failed, never as refreshed", async () => {
+  for (const update of [() => ({ ok: false, error: "head moved" }), () => { throw new Error("gh unavailable"); }]) {
+    const { repo } = branchBehindMain();
+    const h = harness(repo, update);
+    await h.round("src/shared.ts(1,14): error TS2339: Property 'readPaced' does not exist");
+    assert.deepEqual(h.updates, [prNumber]);
+    assert.equal(h.rows.some((r) => r.step === "fix.base_refreshed"), false);
+    assert.match(String(h.rows.find((r) => r.step === "fix.base_refresh_failed")?.error), /head moved|gh unavailable/);
+  }
 });
