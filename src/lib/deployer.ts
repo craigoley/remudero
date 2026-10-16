@@ -323,7 +323,10 @@ export function parseDrainBlockers(message: string): DrainBlocker[] | undefined 
   let raw: unknown;
   try {
     raw = JSON.parse(line);
-  } catch {
+  } catch (err) {
+    // A torn or hand-edited line names no blockers: the refusal is then NOT a drain refusal (the hour's
+    // back-off applies), which is the conservative direction — never a retry on evidence we could not read.
+    void err;
     return undefined;
   }
   if (!Array.isArray(raw)) return undefined;
