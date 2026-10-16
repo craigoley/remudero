@@ -24345,8 +24345,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       reviewPosted: raw.some((c) => (c.context ?? c.name) === REVIEW_CONTEXT && String(c.state ?? c.conclusion ?? "").toUpperCase() === "SUCCESS"),
       supersededReds: supersededRedsNowPassing(raw),
     });
-    if (stale.kind === "stale-event") {
-      // W1-T9913: an armed head GitHub still blocks on a superseded red gets one fresh event, never a re-post.
+    if (stale.kind === "stale-event") { // W1-T9913: one fresh event for a superseded red, never a re-post.
       const outcome = reconcileDependabotStaleEvent({
         statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, checks: stale.checks, nowMs: clock.now(), log,
         comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body),
