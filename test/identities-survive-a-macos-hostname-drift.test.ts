@@ -1,61 +1,39 @@
 import assert from "node:assert/strict";
-import { mock, test } from "node:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
 import { hostIdentity, sameHost } from "../src/lib/host-identity.js";
 import { isHolderStale } from "../src/lib/fs-race-safe.js";
 import { isRotationLockHolderStale } from "../src/lib/ledger.js";
 import { assessTriageClaimLiveness } from "../src/lib/auto-triage.js";
-import { decideDispatchClaimRelease, parseClaimAnchorMessage, staleDispatchClaimEscalations } from "../src/lib/dispatch-claim.js";
-import { claimCommand, classifyReservationAnchor } from "../src/run-task.js";
+import { claimDropRefusal, decideDispatchClaimRelease, dispatchClaimRef, parseClaimAnchorMessage, staleDispatchClaimEscalations } from "../src/lib/dispatch-claim.js";
+import { sweepStaleInflightLocks } from "../src/lib/inflight-lock.js";
+import { judgeInflightLocks } from "../src/lib/report-commands.js";
+import { makeTempDir } from "../src/lib/tmp.js";
 
 // W1-T9541: os.hostname() on the operator Mac flips between `Host` and `Host.local` with network
 // state. A PID@HOST identity recorded under one form must still read as this host from the other.
-
-type ClaimDeps = NonNullable<Parameters<typeof claimCommand>[1]>;
-
-function runClaim(args: string[], deps: ClaimDeps): { code: number; out: string; err: string } {
-  const out = mock.method(console, "log", () => {});
-  const err = mock.method(console, "error", () => {});
-  try {
-    const code = claimCommand(args, deps);
-    const text = (m: typeof out) => m.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
-    return { code, out: text(out), err: text(err) };
-  } finally {
-    out.mock.restore();
-    err.mock.restore();
-  }
-}
-
-function anchoredReserver(anchor: string): { reserver: ClaimDeps["reserver"]; drops: string[] } {
-  const drops: string[] = [];
-  const reserver = {
-    holder: () => "abc123",
-    anchorMessage: () => anchor,
-    drop: (taskId: string, o: { expect: string }) => {
-      drops.push(`${taskId}@${o.expect}`);
-      return true;
-    },
-    attempt: () => assert.fail("--drop never attempts a claim"),
-    mintAnchor: () => assert.fail("--drop never mints"),
-  } as unknown as ClaimDeps["reserver"];
-  return { reserver, drops };
-}
+// `rmd claim --drop` asks claimDropRefusal (src/lib/dispatch-claim.ts) whether the anchor is this
+// host's; the suite drives that gate directly so it does not join src/run-task.ts's importers.
 
 const BARE_ANCHOR = "rmd-dispatch claim 21407@Host 2026-10-14T19:18:21Z";
+const REF = dispatchClaimRef("W1-T8171");
 
 test("W1-T9541: a claim anchored on the bare host is dropped from its mDNS form", () => {
-  const { reserver, drops } = anchoredReserver(BARE_ANCHOR);
-  const r = runClaim(["W1-T8171", "--drop"], { reserver, isPlanned: () => true, localHost: "Host.local" });
-  assert.equal(r.code, 0, r.err);
-  assert.equal(r.out, "dropped refs/rmd-dispatch/W1-T8171");
-  assert.deepEqual(drops, ["W1-T8171@abc123"]);
+  assert.equal(claimDropRefusal(REF, BARE_ANCHOR, "Host.local"), undefined);
+  assert.equal(claimDropRefusal(REF, BARE_ANCHOR, "host"), undefined, "control: case alone is not a different host");
+  assert.equal(claimDropRefusal(REF, "rmd-dispatch claim 21407@Host.local 2026-10-14T19:18:21Z", "Host"), undefined,
+    "the flip runs both ways");
 });
 
 test("W1-T9541: another host claim is still refused", () => {
-  const { reserver, drops } = anchoredReserver(BARE_ANCHOR);
-  const r = runClaim(["W1-T8171", "--drop"], { reserver, isPlanned: () => true, localHost: "other-host.invalid" });
-  assert.equal(r.code, 1);
-  assert.match(r.err, /held by 21407@Host, not by this host \(other-host\.invalid\) — refusing to drop another host's claim/);
-  assert.deepEqual(drops, [], "a genuinely different host's claim is never dropped");
+  assert.equal(claimDropRefusal(REF, BARE_ANCHOR, "other-host.invalid"),
+    "refs/rmd-dispatch/W1-T8171 is held by 21407@Host, not by this host (other-host.invalid) — refusing to drop another host's claim");
+  assert.equal(claimDropRefusal(REF, "rmd-dispatch claim 21407@Host.a.example 2026-10-14T19:18:21Z", "Host.b.example") !== undefined, true,
+    "two FQDNs sharing a first label are two hosts");
+  assert.equal(claimDropRefusal(REF, "not an anchor", "Host"),
+    "refs/rmd-dispatch/W1-T8171 is held by an unreadable anchor, not by this host (Host) — refusing to drop another host's claim");
+  assert.equal(claimDropRefusal(REF, undefined, "Host") !== undefined, true, "no anchor is never this host's");
 });
 
 test("W1-T9541: a dead lock from the bare host is stale from its mDNS form", () => {
@@ -65,6 +43,25 @@ test("W1-T9541: a dead lock from the bare host is stale from its mDNS form", () 
   assert.equal(isHolderStale(held, { ...probes, hostname: () => "Host" }), true, "control: the identical form");
   assert.equal(isHolderStale(held, { ...probes, hostname: () => "other-host.invalid" }), false,
     "a foreign host's pid is never probed, so its lock is never stale");
+});
+
+test("W1-T9541: a live inflight lock from the bare host reads live, never foreign, from its mDNS form", (t) => {
+  const dir = makeTempDir("host-drift");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const inflight = join(dir, "inflight");
+  mkdirSync(inflight);
+  writeFileSync(join(inflight, "W1-T8171.lock"),
+    JSON.stringify({ pid: process.pid, run_id: "run-1", host: "Host", startedAt: new Date().toISOString() }));
+  const sweep = (host: string) => sweepStaleInflightLocks(inflight, { hostname: () => host, isPidAlive: () => true, getProcessStartTime: () => null });
+  const local = sweep("Host.local");
+  assert.deepEqual([local.live, local.unverifiableForeignHost, local.reaped], [["W1-T8171"], [], []]);
+  const foreign = sweep("other-host.invalid");
+  assert.deepEqual([foreign.live, foreign.unverifiableForeignHost], [[], ["W1-T8171"]], "control: a foreign host is unverifiable");
+
+  const doctor = (host: string) => judgeInflightLocks(inflight, { hostname: () => host, isPidAlive: () => true, listContainers: () => [] });
+  assert.deepEqual(doctor("Host.local"), { live: [{ taskId: "W1-T8171", runId: "run-1", pid: process.pid }], unverifiable: [] });
+  assert.deepEqual(doctor("other-host.invalid"), { live: [], unverifiable: [{ taskId: "W1-T8171", host: "Host" }] },
+    "control: a foreign host with no container is unverifiable");
 });
 
 test("W1-T9541: sameHost judges two host names as one machine only when they are", () => {
@@ -108,10 +105,6 @@ test("W1-T9541: every census site reads the bare and mDNS forms as one host", ()
   const later = minted + 2 * 24 * 60 * 60 * 1000;
   assert.deepEqual(staleDispatchClaimEscalations(claims, later, "Host.local"), []);
   assert.equal(staleDispatchClaimEscalations(claims, later, "other-host.invalid").length, 1, "control: a foreign host's claim escalates");
-
-  // classifyReservationAnchor: the caller's own reservation reads as self across a flip.
-  assert.equal(classifyReservationAnchor("rmd-id reservation 4242@Host 2026-10-14T19:18:21Z", { pid: 4242, host: "Host.local" }), "self");
-  assert.equal(classifyReservationAnchor("rmd-id reservation 4242@Host 2026-10-14T19:18:21Z", { pid: 4242, host: "other-host.invalid" }), "fleet");
 
   // isRotationLockHolderStale: a live same-host rotation holder is judged by pid, never by age alone.
   // startedAt is NOW so the real boot and pid-reuse rungs (no seam on this verb) read it as current.

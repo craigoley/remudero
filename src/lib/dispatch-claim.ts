@@ -104,6 +104,13 @@ export function parseClaimAnchorMessage(message: string | undefined): ClaimAncho
   return { pid, host: m[2]!, mintedAtMs, mintedAtIso: m[3]! };
 }
 
+export function claimDropRefusal(ref: string, anchorMessage: string | undefined, localHost: string): string | undefined {
+  const identity = parseClaimAnchorMessage(anchorMessage);
+  if (identity && sameHost(identity.host, localHost)) return undefined;
+  const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
+  return `${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`;
+}
+
 /** BACKSTOP: a day-old cross-host claim needs a human ruling; age never authorizes release. */
 export const DISPATCH_CLAIM_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 

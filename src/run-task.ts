@@ -1650,7 +1650,7 @@ import {
   gitClaimRunnerAsync,
   dispatchClaimRef,
   // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
-  parseClaimAnchorMessage,
+  claimDropRefusal,
   pidIsPresent,
   readNamespaceBootMs,
   findClaimMintRow,
@@ -56735,11 +56735,9 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
       console.error(`rmd claim: ${ref} is not held — nothing to drop`);
       return 1;
     }
-    const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
-    const localHost = opts.localHost ?? hostname();
-    if (!identity || !sameHost(identity.host, localHost)) {
-      const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
-      console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);
+    const refusal = claimDropRefusal(ref, reserver.anchorMessage?.(taskId), opts.localHost ?? hostname());
+    if (refusal !== undefined) {
+      console.error(`rmd claim: ${refusal}`);
       return 1;
     }
     if (!reserver.drop(taskId, { expect: sha })) {
