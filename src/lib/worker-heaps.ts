@@ -177,21 +177,27 @@ async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<Thre
 }
 
 /** Each thread that answers for the threads it spawned, keyed by its Worker: dropped with it. */
-const nestedHeapReaders = new WeakMap<WorkerThread, (timeoutMs: number) => Promise<WorkerHeapReading[]>>();
+const nestedHeapReaders = new WeakMap<WorkerThread, (timeoutMs: number, unanswered: WorkerHeapReading[]) => Promise<WorkerHeapReading[]>>();
 
 /**
  * Serve's side of a thread that spawns threads of its own: {@link readWorkerHeaps} posts it a
  * {@link THREAD_HEAPS_REQUEST} beside its own heap read. Returns the thread's message filter: true
- * for an answer, which it settles. An unanswered request waits for its answer or the Worker's end.
+ * for an answer, which it settles. Every request releases its resolver on answer, timeout or post failure.
  */
 export function askNestedThreadHeaps(thread: WorkerThread & Pick<Worker, "postMessage">): (msg: unknown) => boolean {
   const waiting = new Map<number, (readings: WorkerHeapReading[]) => void>();
   let asked = 0;
-  nestedHeapReaders.set(thread, (timeoutMs) => new Promise((resolve) => {
-    asked += 1;
-    waiting.set(asked, resolve);
-    thread.postMessage({ type: THREAD_HEAPS_REQUEST, id: asked, timeoutMs });
-  }));
+  nestedHeapReaders.set(thread, async (timeoutMs, unanswered) => {
+    const id = ++asked;
+    try {
+      return await within(() => new Promise<WorkerHeapReading[]>((resolve) => {
+        waiting.set(id, resolve);
+        thread.postMessage({ type: THREAD_HEAPS_REQUEST, id, timeoutMs });
+      }), timeoutMs, unanswered);
+    } finally {
+      waiting.delete(id);
+    }
+  });
   return (msg) => {
     const answer = msg as Partial<ThreadHeapsAnswer> | undefined;
     if (answer?.type !== THREAD_HEAPS_ANSWER || answer.id === undefined) return false;
@@ -227,7 +233,7 @@ async function nestedHeaps({ kind, thread }: TrackedWorker, timeoutMs: number): 
     name: `${WORKER_HEAP_PREFIX}inside:${kind}`, kind: "worker-heap", entries: 0, bytes: 0,
     error: `thread ${thread.threadId}'s own threads unsized: no answer within ${timeoutMs}ms`,
   };
-  return within(() => ask(timeoutMs), timeoutMs, [unanswered]);
+  return ask(timeoutMs, [unanswered]);
 }
 
 /**

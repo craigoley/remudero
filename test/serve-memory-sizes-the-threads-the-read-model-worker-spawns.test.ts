@@ -9,6 +9,7 @@
 // never appears in the sample; its bytes stay in `unattributed_bytes`.
 
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -121,4 +122,106 @@ test("W1-T5480: a thread that never answers for its own threads is named unsized
   assert.match(unsized?.error ?? "", new RegExp(`thread ${silent.threadId}'s own threads unsized: no answer within 300ms`));
   const sample = memory.sampleServeMemory([], { usage: () => USAGE, headroom: () => undefined, workerHeaps: readings });
   assert.ok(sample.holders.some((holder) => holder.name === unsized?.name && holder.error), "the sample carries the unsized reading by name");
+});
+
+type HeapRequest = { type: string; id: number; timeoutMs: number };
+
+/** Observe only the request map's construction, synchronously: no production count API or global mock across awaits. */
+function nestedProbe(post?: (message: HeapRequest) => void) {
+  const requests: HeapRequest[] = [];
+  const thread = Object.assign(new EventEmitter(), {
+    threadId: 701,
+    getHeapStatistics: async () => ({ total_heap_size: 1024, used_heap_size: 512, external_memory: 64 }),
+    postMessage: (message: HeapRequest) => { requests.push(message); post?.(message); },
+  });
+  const maps: Map<unknown, unknown>[] = [];
+  const NativeMap = Map;
+  class ObservedMap<K, V> extends NativeMap<K, V> {
+    constructor(entries?: Iterable<readonly [K, V]> | null) {
+      super(entries);
+      maps.push(this);
+    }
+  }
+  let answer: (message: unknown) => boolean;
+  try {
+    globalThis.Map = ObservedMap;
+    answer = nested.askNestedThreadHeaps(thread as unknown as Worker);
+  } finally {
+    globalThis.Map = NativeMap;
+  }
+  assert.equal(maps.length, 1, "control: only the nested request map was observed");
+  return {
+    thread, requests, answer, waiting: maps[0]!,
+    sample: (timeoutMs = 50) => memory.readWorkerHeaps([{ kind: "probe:deadline", thread: thread as unknown as memory.WorkerThread }], timeoutMs),
+  };
+}
+
+const heapTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+const INSIDE_PROBE = `${memory.WORKER_HEAP_PREFIX}inside:probe:deadline`;
+
+test("nested heap deadlines release every timed-out resolver and preserve unsized readings", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nestedProbe();
+  for (let sample = 0; sample < 3; sample++) {
+    const pending = probe.sample();
+    await heapTurn();
+    assert.equal(probe.waiting.size, 1, "control: this sample has a pending nested request");
+    t.mock.timers.tick(50);
+    const readings = await pending;
+    const unsized = named(readings, INSIDE_PROBE);
+    assert.equal(unsized?.entries, 0);
+    assert.equal(unsized?.bytes, 0);
+    assert.match(unsized?.error ?? "", /own threads unsized: no answer within 50ms/);
+    assert.equal((unsized as memory.WorkerHeapReading).used_bytes, undefined, "unknown used heap stays absent");
+    assert.equal(named(readings, `${memory.WORKER_HEAP_PREFIX}probe:deadline`)?.bytes, 1088, "control: the parent's heap was sized");
+    assert.equal(probe.waiting.size, 0, "a completed timeout must release its resolver");
+    assert.equal(memory.sampleServeMemory([], { usage: () => USAGE, headroom: () => undefined, workerHeaps: readings }).unattributed_bytes,
+      USAGE.rss - USAGE.heapTotal - USAGE.external - 1088, "unknown nested bytes remain unattributed");
+  }
+  assert.equal(probe.requests.length, 3, "every sample still asks the worker");
+});
+
+test("a late nested heap answer cannot settle a newer sample or retain either resolver", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nestedProbe();
+  const expired = probe.sample();
+  await heapTurn();
+  t.mock.timers.tick(50);
+  assert.ok(named(await expired, INSIDE_PROBE)?.error, "control: the first request timed out");
+
+  let settled = false;
+  const current = probe.sample().then((readings) => { settled = true; return readings; });
+  const child = { name: `${memory.WORKER_HEAP_PREFIX}probe:child`, kind: "worker-heap", entries: 1, bytes: 80, used_bytes: 60 };
+  assert.equal(probe.answer({ type: nested.THREAD_HEAPS_ANSWER, id: probe.requests[0]!.id, readings: [{ ...child, bytes: 999 }] }), true);
+  await heapTurn();
+  assert.equal(settled, false, "a late answer is consumed without settling the current sample");
+  assert.equal(probe.waiting.size, 1, "only the current request remains");
+  assert.equal(probe.answer({ type: nested.THREAD_HEAPS_ANSWER, id: probe.requests[1]!.id, readings: [child] }), true);
+  const readings = await current;
+  assert.equal(named(readings, child.name)?.bytes, 80);
+  assert.equal(named(readings, INSIDE_PROBE), undefined, "a timely measured answer needs no unknown placeholder");
+  assert.equal(probe.waiting.size, 0);
+  t.mock.timers.tick(1000);
+  assert.equal(probe.waiting.size, 0, "the settled deadline cannot recreate a request");
+});
+
+test("a failed nested heap post releases its resolver and preserves the post failure", async () => {
+  const failure = new Error("heap request port is closed");
+  const probe = nestedProbe(() => { throw failure; });
+  await assert.rejects(probe.sample(), (error: unknown) => error === failure);
+  assert.equal(probe.requests.length, 1, "control: the failed post was attempted");
+  assert.equal(probe.waiting.size, 0, "a failed post must not retain its resolver");
+});
+
+test("a nested heap request left unanswered by worker exit is released at its deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const probe = nestedProbe();
+  const pending = probe.sample();
+  await heapTurn();
+  assert.equal(probe.waiting.size, 1, "control: the request was pending before exit");
+  probe.thread.emit("exit", 0);
+  t.mock.timers.tick(50);
+  const readings = await pending;
+  assert.match(named(readings, INSIDE_PROBE)?.error ?? "", /own threads unsized/);
+  assert.equal(probe.waiting.size, 0, "an exited worker's unanswered resolver is still deadline-bounded");
 });
