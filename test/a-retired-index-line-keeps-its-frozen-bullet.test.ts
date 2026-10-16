@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { resolveMergedRuleId } from "../src/lib/knowledge-gardener.js";
 import { slugifyRuleId } from "../src/lib/doctrine-lifecycle.js";
-import { lookupWorkerRule, parseRuleBodyPointer, parseRuleHeadlines, type RuleHeadline } from "../src/lib/learnings.js";
+import { doctrineCitationFactsAt } from "../src/lib/doctrine-citation-facts.js";
+import { citedDoctrinePaths, plannedDoctrinePages, unresolvedDoctrineCitations } from "../src/lib/doctrine-citations.js";
+import { parseRuleBodyPointer, parseRuleHeadlines, type RuleHeadline } from "../src/lib/learnings.js";
 import { loadPlan } from "../src/lib/plan.js";
 
 // ── 2026-10-11: AN INDEX LINE CAN RETIRE WITHOUT ITS FROZEN RULE BEING LOST ─────────────────────
@@ -113,7 +115,8 @@ test("an index headline states its instruction — CONTROL: every deferring shap
 // retired into a carrier, and merged plan shards, docs and learnings still cite the old path. Those
 // files are history and are not rewritten, so an old path must keep reaching its rule: on disk, or
 // through `doctrine/merged-rules.json`, which `lookupWorkerRule` already consults for a miss.
-const DOCTRINE_PATH_RE = /doctrine\/[a-z0-9-]+\/[a-z0-9._-]+\.md/g;
+// #12389 (2026-10-16): a page an OPEN shard declares in `files:` is one its build creates, so citing it is a forward
+// reference, not a miss; the filing-time lint (`doctrineCitationViolations`) holds a new shard to the same readers.
 
 function citingFiles(dir: string): string[] {
   const out: string[] = [];
@@ -125,34 +128,17 @@ function citingFiles(dir: string): string[] {
   return out;
 }
 
-/** Paths into a real section only: `doctrine/x/y.md` in a shard is an example, not a citation. */
-function citedDoctrinePaths(texts: string[], sections: Set<string>): Set<string> {
-  return new Set(texts.flatMap((t) => t.match(DOCTRINE_PATH_RE) ?? []).filter((p) => sections.has(p.split("/")[1])));
-}
-
-/** The doctrine bodies a plan task declares in `files:`: a filing names the body its build will write (#12389). */
-function plannedDoctrinePaths(tasks: Array<{ files?: string[] }>): Set<string> {
-  return new Set(tasks.flatMap((t) => t.files ?? []).filter((f) => /^doctrine\/[a-z0-9-]+\/[a-z0-9._-]+\.md$/.test(f)));
-}
-
-function unresolvedDoctrineCitations(texts: string[], sections: Set<string>, resolves: (path: string) => boolean): string[] {
-  return [...citedDoctrinePaths(texts, sections)].filter((path) => !resolves(path)).sort();
-}
-
-test("a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry", () => {
+test("a doctrine path cited outside doctrine/ still reaches its rule — on disk, through the merge registry, or as an open shard's planned page", () => {
   const roots = ["plan", "docs", "learnings"].map((d) => join(REPO_ROOT, d));
   const rootDocs = readdirSync(REPO_ROOT).filter((f) => f.endsWith(".md") && f !== "CLAUDE.md").map((f) => join(REPO_ROOT, f));
   const texts = [...roots.flatMap(citingFiles), ...rootDocs].map((f) => readFileSync(f, "utf8"));
-  const source = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
-  const planned = plannedDoctrinePaths(loadPlan(join(REPO_ROOT, "plan", "tasks.yaml")).tasks);
-  const resolves = (path: string) =>
-    existsSync(join(REPO_ROOT, path)) || lookupWorkerRule(path, source, readStore, []) !== undefined || planned.has(path);
-  const doctrine = join(REPO_ROOT, "doctrine");
-  const sections = new Set(readdirSync(doctrine).filter((e) => statSync(join(doctrine, e)).isDirectory()));
+  const facts = doctrineCitationFactsAt(REPO_ROOT);
+  const planned = plannedDoctrinePages(loadPlan(join(REPO_ROOT, "plan", "tasks.yaml")).tasks);
   // POSITIVE CONTROL: the sweep must be reading real citations, not an empty corpus.
-  const cited = citedDoctrinePaths(texts, sections);
+  const cited = citedDoctrinePaths(texts, facts.sections);
   assert.ok(cited.size >= 3, `expected the plan to cite doctrine paths; got ${cited.size}`);
-  assert.deepEqual(unresolvedDoctrineCitations(texts, sections, resolves), [], "alias each old body path in doctrine/merged-rules.json");
+  const resolves = (path: string) => facts.resolves(path) || planned.has(path);
+  assert.deepEqual(unresolvedDoctrineCitations(texts, facts.sections, resolves), [], "alias each old body path in doctrine/merged-rules.json");
 });
 
 test("a doctrine path cited outside doctrine/ — CONTROL: a path with no file and no alias is caught", () => {
@@ -163,11 +149,20 @@ test("a doctrine path cited outside doctrine/ — CONTROL: a path with no file a
   assert.deepEqual(unresolvedDoctrineCitations(texts, new Set(["s"]), (p) => onDisk.has(p) || aliased.has(p)), ["doctrine/s/nowhere.md"]);
 });
 
+test("a doctrine path cited outside doctrine/ — CONTROL: only an open shard's planned page is a forward reference", () => {
+  const page = "doctrine/s/new-page.md";
+  const shard = (status: string, extra: { retirement?: string } = {}) => ({ status, files: ["src/lib/x.ts", page], ...extra });
+  for (const open of ["queued", "running", "blocked"]) assert.ok(plannedDoctrinePages([shard(open)]).has(page), `${open} still builds the page`);
+  for (const landed of ["merged", "done"]) assert.ok(!plannedDoctrinePages([shard(landed)]).has(page), `${landed} built it already, or never will`);
+  assert.ok(!plannedDoctrinePages([shard("blocked", { retirement: "superseded" })]).has(page), "a retired shard creates nothing");
+  assert.deepEqual([...plannedDoctrinePages([{ status: "queued", files: ["doctrine/s/", "docs/a.md"] }])], [], "only a doctrine page is a page");
+});
+
 test("a doctrine body a queued task declares in files: is a planned output, not a dangling citation", () => {
-  const planned = plannedDoctrinePaths([
-    { files: ["src/lib/plan.ts", "doctrine/s/to-be-written.md"] },
-    { files: ["CLAUDE.md"] },
-    {},
+  const planned = plannedDoctrinePages([
+    { status: "queued", files: ["src/lib/plan.ts", "doctrine/s/to-be-written.md"] },
+    { status: "queued", files: ["CLAUDE.md"] },
+    { status: "queued" },
   ]);
   assert.deepEqual([...planned], ["doctrine/s/to-be-written.md"]);
   const texts = ["files: doctrine/s/to-be-written.md", "typo: doctrine/s/to-be-writen.md"];

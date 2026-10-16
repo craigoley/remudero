@@ -449,8 +449,13 @@ export type ServiceFreshness =
         diffUnreadable?: string;
         changes?: AdvanceCommit[];
         logUnreadable?: string;
+        /** W1-T9092: the advance judged against the running process's own import closure (daemon-closure.ts). */
+        closure?: AdvanceClosure;
       } | null;
     } & RecentFetchMark;
+
+/** W1-T9092: whether an advance touched the closure of the process's entry. `unreadable` is material. */
+export type AdvanceClosure = { status: "read"; material: boolean; outside: number } | { status: "unreadable"; reason: string };
 
 export type RecentFetchMark = { source?: "recent-fetch"; refAgeMs?: number }; // W1-T6033: set only when a recent ref stood in
 
@@ -695,6 +700,13 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
  * `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
  * Why: docs/forensics/self-sync.md#daemonfreshnessfromservice.
  */
+/** W1-T9092: the closure's verdict when it was read. An UNREADABLE closure falls back to the prefix list, which calls
+ *  every src/ change material: it fails toward restarting without restarting for advances (docs, plan) today's daemon
+ *  already ignores, so a closure that stays unreadable (an entry outside the tree) can never add restarts. */
+function behindIsMaterial(behind: NonNullable<Extract<ServiceFreshness, { status: "assessed" }>["behind"]>): boolean {
+  return behind.closure?.status === "read" ? behind.closure.material : advanceIsMaterial(behind.changedPaths);
+}
+
 export function daemonFreshnessFromService(svc: ServiceFreshness) {
   if (svc.status === "guarded") return { stale: false, notStale: { arm: "unassessed", serviceStatus: "guarded" } } as const;
   if (svc.status === "degraded") {
@@ -705,7 +717,7 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
       stale: false,
       notStale: {
         arm: "dirty",
-        behind: svc.behind !== null && advanceIsMaterial(svc.behind.changedPaths),
+        behind: svc.behind !== null && behindIsMaterial(svc.behind),
         // PRIMARY CONTROL: match the live-edit ladder's 20-path ledger display bound.
         ...(svc.dirty_paths ? { dirty_paths: svc.dirty_paths.slice(0, 20) } : {}),
         ...(svc.behind ? { oldSha: svc.behind.oldSha, newSha: svc.behind.newSha } : {}),
@@ -715,10 +727,16 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
   }
   if (!svc.behind) return { stale: false, notStale: { arm: "up_to_date" } } as const;
   // An advance that cannot change this process's module graph is no reason to replace it (W1-T2964).
-  if (!advanceIsMaterial(svc.behind.changedPaths)) {
+  // W1-T9092: measured against the process's own closure when it was read, so a src/ module it never loads is no reason.
+  if (!behindIsMaterial(svc.behind)) {
+    const { closure } = svc.behind;
     return {
       stale: false,
-      notStale: { arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha },
+      notStale: {
+        arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha,
+        ...(closure?.status === "read" ? { basis: "closure" as const, outsideClosure: closure.outside } : {}),
+        ...(closure?.status === "unreadable" ? { basis: "prefix" as const, closureUnreadable: closure.reason } : {}),
+      },
     } as const;
   }
   const { oldSha, newSha, changes } = svc.behind;
