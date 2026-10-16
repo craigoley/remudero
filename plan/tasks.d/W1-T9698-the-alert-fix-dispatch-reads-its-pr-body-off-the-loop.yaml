@@ -14,7 +14,7 @@
     - src/run-task.ts
     - test/the-alert-fix-dispatch-reads-its-pr-body-off-the-loop.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 2  # operator-2026-10-15: the main-repair lane opens its fix PR through this seam while main is red, when the loop matters most
   attempts: 0
   rationale: |
