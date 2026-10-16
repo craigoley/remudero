@@ -67,7 +67,7 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
-import { classEstimate, type LearnedEstimate } from "./host-memory-learning.js";
+import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
 import {
   ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
 } from "./host-memory-shadow.js";
@@ -7296,9 +7296,10 @@ export function mainHealthFirstRedCommitFromRunHistory(
   allHistory: readonly MainHealthRunHistoryEntry[],
   options: MainHealthFirstRedOptions = {},
 ): MainHealthFirstRedCommit | "window-exhausted" | undefined {
-  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going
-  // green on a commit whose CI was cancelled is not a green main.
+  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going green
+  // on a commit whose CI was cancelled is not a green main. W1-T9690: an EMPTY (unknown) set names none.
   const workflows = options.requiredWorkflows;
+  if (workflows && workflows.size === 0) return undefined;
   const history =
     workflows && workflows.size > 0
       ? allHistory.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName))
@@ -7349,7 +7350,9 @@ export function enrichMainHealthObservation(
 
   let firstRedCommit: MainHealthFirstRedCommit | undefined;
   let runHistoryWindowExhausted: boolean | undefined;
-  if (enrichment.runHistory) {
+  if (enrichment.runHistory && enrichment.requiredWorkflows?.size === 0) {
+    enrichmentFailures.push("the workflows carrying required checks are unknown, so no first-red commit is named");
+  } else if (enrichment.runHistory) {
     const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory, {
       ...(enrichment.requiredWorkflows ? { requiredWorkflows: enrichment.requiredWorkflows } : {}),
     });
@@ -14496,7 +14499,7 @@ export function pressureWorkers(pressure: FixHostPressure, perWorkerMib: number)
 export function readFixHostPressure(
   floorMib: number,
   read: (path: string) => string = path => readFileSync(path, "utf8"),
-  container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean; reclaim?: SlackReclaim },
+  container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean; reclaim?: SlackReclaim; unitMib?: number },
 ): FixHostPressure {
   const once = () => readFixHostPressureOnce(floorMib, read, container);
   return reclaimBeforeHold(once(), once, container?.reclaim);
@@ -14505,7 +14508,7 @@ export function readFixHostPressure(
 function readFixHostPressureOnce(
   floorMib: number,
   read: (path: string) => string,
-  container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean },
+  container?: { read: () => ContainerMemoryHeadroom; ownWorkLive: () => boolean; unitMib?: number },
 ): FixHostPressure {
   let meminfo: string;
   let host: FixHostPressure;
@@ -14521,7 +14524,7 @@ function readFixHostPressureOnce(
   const named = { hostAvailableMib: host.availableMib, hostFloorMib: floorMib };
   const totalKb = /^MemTotal:\s*(\d+)\s*kB\s*$/m.exec(meminfo)?.[1];
   const reading = container.read();
-  const unit = DEFAULT_ESTIMATE_MIB.implement;
+  const unit = container.unitMib ?? DEFAULT_ESTIMATE_MIB.implement;
   const hostTier = host.availableMib - floorMib < unit ? "host-short" as const : "fits" as const;
   // Unbounded, unread, or no MemTotal to size its floor by: the host reading alone, as before, with the reading named.
   if (!("headroomMib" in reading) || totalKb === undefined || Number(totalKb) <= 0) {
@@ -14537,9 +14540,10 @@ function readFixHostPressureOnce(
   return { ...out, tier: container.ownWorkLive() ? "container-short" : "nothing-to-wait-for" };
 }
 
-/** The production fix pressure: the host and this container, its live work read from the instance's reservations. */
-export function productionFixPressure(floorMib: number, ledgerPath: string): FixHostPressure {
+/** The production fix pressure: the host and this container, live work from its reservations; `unitMib` sizes "fits". */
+export function productionFixPressure(floorMib: number, ledgerPath: string, unitMib?: number): FixHostPressure {
   return readFixHostPressure(floorMib, undefined, {
+    unitMib,
     read: () => readContainerMemoryHeadroom(),
     ownWorkLive: () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
     reclaim: installedSlackReclaim,
@@ -14577,7 +14581,11 @@ export interface FixAdmissionCharge {
   fixEstimateMib: number;
   fixEstimateSource: "measured" | "default-unmeasured";
   reviewEstimateMib: number;
+  fixTypicalMib: number;
+  admissionRung: FixAdmissionRung;
 }
+
+export type FixAdmissionRung = "fits" | "typical" | "nothing-live" | "none";
 
 /**
  * W1-T9498 — THE CHARGE OF `count` RESERVATIONS OF ONE CLASS, ONCE. The pressure reading (MemAvailable, the container's
@@ -14622,11 +14630,13 @@ export function productionFixAdmissionResidents(
  *  its own pressure reading (a test) charges the class defaults with no residency read. */
 export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPressure" | "fixProgressJudge" | "ledgerPath">): {
   readEstimate?: (workerClass: FixAdmissionClass) => LearnedEstimate;
+  readTypical?: (workerClass: FixAdmissionClass) => LearnedEstimate;
   readResidents?: () => FixAdmissionResidents;
 } {
   if (deps.readFixPressure || !deps.fixProgressJudge) return {};
   return {
     readEstimate: (workerClass) => classEstimate(workerClass),
+    readTypical: (workerClass) => classTypical(workerClass),
     readResidents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath))),
   };
 }
@@ -14641,9 +14651,10 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
  * on each refresh (`readReviewReservations`): a review's reservation ends when it settles. Measured 2026-10-14: whole
  * 2,048 MiB slots, a review counted as a slot for the controller's whole life, and running workers charged on top of
  * the reading that already held them, read 0 admissions on 57-66% of the minutes a repair was queued. The floor is
- * kept, and a learned fix estimate above 2,048 MiB admits fewer fixes. Without a pressure reading the stand-in counts
- * workers against `hostWorkerBudget`, as before; an unreadable reading admits none; the nothing-to-wait-for tier still
- * admits one while nothing is outstanding. */
+ * kept; a learned estimate above 2,048 MiB admits fewer, and W1-T9679's rungs admit ONE (charged whole) when none fits
+ * and no fix is reserved here: "typical" when no fix tree is live and what is left covers the typical peak
+ * (`readTypical`), else "nothing-live" when that peak exceeds the headroom and no tree is live (unreadable is not idle).
+ * No reading: the stand-in counts `hostWorkerBudget`; an unreadable one admits none; nothing-to-wait-for admits one. */
 export function createSweepFixAdmissionController(input: {
   surface: SweepRepairSurface;
   queueDepth: number;
@@ -14655,6 +14666,7 @@ export function createSweepFixAdmissionController(input: {
   readReviewReservations?: () => number;
   /** W1-T9498: a class's learned estimate. Default: the class default, unmeasured. */
   readEstimate?: (workerClass: FixAdmissionClass) => LearnedEstimate;
+  readTypical?: (workerClass: FixAdmissionClass) => LearnedEstimate;
   /** W1-T9498: the live trees' residency. Default: unread, so every reservation is charged its whole estimate. */
   readResidents?: () => FixAdmissionResidents;
   readActiveWorkers?: () => number;
@@ -14690,6 +14702,14 @@ export function createSweepFixAdmissionController(input: {
     }
   };
   let residents: FixAdmissionResidents;
+  let residentsRead = false;
+  const liveTrees = (): FixAdmissionResidents => {
+    if (!residentsRead) {
+      residents = readResidents();
+      residentsRead = true;
+    }
+    return residents;
+  };
   // What the current readings admit. A claim's own admission recomputes it without re-reading: its worker has not
   // started, so it is charged whole on the reading the claim was judged on.
   const compute = () => {
@@ -14711,11 +14731,26 @@ export function createSweepFixAdmissionController(input: {
       fixEstimateMib: fix.estimateMib,
       fixEstimateSource: fix.samples > 0 ? "measured" : "default-unmeasured",
       reviewEstimateMib: review.estimateMib,
+      fixTypicalMib: Math.min(fix.estimateMib, input.readTypical?.("fix").estimateMib ?? fix.estimateMib),
+      admissionRung: "none",
     };
     const left = charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib;
-    const fits = Math.floor(Math.max(0, left) / Math.max(1, fix.estimateMib));
+    available = Math.floor(Math.max(0, left) / Math.max(1, fix.estimateMib));
+    if (available > 0) {
+      charge.admissionRung = "fits";
+      return;
+    }
     // Nothing to wait for: one is admitted, never wedged, while nothing else is outstanding (pressureWorkers' rule).
-    available = pressure.tier === "nothing-to-wait-for" && charged() + reservations === 0 ? Math.max(1, fits) : fits;
+    if (pressure.tier === "nothing-to-wait-for" && charged() + reservations === 0) {
+      available = 1;
+      charge.admissionRung = "nothing-live";
+      return;
+    }
+    const live = reservations === 0 ? liveTrees() : undefined;
+    if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
+    else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
+      charge.headroomMib > 0 && charge.fixTypicalMib > charge.headroomMib) charge.admissionRung = "nothing-live";
+    if (charge.admissionRung !== "none") available = 1;
   };
   const reviewsFit = (count: number): boolean => !pressure
     ? Math.max(0, input.hostWorkerBudget - activeWorkers) - reservations - count >= 0
@@ -14733,9 +14768,8 @@ export function createSweepFixAdmissionController(input: {
     activeWorkers = Math.max(0, Math.trunc(input.readActiveWorkers?.() ?? input.activeWorkers));
     reviewReservations = Math.max(0, Math.trunc(input.readReviewReservations?.() ?? input.reviewReservations));
     pressure = input.readPressure?.();
-    // Residency is read only when a reading can use it: something is outstanding to charge.
-    residents = pressure && pressure.reason === undefined && reviewReservations + reservations > 0
-      ? readResidents() : undefined;
+    residentsRead = pressure !== undefined && pressure.reason === undefined && reviewReservations + reservations > 0;
+    residents = residentsRead ? readResidents() : undefined;
     compute();
   };
   refresh();
@@ -14778,6 +14812,8 @@ export function createSweepFixAdmissionController(input: {
       fix_estimate_mib: state.charge?.fixEstimateMib,
       fix_estimate_source: state.charge?.fixEstimateSource,
       review_estimate_mib: state.charge?.reviewEstimateMib,
+      fix_typical_mib: state.charge?.fixTypicalMib,
+      admission_rung: state.charge?.admissionRung,
       ...order,
     });
   };
@@ -14785,7 +14821,7 @@ export function createSweepFixAdmissionController(input: {
   const refusalArithmetic = (): string => charge
     ? `(headroom ${charge.headroomMib} MiB over the floor; charged ${charge.reviewChargeMib} MiB for ${charged()} ` +
       `reviews at ${charge.reviewEstimateMib} and ${charge.fixChargeMib} MiB for ${reservations} admitted fixes; ` +
-      `a fix needs ${charge.fixEstimateMib} MiB (${charge.fixEstimateSource}); ${activeWorkers} active, ${fixesAdmitted} fixes admitted)`
+      `a fix needs ${charge.fixEstimateMib} MiB (${charge.fixEstimateSource}; typical ${charge.fixTypicalMib}); ${activeWorkers} active, ${fixesAdmitted} fixes admitted)`
     : `(${activeWorkers} active, ${charged()} reserved for review, ${fixesAdmitted} fixes admitted)`;
   emit();
   return {
@@ -15624,7 +15660,8 @@ export async function runSweep(
           hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
           activeWorkers: fullRepairActiveWorkers,
           readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-          readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath) : undefined),
+          readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
+            ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath, classEstimate("fix").estimateMib) : undefined),
           reviewReservations: fullReviews.planned,
           readReviewReservations: () =>
             (fullReviews.pulling ? Math.max(fullReviews.planned, fullReviews.started) : fullReviews.started) - fullReviews.settled,
@@ -16723,7 +16760,8 @@ export async function runSweep(
   // legible state `judgeSweepLiveness` reads. RENDER_RELEVANT, rotating on recency (W1-T1237).
 
   deps.markPrelude?.("walk_setup", true);
-  log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
+  log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true,
+    ...(deps.repairAdmissionSurface ? { surface: deps.repairAdmissionSurface } : {}) });
 
   // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
   // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per
@@ -20078,7 +20116,8 @@ export async function runSweepLightPass(
     hostWorkerBudget,
     activeWorkers,
     readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-    readPressure: deps.readFixPressure ?? (deps.fixProgressJudge ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath) : undefined),
+    readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
+      ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath, classEstimate("fix").estimateMib) : undefined),
     reviewReservations: unsettledSpawning,
     readReviewReservations: () => unsettledSpawning,
     ...productionFixAdmissionReaders(deps),

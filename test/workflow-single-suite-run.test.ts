@@ -163,7 +163,7 @@ test("W1-T3207: the instrumented coverage run selects every duration-balanced sh
 
 test("W1-T3207: coverage gates consume downloaded artifacts without npm ci or Playwright", () => {
   const required = doc.jobs["coverage-ratchet-required"];
-  assert.deepEqual(required.needs, ["coverage-ratchet"]);
+  assert.deepEqual(required.needs, ["coverage-ratchet", "coverage-ledger"]);
   const body = (required.steps ?? []).map((s) => s.run ?? s.uses ?? "").join("\n");
   assert.match(body, /actions\/download-artifact@/, "the consumer must download the uploaded coverage shards");
   assert.match(body, /coverage-shards\/coverage-shard-\$\{SHARD\}\/class/, "the consumer must read shard metadata from the artifact");

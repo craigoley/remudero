@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 PR-queue review: root cause of #11629's SHARD HANG red (W1-T9410's build PR)"
   plan_refs: [W1-T6085, W1-T8038, W1-T8040]
   files: [scripts/pure-test-pool.mjs, test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

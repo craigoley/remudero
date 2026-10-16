@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: host I/O investigation 02:25-03:00Z; operator approved filing on 2026-10-15"
   plan_refs: [W1-T6364, W1-T6110, W1-T6125, W1-T5669, W1-T4229, W1-T9601]
   files: [deploy/scratch-mounts.sh, deploy/recycle-container.sh, deploy/serve-container.sh, deploy/install-host-units.sh, deploy/host-update.sh, deploy/rmd-host-cleanup.sh, docs/operator-guide.md, test/scratch-mounts.test.ts, test/the-hot-checkouts-live-on-scratch.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
