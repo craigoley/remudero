@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-16: agent F5, the 06:45:28Z progress-watchdog recycle of DAEMON-1792125203347 (pid 517647), read-only on the host"
   plan_refs: [W1-T5687, W1-T5688, W1-T6598, W1-T6597, W1-T9563, W1-T9632, W1-T9702, W1-T9516, W1-T2379]
-  files: [src/lib/progress-watchdog.ts, docs/cli-reference.md, test/the-watchdog-never-recycles-a-pass-in-flight.test.ts]
+  files: [src/lib/progress-watchdog.ts, src/run-task.ts, docs/cli-reference.md, test/the-watchdog-never-recycles-a-pass-in-flight.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -68,7 +68,7 @@
     4. STILL RECYCLES. A pass past its own bound_ms with no abandoned row has a wedged bound timer, so it is not in
        flight, and the existing STALLED recycle applies. An abandoned pass is not in flight, so the existing age rule
        applies from there.
-    docs/cli-reference.md's progress-watchdog entry names IN_PASS. Tests go in a new file, with `test(` titles
+    The progress-watchdog COMMANDS detail in src/run-task.ts names IN_PASS, and docs/cli-reference.md is regenerated. Tests go in a new file, with `test(` titles
     verbatim as in the proofs below. They replay the 10-16 rows (06:10:59 started, 06:15:10 sweep.pass full, a 06:45
     pulse, now 06:45:28) and cover the pass past its bound, a settled pass, an abandoned pass, a pass from an earlier
     generation and a pass whose daemon stopped pulsing.
