@@ -1,0 +1,88 @@
+- id: W1-T9903
+  title: "TWO STALE STATEMENTS STILL STEER OPERATORS — osv-scanner.toml ignores GHSA-frvp-7c67-39w9 though the lockfile has carried the fixed @hono/node-server 2.1.1 since #4915 (CI's osv-scan logs it as an unused ignore), and title-needs-a-re-run.md says a title edit fires nothing though pr-title-lint.yml has run on edited since #6062; remove the ignore, correct the doctrine"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19 span: two stale statements, both corrections. The ignore removal tightens the scan; the doctrine edit changes prose only. No src/, no workflow, no gate config beyond deleting one unused suppression
+  band_meaning: span
+  origin: "operator session 2026-10-16: CI's osv-scan step logs 'osv-scanner.toml has unused ignores: GHSA-frvp-7c67-39w9'; the doctrine page contradicts W1-T3781's pinned trigger (W1-T9828's rationale already names it stale)"
+  plan_refs: [W1-T351, W1-T3781, W1-T4400, W1-T462, W1-T9828]
+  files:
+    - osv-scanner.toml
+    - doctrine/ci-and-merging/title-needs-a-re-run.md
+    - CLAUDE.md
+    - test/an-osv-ignore-names-an-advisory-the-lockfile-still-carries.test.ts
+  status: queued
+  priority: 2  # an unused suppression hides the next real hit on the same id, and the stale page tells every reader a retitle needs a re-run
+  attempts: 0
+  rationale: |
+    READ at origin/main 6ca8596ef (2026-10-16):
+    - THE IGNORE IS UNUSED. osv-scanner.toml's only [[IgnoredVulns]] entry is GHSA-frvp-7c67-39w9 (@hono/node-server
+      serve-static path traversal, fixed in 2.0.5). Its comment says the lockfile holds 1.19.17 and the fix is not
+      reachable because @modelcontextprotocol/sdk pins ^1.19.9. Both are stale. package-lock.json's only
+      "node_modules/@hono/node-server" entry is 2.1.1 (node-server-2.1.1.tgz), and @modelcontextprotocol/sdk now
+      declares "@hono/node-server": "^1.19.9 || ^2.0.5". The lock moved 1.19.17 -> 2.1.1 in #4915 (2026-09-10).
+      deploy/package-lock.json has no @hono entry, and those two are the only tracked lockfiles (git ls-files).
+      `npm ls @hono/node-server` prints @hono/node-server@2.1.1 only.
+    - LOCAL SCAN (osv-scanner 2.4.0, both lockfiles): with the committed config it prints "osv-scanner.toml has
+      unused ignores: - GHSA-frvp-7c67-39w9" and "No issues found". With an empty config it also prints "No issues
+      found". So removing the entry surfaces nothing; it only stops suppressing a future hit on that id.
+    - THE DOCTRINE IS STALE. doctrine/ci-and-merging/title-needs-a-re-run.md (W1-T351, re-derived 2026-08-06) says
+      "`edited` still fires nothing" and that ci.yml's commitlint job reads the title live. Since #6062 (2026-09-19)
+      .github/workflows/pr-title-lint.yml job `commitlint` runs on `types: [opened, synchronize, reopened, edited]`
+      and reads the title LIVE (`gh pr view "$PR_NUMBER" ... --json title`). test/title-edit-commitlint-workflow.test.ts
+      (W1-T3781) pins that trigger and that ci.yml's own trigger stays without `edited`. ci-gate.yml re-aggregates on
+      `edited` only (W1-T4400). ci.yml's `commitlint` key is now the `light-gates` job (W1-T4399, W1-T5695) and lints
+      no title. The CLAUDE.md index headline repeats the stale claim.
+    - THE NUANCE THE PAGE MUST KEEP: GitHub does not start workflow runs for events caused by a workflow's
+      GITHUB_TOKEN, so a retitle made with GITHUB_TOKEN still fires nothing. A user's edit or a GitHub App token's edit
+      fires `pull_request.edited` (W1-T9828's design relies on the App token for exactly this).
+    SWEEP: plan/tasks.d on origin/main for frvp, osv-scanner.toml and title-needs-a-re-run: W1-T462 cites the entry
+    as an example of a major-only fix, and W1-T9828's rationale notes the page is stale; neither edits either file.
+    The 250 most recently updated origin heads (back to 2026-10-11) change neither file.
+  design: |
+    1. osv-scanner.toml: delete the GHSA-frvp-7c67-39w9 [[IgnoredVulns]] entry and its comment block. Keep the file
+       and its header comment (what an entry must state, and that it expires when the graph moves), so the next
+       suppression follows the same policy. Add no other ignore.
+    2. TEST, new file test/an-osv-ignore-names-an-advisory-the-lockfile-still-carries.test.ts, offline (no scanner,
+       no network):
+       test("W1-T9903: osv-scanner.toml carries no ignore for GHSA-frvp-7c67-39w9 and no lockfile holds @hono/node-server below 2.0.5")
+       reads osv-scanner.toml and asserts the id is absent. It then reads every tracked package-lock.json
+       (package-lock.json and deploy/package-lock.json). It collects every packages key ending in
+       "node_modules/@hono/node-server" and asserts each version is at least 2.0.5 by numeric semver comparison.
+       It also asserts the root lockfile has at least one such key, so the check cannot pass on an empty set. If the
+       dependency is ever dropped, that count assertion goes red and is updated by name.
+       Fault-inject before pushing: restore the base osv-scanner.toml and watch the test fail; set the lock version to
+       1.19.17 in a scratch copy and watch it fail.
+    3. doctrine/ci-and-merging/title-needs-a-re-run.md: rewrite the rule.
+       - Headline: a retitle re-lints itself when a user or App edits it. pr-title-lint.yml runs on `edited` (#6062,
+         W1-T3781) and reads the title live; ci-gate.yml re-aggregates on `edited` (W1-T4400).
+       - Exception: an edit made with a workflow's GITHUB_TOKEN fires no workflow. For that retitle, re-run the
+         `commitlint` job, which reads the title live, or close and reopen, which fires `reopened` without touching
+         the branch.
+       - Say that ci.yml's `commitlint` key is the `light-gates` job and lints no title.
+       - Keep the W1-T351 citation, and add "corrected 2026-10-16 after #6062".
+       The body must name pr-title-lint.yml and GITHUB_TOKEN, each on one physical line.
+    4. CLAUDE.md: replace the index headline "A corrected PR title is observed by a RE-RUN ... `edited` still fires
+       nothing." with one that starts "**A RETITLE RE-LINTS ITSELF" and names the GITHUB_TOKEN exception. Keep the
+       same pointer and no more than about 225 bytes of headline plus pointer (scripts/claude-md-budget-baseline.json).
+       Then run `npm run agents-md` if it regenerates a mirror.
+    No src/ change, no workflow change, no scanner flag change.
+  acceptance:
+    - claim: "osv-scanner.toml no longer ignores GHSA-frvp-7c67-39w9, and no tracked lockfile holds an affected @hono/node-server"
+      proof: 'unit test: test/an-osv-ignore-names-an-advisory-the-lockfile-still-carries.test.ts'
+    - claim: "the test checks both the config and every tracked lockfile, with a non-empty control"
+      proof: 'grep: test("W1-T9903: osv-scanner\.toml carries no ignore for GHSA-frvp-7c67-39w9 and no lockfile holds @hono/node-server below 2\.0\.5" in test/an-osv-ignore-names-an-advisory-the-lockfile-still-carries.test.ts'
+    - claim: "the doctrine page names the workflow that runs on a title edit"
+      proof: 'grep: pr-title-lint\.yml in doctrine/ci-and-merging/title-needs-a-re-run.md'
+    - claim: "the doctrine page keeps the GITHUB_TOKEN exception"
+      proof: 'grep: GITHUB_TOKEN in doctrine/ci-and-merging/title-needs-a-re-run.md'
+    - claim: "the CLAUDE.md index headline no longer says edited fires nothing"
+      proof: 'grep: A RETITLE RE-LINTS ITSELF in CLAUDE.md'
+  falsifier: |
+    At origin/main the new test fails: osv-scanner.toml still carries the GHSA-frvp-7c67-39w9 entry. Neither doctrine
+    grep matches, since the page names neither pr-title-lint.yml nor GITHUB_TOKEN, and the CLAUDE.md headline grep
+    reads 0.
