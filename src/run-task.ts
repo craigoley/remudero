@@ -19686,6 +19686,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
 
   // W1-T8676: the boundary checkpoint this run restored, which `failOnWorkerError` keeps through a worker error.
   let restoredCheckpoint: { branch: string; headSha: string } | undefined;
+  /** W1-T8676/W1-T9786: the restored checkpoint a failed exit keeps, unless this run pushed its own branch (the newer
+   *  checkpoint, W1-T7837). Read while the worktree stands; only a proven absence (exit 1) keeps it. */
+  const checkpointToKeep = (): { branch: string; headSha: string } | undefined => restoredCheckpoint !== undefined &&
+    hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
+    ? restoredCheckpoint : undefined;
   /**
    * A worker returned an ERROR envelope (max_turns, max_budget_usd, execution
    * error). Turn it into a terminal verdict: clean the worktree so no debris
@@ -19697,11 +19702,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   const failOnWorkerError = (r: WorkerResult, stage: string, reason?: string): RunResult | null => {
     const v = workerErrorVerdict(r, costUsd, stage);
     if (!v) return null;
-    // W1-T8676: a worker error is not the checkpoint's fault. Unless this run pushed its own branch (the newer
-    // checkpoint, W1-T7837) — read while the worktree stands; only a proven absence (exit 1) keeps it.
-    const keptCheckpoint = v.verdict === "failed" && restoredCheckpoint !== undefined &&
-      hostWorktreeGitResult(worktreePath, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).status === 1
-      ? restoredCheckpoint : undefined;
+    // W1-T8676: a worker error is not the checkpoint's fault.
+    const keptCheckpoint = v.verdict === "failed" ? checkpointToKeep() : undefined;
     try {
       worktreeRemove(repoDir, worktreePath);
       log("worktree.remove", { on: `${stage}.error` });
@@ -22382,8 +22384,20 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       return { taskId, runId, merged: false, costUsd, verdict: "failed" };
     }
     log("run.error", { error: String((err as Error)?.message ?? err) });
+    // W1-T9786: nor is a thrown harness error (W1-T9047's refused push), so this exit keeps it too.
+    let keptThroughThrow: { branch: string; headSha: string } | undefined;
+    try {
+      keptThroughThrow = verdictWritten ? undefined : checkpointToKeep();
+    } catch (error) {
+      // Unproven (a refused worktree pointer): keep nothing, as before, and never replace the run's own error.
+      log("implement.checkpoint_keep_unproven", { task_id: taskId, error: String((error as Error)?.message ?? error) });
+    }
     // W1-T4655: the run DID end, so it gets ONE terminal row naming the harness cause.
     endThrownRun(log, verdictWritten, "run.error", err, costUsd);
+    if (keptThroughThrow) {
+      log("implement.checkpoint_kept", { task_id: taskId, source_branch: keptThroughThrow.branch, head_sha: keptThroughThrow.headSha,
+        failed_stage: "run.error", failed_cause: runErrorCause(err) });
+    }
     // Reclaim the worktree even on an unexpected throw — a dead run must not
     // leave debris that blocks the next one (start-of-run prune is the backstop,
     // but clean up eagerly here too). Best-effort; the ledger already has the
