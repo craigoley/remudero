@@ -12,7 +12,8 @@ import { validInboxDismissalAudit, type InboxDismissalAudit } from "./inbox-dism
 
 import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
-import type { AttentionJudgment } from "./inbox-responder.js";
+import type { AttentionCensus, AttentionJudgment } from "./inbox-responder.js";
+import { classificationSnapshotKey } from "./read-page.js";
 import { createBandMeaningReplayRegistryReader, readBandMeaningReplayStore, replayBandMeaningRefusals, replayBandMeaningRefusalsAsync,
   type BandMeaningReplayInput, type BandMeaningReplayPass, type BandMeaningReplayRegistryReader, type ReplayStranded } from "./inbox-replay.js";
 import { appendLedger } from "./ledger.js";
@@ -115,6 +116,10 @@ export function persistedInboxPath(stateDir: string): string {
 
 /** What one slow-lane pass classified. `identity` names the content; a re-stamp of the same content keeps it. */
 export interface PersistedInboxContent extends ClassificationEvidence {
+  /** One completed classification, shared by the census, every section and every cursor. */
+  snapshotKey?: string;
+  attentionCensus?: AttentionCensus;
+  snapshotScope?: { instance?: string; repository?: string; root?: string };
   sourceIdentity?: InboxSourceIdentity;
   proposals: Proposal[];
   classifications: InboxClassification[];
@@ -162,6 +167,28 @@ export interface PersistedInbox extends PersistedInboxContent {
   generatedAt: string;
 }
 
+function validInboxSnapshot(value: Partial<PersistedInbox>): boolean {
+  if (value.snapshotKey === undefined && value.attentionCensus === undefined) return true;
+  const census = value.attentionCensus;
+  const scope = value.snapshotScope;
+  const owned = scope && (typeof scope.root === "string" && scope.root.trim() !== "" ||
+    typeof scope.instance === "string" && scope.instance !== "" && typeof scope.repository === "string" && scope.repository !== "");
+  const { identity: _identity, generatedAt: _generatedAt, snapshotKey: _snapshotKey, attentionCensus: _census, ...content } = value;
+  const { snapshotKey: _censusKey, ...facts } = census ?? {};
+  const attention = ["decision", "reply", "in_progress", "history", "awaiting_daemon"] as const;
+  const measured = (counts: object | undefined, keys: readonly string[]) => counts !== null && counts !== undefined &&
+    keys.every(key => { const n = (counts as Record<string, unknown>)[key]; return typeof n === "number" && Number.isSafeInteger(n) && n >= 0; });
+  return Boolean(owned) && typeof value.snapshotKey === "string" && /^[a-f0-9]{64}$/.test(value.snapshotKey) &&
+    census?.snapshotKey === value.snapshotKey && (census.state === "complete" || census.state === "partial") &&
+    classificationSnapshotKey(content, facts) === value.snapshotKey &&
+    measured(census.counts, attention) && measured(census.verifiedCounts, attention) &&
+    measured(census.decisionReadiness, ["ready", "needsPreparation", "needsTriage", "unknown"]) &&
+    Array.isArray(census.items) && census.sources !== null && census.sources !== undefined &&
+    ["plan", "registry", "liveLedger", "archiveLedger", "githubProjection"].every(key =>
+      ["observed", "partial", "unavailable"].includes((census.sources as Record<string, string>)[key] ?? "")) &&
+    value.stores !== null && typeof value.stores === "object";
+}
+
 export function persistedInboxIdentity(content: PersistedInboxContent): string {
   return createHash("sha256").update(JSON.stringify(content)).digest("hex").slice(0, 32);
 }
@@ -181,7 +208,7 @@ export function readPersistedInbox(stateDir: string): PersistedInbox | undefined
     const parsed = JSON.parse(raw) as Partial<PersistedInbox>;
     const valid = typeof parsed.identity === "string" && Number.isFinite(Date.parse(parsed.generatedAt ?? "")) && Array.isArray(parsed.proposals) &&
       Array.isArray(parsed.classifications) && Array.isArray(parsed.ledgerRows) && Array.isArray(parsed.mergedTaskIds) && typeof parsed.complete === "boolean";
-    return valid ? { ...parsed, attentionEvidence: validAttentionEvidence(parsed.attentionEvidence, parsed.proposals!.length),
+    return valid && validInboxSnapshot(parsed) ? { ...parsed, attentionEvidence: validAttentionEvidence(parsed.attentionEvidence, parsed.proposals!.length),
       dismissalAudit: validInboxDismissalAudit(parsed.dismissalAudit) } as PersistedInbox : undefined;
   } catch {
     // deliberate: a torn or foreign file is no classification, answered as not ready until the next pass rewrites it.
