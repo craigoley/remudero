@@ -1,0 +1,103 @@
+- id: W1-T9808
+  title: "A LATCHED RESTART STILL ADMITS WORK ITS DRAIN WILL ABANDON — W1-T8172 gates only the drain's own review clock, once per pass, so after the latch the in-flight ticker's ordinary light pass, its lane refills and the full-sweep retrigger keep dispatching fixes and admitting reviews with no reading of the latch; on 2026-10-15 fix dispatches W1-T9113 and W1-T7699 started at 19:02 inside the 18:59:45 drain and were abandoned, and #12123/#12124 were admitted late in the 20:08 episode"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — one latch admission predicate (time left in the drain's bound against the kind's measured run length) is read by every surface that admits a review or a detached fix after the latch; the drain itself, its bound and W1-T5721's protection are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 leads 5 and 6 (B17): W1-T8172 (#12249) build left (1) light passes and full-sweep retriggers admitting detached work after the latch and (2) no per-review admission predicate in runSweepLightPass and its refills; ~/Remudero-notes/tracker-2026-10-15.md B17 lines"
+  plan_refs: [W1-T100, W1-T147, W1-T9748, W1-T8172, W1-T5721, W1-T4053, W1-T1211, W1-T5366, W1-T5931, W1-T9114, W1-T9780, W1-T8141]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts
+  status: queued
+  priority: 2  # every abandoned admission is a fix round or review redone after the boot, plus the drain time it held; it self-heals, so not P1
+  attempts: 0
+  rationale: |
+    Leads 5 and 6 are one task: both are an admission made after the restart latched that the drain cannot finish, and
+    both are closed by one predicate read at each admitting surface.
+    EVIDENCE (B17's measurement, 2026-10-15, core ledger; before #12249 deployed, so the counts are the old code's,
+    and the reads below show the same paths are still open):
+      - The 18:29:00 latch drained from 18:59:45 for 1,217,693 ms against a 559,000 ms bound (the W1-T8172 comment in
+        src/lib/daemon.ts quotes it). Fix dispatches W1-T9113 and W1-T7699 started at 19:02, inside that drain, and
+        were abandoned at its bound. The 4 reviews its clock admitted at 19:17 were abandoned too.
+      - In the 20:08 episode, reviews for #12123 and #12124 were admitted late in the drain.
+    READ at origin/main db88033a3 (2026-10-16):
+      - W1-T8172 added one gate: `startInterphaseReviewClock(..., "drain", admitPass)` in `drainBeforeRestart`, with
+        `admitPass = () => deadlineMs - daemonClock.now() > reviewMs`. It is asked once per due PASS. A pass then
+        admits up to the review width at once, and nothing asks again per review.
+      - `runSweepLightPass` (src/lib/sweep.ts) sets `lightPassRefillsClosed = false;` at its start. The flag's comment
+        reads "Closed by `drainInFlightReviews` (an exit), reopened by the next light pass." So a drain-clock pass
+        reopens the refills the drain closed, and `refillFreedLanes` runs `while (!lightPassRefillsClosed && await
+        admitOneRefill());`. `admitOneRefill` checks the width (`reviewAdmissionBound`) and the live head, never the
+        latch.
+      - The in-flight ticker (`startInFlightTicker`, src/lib/daemon.ts) runs the ordinary `deps.sweepLight?.()` and the
+        full-sweep retrigger during the lane wait after the latch. Both read only `deps.checkStop?.() ??
+        deps.checkPause?.()`. Neither reads `inFlightFreshness` or `restartWait.decidedAtMs`.
+      - `LightPassScope` carries only `reviewOnly`. `buildSweepLightHook` (src/run-task.ts) opens the light pass's fix
+        rung on `fixRungAllowedBesideInFlight`, which is true whenever every in-flight run is awaiting external,
+        which is the usual state of a lane waiting out a latch.
+      - `runGatedSweep` (the retrigger and the pre-exit pass) builds `continueReviewAdmissions` as `deps.checkStop?.()
+        === undefined && deps.checkPause?.() === undefined` and `workerAdmissionHold` from the fleet-control hold
+        only. The full pass asks both per admission (src/lib/sweep.ts, `workerAdmissionHoldReason(deps)` at each
+        fix-dispatch site and `deps.continueReviewAdmissions()` per review), so the per-admission seam exists; the
+        latch is simply not in it.
+      - `detachSweepAction` (src/lib/sweep.ts) registers any started action with no admission check, so a fix
+        dispatched after the latch joins `drainBeforeRestart`'s wait with the exit's whole bound.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the open heads updated since 10-12 for latchDrain,
+    restart latch, lightPassRefillsClosed, freshness_drain, pre_exit_pass and "after the latch". Control: main's
+    daemon.ts reads 19 such lines; no open head adds one outside merged tasks' stale run branches. W1-T9114 (queued)
+    moves reviews and fix dispatch into adoptable run children, after which a restart need not drain them; it is
+    large and behind `sweep.runChild.mode`. W1-T8141 (queued) ends a fix round already running; this task stops
+    starting one that cannot finish. W1-T9780 (#12309, open) detaches light-pass actions as 'light-pass-action',
+    which this predicate must also cover.
+    OVERLAP (lint duplicate-surface): W1-T100 routes blocked_ci to the ci-log fix path, W1-T147 is the overnight
+    chaos drill and W1-T9748 traces declared files to the staging step. They share daemon.ts, sweep.ts or
+    run-task.ts as broad files only; none reads the restart latch at an admission.
+  design: |
+    Operator rulings: no hard thresholds (no fixed wait, age or count below), lean into automation.
+    1. ONE PREDICATE. runDaemon exposes `restartAdmission(kind)` for kinds "review" and "fix-dispatch" (and any
+       `DetachedActionKind` that holds a drain). With no latch it admits. Under a latch it admits only while the time
+       left in the drain's bound (latch time plus `sweepWallClockBoundMs`, the deadline W1-T8172 already computes)
+       exceeds that kind's measured run length: `medianReviewRunMs` for reviews, and the same kind of ledger median
+       for a fix dispatch (from its dispatch row to its settle row). With no history it admits as today. If
+       W1-T9114 is on main and places the kind in a run child, it admits.
+    2. EVERY SURFACE ASKS IT, PER ADMISSION.
+       - The full pass: `runGatedSweep` adds the predicate to `continueReviewAdmissions` and to its
+         `workerAdmissionHold`. That covers the retrigger and the pre-exit pass.
+       - The light pass: `LightPassScope` gains `admit`. `buildSweepLightHook` closes the fix rung when
+         `admit("fix-dispatch")` refuses. `runSweepLightPass` asks `admit("review")` for each selected review and in
+         `admitOneRefill`, and a refusal leaves the PR for the next pass. A pass no longer reopens refills that an
+         exit's drain closed while the latch holds.
+       - The drain's review clock asks the same predicate per review instead of `admitPass` per pass.
+    3. NAME THE HOLD. A refusal writes the existing `daemon.admission_held` row with surface (light, light-refill,
+       full-sweep), kind, `reason: "restart latched"`, time left and measured length. `daemon.freshness_drain.completed`
+       gains `admissions_held_after_latch`.
+    4. Work already admitted is waited on as today. W1-T5721's protection of live fix workers is unchanged.
+    5. sweep.ts sits at its comment ceiling: no new comment lines there.
+    6. Tests (new file, `test(` titles verbatim as in the proofs below; drive runDaemon with an injected runOne,
+       sweep, sweepLight and fake clock, as test/the-restart-drain-starts-when-the-restart-latches.test.ts does):
+       - after the latch, with a lane awaiting external, the ticker's light pass dispatches no fix whose measured
+         length exceeds the time left, and a `daemon.admission_held` row names it;
+       - the full-sweep retrigger after the latch dispatches no such fix;
+       - a light pass and its refills admit a review only while its measured length fits the time left, per review;
+       - with no latch, or no history, admission is unchanged (positive control).
+  acceptance:
+    - claim: "after the latch a light pass dispatches no fix its drain would abandon, and names the hold"
+      proof: 'grep: test("W1-T9808: after the latch a light pass dispatches no fix its drain would abandon" in test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts'
+    - claim: "after the latch a full-sweep retrigger dispatches no fix its drain would abandon"
+      proof: 'grep: test("W1-T9808: after the latch a full-sweep retrigger dispatches no fix its drain would abandon" in test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts'
+    - claim: "a light pass and its refills admit each review only while it fits the time left in the drain"
+      proof: 'grep: test("W1-T9808: a light pass and its refills admit a review only while it fits the drain" in test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts'
+    - claim: "with no latch or no history, admission is as today"
+      proof: 'grep: test("W1-T9808: with no latch or no history admission is unchanged" in test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts'
+  falsifier: |
+    At origin/main, runDaemon with a latched restart, one lane awaiting external, a median fix-dispatch length longer
+    than the time left and a light pass that finds a red PR still calls the fix dispatch and writes no
+    `daemon.admission_held` row, so the first test fails. A drain-clock pass at origin/main reopens refills and admits
+    a second review after the first with less time left than the median, so the third test fails.

@@ -134,6 +134,11 @@ test("W1-T2877: the rendered launcher refuses on STOP and on an unmounted state 
     assert.match(launcher, /is not mounted/, "the unmounted-state refusal must survive rendering");
     assert.match(launcher, /already running -- nothing to do/, "idempotence must survive rendering");
     assert.match(launcher, /revive boot=/, "the revival record must survive rendering");
+    const watchdog = readFileSync(join(root, "systemd", "rmd-fleet-watchdog.service"), "utf8");
+    assert.match(watchdog, /^TimeoutStartSec=75min$/m, "a hung oneshot cannot silence every later timer tick");
+    assert.match(watchdog, /^KillMode=control-group$/m, "the backstop ends the whole tick, including stuck children");
+    assert.match(watchdog, /^SendSIGKILL=yes$/m);
+
 
     // The heap ceiling is the difference between the retro rung completing and aborting at ~2046 MB.
     // W1-T2953: the heap comes from the INPUT, never a constant — it rendered 4096 by default while

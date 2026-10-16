@@ -202,6 +202,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic } from "./lib/fs-race-safe.js";
+import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
@@ -1039,6 +1040,7 @@ import {
   type RetroAttemptRecord,
   type RetroBackoffDecision,
   type RetroBackoffPolicy,
+  serializeRetroDispatch,
 } from "./lib/retro.js";
 import {
   runRetroPrepublishPreflight,
@@ -1431,6 +1433,9 @@ import {
   realRiskJudge,
   resolveRiskJudgeMount,
   riskJudgeDiffInputBudget,
+  riskJudgePlanContext,
+  riskJudgePlanContextDigest,
+  riskJudgePlanContextDigestFor,
   riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
@@ -1623,6 +1628,7 @@ import {
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
+  reconcileDependabotRefusedPath,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -1652,7 +1658,7 @@ import {
   gitClaimRunnerAsync,
   dispatchClaimRef,
   // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
-  parseClaimAnchorMessage,
+  claimDropRefusal,
   pidIsPresent,
   readNamespaceBootMs,
   findClaimMintRow,
@@ -3018,7 +3024,8 @@ export function handedOffHeadRiskJudge(
       input: {
         change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
         gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
-        planContext: { taskId: pr.taskId, taskType: task?.type },
+        planContext: riskJudgePlanContext(pr.taskId, task),
+        planContextDigest: riskJudgePlanContextDigest(task),
       },
       config: (() => {
         const riskPolicy = readRiskPolicy(policyPath(repoRoot));
@@ -3328,7 +3335,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
-import { taskAwaitsAmendment } from "./lib/refusal-amendment.js";
+import { refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable, resolveOwnerRepoAtAsync } from "./lib/owner-repo.js";
@@ -14373,7 +14380,8 @@ export async function runFixRung(opts: {
         reason: green ? "flake-confirmed" : "flake claim refuted" };
     }
     if (fixAction.kind === "hand-off") {
-      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha });
+      const refusalExcerpt = refusalExcerptFromFixReport(fixReport);
+      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha, ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}) });
       logFixDone();
       return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
     }
@@ -17383,34 +17391,6 @@ export function refreshManagedCheckout(
   // Async, so a fetch over a slow origin never holds the daemon loop (2026-10-08 profile: 20.1 s and 29.5 s blocks).
   const git = async (...args: string[]) => (await execFilePromise("git", ["-C", repoDir, ...args], { encoding: "utf8" })).stdout.trim();
   return refreshHeldManagedCheckout(repoDir, () => lock.release(), log, runInstall, git);
-}
-
-/**
- * W1-T9077: once the store holds the bundle for the managed checkout's revision, cut its engine tree (a detached worktree a
- * run child that outlives the daemon runs from), ledger how far the newest current engine lags main, and remove the engine
- * trees no run names. Off the loop, never rejects: a failure is ledgered and the previous engine stays the newest.
- */
-export async function buildEngineAfterStore(
-  repoDir: string,
-  stateRoot: string,
-  storeRoot: string,
-  stored: StoreBuildResult,
-  log: (step: string, extra?: Record<string, unknown>) => void,
-  /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
-  seams: Partial<Pick<EngineBuildOptions, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
-): Promise<void> {
-  if (stored.kind !== "built" && stored.kind !== "present") return;
-  try {
-    const git = seams.git ?? ((dir: string, args: readonly string[]) => hostWorktreeGitAsync(dir, args));
-    const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
-    const { isCurrent, ...buildSeams } = seams;
-    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, storeRoot, log, ...buildSeams });
-    if (built.kind === "failed") return;
-    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git, ...(isCurrent ? { isCurrent } : {}) });
-    await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });
-  } catch (error) {
-    log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
-  }
 }
 
 /** W1-T6356: the git half of {@link refreshManagedCheckout}, awaited so the daemon loop keeps turning while git runs. */
@@ -22073,7 +22053,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { taskId: task.id, taskType: task.type },
+      planContext: { ...riskJudgePlanContext(task.id, task) },
+      planContextDigest: riskJudgePlanContextDigest(task),
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
@@ -24154,7 +24135,19 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
 
   if (result.decision === "refuse") {
-    console.log(`no remudero-review posted (refused): ${view.url}`);
+    const refused = reconcileDependabotRefusedPath({
+      registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+      body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
+      capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+    });
+    if (refused === "failed") {
+      // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
+      log("dep-review.decided", { ...result, decision: "hold", review_decision: "refuse",
+        reason: "refused-path proposal not captured; will retry", pr_url: view.url, head_sha: view.headRefOid });
+      console.log(`refused, owned-build proposal NOT captured; will retry: ${view.url}`);
+      return 1;
+    }
+    console.log(`no remudero-review posted (refused; owned-build proposal ${refused}): ${view.url}`);
     return 2;
   }
   if (result.decision === "hold") {
@@ -27884,7 +27877,7 @@ export function classifyReservationAnchor(message: string, caller?: ReservationC
     const holder = callerFromReservationAnchor(m);
     if (!caller) return "fleet";
     if (!holder) return "unknown";
-    return holder.pid === caller.pid && holder.host === caller.host ? "self" : "fleet";
+    return holder.pid === caller.pid && sameHost(holder.host, caller.host) ? "self" : "fleet";
   }
   if (/^reserve\s+W1-T\d+\b/.test(m)) return "operator";
   return "unknown";
@@ -33875,9 +33868,24 @@ async function retroCommand(
      * real dynamically-enumerated plan-reading preflight. */
     prepublishPreflight?: typeof runRetroPrepublishPreflight;
     openPrs?: GhApiFetcher;
+    /** W1-T9363: set only by the lane gate below, on its own re-entry, once it holds the lock. */
+    inRetroLane?: true;
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  // W1-T9363: one retro at a time per root, held from the open-PR read through publication, so a
+  // second retro (an operator run beside the daemon's) defers instead of synthesizing from the same
+  // merge-base. A dry-run writes nothing, so it never takes the lock.
+  if (!dryRun && !opts.inRetroLane) {
+    const laneConfig = loadConfig();
+    const lane = await serializeRetroDispatch(join(laneConfig.root, "state", "retro.lock"),
+      () => retroCommand(rest, { ...opts, inRetroLane: true }));
+    if (lane.kind === "completed") return lane.value;
+    appendLedger(ledgerPathFor(laneConfig), { run_id: `RETRO-${nextLaneEpochMs()}`, task_id: "RETRO", step: "retro.skipped_in_flight",
+      lane: "retro", holder_pid: lane.holder.pid, holder_host: lane.holder.host, holder_started_at: lane.holder.startedAt });
+    console.log(`\n### [retro] retro skipped — another retro (pid ${lane.holder.pid} on ${lane.holder.host}) holds the lane`);
+    return 1;
+  }
   const checkoutRoot = opts.repoRoot ?? repoRoot;
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
@@ -39943,7 +39951,7 @@ export async function daemonCommand(
   const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const adoptedRunIds = new Set<string>();
   const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
-    step: ["run_child.settled"], refuseIncomplete: true,
+    step: ["run_child.settled"], pattern: /"step":"run_child\.settled"/, refuseIncomplete: true,
   }) : undefined;
   if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
   const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
@@ -40449,7 +40457,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
+            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).externalWaitFreshness,
             restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
@@ -40546,8 +40554,8 @@ export async function daemonCommand(
         // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
         // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
-          ? daemonFreshnessReads(repoRoot).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
+          ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
@@ -44105,7 +44113,9 @@ function* openPrViewSteps(
     repo,
     raw
       .filter((pr) => emitterPlanFilings.get(pr.number) !== true)
-      .map((pr) => ({ number: pr.number, headRefOid: pr.headRefOid })),
+      .map((pr) => ({
+        number: pr.number, headRefOid: pr.headRefOid, nominated: resolveOpenPrTaskId(pr, false) === undefined,
+      })),
     fetch,
     deps.planFilingFileCache ?? createPlanFilingFileCache(),
     { missCap: deps.planFilingFileMissCap ?? DEFAULT_SWEEP_POLICY.planFilingAdmissionBound },
@@ -47319,6 +47329,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       behindMainByPr,
       baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+      planContextDigestFor: riskJudgePlanContextDigestFor(plan),
       handedOffHeadJudgments,
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
@@ -48714,6 +48725,7 @@ export function buildSweepHook(
           baseChangedFilesByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+          planContextDigestFor: riskJudgePlanContextDigestFor(plan),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
@@ -49105,6 +49117,7 @@ export function buildSweepLightHook(
                 readMainPlan: resolvedReadMainPlan },
             }),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
+            planContextDigestFor: riskJudgePlanContextDigestFor(activePlan),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
@@ -53640,7 +53653,7 @@ export async function approveCommand(
       if (!candidate) return undefined;
       // W1-T9161: the approve that wrote this row may still be in its CI wait, about to merge the PR or arm it. A pid is
       // only a process on the host that wrote it; a dead pid, another host's, or a row naming none keeps the join.
-      if (candidate.actorPid !== undefined && candidate.host === hostname() && defaultIsPidAlive(candidate.actorPid)) {
+      if (candidate.actorPid !== undefined && sameHost(candidate.host, hostname()) && defaultIsPidAlive(candidate.actorPid)) {
         log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
         return undefined;
       }
@@ -56794,11 +56807,9 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
       console.error(`rmd claim: ${ref} is not held — nothing to drop`);
       return 1;
     }
-    const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
-    const localHost = opts.localHost ?? hostname();
-    if (!identity || identity.host !== localHost) {
-      const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
-      console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);
+    const refusal = claimDropRefusal(ref, reserver.anchorMessage?.(taskId), opts.localHost ?? hostname());
+    if (refusal !== undefined) {
+      console.error(`rmd claim: ${refusal}`);
       return 1;
     }
     if (!reserver.drop(taskId, { expect: sha })) {
@@ -57573,8 +57584,10 @@ import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./li
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot, type StoreBuildResult } from "./lib/child-entry-store.js";
-import { ensureEngineTree, newestCurrentEngine, pruneEngineTrees, type EngineBuildOptions } from "./lib/engine-tree.js";
+import { buildIntoStore, childEntryStoreRoot } from "./lib/child-entry-store.js";
+// W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
+import { buildEngineAfterStore } from "./lib/engine-tree.js";
+export { buildEngineAfterStore };
 import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,

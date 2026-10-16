@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { sameHost } from "./host-identity.js";
 
 /**
  * PER-TASK IN-FLIGHT LOCK (docs/archive/DIAGNOSIS.md, diag/drain-sequential-await).
@@ -258,7 +259,7 @@ export function sweepStaleInflightLocks(
       // Mirror isHolderStale's rung 1 EXACTLY (same `myHost`, same "absent host ⇒ skip the
       // check" reading) so the split can never disagree with the predicate that already decided
       // this lock was not reaped: a foreign host is UNVERIFIABLE, not confirmed alive.
-      if (reclaim.holder.host !== undefined && reclaim.holder.host !== myHost) {
+      if (reclaim.holder.host !== undefined && !sameHost(reclaim.holder.host, myHost)) {
         result.unverifiableForeignHost.push(taskId);
       } else {
         result.live.push(taskId);
