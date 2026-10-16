@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { linkSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { Script } from "node:vm";
 import { assessWorkspaceDiskBudget, sampleWorkspaceUsage, workspaceSizeWarning, workspaceUsageEvidence } from "../src/lib/workspace-usage.js";
 import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 import { renderCanaryReport } from "../src/lib/model-canary-report.js";
@@ -74,4 +75,6 @@ test("private resource evidence labels phase sampling cleanup and missing measur
   const html = renderCanaryReport([]);
   assert.match(html, /Observed generated disk/);
   assert.match(html, /transient peaks unmeasured/);
+  const script = html.match(/<script>([\s\S]*)<\/script>/)![1]!;
+  assert.doesNotThrow(() => new Script(script), "the actual private report script parses");
 });
