@@ -1,0 +1,75 @@
+- id: W1-T9807
+  title: "A 'MAIN-OWNED' SCOPE REFUSAL IS NEVER RETRIED, AND IT FIRES ON ANY HOT FILE — runFixRung refuses a NEEDS_SCOPE path as main-owned whenever main touched it since the merge base, in any round mode, and its 'refresh against main' is prose nothing reads: #12043 (W1-T9363) round 1 (reviewer-unmet, 2026-10-15 22:46Z) was refused for src/run-task.ts, which main changed 40 times that day, and three later refreshes never retried it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — when a fix round's scope request is refused because main owns a path, and how it is retried; the amendment writer and #10459's remedy-surface filter are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 4 (D2): #12043 (W1-T9363) round 1 NEEDS_SCOPE src/run-task.ts refused main-owned, never retried; the operator's #12297 amendment then added src/run-task.ts to files"
+  plan_refs: [W1-T9363, W1-T9792, W1-T9561, W1-T6465, W1-T5801]
+  files:
+    - src/run-task.ts
+    - test/a-main-owned-scope-refusal-is-retried-once-main-is-merged.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-16: a scope need on a hot file is refused for good, so the PR waits for an operator amendment (#12043, #12297)
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16):
+    - src/run-task.ts `runFixRung`, `fixAction.kind === "scope-needed"` arm:
+      `const scopeMain = mainOwnedPaths(opts.worktreePath, fixAction.paths);`
+      `if (scopeMain.outcome === "compared" && scopeMain.owned.length > 0) { amendment = { kind: "refused", reason:
+      "main-owned", detail: ... "since this PR's merge base; refresh against main" }; ... }`
+      The round then logs `fix.commit_refused` "non-test paths need scope" and stands down. Nothing requests the
+      refresh, and nothing records a retry.
+    - The `pendingScope` check at the top of the next round matches only outcomes created, resumed and
+      branch_update_requested, so a refused main-owned row is never revisited. The amendment is filed only if a
+      later worker happens to report NEEDS_SCOPE again with a merge base newer than main's last touch.
+    - `mainOwnedPaths` ("a red there is main's, so refresh, never patch (#10369)") came in with #10459 (aa7592838)
+      for CI-log-named remedy paths. The same commit applied it to every NEEDS_SCOPE request, including a
+      reviewer-unmet round, where no red exists for main to own.
+    - main changed src/run-task.ts in 40 of its 245 commits on 2026-10-15, so a scope need on it is main-owned
+      almost always.
+    - #12043, per W1-T9792's measured rationale: round 1 (reviewer-unmet) ended NEEDS_SCOPE src/run-task.ts, refused
+      main-owned. Three branch refreshes followed and the scope was never re-requested. The operator's #12297
+      (23a75a52a) added `src/run-task.ts` to W1-T9363's files by hand.
+    - W1-T9561's census of 10-04..14 counts 3 main-owned refusals among 27 refused amendments.
+    - Core ledger (read 2026-10-16, archives 10-13..16 plus live), `fix.scope_amendment` refused `main-owned`:
+      2026-10-09T22:29Z [src/lib/plan.ts, test/machine-filed-task-admission.test.ts], 10-10T03:39Z
+      [src/lib/sweep.ts], 10-11T14:37Z [scripts/pure-test-pool.mjs, scripts/test-tier-manifest.mjs] and
+      10-15T22:46:57Z [src/run-task.ts] (#12043's round 1). No later row for #12043 retries it.
+    - NOT COVERED: W1-T9792 turns a categorized NEEDS_DESIGN refusal into a plan amendment. It does not touch the
+      main-owned arm. W1-T9802 and W1-T9561 do not either. No open head changes `mainOwnedPaths`' scope caller.
+  design: |
+    1. NARROW THE REFUSAL. The scope-needed arm refuses main-owned only for a path that is both main-owned and named
+       by the round's failing CI log (`logNamedMain.owned`, already computed for #10459's remedy filter). That is
+       the #10369 class. In a reviewer-unmet, gate-fix or merge-conflict round, or for a path the log does not name,
+       main's touch is not a refusal, and `amendScope` runs as for any other path.
+    2. RETRY WHAT IS REFUSED. A main-owned refusal records `main_sha` (the refs/remotes/origin/main it compared) on
+       its `fix.scope_amendment` row, and the round requests the refresh itself (`deps.updateBranch`, ledgered
+       `fix.base_refreshed` with reason `scope-main-owned`).
+    3. THE NEXT HEAD. The `pendingScope` check also matches a `main-owned` refusal for this task and PR whose
+       `main_sha` is an ancestor of the current head (`git merge-base --is-ancestor`). The refresh has landed main's
+       change, so it calls `amendScope` with the recorded paths. A head that does not yet contain `main_sha` waits as
+       today.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below; drive `runFixRung` with fakes and a gitRepo
+       fixture):
+       - a reviewer-unmet round whose worker reports NEEDS_SCOPE for a path main changed since the merge base files
+         the scope amendment (#12043's round 1 shape);
+       - a ci-log round whose failing log names that main-owned path is still refused main-owned (#10369's guard,
+         positive control), and its row carries `main_sha`;
+       - at a later head containing `main_sha`, the round retries `amendScope` with the recorded paths without a
+         new worker; at a head without it, nothing is retried.
+  acceptance:
+    - claim: "a scope need in a round with no main-owned red is amended even when main touched the path"
+      proof: 'grep: test("W1-T9807: a reviewer-unmet scope need on a path main touched gets its amendment" in test/a-main-owned-scope-refusal-is-retried-once-main-is-merged.test.ts'
+    - claim: "a ci-log-named path main is repairing is still refused main-owned"
+      proof: 'grep: test("W1-T9807: a log-named path main is repairing is still refused main-owned" in test/a-main-owned-scope-refusal-is-retried-once-main-is-merged.test.ts'
+    - claim: "a main-owned refusal is retried at the first head that contains the main it compared"
+      proof: 'grep: test("W1-T9807: a main-owned refusal is retried once its main is merged" in test/a-main-owned-scope-refusal-is-retried-once-main-is-merged.test.ts'
+  falsifier: |
+    At origin/main, a reviewer-unmet runFixRung round whose worker ends `FIX_OUTCOME: NEEDS_SCOPE src/x.ts`, where main
+    changed src/x.ts since the merge base and the branch did not, logs `fix.scope_amendment` refused `main-owned` and never
+    calls the amendment writer, so the first test fails.
