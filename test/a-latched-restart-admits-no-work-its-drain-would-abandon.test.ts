@@ -17,8 +17,6 @@ import * as daemonModule from "../src/lib/daemon.js";
 import { runDaemon, type DaemonDeps, type LightPassScope, type ReviewAdmissionGate } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildSweepLightHook } from "../src/run-task.js";
-import { ghShim } from "./helpers/gh-shim.js";
 import {
   DEFAULT_SWEEP_POLICY, detachedSweepActionCount, drainDetachedSweepActions, drainInFlightReviews, inFlightReviewCount,
   runSweepLightPass, type OpenPrView, type SweepDeps,
@@ -167,10 +165,15 @@ test("W1-T9808: after the latch a light pass dispatches no fix its drain would a
   } finally {
     await short.cleanup();
   }
-  // The production hook closes its fix rung on that predicate: it asks it for a fix on the light surface.
+  // The production hook closes its fix lanes on that predicate (`lightPassFixAdmitted`), asked on the light surface.
   const asked: string[] = [];
-  await runLightHook({ reviewOnly: false, admit: (kind, surface) => { asked.push(`${kind}:${surface}`); return false; } });
-  assert.ok(asked.includes("fix-dispatch:light"), JSON.stringify(asked));
+  const admitted = (answer: boolean, reviewOnly = false) => daemonModule.lightPassFixAdmitted?.({ reviewOnly,
+    admit: (kind, surface) => { asked.push(`${kind}:${surface}`); return answer; } });
+  assert.equal(admitted(false), false, "a refused fix closes the light pass's fix lanes");
+  assert.deepEqual(asked, ["fix-dispatch:light"]);
+  assert.equal(admitted(true), true);
+  assert.equal(admitted(true, true), false, "a review-only pass never opens them");
+  assert.equal(daemonModule.lightPassFixAdmitted?.(undefined), true, "with no scope the ordinary pass is unchanged");
 });
 
 test("W1-T9808: after the latch a full-sweep retrigger dispatches no fix its drain would abandon", async (t) => {
@@ -287,7 +290,7 @@ test("W1-T9808: a fix round runs from its start to its own fix.done", () => {
   assert.equal(daemonModule.medianFixRoundMs([]), undefined);
 });
 
-// ── the light pass and the production hook ─────────────────────────────────────────────────────────
+// ── the light pass ─────────────────────────────────────────────────────────────────────────────────
 
 const NOW = Date.now();
 const twoLanes = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 2, reviewLaneMin: 1, reviewLaneMax: 2 };
@@ -331,26 +334,4 @@ function lightPassHarness() {
     await drainInFlightReviews({ boundMs: 1000 });
   };
   return { deps, hold, started, asked, rows, finish };
-}
-
-async function runLightHook(scope: LightPassScope): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t9808-hook-`));
-  const shim = ghShim([
-    { when: "pulls?state=open", stdout: "[]" },
-    { when: "", stdout: "{}" },
-  ], { kind: "t9808-gh" });
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${shim.dir}:${oldPath}`;
-  try {
-    const hook = buildSweepLightHook(
-      "o", "r", { root } as never, join(root, "ledger.ndjson"), "RUN-T9808",
-      { tasks: [] } as never, () => {},
-      { loadedCodeSha: "boot-loaded-sha", isLoadedCodeAtOrAfter: () => false },
-    );
-    await hook(scope);
-  } finally {
-    process.env.PATH = oldPath;
-    rmSync(shim.dir, { recursive: true, force: true });
-    rmSync(root, { recursive: true, force: true });
-  }
 }

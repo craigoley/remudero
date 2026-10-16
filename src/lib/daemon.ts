@@ -2056,6 +2056,11 @@ export interface LightPassScope {
 /** W1-T9808: a latched restart's admission predicate. A call without `surface` is a probe: no hold row, no count. */
 export type RestartAdmission = (kind: "review" | "fix-dispatch", surface?: "light" | "light-refill" | "full-sweep") => boolean;
 
+/** W1-T9808: may this light pass open its fix lanes? Never on a review-only pass, nor when the latch refuses a fix. */
+export function lightPassFixAdmitted(scope?: LightPassScope): boolean {
+  return scope?.reviewOnly !== true && scope?.admit?.("fix-dispatch", "light") !== false;
+}
+
 interface InterphaseReviewClock {
   /** Stops new admission, lets an already-started pass settle, and reports whether this clock
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how

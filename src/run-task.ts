@@ -480,6 +480,7 @@ import {
   type IntakeRungDecision,
   type IntakeRungRunResult,
   type LightPassScope,
+  lightPassFixAdmitted,
   type ReviewAdmissionGate,
   type StarvationCensus,
   type StarvationClearedInfo,
@@ -49079,7 +49080,7 @@ export function buildSweepLightHook(
       // W1-T1211: ONE read per tick. `readLedgerLines` is the same reader every other rung in this
       // file uses, and the in-flight ids come from lock FILENAMES — no pid probe, no lock content.
       // W1-T9808: after a restart latched, a fix that would outlast the drain's time left closes the fix rung.
-      const fixAdmitted = !reviewOnly && scope?.admit?.("fix-dispatch", "light") !== false;
+      const fixAdmitted = lightPassFixAdmitted(scope);
       const fixRungAllowed = fixAdmitted && fixRungAllowedBesideInFlight(
         readLedgerLines(ledgerPath),
         inFlightTaskIdsFrom(join(config.root, "state", "inflight")),
