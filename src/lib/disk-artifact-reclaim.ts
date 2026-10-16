@@ -209,7 +209,8 @@ function sweepArtifactRoot(
   try {
     names = listEntries(scanRoot);
   } catch {
-    return { reclaimed, kept, bytesReclaimed }; // unreadable root — best-effort, matches reapStaleWorktrees
+    keep(scanRoot, "unreadable", { what: "readdir" });
+    return { reclaimed, kept, bytesReclaimed };
   }
 
   for (const name of names) {
