@@ -15,9 +15,11 @@ import type { OnboardingReadinessGateway } from "../src/lib/onboarding-readiness
 import { makeTempDir } from "../src/lib/tmp.js";
 import { createSelectedRegistryObserver } from "../src/lib/selected-registry-consumers.js";
 import * as registryConsumers from "../src/lib/selected-registry-consumers.js";
-import { createRepositoriesReadModelView } from "../src/lib/repositories-view.js";
-import { ledgerSource, readModelLaneViews } from "../src/lib/read-model-worker.js";
+import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "../src/lib/repositories-view.js";
+import { createReadModelWorker, ledgerSource, readModelLaneViews } from "../src/lib/read-model-worker.js";
 import { createDemandBook } from "../src/lib/view-demand.js";
+import { trackWorkerThreads } from "../src/lib/worker-heaps.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 import { readSelectedInstanceRegistry, registryFileIO } from "../src/lib/instance-registry-selection.js";
 
 interface Row { step: string; fields: Record<string, unknown> }
@@ -43,7 +45,8 @@ async function invoke(route: Route, repo = "owner/repo"): Promise<{ code: number
 
 function fixture(t: { after(fn: () => void): void }, selected = true) {
   const root = makeTempDir("selected-serve-consumer");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let retained = false;
+  t.after(() => { if (!retained) rmSync(root, { recursive: true, force: true }); });
   const legacy = join(root, "legacy.yaml"), path = join(root, "selected.yaml");
   writeFileSync(legacy, selectedText("legacy"));
   if (selected) writeFileSync(path, selectedText());
@@ -53,7 +56,7 @@ function fixture(t: { after(fn: () => void): void }, selected = true) {
     record: (step: string, fields: Record<string, unknown>) => { rows.push({ step, fields }); },
   };
   const input = { repoRegistryPath: legacy, gateway, selectedRegistryObservation: options };
-  return { root, legacy, path, rows, options, input, route: buildOnboardingReadinessRoute(input) };
+  return { root, legacy, path, rows, options, input, route: buildOnboardingReadinessRoute(input), preserve: () => { retained = true; } };
 }
 
 async function observed(rows: Row[]): Promise<Record<string, unknown> | undefined> {
@@ -327,6 +330,51 @@ test("selected real view-lane factory consumes optional shadow intent while old 
   const old = readModelLaneViews({ instances: [] }, clock, f.options.record, demand).find(view => view.name === "repositories"); assert.ok(old && "create" in old);
   assert.deepEqual(old.create().materialize({ now: 0, instances: [] }), []);
   assert.deepEqual(f.rows, [], "an absent old contract does not opt in by upgrade");
+});
+
+test("selected default projector and view workers carry optional intent without changing cached public bodies", { timeout: 60000 }, async (t) => {
+  const f = fixture(t), stateDir = join(f.root, "state");
+  mkdirSync(stateDir); mkdirSync(join(f.root, "plan"));
+  writeFileSync(join(stateDir, "ledger.ndjson"), ""); writeFileSync(join(f.root, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(f.legacy, selectedText("core"));
+  createRepositoriesSourcePublisher({ stateDir, instances: () => [{ instanceId: "core", options: {
+    root: f.root, repoRegistryPath: f.legacy, ownInstance: "core",
+  } }] })();
+  switchViewsOn(stateDir, ["repositories"], "shadow");
+  let legacyBody: unknown;
+  for (const enabled of [false, true]) {
+    f.rows.length = 0;
+    const threads = trackWorkerThreads();
+    const options: Parameters<typeof createReadModelWorker>[0] = {
+      stateDir, instances: [{ name: "core", ledgerDir: stateDir }], tickMs: 20, every: () => () => {},
+      selectedRegistryObservation: enabled ? f.options : undefined,
+      log: (step, fields = {}) => { f.rows.push({ step, fields }); },
+    };
+    const worker = createReadModelWorker(options);
+    options.selectedRegistryObservation = undefined;
+    try {
+      worker.start();
+      for (let n = 0; n < 1000 && (!worker.body("repositories") || (enabled && !f.rows.some(row => row.step === STEP && row.fields.target_instance === "core"))); n++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const body = worker.body("repositories")?.body.data; assert.ok(body, "the real default workers must produce an actual cached body");
+      const selected = f.rows.filter(row => row.step === STEP);
+      if (!enabled) { assert.deepEqual(selected, []); legacyBody = body; }
+      else {
+        assert.ok(selected.some(row => row.fields.action === "repositories-view" && row.fields.target_instance === "core"), "actual projector -> view thread -> factory forwarding, not just a fixture object");
+        assert.ok(selected.every(row => row.fields.selected_state === "unknown" && row.fields.publication_permission === "not-granted"));
+        assert.ok(!JSON.stringify(selected).includes(f.path));
+        assert.deepEqual(body, legacyBody, "selected observation does not choose another public portfolio source");
+      }
+      assert.ok(!JSON.stringify(body).includes("selected-material-sentinel"));
+    } finally {
+      worker.stop();
+      for (let n = 0; n < 200 && threads.live().length; n++) await new Promise(resolve => setTimeout(resolve, 10));
+      const remaining = threads.live().length; threads.stop();
+      if (remaining) f.preserve();
+      assert.equal(remaining, 0, "preserve the fixture if any owned writer has not actually exited");
+    }
+  }
 });
 
 test("selected readiness absent opt-in preserves legacy checks without a selected read or receipt", async (t) => {
