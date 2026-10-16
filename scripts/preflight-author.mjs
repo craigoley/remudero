@@ -17,6 +17,7 @@ import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindin
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
+import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -177,13 +178,47 @@ export function authorSelection(root, changed, range, spawn = spawnSync) {
   });
 }
 
+/** Judge the publication destination, never the local branch name. Unknown is not a pass.
+ *  No automatic consumer supplies the target yet; measurement is scoped to explicit caller input.
+ *  `git` is the author's checked, environment-scrubbed runner, pinned to this worktree. */
+export function authorPublicationIdentity({ headRef, headSha, baseSha, publicationSha }, git) {
+  const scope = { headRef: headRef ?? null, headSha, baseSha };
+  const refuse = (message) => ({ ...scope, state: 'refused', message });
+  if (publicationSha !== undefined && publicationSha !== headSha) {
+    return refuse(`publication head ${publicationSha} is not the committed author HEAD ${headSha}; validate the tree that will be published`);
+  }
+  if (headRef === undefined) {
+    return { ...scope, state: 'unknown-target', message: 'publication target unknown; pass --head-ref <destination branch> before publication; identity NOT verified' };
+  }
+  const branch = headRef.replace(/^refs\/heads\//, '');
+  if (!branch || branch === 'HEAD' || (headRef.startsWith('refs/') && !headRef.startsWith('refs/heads/'))) {
+    return refuse('--head-ref must name the destination branch, optionally prefixed with refs/heads/');
+  }
+  scope.headRef = branch;
+  scope.targetRef = `refs/heads/${branch}`;
+  try {
+    git(['check-ref-format', scope.targetRef]);
+    // Match head-identity-gate's author-message walk and diff, at the EXACT committed SHA.
+    // No bare HEAD read: a refspec may publish another commit, which this author run cannot certify.
+    const headCommitMessage = git(['log', '-1', '--first-parent', '--no-merges', '--format=%B', headSha]);
+    if (!headCommitMessage.trim()) return refuse('cannot read the publication head author message');
+    const changedPaths = git(['diff', '--name-only', '-z', '--no-renames', `${baseSha}...${headSha}`]).split('\0').filter(Boolean);
+    const result = evaluateHeadIdentityGate({ headCommitMessage, headRef: branch, changedPaths });
+    return { ...scope, state: result.ok ? 'passed' : 'refused', message: result.message };
+  } catch (error) {
+    return refuse(`publication identity could not be measured: ${error.message}`);
+  }
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
     'runtime-profile': { type: 'string' },
-  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; full hosted CI remains required.' });
+    'head-ref': { type: 'string' },
+    'head-sha': { type: 'string' },
+  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--head-ref <publication destination branch> [--head-sha <committed HEAD sha>]] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; unknown publication target is NOT identity assurance; full hosted CI remains required.' });
   if (helpRequested) return 0;
   const startedAt = Date.now();
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
@@ -312,6 +347,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     if (shallow !== 'false') throw new Error('Git history completeness is unavailable; author selection and expensive validation were not started');
     receipt.gitHistory.state = 'complete';
+    receipt.publicationIdentity = authorPublicationIdentity({ headRef: values['head-ref'],
+      publicationSha: values['head-sha'], headSha: receipt.headSha, baseSha: receipt.baseSha }, git);
+    console.log(`publication identity: ${receipt.publicationIdentity.state}; ${receipt.publicationIdentity.message}`);
+    if (receipt.publicationIdentity.state === 'refused') {
+      receipt.affectedTestsNotRunReason = 'publication identity refused; no selection, dependency, census, heavy slot, static or test phase was started';
+      throw new Error(receipt.publicationIdentity.message);
+    }
     receipt.changedFiles = git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`]).split('\0').filter(Boolean);
     if (receipt.changedFiles.length === 0) throw new Error('empty author diff: nothing to verify');
     const selection = select(receipt.changedFiles, `${receipt.baseSha}...${receipt.headSha}`);

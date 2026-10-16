@@ -1141,6 +1141,8 @@ import {
   type VerifyHumanReleaseHook,
   type VerifyHumanVerdict,
 } from "./lib/verify-human-judge.js";
+import { withWhyMeJudgmentInput } from "./lib/inbox-why-me.js";
+import { readPersistedInbox } from "./lib/fleet-lane.js";
 import { EMPTY_RELEASE_AUDIT_STATE, releaseAutomatedShard, runReleaseAudit, type ReleaseAuditState } from "./lib/verify-human-release.js";
 import { censusHandRuns } from "./lib/hand-run-census.js";
 import { gunzipSync } from "node:zlib";
@@ -1632,6 +1634,9 @@ import {
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
+  reconcileDependabotStaleEvent,
+  dependabotStaleEventVerdict,
+  buildDepReviewStaleEventEscalation,
   reconcileDependabotTitle,
   depReviewRequiredSet,
   type DepReviewRequired,
@@ -1762,6 +1767,7 @@ import {
   checksStateFromRollup,
   checksPendingSinceFromRollup,
   CI_GATE_CHECK_NAME,
+  supersededRedsNowPassing,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
   deriveDayUnpricedRows,
@@ -24104,7 +24110,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,baseRefName,author,statusCheckRollup,commits",
+    "number,url,title,body,headRefOid,headRefName,baseRefName,author,statusCheckRollup,commits,mergeStateStatus,autoMergeRequest",
   ])) as {
     number: number;
     url: string;
@@ -24116,6 +24122,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
     commits?: DependabotHeadCommit[];
+    mergeStateStatus?: string;
+    autoMergeRequest?: unknown;
   };
   const config = deps.config ?? loadConfig();
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
@@ -24347,6 +24355,22 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     return 0;
   }
   if (result.decision === "arm") {
+    const raw = view.statusCheckRollup ?? [];
+    const stale = dependabotStaleEventVerdict({
+      mergeStateStatus: view.mergeStateStatus, autoMergeArmed: view.autoMergeRequest != null,
+      reviewPosted: raw.some((c) => (c.context ?? c.name) === REVIEW_CONTEXT && String(c.state ?? c.conclusion ?? "").toUpperCase() === "SUCCESS"),
+      supersededReds: supersededRedsNowPassing(raw),
+    });
+    if (stale.kind === "stale-event") { // W1-T9913: one fresh event for a superseded red, never a re-post.
+      const outcome = reconcileDependabotStaleEvent({
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, checks: stale.checks, nowMs: clock.now(), log,
+        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body),
+        escalate: () => escalate(buildDepReviewStaleEventEscalation({ prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+          headSha: view.headRefOid, checks: stale.checks }), { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      });
+      console.log(`dependabot stale-event block ${outcome} (${stale.checks.join(", ")}): ${view.url}`);
+      return 1;
+    }
     // W1-T228: guarded post — decideDepReview never executes a proof, so
     // this attempt's evidence is always "no_evidence"; the guard still
     // refuses it if a STRONGER (executed) verdict is already posted for this
@@ -32437,7 +32461,7 @@ export async function defaultVerifyHumanCadenceResult(
     const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const result = await verifyHumanCadence({
-      shards: parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited),
+      shards: withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, repoRoot, clock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME }),
       priorVerdicts: priorVerifyHumanVerdicts(rows),
       priorAgeBandKeys: priorVerifyHumanAgeBandKeys(rows),
       judge: shadowedVerifyHumanJudge({
@@ -52882,7 +52906,7 @@ export async function verifyHumanSweepCommand(
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited);
+  const shards = withWhyMeJudgmentInput(parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
   const priorVerdicts = priorVerifyHumanVerdicts(rows);
 
   if (dryRun) {

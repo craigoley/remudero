@@ -249,6 +249,24 @@ test("the judge's preload stays out of worker threads: a thread that throws stil
   }
 });
 
+test("a run whose test timed out under --test-force-exit fails, pooled or isolated, though node exits 0 with # fail 0", () => {
+  const root = tierFixture();
+  // CI 38972373415: seven pooled tests hit their timeout; node counts that `cancelled`, not `fail`,
+  // and --test-force-exit exited 0, so the pool read green and its leak ladder never ran.
+  writeFileSync(join(root, "test/f-hangs.test.ts"), `import test from "node:test";\ntest("f never settles", () => new Promise(() => {}));\n`);
+  for (const pooled of [true, false]) {
+    const log: string[] = [];
+    const status = pool.spawnJudgedRun(["test/a-first.test.ts", "test/f-hangs.test.ts"], {
+      spawn: realSpawn as never, cwd: root,
+      args: ["--test", "--test-reporter=tap", "--test-reporter-destination=stdout", "--test-timeout=300", "--test-force-exit",
+        ...(pooled ? ["--experimental-test-isolation=none"] : [])],
+      pool: pooled, role: pooled ? "pool" : "rest", log: (l) => log.push(l), env: childEnv(),
+    });
+    assert.notEqual(status, 0, `pooled=${pooled}: ${log.join("\n")}`);
+    assert.match(log.join("\n"), /# cancelled 1: a test that timed out/, `pooled=${pooled}`);
+  }
+});
+
 test("unit test: an isolated run names the unreported file's own last test and exit", () => {
   const root = "/fixture-root";
   const files = ["test/a.test.ts", "test/b.test.ts"];

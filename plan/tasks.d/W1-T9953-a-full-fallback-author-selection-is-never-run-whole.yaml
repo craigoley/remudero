@@ -1,0 +1,111 @@
+- id: W1-T9953
+  title: "A FULL-FALLBACK AUTHOR SELECTION IS NEVER RUN WHOLE ON A SHARED HOST — under --deadline, preflight-author prices the full fallback against the whole remaining deadline, admits all 3,645 suites at 1-3 workers and holds a shared Mac test slot for 2+ hours to give a slower copy of the full run CI does anyway; it must name the file that forced the fallback, run a reach-and-cost-bounded partial set, and say the rest is CI's"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # one concern: what preflight-author runs when the selector falls back to everything; the shared selector is unchanged
+  band_meaning: blast-radius
+  origin: 'W1-T9928 rationale (slot-1 held by a 3,645-file full-fallback run); coordinator brief 2026-10-16 "why preflight-author selects the FULL suite"'
+  plan_refs: [W1-T7809, W1-T5895, W1-T4404, W1-T6084, W1-T9928, W1-T9951]
+  files:
+    - scripts/preflight-author.mjs
+    - test/a-full-fallback-author-selection-is-never-run-whole.test.ts
+  status: queued
+  priority: 1  # every full-fallback author run under a deadline holds a shared Mac test slot for hours
+  attempts: 0
+  rationale: |
+    OBSERVED:
+    - W1-T9928's rationale, 2026-10-16 17:28-19:33Z: pid 70214, `node --import tsx scripts/preflight-author.mjs` in a
+      Codex checkout, held /tmp/rmd-test-slots/slot-1.json (label preflight-author:static-and-affected, concurrency
+      2). Its grandchild was `node --test --test-concurrency=1` over 3,645 test files, a full-fallback selection. It
+      had been working for 2 h 04 m. Another agent saw a preflight hold slot-1 for 1 h 45 m or more.
+    - Every Codex author receipt kept on this Mac for 2026-10-15 (task-receipts-20261015-runtime-health, 17 files)
+      that reached the tests ran with `capacity.budgetSource: validated-native-fixed-deadline`, which means
+      `--deadline` plus `--runtime-profile`. Without them, the same 414-suite W1-T9699 selection went over-capacity
+      against a 900000 ms budget.
+    - A dry run at a8f760d76 on a one-line deploy/acr-login.sh commit printed only `author selection:
+      full-fallback, 3667 suite(s) (floor full, narrow none)`. Its reason, "deploy/acr-login.sh is outside what the
+      selector models (the read map cannot speak for it: no read map supplied)", went to the receipt JSON alone.
+    MEASURED at a8f760d76, with this repo's scripts/test-tier-manifest.json and listTestFiles:
+    - priceSelection over all 3,667 suites gives 13,834,083 ms (3.84 h of suite time, with the 1.25 safety factor).
+    - hostBudget (legacy wall share, AUTHOR_WALL_SHARE of AUTHOR_STEP_RUNTIME_MS) gives 15 min per worker, so the
+      full set never fits. fittingSubset then runs only the changed tests (includeRest false for full-fallback).
+      That path is already safe.
+    - deadlineHostBudget gives workers x min(4 h, deadline - now - reserve). The full set FITS at 1 worker with a
+      4 h deadline (239 min budget for 230 min cost), at 2 workers with 2.5 h, and at 3 workers with 2 h.
+      capacityVerdict then admits all of it, and the affected-tests step runs every suite.
+    - Of the last 600 first-parent commits on main, 311 were not plan-only. fullRunTrigger(changed, false), the
+      author's view, since authorSelection never supplies a read map and no production caller of
+      readReadMapInput exists, fires on 55 of them (18%). The first trigger by class: deploy/ 20,
+      .github/workflows 9, learnings/ 8, test/helpers 5, .github/semgrep 4, hooks/ 3, test/setup 2,
+      .github/scripts 1, .gitignore 1, .mcp.json 1, package.json 1.
+    READ at a8f760d76 (symbols, not lines):
+    - scripts/preflight-author.mjs `main`: `budget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline })
+      : legacyBudget`, then `capacityVerdict(receipt.suites, manifest, budget)`. A full-fallback selection is
+      priced like any other. The `author selection:` console line prints the selection, count, floor and narrow,
+      never `receipt.reasons`.
+    - `fittingSubset(..., { includeRest: receipt.selection !== 'full-fallback' })` keeps only the changed tests
+      when a full fallback goes over capacity.
+    - src/lib/affected-suites.ts `fullRunTrigger` and `selectAffectedSuites` return `fullRun: true` naming only the
+      FIRST trigger. `buildAffectedSuitesGraph(files, extraTargets)` already records import and named-path edges to
+      any `extraTargets`.
+    - Every receipt carries `hostedFullSuiteAndCoverage: 'required-pending'`, and the closing line says "hosted
+      full-suite/coverage remains REQUIRED, not proven by this run". CI runs the full suite on every PR whatever the
+      author did.
+    WHY A LOCAL FULL RUN IS NEVER THE RIGHT ANSWER: it proves nothing CI does not prove again. It reaches that answer
+    hours later than CI's sharded run. And it holds one of the host's few test slots the whole time, so every other
+    session's preflight waits behind it (W1-T9928, W1-T9951).
+  design: |
+    In scripts/preflight-author.mjs only. The shared selector (src/lib/affected-suites.ts) is unchanged.
+    1. NAME WHY. When the selection is full-fallback (selector `fullRun`, or an empty floor), the `author selection:`
+       line is followed by one `full-fallback because: <reason>` line per selector reason. The receipt keeps
+       `reasons` as today.
+    2. SET ASIDE, DO NOT DISCARD. For a selector `fullRun`, take the changed files that are triggers on their own
+       (`fullRunTrigger([file], false) !== undefined`) as `setAside`. Build the PARTIAL set:
+       (a) the changed tests;
+       (b) the selection `select` gives for the changed files minus `setAside`, when that is non-empty and not
+           itself a fullRun. Its narrow arm is used when present, else its floor;
+       (c) every suite that reaches a set-aside file through the graph's importers. Use
+           `buildAffectedSuitesGraph(input.files, setAside)` over the same `readAffectedSuitesInput` files: a suite
+           that imports a changed test helper, or names deploy/x.sh by path, is the suite most likely to fail.
+       Order is (a), then (c), then (b), then measured duration ascending. This reuses fittingSubset's
+       reach-then-cost ordering, with `includeRest` true over the PARTIAL set only. Suites outside the partial set
+       are never run locally.
+    3. PRICE IT AGAINST THE HOST, NEVER THE DEADLINE. A full-fallback partial set is priced with `hostBudget`, the
+       host-derived wall share, even when `--deadline`/`--runtime-profile` validated a native budget. The deadline
+       may still SHRINK it: take the smaller of the two budgets, so it never expands a fallback. runtimeAdmission
+       still judges whatever subset runs.
+    4. SAY IT IS PARTIAL. The receipt records `selectedArm: 'full-fallback'`, `partial: { reasons, setAside,
+       tiers: { changed, setAsideReaders, modelled }, ran, leftToCi }`. The verdict is `over-capacity`, exit
+       OVER_CAPACITY_EXIT, never `passed`. The console prints `full-fallback: PARTIAL — ran <n> of <m> suite(s)
+       chosen by reach and measured cost; CI's full run is the check for <set-aside files> and the other <k>`.
+       When the partial set is empty (for example only .gitignore changed and nothing reaches it), affected-tests
+       is NOT RUN with that same sentence. No suite step starts, so no test slot is held for one. W1-T9951 owns
+       whether the slot is taken at all.
+    5. A non-full-fallback selection is unchanged, in both budget modes.
+    NAMED, NOT TAKEN HERE (each its own task, after this one lands): precise selection per trigger class, by the
+    measured counts above. deploy/ and *.json need a consumption-ready read map (W1-T6084; read-map-corpus says
+    `liveNarrowingAllowed: false`). test/helpers could walk the import graph like src/ (W1-T4404 made helpers a
+    full-run trigger on purpose). learnings/ and hooks/ could get path readers like docs/. Any of these changes the
+    selector CI's shadow measures, so it needs shadow evidence, not this author-side change.
+    Tests go in test/a-full-fallback-author-selection-is-never-run-whole.test.ts, titled verbatim as in the proofs.
+    Drive `main` with its existing `select`, `spawn` and `host` seams and a fixture manifest: an injected selection
+    returning `fullRun: true` with a deploy/ reason, a deadline far enough out that deadlineHostBudget would fit the
+    full list, and a spawn that records the affected-tests argv. No real suite runs.
+  acceptance:
+    - claim: "a full-fallback selection prints the selector's reason for it on the console, not only in the receipt"
+      proof: 'grep: test("W1-T9953: a full-fallback selection names the file that forced it" in test/a-full-fallback-author-selection-is-never-run-whole.test.ts'
+    - claim: "a full-fallback selection is never run whole, even when a native deadline budget would fit every suite"
+      proof: 'grep: test("W1-T9953: a deadline that would fit the whole suite still runs only the partial set" in test/a-full-fallback-author-selection-is-never-run-whole.test.ts'
+    - claim: "the partial set is the changed tests, the readers of each set-aside file and the selection of the modelled rest, bounded by the host budget"
+      proof: 'grep: test("W1-T9953: the partial set takes changed tests, set-aside readers and the modelled rest" in test/a-full-fallback-author-selection-is-never-run-whole.test.ts'
+    - claim: "a full-fallback run's verdict is over-capacity with a PARTIAL line naming what CI is left to check, never passed"
+      proof: 'grep: test("W1-T9953: a full-fallback run says it is partial and is never green" in test/a-full-fallback-author-selection-is-never-run-whole.test.ts'
+  falsifier: |
+    On origin/main, the console line carries no reason, so the first test fails. With a deadline that fits, the
+    affected-tests argv holds every suite, so the second fails. The over-capacity subset keeps only changed tests,
+    with no set-aside readers and no modelled rest, so the third fails. The second fixture's verdict is `passed`, so
+    the fourth fails.
