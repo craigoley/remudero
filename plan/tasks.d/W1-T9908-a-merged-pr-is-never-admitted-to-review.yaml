@@ -1,0 +1,63 @@
+- id: W1-T9908
+  title: "A PR THE LEDGER ALREADY RECORDS MERGED IS NEVER ADMITTED TO REVIEW — the sweep's action-time review claim re-reads the ledger for delivered and refused verdicts but not for `pr.terminal`, so a pass working from an older open-PR view admits a review the lane then skips: on 2026-10-16 boot 3 wrote 9 `review.skipped_closed_before_review` rows for 6 PRs 6-10 min after their merged `pr.terminal` rows"
+  repo: remudero
+  depends_on: [W1-T9907]  # same-file serialization only (src/lib/sweep.ts); nothing here needs W1-T9907's behaviour
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium  # one concern: the review claim refuses a PR the ledger records merged; dispositions, the open-PR read and closed (unmerged) PRs are unchanged
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-16, verification agent V1 finding 8 / lead L5 (~/Remudero-notes/flow-verify-2026-10-16/RESULTS.txt), filed by agent F7; a W1-T9802 follow-up"
+  plan_refs: [W1-T9802, W1-T228, W1-T254, W1-T1213]
+  files:
+    - src/lib/sweep.ts
+    - test/a-merged-pr-is-never-admitted-to-review.test.ts
+  status: queued
+  priority: 3  # cheap residual: each case costs one review admission, a lane slot and a GitHub read, then self-skips
+  attempts: 0
+  rationale: |
+    READ at origin/main c73ab052d. Symbols, not lines.
+    - W1-T9802 (merged) makes `logArmAttribution` (src/lib/arm-auto-merge.ts) write a merged `pr.terminal` row
+      (source `automerge.direct_merge`) when the sweep merges a PR itself.
+    - src/lib/sweep.ts `claimReview` (inside `runSweep`) is the action-time re-read every review admission passes:
+      the full pass's `runReview` and the light pass, whose `runSweepLightPass` runs `runSweep([pr], ...)` per PR. It
+      reads `readLedger(deps.ledgerPath)` and refuses on a delivered verdict, a durable refusal or a retry backoff.
+      It never looks at `pr.terminal`, although `isMergedLedgerRow` and `prUrlKey` (src/lib/ledger-carry.ts) are
+      already imported into sweep.ts.
+    - The review lane does catch it later: `review.skipped_closed_before_review` with merged true. By then the
+      sweep has written `sweep.review_admitted`, started a review run and spent a GitHub read.
+    OBSERVED 2026-10-16, core ledger (V1's corpus, read on the Mac):
+    - Merged `pr.terminal` rows: #12375 17:18:26Z, #12370 17:19:47Z, #12369 17:20:51Z, #12362 17:21:17Z,
+      #12347 17:22:26Z, #12363 17:23:11Z.
+    - `sweep.review_admitted` for those PRs at 17:27:32Z (light: #12347, #12362, #12363) and 17:28:43-17:29:04Z
+      (full: #12347, #12362, #12363, #12369, #12370, #12375), then `review.skipped_closed_before_review` at
+      17:27:36, 17:27:37, 17:27:38, 17:28:46, 17:28:49, 17:29:04, 17:29:05, 17:29:06 and 17:39:36Z: 9 rows, 6 PRs.
+      07:40-17:12Z: 0.
+    NOT IN SCOPE: why the passes' open-PR view still listed those PRs (its read time and any cache); closed,
+    unmerged PRs, which can reopen; dispositions of a merged PR in a stale view.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and open heads updated since 2026-10-11 for
+    skipped_closed_before_review, "closed before review" and a terminal check at review admission. W1-T2752 (an
+    escalated terminal head) is a different surface.
+  design: |
+    1. In `claimReview`, after its ledger re-read, a PR the re-read lines record as merged (`isMergedLedgerRow` on a
+       row whose `prUrlKey(pr_url)` matches the PR's, or whose pr_number matches) is refused: `ok: false`,
+       `deduped: true`, reason "PR #<n> is recorded merged (<step> at <ts>) — no review is admitted for a merged
+       PR". The claim key is released as the other refusals release it.
+    2. So no `sweep.review_admitted` row is written and `postReview` is not called for it. The disposition is
+       finalized through the existing not-ok path.
+    3. A `pr.terminal` row with state closed does not refuse. Nothing else changes. No new constant.
+    4. Tests go in the new file, `test(` titles verbatim as in the proofs. Drive `runSweep` with one green PR
+       whose review is none and a ledger holding a merged `pr.terminal` row for it (the row W1-T9802 writes), and
+       count `sweep.review_admitted` rows and `postReview` calls.
+  acceptance:
+    - claim: "a PR the ledger records merged is not admitted to review"
+      proof: 'grep: test("W1-T9908: a PR the ledger records merged is not admitted to review" in test/a-merged-pr-is-never-admitted-to-review.test.ts'
+    - claim: "a closed, unmerged pr.terminal row does not block review admission"
+      proof: 'grep: test("W1-T9908: a closed unmerged terminal row does not block review admission" in test/a-merged-pr-is-never-admitted-to-review.test.ts'
+    - claim: "a PR with no terminal row is admitted as before"
+      proof: 'grep: test("W1-T9908: a PR with no terminal row is admitted as before" in test/a-merged-pr-is-never-admitted-to-review.test.ts'
+  falsifier: |
+    At origin/main `claimReview` ignores `pr.terminal`, so the PR is admitted, a `sweep.review_admitted` row is
+    written and `postReview` is called: the first test fails. The second and third pass before and after; they guard
+    against a fix that refuses on any terminal row or on none.
