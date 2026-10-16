@@ -34,6 +34,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadConfig, type Config } from "./config.js";
+import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./branch-update.js";
 import {
@@ -1995,6 +1996,9 @@ export function logArmAttribution(
       lane,
       ...preflightFields,
     });
+    // The merge landed, so the terminal fact exists now; the sweep's closed-PR rung only dedups it later.
+    log(PR_TERMINAL_STEP, { task_id: "SWEEP", pr_url: prUrl, pr_number: prNumber, state: "merged",
+      merged_at: new Date().toISOString(), source: "automerge.direct_merge" });
   }
   const preflightStep =
     directMergePreflight?.reason === "plan_pr_mergeability_unknown_bound"
