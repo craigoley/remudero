@@ -14421,7 +14421,6 @@ export function inFlightReviewCount(): number {
   return inFlightReviewRuns.size;
 }
 
-/** W1-T8172: the reviews in flight NOW, by identity, so a latched restart can tell what it waited on from the latch. */
 export function inFlightReviewRunsNow(): Promise<void>[] {
   return [...inFlightReviewRuns];
 }
