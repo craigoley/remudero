@@ -559,15 +559,18 @@ export async function readSelectedDepReviewChecks(
     value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
   const timestamp = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
   const rows = (value: unknown, key: string): Record<string, unknown>[] | undefined => {
-    const body = record(value), list = body?.[key];
-    if (!Array.isArray(list) || !Number.isSafeInteger(body?.total_count) || body?.total_count !== list.length || !list.every(row => record(row) !== undefined)) return undefined;
+    const body = record(value);
+    if (body === undefined) return undefined;
+    const list = body[key];
+    if (!Array.isArray(list) || !Number.isSafeInteger(body.total_count) || body.total_count !== list.length || !list.every(row => record(row) !== undefined)) return undefined;
     return list;
   };
   const pull = (value: unknown) => {
     const p = record(value), head = record(p?.head), repository = record(record(p?.base)?.repo);
-    if (!p || !id(p.id) || p.number !== target.number || p.html_url !== target.url || p.state !== "open" || p.merged !== false ||
-        head?.sha !== target.headSha || (p.body ?? "") !== target.body || !id(repository?.id) ||
-        typeof repository?.full_name !== "string" || repository.full_name.toLowerCase() !== slug) return undefined;
+    if (p === undefined || head === undefined || repository === undefined) return undefined;
+    if (!id(p.id) || p.number !== target.number || p.html_url !== target.url || p.state !== "open" || p.merged !== false ||
+        head.sha !== target.headSha || (p.body ?? "") !== target.body || !id(repository.id) ||
+        typeof repository.full_name !== "string" || repository.full_name.toLowerCase() !== slug) return undefined;
     return { prId: p.id, repoId: repository.id };
   };
   if (!id(target.number) || !/^[a-f0-9]{40}$/.test(target.headSha) ||
