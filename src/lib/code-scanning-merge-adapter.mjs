@@ -55,7 +55,7 @@ export function* securityMergeMetadataRequests(target) {
     if (last?.head?.sha !== headSha || last.state !== 'open' || last.base?.sha !== first.base.sha || last.changed_files !== first.changed_files ||
         last.base?.repo?.full_name !== first.base.repo.full_name || last.base.ref !== first.base.ref)
       return {headSha,decision:unknown('head-or-base-changed-during-observation')};
-    return {headSha,decision};
+    return {headSha,baseSha:first.base.sha,decision};
   } catch {
     return {headSha,decision:unknown('security-api-unavailable')};
   }
@@ -81,8 +81,9 @@ export async function publishSecurityMergeDecision(target, api, targetUrl) {
   const observed = await readSecurityMergeDecision(target, api.read);
   if (!sha(observed.headSha)) return {...observed,published:false};
   const live = await api.read(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`);
-  if (live?.head?.sha !== observed.headSha || live.state !== 'open')
-    return {...observed,decision:unknown('head-changed-before-publication'),published:false};
+  if (live?.head?.sha !== observed.headSha || live.state !== 'open' || live.base?.sha !== observed.baseSha ||
+      live.base?.ref !== 'main' || live.base?.repo?.full_name !== 'craigoley/remudero')
+    return {...observed,decision:unknown('head-or-base-changed-before-publication'),published:false};
   await api.status({sha:observed.headSha,context:SECURITY_MERGE_CONTEXT,
     state:observed.decision.mergeAllowed ? 'success' : observed.decision.state === 'blocked' ? 'failure' : 'error',
     description:`${observed.decision.state}: ${observed.decision.reason}`.slice(0,140),target_url:targetUrl});

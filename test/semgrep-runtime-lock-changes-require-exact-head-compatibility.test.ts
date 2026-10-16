@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+import {mkdtempSync,readFileSync,rmSync,mkdirSync,symlinkSync,unlinkSync,writeFileSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -28,9 +28,12 @@ function fixture(){
   details_url:'https://github.com/craigoley/remudero/actions/runs/44/job/55'};
  const checks:any[]=[security,runtime];
  const run:any={id:44,repository:{full_name:'craigoley/remudero'},event:'pull_request',head_sha:head,
-  path:workflow,workflow_id:66,run_attempt:1,check_suite_id:33,status:'completed',conclusion:'success'};
+  path:workflow,workflow_id:66,run_attempt:1,check_suite_id:33,status:'completed',conclusion:'success',
+  pull_requests:[{number:11468,head:{sha:head},base:{sha:base,repo:{url:'https://api.github.com/repos/craigoley/remudero'}}}]};
  const job:any={id:55,run_id:44,run_attempt:1,head_sha:head,name:context,
-  check_run_url:'https://api.github.com/'+prefix+'/check-runs/22',status:'completed',conclusion:'success'};
+  check_run_url:'https://api.github.com/'+prefix+'/check-runs/22',status:'completed',conclusion:'success',
+  steps:['Detect runtime lock changes','Set up pinned Python','Verify hash-locked install and dependency closure']
+   .map((name,i)=>({name,number:i+1,status:'completed',conclusion:'success'}))};
  const trusted:any={type:'file',path:workflow,sha:blob,size:4096},proposed:any={...trusted};
  const reads:string[]=[];
  const read=(path:string):any=>{
@@ -104,6 +107,14 @@ const mutations:[string,(f:ReturnType<typeof fixture>)=>void][]=[
  ['empty workflow',f=>{f.trusted.size=f.proposed.size=0;}],['unclosed run',f=>{f.run.status='in_progress';}],
  ['run conclusion mismatch',f=>{f.run.conclusion='failure';}],['skipped check',f=>{f.runtime.conclusion=f.job.conclusion=f.run.conclusion='skipped';}],
  ['missing base identity',f=>{delete f.pr.base.sha;}],
+ ['other PR',f=>{f.run.pull_requests[0].number++;}],['old run base',f=>{f.run.pull_requests[0].base.sha=foreign;}],
+ ['old associated head',f=>{f.run.pull_requests[0].head.sha=foreign;}],['missing PR association',f=>{f.run.pull_requests=[];}],
+ ['ambiguous PR association',f=>{f.run.pull_requests.push(f.run.pull_requests[0]);}],
+ ['foreign associated base',f=>{f.run.pull_requests[0].base.repo.url='https://api.github.com/repos/attacker/repo';}],
+ ['missing steps',f=>{delete f.job.steps;}],['installation skipped',f=>{f.job.steps[2].conclusion='skipped';}],
+ ['duplicate installation step',f=>{f.job.steps.push({...f.job.steps[2]});}],
+ ['unfinished installation step',f=>{f.job.steps[2].status='in_progress';}],['invalid step number',f=>{f.job.steps[2].number=0;}],
+ ['generation bound',f=>{for(let i=0;i<8;i++)f.checks.push({...f.runtime,id:30+i});}],
 ];
 for(const [label,mutate] of mutations)test('runtime compatibility refuses '+label,()=>{
  const f=fixture();mutate(f);const result=readSecurityMergeDecisionSync(target,f.read);
@@ -130,6 +141,20 @@ test('unavailable compatibility metadata or head drift cannot publish a reusable
   const value=drift.read(p);if(p===prPath&&++n===3)value.head.sha=foreign;return value;
  },status:async(s:any)=>writes.push(s)});
  assert.equal(changed.published,false);assert.equal(writes.length,1);
+ let baseReads=0;const baseDrift=fixture();
+ const movedBase=await publishSecurityMergeDecision(target,{read:async(p:string)=>{
+  const value=baseDrift.read(p);if(p===prPath&&++baseReads===3)value.base.sha=foreign;return value;
+ },status:async(s:any)=>writes.push(s)});
+ assert.equal(movedBase.published,false);assert.equal(writes.length,1);
+});
+
+test('a verified other-workflow name collision cannot mask the newest genuine runtime generation',()=>{
+ const f=fixture(),collision={...f.runtime,id:23,details_url:'https://github.com/craigoley/remudero/actions/runs/77/job/88',check_suite:{id:99}};
+ f.checks.push(collision);
+ const read=(p:string)=>p===prefix+'/actions/runs/77'?{...f.run,id:77,check_suite_id:99,path:'.github/workflows/other.yml'}:f.read(p);
+ assert.equal(readSecurityMergeDecisionSync(target,read).decision.mergeAllowed,true);
+ f.runtime.status='in_progress';
+ assert.equal(readSecurityMergeDecisionSync(target,read).decision.reason,'semgrep-runtime-compatibility-pending');
 });
 
 test('runtime completion wakes the trusted policy producer using metadata only',async()=>{
@@ -173,7 +198,7 @@ test('runtime workflow is unprivileged exact-head closure-only and never makes s
  assert.equal(job['runs-on'],'ubuntu-24.04');assert.equal(job.permissions,undefined);
  assert.equal(job.steps[0].with.ref,'${{ github.event.pull_request.head.sha }}');assert.equal(job.steps[0].with['persist-credentials'],false);
  const install=job.steps.find((s:any)=>s.name==='Verify hash-locked install and dependency closure');
- assert.equal(install['continue-on-error'],undefined);assert.ok(install.run.includes('"$VENV/bin/python" -m pip check'));
+ assert.equal(install['continue-on-error'],undefined);assert.ok(install.run.includes('"$VENV/bin/python" -I -m pip check'));
  assert.ok(install.run.includes('"$VENV/bin/semgrep" --version'));assert.ok(install.run.includes('SemgrepCore.executable_path()'));
  assert.ok(install.run.includes('--require-hashes'));assert.ok(install.run.includes('--no-index'));
  assert.equal(text.includes('security-events: write'),false);assert.equal(text.includes('secrets.'),false);
@@ -184,4 +209,34 @@ test('runtime workflow is unprivileged exact-head closure-only and never makes s
  const producer=parse(readFileSync(new URL('../.github/workflows/security-merge-policy.yml',import.meta.url),'utf8'));
  assert.ok(producer.on.workflow_run.workflows.includes('Semgrep runtime compatibility'));
  assert.equal(producer.jobs.metadata.permissions.actions,'read');assert.equal(producer.jobs.metadata.steps[0].with.ref,'main');
+});
+
+test('real isolated Python stages only committed closed locks and rejects PR module shadowing and expanded inputs',t=>{
+ const flow=parse(readFileSync(new URL('../.github/workflows/semgrep-runtime-compatibility.yml',import.meta.url),'utf8'));
+ const install=flow.jobs['runtime-compatibility'].steps.find((s:any)=>s.name==='Verify hash-locked install and dependency closure');
+ const match=/<<'PY'\n([\s\S]*?)\nPY\n/.exec(install.run);assert.ok(match);
+ const script=match[1],dir=mkdtempSync(join(tmpdir(),'rmd-runtime-inputs-')),repo=join(dir,'repo');
+ t.after(()=>rmSync(dir,{recursive:true,force:true}));mkdirSync(repo);mkdirSync(join(repo,'.github','semgrep'),{recursive:true});
+ const invoke=(file:string,args:string[],input?:string)=>spawnSync(file,args,{cwd:repo,encoding:'utf8',input,timeout:10000,
+  env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null'}});
+ const git=(args:string[])=>{const r=invoke('git',args);assert.equal(r.status,0,r.stderr);};
+ git(['init','--quiet']);
+ for(const name of ['build-requirements.txt','requirements.txt'])writeFileSync(join(repo,'.github','semgrep',name),
+  readFileSync(new URL('../.github/semgrep/'+name,import.meta.url)));
+ const marker=join(repo,'shadow-ran');writeFileSync(join(repo,'pathlib.py'),'open("shadow-ran", "w").write("not isolated")\nraise RuntimeError("PR module executed")\n');
+ const commit=()=>{git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','--quiet','--allow-empty','-m','fixture']);};
+ commit();
+ const stage=(isolated:boolean)=>{const out=mkdtempSync(join(dir,'out-'));
+  const r=invoke('python3',[...(isolated?['-I']:[]),'-',out,repo],script);return {...r,out};};
+ const negative=stage(false);assert.notEqual(negative.status,0);assert.match(negative.stderr,/PR module executed/);
+ assert.equal(readFileSync(marker,'utf8'),'not isolated');unlinkSync(marker);
+ const positive=stage(true);assert.equal(positive.status,0,positive.stderr);
+ for(const name of ['build-requirements.txt','requirements.txt'])assert.deepEqual(readFileSync(join(positive.out,name)),readFileSync(join(repo,'.github','semgrep',name)));
+ assert.throws(()=>readFileSync(marker),/ENOENT/);
+ const lock=join(repo,'.github','semgrep','requirements.txt'),original=readFileSync(lock,'utf8');
+ for(const invalid of [original+'-r extra.txt\n',original+'--index-url https://example.invalid\n',original.replace('semgrep==1.180.0','semgrep==1.181.0')]){
+  writeFileSync(lock,invalid);commit();const r=stage(true);assert.notEqual(r.status,0);assert.match(r.stderr,/AssertionError/);
+ }
+ writeFileSync(join(repo,'outside.txt'),original);unlinkSync(lock);symlinkSync('../../outside.txt',lock);commit();
+ const linked=stage(true);assert.notEqual(linked.status,0);assert.match(linked.stderr,/committed regular file/);
 });

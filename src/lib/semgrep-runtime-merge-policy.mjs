@@ -16,17 +16,32 @@ export function* semgrepRuntimeMetadataRequests(input) {
   if (!checks.length) return unknown('trusted-exact-head-semgrep-runtime-result-missing');
   if (checks.some(check => !positive(check.id)) || new Set(checks.map(check => check.id)).size !== checks.length)
     return unknown('semgrep-runtime-check-generation-ambiguous');
-  const check = checks.reduce((a,b) => a.id > b.id ? a : b);
+  // BACKSTOP: bound additional metadata reads; a larger generation corpus is UNKNOWN, not partial success.
+  if (checks.length > 8) return unknown('semgrep-runtime-generation-corpus-exceeds-bound');
+  const prefix = 'repos/craigoley/remudero';
+  let selected;
+  for (const check of [...checks].sort((a,b) => b.id-a.id)) {
+    const link = /^https:\/\/github\.com\/craigoley\/remudero\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)$/.exec(check.details_url ?? '');
+    if (!link || !positive(Number(link[1])) || !positive(Number(link[2])) || !positive(check.check_suite?.id))
+      return unknown('semgrep-runtime-run-identity-unavailable');
+    const runId = Number(link[1]), jobId = Number(link[2]);
+    const run = yield `${prefix}/actions/runs/${runId}`;
+    if (run?.id !== runId || run.repository?.full_name !== 'craigoley/remudero' || run.event !== 'pull_request' ||
+        run.head_sha !== input.headSha || !positive(run.workflow_id) || !positive(run.run_attempt) || run.check_suite_id !== check.check_suite.id)
+      return unknown('semgrep-runtime-workflow-identity-mismatch');
+    if (run.path !== SEMGREP_RUNTIME_WORKFLOW) {
+      if (typeof run.path === 'string' && /^\.github\/workflows\/[A-Za-z0-9_-]+\.ya?ml$/.test(run.path)) continue;
+      return unknown('semgrep-runtime-workflow-identity-mismatch');
+    }
+    selected = {check,run,runId,jobId}; break;
+  }
+  if (!selected) return unknown('trusted-exact-head-semgrep-runtime-result-missing');
+  const {check,run,runId,jobId} = selected;
+  const pr = Array.isArray(run.pull_requests) && run.pull_requests.length === 1 ? run.pull_requests[0] : null;
+  if (pr?.number !== input.prNumber || pr.head?.sha !== input.headSha || pr.base?.sha !== input.baseSha ||
+      pr.base?.repo?.url !== 'https://api.github.com/repos/craigoley/remudero')
+    return unknown('semgrep-runtime-pr-or-base-provenance-unavailable');
   if (check.status !== 'completed') return unknown('semgrep-runtime-compatibility-pending');
-  const link = /^https:\/\/github\.com\/craigoley\/remudero\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)$/.exec(check.details_url ?? '');
-  if (!link || !positive(Number(link[1])) || !positive(Number(link[2])) || !positive(check.check_suite?.id))
-    return unknown('semgrep-runtime-run-identity-unavailable');
-  const prefix = 'repos/craigoley/remudero', runId = Number(link[1]), jobId = Number(link[2]);
-  const run = yield `${prefix}/actions/runs/${runId}`;
-  if (run?.id !== runId || run.repository?.full_name !== 'craigoley/remudero' || run.event !== 'pull_request' ||
-      run.head_sha !== input.headSha || run.path !== SEMGREP_RUNTIME_WORKFLOW || !positive(run.workflow_id) ||
-      !positive(run.run_attempt) || run.check_suite_id !== check.check_suite.id)
-    return unknown('semgrep-runtime-workflow-identity-mismatch');
   const job = yield `${prefix}/actions/jobs/${jobId}`;
   if (job?.id !== jobId || job.run_id !== runId || job.run_attempt !== run.run_attempt || job.head_sha !== input.headSha ||
       job.name !== SEMGREP_RUNTIME_CHECK || job.check_run_url !== `https://api.github.com/${prefix}/check-runs/${check.id}` ||
@@ -40,5 +55,10 @@ export function* semgrepRuntimeMetadataRequests(input) {
   if (run.status !== 'completed' || run.conclusion !== check.conclusion) return unknown('semgrep-runtime-run-not-closed');
   if (check.conclusion === 'failure') return {state:'blocked',mergeAllowed:false,reason:'semgrep-runtime-incompatible-or-install-failed'};
   if (check.conclusion !== 'success') return unknown('semgrep-runtime-compatibility-not-successful');
+  for (const name of ['Detect runtime lock changes','Set up pinned Python','Verify hash-locked install and dependency closure']) {
+    const steps = Array.isArray(job.steps) ? job.steps.filter(step => step.name === name) : [];
+    if (steps.length !== 1 || !positive(steps[0].number) || steps[0].status !== 'completed' || steps[0].conclusion !== 'success')
+      return unknown('semgrep-runtime-required-step-not-successful');
+  }
   return {state:'compatible',mergeAllowed:true,reason:'trusted-exact-head-semgrep-runtime-compatible'};
 }
