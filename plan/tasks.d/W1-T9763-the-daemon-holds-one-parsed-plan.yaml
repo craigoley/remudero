@@ -1,0 +1,56 @@
+- id: W1-T9763
+  title: "THE DAEMON HOLDS ONE PARSED PLAN, NOT ONE PER HOLDER, AND ITS TICK READ NEVER CLONES THE PLAN — one loadPlan copy retains ~38.9 MiB and one tick-read structuredClone ~37.7 MiB at 4,112 tasks (offline census), and the boot plan, the active plan, each lane's synced plan and the tick read each keep their own"
+  repo: remudero
+  depends_on: [W1-T9647]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, how many parsed Plan objects the daemon keeps alive; which plan each reader sees is unchanged
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9647 memory census (PR 12231), item Z1'
+  plan_refs: [W1-T9647, W1-T4051, W1-T4075, W1-T9105, W1-T9091]
+  files:
+    - src/run-task.ts
+    - src/lib/read-plane.ts
+    - src/lib/daemon.ts
+    - test/the-daemon-holds-one-parsed-plan.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED offline by the W1-T9647 build (PR 12231), census 27d1f36d8d59 on 2026-10-15 over a synthetic production-scale corpus (369 rotations x 8,900 rows, 18,000 live rows, 12,000 closed PRs, 600 issues; plan at 4,112 tasks); evidence logs-8864/9647-census/census-27d1f36d8.{json,md}. Live set 867 MiB, filing threshold 43.4 MiB (min of 5% of the live set and 50 MiB). The per-step shares are INFERRED.
+    - Rank 3: plan parse (loadPlan), 4,112 entries, 38.9 MiB retained, 9,915 bytes/task.
+    - Rank 4: tick-read plan clone (structuredClone), 4,112 entries, 37.7 MiB, 9,614 bytes/task.
+    READ at origin/main 3ce249c80 (symbols, not lines):
+    - src/run-task.ts's daemon command keeps `activePlanRef = { current: plan }`; the boot plan is also closed over by
+      the sweep hooks; each in-flight lane keeps its own synced plan (runTask); the dispatch phase's snapshots hold one
+      per distinct reload (src/lib/daemon.ts).
+    - The tick read's request is `{ plan, previousProjection }` (createTickReadProducer), and src/lib/read-plane.ts
+      `structuredClone(input)`s each queued request, so every tick read carries a full clone of the plan to its worker.
+    INFERRED: at least 3 plan copies in steady state, ~115 MiB, above the filing threshold on its own; more during a
+    multi-lane dispatch phase. W1-T9647's daemon.memory row (merging in PR 12231) counts distinct Plan objects as
+    `parts.distinct_tasks`; this task's saving is read there per generation.
+  design: |
+    1. One parsed plan per plan revision: the daemon keeps a single shared, frozen Plan for the current revision (keyed
+       by the plan blob sha the loader already reads), and the boot, active, sweep-hook and lane readers take that
+       instance instead of re-parsing or copying. A lane that needs a different revision gets that revision's one
+       instance; an instance with no holder is released.
+    2. The tick read never sends the plan: the worker loads (or receives once per revision) the plan by revision key
+       and the request carries only the key, so read-plane.ts no longer structuredClones a Plan per request.
+    3. Readers that mutated their plan copy (if the builder finds any) get an explicit copy at that site, named in the
+       PR; the shared instance is frozen so a missed one throws in tests.
+    4. Proof in production: daemon.memory `parts.distinct_tasks` p50 over one generation after the fix's boot_head_sha
+       falls to about one plan's task count. No new constant.
+    Tests go in test/the-daemon-holds-one-parsed-plan.test.ts, titled verbatim as in the proofs.
+  acceptance:
+    - claim: "the boot, active, sweep-hook and lane readers of one plan revision hold the same Plan instance"
+      proof: 'grep: test("W1-T9763: every daemon reader of one plan revision holds the same instance" in test/the-daemon-holds-one-parsed-plan.test.ts'
+    - claim: "a tick-read request carries the plan's revision key, not a Plan, and the worker answers the same facts"
+      proof: 'grep: test("W1-T9763: a tick read carries the plan revision, never a plan clone" in test/the-daemon-holds-one-parsed-plan.test.ts'
+    - claim: "the shared plan is frozen, so a reader that mutates it fails loudly"
+      proof: 'grep: test("W1-T9763: the shared plan is frozen" in test/the-daemon-holds-one-parsed-plan.test.ts'
+  falsifier: |
+    On origin/main, load the plan through the daemon's boot path and an in-flight lane's sync and compare instances:
+    they differ, so the first test fails. Capture the read-plane request a tick enqueues: it holds a `plan` with every
+    task, so the second test fails.

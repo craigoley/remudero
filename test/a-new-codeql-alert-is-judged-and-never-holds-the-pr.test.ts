@@ -319,8 +319,8 @@ test("the failing codeql check is read deduped by its latest attempt, and only h
   assert.equal(restModule.classifyCodeqlHeadAlerts(HEAD, "not a listing"), undefined);
 
   const hydrated = restModule.hydrateCodeqlHeadAlerts("o", "r", [{ number: 1, headSha: HEAD }, { number: 2, headSha: HEAD }], (args) => {
-    if (String(args[1]).includes("refs/pull/2/head")) throw new Error("gh down");
-    assert.match(String(args[1]), /code-scanning\/alerts\?ref=refs\/pull\/1\/head&state=open/);
+    if (String(args[1]).includes("refs/pull/2/merge")) throw new Error("gh down");
+    assert.match(String(args[1]), /code-scanning\/alerts\?ref=refs\/pull\/1\/merge&state=open/);
     return [row()];
   });
   assert.deepEqual([...hydrated.keys()], [1], "a failed read leaves that head unobserved, never judged");

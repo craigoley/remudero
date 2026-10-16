@@ -109,6 +109,7 @@ import {
   drainDetachedSweepActions,
   drainInFlightReviews,
   inFlightReviewCount,
+  inFlightReviewRunsNow,
 } from "./sweep.js";
 // VALUE import (W1-T342's gate moved to its own pure module so drain.ts can share it — see that
 // module's header for why neither daemon.ts nor sweep.ts could host it). Pure, no filesystem.
@@ -139,7 +140,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 import {
-  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, type DaemonMemoryGovernor, type HeapShadowOptions,
+  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
 } from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
@@ -322,6 +323,30 @@ export function dispatchRunHistory(rawLines: readonly string[], runs?: MeasuredR
     runs?.push({ ...(start.taskId !== undefined ? { taskId: start.taskId } : {}), ms: at - start.at });
   }
   return { totalMs, samples };
+}
+
+/** W1-T8172: the median review run length, `sweep.review_started` to the next `review.posted` for the same PR, or
+ *  undefined with no pair. Torn rows and unpaired or reversed ends contribute nothing. */
+export function medianReviewRunMs(rawLines: readonly string[]): number | undefined {
+  const started = new Map<number, number>();
+  const lengths: number[] = [];
+  for (const raw of rawLines) {
+    if (!raw.includes('"sweep.review_started"') && !raw.includes('"review.posted"')) continue;
+    let row: Record<string, unknown>;
+    try { row = JSON.parse(raw); } catch (error) { /* a torn ledger row supplies no measurement */ continue; }
+    const at = typeof row?.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isFinite(at)) continue;
+    if (row.step === "sweep.review_started" && typeof row.pr_number === "number") started.set(row.pr_number, at);
+    const pr = row.step === "review.posted" && typeof row.pr_url === "string" ? Number(/\/pull\/(\d+)$/.exec(row.pr_url)?.[1]) : NaN;
+    const startedAt = started.get(pr);
+    if (startedAt === undefined) continue;
+    started.delete(pr);
+    if (at > startedAt) lengths.push(at - startedAt);
+  }
+  if (lengths.length === 0) return undefined;
+  lengths.sort((a, b) => a - b);
+  const mid = lengths.length >> 1;
+  return lengths.length % 2 === 1 ? lengths[mid] : (lengths[mid - 1]! + lengths[mid]!) / 2;
 }
 
 export interface RestartBoundaryContext { waitingOn: string; runId: string }
@@ -1937,7 +1962,7 @@ interface InterphaseReviewClock {
   /** Stops new admission, lets an already-started pass settle, and reports whether this clock
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
    * many passes it admitted. */
-  stop(): Promise<{ eventWakeSeen: boolean; passes: number }>;
+  stop(): Promise<{ eventWakeSeen: boolean; passes: number; held: number }>;
   /** W1-T5803: an event wake the caller's own sleep consumed, handed on so this clock passes for it. */
   handWake(): void;
   /** Passes admitted so far, read without stopping the clock. */
@@ -2077,18 +2102,21 @@ export type InterphaseReviewClockScope = "drain" | "pause";
  *  observed during an active pass stays pending. W1-T4732 permits one review-only follow-up
  *  beside a slow pass, while further wakes coalesce until a slot opens. Forensics: docs/forensics/daemon.md.
  *  W1-T4053: `scope: "drain"` runs it beside a freshness drain, ledgering `during_drain: true`; W1-T4429:
- *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts. */
+ *  `"pause"` beside a PAUSE's sleep (`during_pause: true`) — a pause stops NEW work, never verdicts.
+ *  W1-T8172: `admitPass`, when given, is asked before each due pass; a refusal spends the slot and counts as `held`. */
 export function startInterphaseReviewClock(
   deps: DaemonDeps,
   pollIntervalMs: number,
   log: (step: string, extra?: Record<string, unknown>) => void,
   scope?: InterphaseReviewClockScope,
+  admitPass?: () => boolean,
 ): InterphaseReviewClock {
   let active = true;
   let eventWakeSeen = false;
   let eventWakePending = false;
   let elapsedMs = 0;
   let passes = 0;
+  let held = 0;
   const activePasses = new Set<Promise<void>>();
   const phase = scope === "drain" ? "freshness_drain" : scope === "pause" ? "pause" : "interphase";
   const scopeTag: Record<string, boolean> =
@@ -2139,6 +2167,10 @@ export function startInterphaseReviewClock(
           eventWakePending = false;
           elapsedMs = 0;
           lastPassAtMs = interphaseClock.now();
+          if (admitPass && !admitPass()) {
+            held += 1;
+            continue;
+          }
           passes += 1;
           const pass = (async () => {
             try {
@@ -2160,7 +2192,7 @@ export function startInterphaseReviewClock(
       active = false;
       if (runner) await runner;
       if (activePasses.size > 0) await Promise.all(activePasses);
-      return { eventWakeSeen, passes };
+      return { eventWakeSeen, passes, held };
     },
     handWake: () => {
       eventWakeSeen = true;
@@ -3459,7 +3491,11 @@ export async function runDaemon(
     if (cause !== undefined) {
       idleLaneTickCause = cause;
       idleLaneTickHold = cause === "pause" || cause === "operator_pause" || cause === "recycle_drain"
-        ? pauseHoldRecord(fields) : undefined;
+        ? pauseHoldRecord(fields) : cause === "memory" ? {
+          reason: step === "daemon.queue_governor"
+            ? `${fields?.pressure_tier} (${fields?.pressure_binding}): ${fields?.pressure_available_mib} MiB available, floor ${fields?.pressure_floor_mib} MiB`
+            : String(fields?.reason),
+        } : undefined;
     }
     livenessPulse?.note(step);
   };
@@ -3553,6 +3589,14 @@ export async function runDaemon(
         tick,
         observed_open_count: verdict.result.observedOpenCount,
         wip_limit: verdict.result.wipLimit,
+        held_by: verdict.result.measuredBound === 0 && verdict.result.pressure ? "memory" : "wip",
+        measured_bound: verdict.result.measuredBound,
+        pressure_tier: verdict.result.pressure?.tier,
+        pressure_binding: verdict.result.pressure?.binding,
+        pressure_available_mib: verdict.result.pressure?.availableMib,
+        pressure_floor_mib: verdict.result.pressure?.floorMib,
+        pressure_host_available_mib: verdict.result.pressure?.hostAvailableMib,
+        ...reclaimLedgerFields(verdict.result.pressure?.reclaim),
         // W1-T4465 design (iii): the owned/foreign split, the tier, and the trailing flow this
         // verdict was decided against, so a held daemon's own ledger names WHY it is held and
         // which way the queue is moving — never just a bare count-vs-limit pair.
@@ -4143,43 +4187,104 @@ export async function runDaemon(
   // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
   // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
   // and the memory-pressure exit so neither restart can kill work the other would have waited for.
-  const drainBeforeRestart = async (stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain"): Promise<void> => {
+  // W1-T8172 — THE RESTART DRAIN STARTS WHEN THE RESTART LATCHES. 2026-10-15 the latch came at 18:29:00, the drain at
+  // 18:59:45; it ran 1,217,693 ms against a 559,000 ms bound and abandoned the 4 reviews its clock admitted at 19:17.
+  // What is in flight at the dispatch latch is the drain's from then: the lane wait is its wait, its bound runs from the
+  // latch, and the exit waits only on what has not settled. Work admitted after the latch keeps the exit's own bound.
+  type LatchDrain = { latchAtMs: number; reviews: ReadonlySet<Promise<void>>; detached: number; started: boolean; done?: true };
+  let latchDrain: LatchDrain | undefined;
+  const beginLatchDrain = (latchAtMs: number): void => {
+    if (latchDrain?.latchAtMs === latchAtMs) return;
+    const reviews = new Set(inFlightReviewRunsNow());
+    const detached = detachedSweepActionCount();
+    latchDrain = { latchAtMs, reviews, detached, started: reviews.size > 0 || detached > 0 };
+    if (latchDrain.started) log("daemon.freshness_drain.started", { started_at: "latch", latched_at: fixedClock(latchAtMs).iso(),
+      detached_sweep_actions: detached, in_flight_reviews: reviews.size });
+  };
+  // W1-T8172 design 2: the drain's clock admits a pass only while the time left exceeds the measured review length.
+  const measuredReviewLength = (): { ms?: number; source: "measured" | "no_history" | "unreadable" } => {
+    try {
+      const ms = medianReviewRunMs(deps.readLedgerLines?.() ?? []);
+      return ms === undefined ? { source: "no_history" } : { ms, source: "measured" };
+    } catch (error) {
+      // An unreadable ledger is no history: the clock admits as before W1-T8172, and the completion row says why.
+      return { source: "unreadable" };
+    }
+  };
+
+  // The drain every restart takes before it returns: live fix workers and in-flight reviews finish (bounded),
+  // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
+  // and the memory-pressure exit so neither restart can kill work the other would have waited for.
+  const drainBeforeRestart = async (stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number): Promise<void> => {
+    const fromLatch = stepPrefix === "daemon.freshness_drain" && latchAtMs !== undefined &&
+      latchDrain?.latchAtMs === latchAtMs && !latchDrain.done ? latchDrain : undefined;
+    if (fromLatch) fromLatch.done = true;
+    const exitAtMs = daemonClock.now();
     const detachedAtFreshness = detachedSweepActionCount();
     // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
-    const reviewsAtFreshness = inFlightReviewCount();
-    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0) {
-      const drainStartedAtMs = daemonClock.now();
-      log(`${stepPrefix}.started`, {
+    const reviewsAtExit = inFlightReviewRunsNow();
+    const reviewsAtFreshness = reviewsAtExit.length;
+    const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || latchStarted) {
+      const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
+      const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
+        : stepPrefix === "daemon.freshness_drain" ? { started_at: "exit" } : {};
+      if (!latchStarted) log(`${stepPrefix}.started`, {
+        ...latchFields,
         detached_sweep_actions: detachedAtFreshness,
         in_flight_reviews: reviewsAtFreshness,
       });
+      // Bounds: what the latch saw has had the wait since the latch; anything newer gets the exit's whole bound.
+      const latchLeftMs = fromLatch ? Math.max(0, fromLatch.latchAtMs + sweepWallClockBoundMs - exitAtMs) : sweepWallClockBoundMs;
+      const seen = new Set(reviewsAtExit);
+      const settled = new Set<Promise<void>>();
+      const watch = (reviews: Iterable<Promise<void>>): void => {
+        for (const review of reviews) { seen.add(review); void review.then(() => settled.add(review)); }
+      };
+      watch(reviewsAtExit);
+      const afterLatch = (): Promise<void>[] => fromLatch ? [...seen].filter((review) => !fromLatch.reviews.has(review)) : [];
+      const reviewBoundMs = afterLatch().length > 0 ? sweepWallClockBoundMs : latchLeftMs;
+      let detachedBoundMs = latchLeftMs;
+      if (fromLatch && detachedAtFreshness > 0) {
+        const sinceLatchMs = exitAtMs - fromLatch.latchAtMs;
+        const live = await drainDetachedSweepActions({ boundMs: 0 });
+        if (live.some((action) => action.ageMs < sinceLatchMs)) detachedBoundMs = sweepWallClockBoundMs;
+      }
+      const deadlineMs = exitAtMs + Math.max(reviewBoundMs, detachedBoundMs);
+      const reviewLength = stepPrefix === "daemon.freshness_drain" ? measuredReviewLength() : undefined;
       // W1-T4053 — REVIEWS KEEP FLOWING THROUGH THE DRAIN. With the clock stopped, 42 drains in three days
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
       // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
+      const reviewMs = reviewLength?.ms;
+      const admitPass = reviewMs === undefined ? undefined : () => deadlineMs - daemonClock.now() > reviewMs;
       const drainReviewClock =
-        detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain") : undefined;
+        detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", admitPass) : undefined;
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
       let abandonedReviews: number;
       let reviewPasses = 0;
+      let reviewPassesHeld = 0;
       try {
         [abandoned, abandonedReviews] = await Promise.all([
           drainDetachedSweepActions({
-            boundMs: sweepWallClockBoundMs,
+            boundMs: detachedBoundMs,
             freshness: true,
             onRelease: (action) => log("daemon.detached_action_released", {
               action_kind: action.actionKind, task_id: action.taskId,
               age_ms: action.ageMs, phase: action.phase, reason: action.reason,
             }),
           }),
-          drainInFlightReviews({ boundMs: sweepWallClockBoundMs }),
+          drainInFlightReviews({ boundMs: reviewBoundMs }),
         ]);
       } finally {
-        reviewPasses = drainReviewClock ? (await drainReviewClock.stop()).passes : 0;
+        const stopped = drainReviewClock ? await drainReviewClock.stop() : undefined;
+        reviewPasses = stopped?.passes ?? 0;
+        reviewPassesHeld = stopped?.held ?? 0;
       }
-      if (drainReviewClock) abandonedReviews = await drainInFlightReviews({
-        boundMs: Math.max(0, sweepWallClockBoundMs - Math.max(0, daemonClock.now() - drainStartedAtMs)),
-      });
+      if (drainReviewClock) {
+        watch(inFlightReviewRunsNow());
+        abandonedReviews = await drainInFlightReviews({ boundMs: Math.max(0, deadlineMs - daemonClock.now()) });
+      }
       for (const action of abandoned) {
         log("daemon.detached_action_abandoned", {
           action_kind: action.actionKind,
@@ -4188,14 +4293,28 @@ export async function runDaemon(
           bound_ms: sweepWallClockBoundMs,
         });
       }
+      const nowMs = daemonClock.now();
       log(`${stepPrefix}.completed`, {
-        detached_sweep_actions: detachedAtFreshness,
+        ...latchFields,
+        detached_sweep_actions: latchStarted ? latchStarted.detached : detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
         abandoned_detached_sweep_actions: abandoned.length,
-        in_flight_reviews: reviewsAtFreshness,
+        in_flight_reviews: latchStarted ? latchStarted.reviews.size : reviewsAtFreshness,
         abandoned_in_flight_reviews: abandonedReviews,
         review_passes: reviewPasses,
-        duration_ms: Math.max(0, daemonClock.now() - drainStartedAtMs),
+        duration_ms: Math.max(0, nowMs - drainStartedAtMs),
+        ...(stepPrefix === "daemon.freshness_drain" ? {
+          in_flight_reviews_at_exit: reviewsAtFreshness,
+          exit_wait_ms: Math.max(0, nowMs - exitAtMs),
+          exit_bound_ms: Math.max(reviewBoundMs, detachedBoundMs),
+          review_passes_held: reviewPassesHeld,
+          review_length_ms: reviewLength?.ms ?? null,
+          review_length_source: reviewLength?.source,
+        } : {}),
+        ...(fromLatch ? {
+          admitted_after_latch: afterLatch().length,
+          abandoned_admitted_after_latch: afterLatch().filter((review) => !settled.has(review)).length,
+        } : {}),
       });
     }
   };
@@ -4228,7 +4347,7 @@ export async function runDaemon(
     }
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
     // The caller stops its interphase clock before the final pass (W1-T2865).
-    await drainBeforeRestart("daemon.freshness_drain");
+    await drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs);
     return preExitPass;
   };
   const stopForFreshness = async (
@@ -6481,6 +6600,7 @@ export async function runDaemon(
     const latchRestart = (freshness: Extract<DaemonFreshness, { stale: true }>): void => {
       if (!inFlightFreshness) {
         restartWait.decidedAtMs = daemonClock.now();
+        beginLatchDrain(restartWait.decidedAtMs);
         // Every in-flight run holds refill until a boundary or settlement; refills cannot renew it (W1-T7806).
         for (const t of inFlightTasks) if (!hasChildTask(t.id)) {
           restartHoldouts.add(t.id);
@@ -6565,6 +6685,11 @@ export async function runDaemon(
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
       const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const memoryPressure = governed?.kind === "queue" && governed.result.measuredBound === 0
+        ? governed.result.pressure : undefined;
+      const governorReason = memoryPressure
+        ? `governor: memory ${memoryPressure.tier} (${memoryPressure.binding}): ${memoryPressure.availableMib} MiB available, floor ${memoryPressure.floorMib} MiB`
+        : governed ? `governor: ${governed.kind}` : undefined;
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
@@ -6583,10 +6708,10 @@ export async function runDaemon(
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
-        (governed ? `governor: ${governed.kind}` : undefined);
+        governorReason;
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
-      if (governed && reason === `governor: ${governed.kind}` && inFlightTasks.size > 0) {
+      if (governed && reason !== undefined && reason === governorReason && inFlightTasks.size > 0) {
         if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
           phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         sampleLaneChange();
