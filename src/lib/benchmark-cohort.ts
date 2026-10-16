@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainThread, parentPort, SHARE_ENV, workerData, type Worker } from "node:worker_threads";
 import { startWorker } from "./child-entry-argv.js";
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import { joinVerifiedTaskOutcomes, type BenchmarkVerifiedOutcome, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { deriveModelDrift, MODEL_DRIFT_VERSION, unavailableModelDrift, type ModelDriftReport,
@@ -985,6 +985,59 @@ export async function runBenchmarkCohortPass(
     snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
 }
 
+export const BENCHMARK_COHORT_MIN_INTERVAL_MS = 900_000; // W1-T8876: one pass re-parses a 37 MB checkpoint
+const BENCHMARK_COHORT_DAEMON_MAX_SOURCES = 4;
+
+export interface BenchmarkCohortCadenceDeps {
+  stateDir: () => string;
+  clock?: Clock;
+  intervalMs?: number;
+  run?: (stateDir: string) => Promise<BenchmarkCohortPassResult>;
+}
+
+export interface BenchmarkCohortCadence {
+  checkBenchmarkCohort: () => boolean;
+  runBenchmarkCohortPass: () => Promise<BenchmarkCohortPassResult>;
+}
+
+function benchmarkCohortInputs(stateDir: string): string | undefined {
+  try {
+    const live = statSync(ledgerLivePath(stateDir), { throwIfNoEntry: false });
+    const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).length;
+    return JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir, BENCHMARK_COHORT_DAEMON_MAX_SOURCES,
+      live ? [live.ino, live.size] : null, rotations]);
+  } catch { /* an unreadable state directory matches no finished inputs, so the pass runs and reports it */
+    return undefined;
+  }
+}
+
+/** W1-T8876: a pass runs only when its inputs changed since the last finished pass, at most once per floor.
+ * A partial or failed pass records no inputs, so its unfinished work is retried at the next floor. */
+export function benchmarkCohortCadence(deps: BenchmarkCohortCadenceDeps): BenchmarkCohortCadence {
+  const clock = deps.clock ?? systemClock;
+  const intervalMs = deps.intervalMs ?? BENCHMARK_COHORT_MIN_INTERVAL_MS;
+  const run = deps.run ?? benchmarkCohortDaemonPass;
+  let lastStartedAt = Number.NEGATIVE_INFINITY;
+  let finishedInputs: string | undefined;
+  return {
+    checkBenchmarkCohort: () => {
+      const current = clock.now();
+      if (current - lastStartedAt < intervalMs) return false;
+      if (finishedInputs !== undefined && benchmarkCohortInputs(deps.stateDir()) === finishedInputs) return false;
+      lastStartedAt = current;
+      return true;
+    },
+    runBenchmarkCohortPass: async () => {
+      const stateDir = deps.stateDir();
+      const inputs = benchmarkCohortInputs(stateDir);
+      finishedInputs = undefined;
+      const result = await run(stateDir);
+      if (result.pendingSources === 0) finishedInputs = inputs;
+      return result;
+    },
+  };
+}
+
 const BENCHMARK_COHORT_WORKER_KIND = "benchmark-cohort-pass-v1" as const;
 type CohortWorkerData = { kind: typeof BENCHMARK_COHORT_WORKER_KIND; stateDir: string;
   opts: { maxSources?: number; nowIso?: string } };
@@ -1016,7 +1069,7 @@ export function runBenchmarkCohortPassOffLoop(
 
 /** W1-T9845: the pass the daemon hook runs by default, off the daemon loop. */
 export const benchmarkCohortDaemonPass = (stateDir: string): Promise<BenchmarkCohortPassResult> =>
-  runBenchmarkCohortPassOffLoop(stateDir, { maxSources: 4 });
+  runBenchmarkCohortPassOffLoop(stateDir, { maxSources: BENCHMARK_COHORT_DAEMON_MAX_SOURCES });
 
 /** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */
 export async function runBenchmarkCohortIdlePass(
