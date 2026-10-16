@@ -33889,7 +33889,7 @@ async function retroCommand(
     const lane = await serializeRetroDispatch(join(laneConfig.root, "state", "retro.lock"),
       () => retroCommand(rest, { ...opts, inRetroLane: true }));
     if (lane.kind === "completed") return lane.value;
-    appendLedger(ledgerPathFor(laneConfig), { run_id: `RETRO-${Date.now()}`, task_id: "RETRO", step: "retro.skipped_in_flight",
+    appendLedger(ledgerPathFor(laneConfig), { run_id: `RETRO-${nextLaneEpochMs()}`, task_id: "RETRO", step: "retro.skipped_in_flight",
       lane: "retro", holder_pid: lane.holder.pid, holder_host: lane.holder.host, holder_started_at: lane.holder.startedAt });
     console.log(`\n### [retro] retro skipped — another retro (pid ${lane.holder.pid} on ${lane.holder.host}) holds the lane`);
     return 1;
