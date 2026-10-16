@@ -50,6 +50,10 @@
     The maintained producer census correctly refuses that undeclared identity. Declare the central producer registry
     so the implementation can register this label without renaming it or bypassing the census. No runtime policy,
     task priority, budget, risk, dependency, reservation or acceptance criterion changes.
+    SPLIT 2026-10-15: W1-T9762 (priority 1) fixes the live decision's over-charge: an unseen start's own claim gets its
+    class typical instead of its learned p90, and a live tree's claim decays by its class's measured time to peak.
+    This task's joint candidate should read those decayed per-claim numbers (ShadowClaim chargedMib and decay), not
+    re-derive them. No other field of this task changes.
   design: |
     1. Replace the sum of per-claim p90s with a joint quantile over the live claims' measured peak distributions:
        - the convolution of the empirical per-class samples, or the existing typical + one-tail rule where samples are
