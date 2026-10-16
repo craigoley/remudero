@@ -69,7 +69,8 @@ test("selected real approve command scopes single and batch fileability adapters
   const quiet = t.mock.method(console, "error", () => {}); t.after(() => quiet.mock.restore());
   const trappedFs = { mkdirSync: () => assert.fail("invalid draft must not create a directory"),
     writeFileSync: () => assert.fail("invalid draft must not write"), readFileSync: () => "" };
-  for (const batch of [false, true]) for (const enabled of [false, true]) {
+  for (const batch of [false, true]) await t.test(batch ? "batch approval adapter owns shadow context" : "single approval adapter owns shadow context", async () => {
+  for (const enabled of [false, true]) {
     writeFileSync(join(state, "ledger.ndjson"), "");
     config.selectedRegistryMode = enabled ? { mode: "shadow", instanceName: "fixture", registryPath: selectedPath } : undefined;
     let entered = 0;
@@ -90,6 +91,7 @@ test("selected real approve command scopes single and batch fileability adapters
     assert.equal(rows.some(row => row.step === "ratify.approved"), false);
     assert.equal(readFileSync(join(state, "inbox-proposals.json"), "utf8"), proposals, "refusal retains the human's pending proposals");
   }
+  });
 });
 
 test("selected loaded CLI config reaches benchmark delayed draft evaluation and actual offline lint without activation", async (t) => {
