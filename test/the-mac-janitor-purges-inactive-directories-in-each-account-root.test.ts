@@ -54,7 +54,7 @@ function data(root: string, name: string, hours = 7) {
 }
 function sweep(fx: Fixture, apply = true, extra: Record<string, string> = {}) {
   return spawnSync("bash", [SCRIPT, apply ? "--apply" : "--dry-run"], { encoding: "utf8", timeout: 60_000, env: {
-    ...process.env, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`, TMPDIR: fx.scratch,
+    ...process.env, HOME: fx.home, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`, TMPDIR: fx.scratch,
     REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.scratch,
     REMUDERO_JANITOR_LOG: join(fx.root, "janitor.log"), REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "janitor.lock"),
     REMUDERO_JANITOR_DIRECTORY_ROOTS: roots(fx).join(":"), ...extra,
@@ -81,11 +81,17 @@ test("the default account policy includes Remudero, lanes-wt, the canonical chec
     const old = roots(fx).slice(0, -1).map(root => data(root, "default-scope-data"));
     const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: "" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    for (const path of old) assert.equal(existsSync(path), false, r.stdout);
+    for (const path of old) {
+      const macOnly = path.startsWith(join(fx.home, "Developer/remudero-operator-worktrees") + "/");
+      assert.equal(existsSync(path), macOnly && process.platform !== "darwin", path + r.stdout);
+    }
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
 
 test("each Mac account's default operator-worktrees root retains young, active and evidence-bearing children", () => {
+  // This source-policy control is discriminating on Linux too: do not broaden
+  // production's Mac-only default merely to satisfy a cross-platform fixture.
+  assert.match(readFileSync(SCRIPT, "utf8"), /if \[ "\$OS_NAME" = "Darwin" \]; then\n(?:[^\n]*\n){0,4}  DIRECTORY_SCAN_ROOTS\+=\("\$USER_HOME\/Developer\/remudero-operator-worktrees"\)/);
   for (const account of ["craigoley", "craigoleyagent"]) {
     const fx = setup();
     try {
@@ -100,9 +106,10 @@ test("each Mac account's default operator-worktrees root retains young, active a
       writeFileSync(fx.lsofList, held + "\n");
       const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: "" });
       assert.equal(r.status, 0, r.stderr + r.stdout);
-      assert.equal(existsSync(old), false, account + r.stdout);
+      assert.equal(existsSync(old), process.platform !== "darwin", account + r.stdout);
       for (const path of [root, young, held, evidence]) assert.equal(existsSync(path), true, account + path + r.stdout);
-      assert.match(r.stdout, new RegExp(`scratch-directory-scan: ${root}`));
+      if (process.platform === "darwin") assert.match(r.stdout, new RegExp(`scratch-directory-scan: ${root}`));
+      else assert.ok(!r.stdout.includes(`scratch-directory-scan: ${root}`), "Linux must retain the Mac-only namespace");
     } finally { rmSync(fx.root, { recursive: true, force: true }); }
   }
 });
