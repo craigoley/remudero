@@ -7,7 +7,9 @@
   verify: human
   risk: high
   band_meaning: span
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=42482fcf9f143f61
   attempts: 0
   files:
     - src/run-task.ts
