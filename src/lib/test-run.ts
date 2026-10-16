@@ -136,7 +136,7 @@ export async function runBoundedTest(args: readonly string[], opts: BoundedTestR
     );
   } finally {
     try {
-      log(JSON.stringify({ step: "test_run.workspace_resources", runId: process.env.RMD_RUN_ID ?? null,
+      log(JSON.stringify({ step: "test_run.workspace_resources", runId: process.env.REMUDERO_RUN_ID ?? null,
         nodeVersion: process.versions.node, resources: workspaceUsageEvidence([
           workspaceBefore, sampleWorkspaceUsage(process.cwd()),
         ]) }));

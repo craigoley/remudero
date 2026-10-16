@@ -6,6 +6,7 @@ import { Script } from "node:vm";
 import { assessWorkspaceDiskBudget, sampleWorkspaceUsage, workspaceSizeWarning, workspaceUsageEvidence } from "../src/lib/workspace-usage.js";
 import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 import { renderCanaryReport } from "../src/lib/model-canary-report.js";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 
 test("workspace measurements distinguish a proven empty root from missing or budget-incomplete evidence", (t) => {
   const { dir } = ownedFixtureDir(t, "workspace-observation");
@@ -17,7 +18,7 @@ test("workspace measurements distinguish a proven empty root from missing or bud
   assert.equal(measured.completeness, "complete"); assert.ok(measured.generatedPathBytes! > 0);
   assert.equal(sampleWorkspaceUsage(join(dir, "absent")).generatedPathBytes, null);
   let clock = 0;
-  assert.equal(sampleWorkspaceUsage(dir, { maxMs: 1, now: () => ++clock }).completeness, "unknown");
+  assert.equal(sampleWorkspaceUsage(dir, { maxMs: 1, clock: clockFromMillisFn(() => ++clock) }).completeness, "unknown");
   assert.equal(sampleWorkspaceUsage(dir, { maxEntries: 0 }).generatedPathBytes, null);
   assert.equal(sampleWorkspaceUsage(dir, { roots: ["../outside"] }).completeness, "unknown");
 });

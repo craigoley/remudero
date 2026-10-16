@@ -2,6 +2,10 @@
  * schedules work or calls a missing measurement zero. APFS path blocks are not unique disk cost. */
 import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readSync, realpathSync, statfsSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { clockFromMillisFn, type Clock } from "./clock.js";
+
+// Elapsed budgets use a monotonic source through the shared clock port; no wall timestamps escape.
+const samplingClock = clockFromMillisFn(() => performance.now());
 
 export interface WorkspaceUsageSample {
   generatedPathBytes: number | null;
@@ -36,14 +40,20 @@ function dependencyMethod(root: string): WorkspaceUsageSample["dependencyMethod"
       if (size === bytes.length) return "unknown";
       const method: unknown = (JSON.parse(bytes.subarray(0, size).toString("utf8")) as { method?: unknown }).method;
       return method === "apfs-clone" || method === "private-copy" || method === "readonly-links" ? method : "unknown";
-    } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "unrecorded" : "unknown"; }
+    } catch (error) {
+      // An absent marker is unrecorded; an unreadable marker cannot establish a method.
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? "unrecorded" : "unknown";
+    }
     finally { if (fd !== undefined) closeSync(fd); }
-  } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown"; }
+  } catch (error) {
+    // Keep a missing install distinct from an install whose metadata cannot be read.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown";
+  }
 }
 
 export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly string[]; maxEntries?: number;
-  maxMs?: number; now?: () => number } = {}): WorkspaceUsageSample {
-  const now = opts.now ?? (() => performance.now()), start = now();
+  maxMs?: number; clock?: Clock } = {}): WorkspaceUsageSample {
+  const clock = opts.clock ?? samplingClock, start = clock.now();
   const maxEntries = opts.maxEntries ?? 2000, maxMs = opts.maxMs ?? 20;
   const result: WorkspaceUsageSample = { generatedPathBytes: null, completeness: "unknown", entries: 0, durationMs: 0,
     hostFreeBytes: null, dependencyMethod: "unknown", reasons: [], warning: null };
@@ -52,15 +62,21 @@ export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly
   }
   let root: string;
   try { root = realpathSync(workspace); }
-  catch { result.reasons.push("workspace-unreadable"); return result; }
+  catch {
+    // The unavailable observation and its reason reach the caller; this is never an empty root.
+    result.reasons.push("workspace-unreadable"); return result;
+  }
   try {
     const fs = statfsSync(root), available = fs.bavail * fs.bsize;
     if (Number.isSafeInteger(available) && available >= 0) result.hostFreeBytes = available;
-  } catch { result.reasons.push("host-free-unavailable"); }
+  } catch {
+    // Preserve null free space with its reason, so capacity cannot be admitted from this sample.
+    result.reasons.push("host-free-unavailable");
+  }
   result.dependencyMethod = dependencyMethod(root);
   let total = 0, observed = false, incomplete = false;
   const seen = new Set<string>();
-  const budget = () => result.entries < maxEntries && now() - start < maxMs;
+  const budget = () => result.entries < maxEntries && clock.now() - start < maxMs;
   for (const name of opts.roots ?? GENERATED_WORKSPACE_ROOTS) {
     if (!budget()) { incomplete = true; result.reasons.push("sampling-bound"); break; }
     const path = resolve(root, name), rel = relative(root, path);
@@ -75,6 +91,7 @@ export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly
       }
       if (linked) { incomplete = true; result.reasons.push(`borrowed-root:${name}`); continue; }
     } catch (error) {
+      // Only ENOENT proves an empty root; other failures retain a lower bound and their reason.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") { observed = true; continue; }
       incomplete = true; result.reasons.push(`root-unreadable:${name}`); continue;
     }
@@ -99,13 +116,16 @@ export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly
             }
           } finally { dir.closeSync(); }
         }
-      } catch { incomplete = true; result.reasons.push("entry-unreadable-or-changed"); }
+      } catch {
+        // Partial bytes remain a lower bound and the failed observation is named in the sample.
+        incomplete = true; result.reasons.push("entry-unreadable-or-changed");
+      }
     }
     if (!budget()) break;
   }
   result.generatedPathBytes = observed ? total : null;
   result.completeness = observed ? incomplete ? "lower-bound" : "complete" : "unknown";
-  result.durationMs = Math.max(0, now() - start);
+  result.durationMs = Math.max(0, clock.now() - start);
   result.warning = workspaceSizeWarning(total);
   return result;
 }
