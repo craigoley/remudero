@@ -41,6 +41,7 @@ import { TEST_PROCESS_MARKER } from "../../src/lib/tmp.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
 import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
+import { fixtureRetentionReason } from "./retained-fixtures.js";
 
 // Fixtures must not populate the operator's durable dependency store because their HOME is real.
 // Explicit fixture roots remain supported; tests can set their own override after setup.
@@ -454,6 +455,11 @@ process.on("exit", () => {
   const refusals = ghRefusalCount();
 
   for (const dir of created) {
+    const retainedReason = fixtureRetentionReason(dir);
+    if (retainedReason !== undefined) {
+      console.error(`test fixture retained: ${String(dir)} (${retainedReason})`);
+      continue;
+    }
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

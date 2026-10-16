@@ -22,3 +22,10 @@ the existing guarded publication-aware retirement path, never a blanket recursiv
 six-hour janitor is a crash/backstop reaper, not a substitute for finishing your own cleanup.
 Keep the required output schema unchanged; record retained paths and the reason in the allowed
 report or receipt when that contract permits it.
+
+Test fixtures should pass their test or enclosing suite as `scope` to the shared Git/ledger
+helpers, or use `ownedFixtureDir(scope, kind)`. Register asynchronous child/writer closure with
+`until(closed)` before the scope completes. Its teardown releases only its fresh pinned scratch;
+failed closure or changed identity keeps the path, fails the hook and survives the exit backstop.
+Use `retain(reason)` for required failure evidence. Caller-supplied shared directories keep their
+original owner. Existing process-exit cleanup remains the fallback for unmigrated fixtures.
