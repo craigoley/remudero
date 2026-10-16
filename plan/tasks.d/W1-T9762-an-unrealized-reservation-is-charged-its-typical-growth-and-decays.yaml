@@ -1,0 +1,94 @@
+- id: W1-T9762
+  title: "AN UNREALIZED RESERVATION IS CHARGED ITS MEASURED TYPICAL GROWTH PLUS ONE TAIL, AND DECAYS AS ITS FOOTPRINT IS OBSERVED — unrealized-reservations tipped 719 of 948 would-defer verdicts on 2026-10-15 at 56% precision: gatherShadowInputs gives the start no typicalMib, so every enforced admission charges its own learned p90 as typical growth, and a live tree's claim never decays with age"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how much growth the budget charges a reservation that has not yet realised its footprint; the reasons, the reserve, the policy modes and the admission tiers are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 (22:10Z enforce decision read and 23:35Z 'keep watching, keep going'): fix the unrealized-reservations over-charge at priority 1; standing rulings: no hard fixed thresholds, never raise core memory.max"
+  plan_refs: [W1-T7094, W1-T9557, W1-T8879, W1-T8472, W1-T9706, W1-T9761]
+  files:
+    - src/lib/host-memory-shadow.ts
+    - src/lib/host-memory-learning.ts
+    - test/an-unrealized-reservation-is-charged-its-typical-growth-and-decays.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-15: the top deferral reason, and 44% of deferrals had no real pressure behind them
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 02:00-22:01Z (1,402 memory_budget.shadow rows, core ledger, read-only;
+    ~/Remudero-notes/flow-remeasure-2026-10-14/RESULTS.md "Enforce decision read"):
+    - would-defer 68%. Precision 56%: real pressure stood behind only 56% of deferrals.
+    - Top reason: unrealized-reservations, behind 719 of 948 would-defer verdicts.
+    - Container memory p50/p90 4.1/5.8 GB (max 8.2), memory.events oom/oom_kill 0/0.
+    - W1-T9706's rationale reads the same shape at 17:08-17:10Z: unrealizedMib 2,789-8,259 and projectedAvailableMib
+      -278 to 1,401 for three build starts.
+    READ at origin/main c793012cb (symbols, not lines). The brief's premise ("charged at p90") is only partly current:
+    - evaluateShadowMemory (src/lib/host-memory-shadow.ts) ALREADY charges each live tree its typical growth,
+      min(share, typicalMib - resident), plus ONE tail allowance (the largest single share - typical, or a daemon's
+      tail). That is the same typical-plus-one-tail rule W1-T9557 (#12017/#11823, merged) applied to the daemon's growth
+      in the capacity decision. The summed p90 (`unrealizedMib`) is kept for comparison only. The reason
+      "unrealized-reservations" fires when base - hostClaimMib < hostReserveMib.
+    - THE START IS STILL CHARGED ITS p90. gatherShadowInputs builds `start` with workerClass and estimateMib only; it
+      never passes the class typical that it attaches to every measured ledger entry. When the start is not yet in the
+      ledger (startSeen false), evaluateShadowMemory charges claim(inputs.start.estimateMib, undefined, 0), so its
+      typical part equals its whole learned p90 (ESTIMATE_LEARNING.quantile 0.9). awaitMemoryAdmission
+      (src/lib/host-memory-admission.ts) evaluates BEFORE it opens the reservation, so every enforced start is unseen.
+      Since #11735 that is every garden child, and since #12106 (merged 10-15) every implement, fix, review and
+      advisory start that worker.ts admits too. With W1-T8879's 10-12 class peaks (p50/p90 MiB: implement 723/2,904, review 319/1,008, fix
+      290/1,277, garden 226/1,100), a garden start is over-charged about 870 MiB and a build start about 2,180 MiB.
+    - NO DECAY. A live tree's remaining typical claim is typicalMib - resident whatever its age. A build 40 minutes in,
+      still under its median, is charged the rest of its median as if it had just started. The learned peak store
+      records each tree's peak but not WHEN it peaked (PeakSample: c, p, at), so nothing can say a tree is past its
+      growth.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main for unrealized, typicalMib, start typical, time-to-peak and
+    decay, and the plan/ and memory-file diffs of the 237 origin heads updated since 2026-10-11.
+    - W1-T8879 (queued, priority 2) adds a SEPARATELY NAMED joint-quantile candidate in shadow. Its 2026-10-14
+      correction keeps the typical-plus-one-tail rule as the decision. It touches neither the start's typical nor age
+      decay. Its candidate should read the decayed claims this task produces.
+    - W1-T9557 (merged) changed only the daemon growth in the zero-worker capacity decision.
+    - W1-T8472 (merged) gates the container projection on prior pressure.
+    - W1-T9706 (queued) orders builds against waiting repairs.
+    - W1-T9761 ages deferred gardens. This task lowers the charge that defers them.
+  design: |
+    Typical plus one tail, as W1-T9557 and the host check already define it, applied to every unrealized claim
+    including the start's own, and decayed by measurement. It adds no new constant, interval, count or byte threshold.
+    1. THE START'S TYPICAL. gatherShadowInputs passes the start's class typical (the same `typical()` helper the ledger
+       entries use, measured classes only) as inputs.start.typicalMib. An unseen start is then charged its median as
+       typical, and its p90 - median competes for the one tail allowance like every other tree. An unmeasured class keeps
+       its whole estimate as typical, as today.
+    2. TIME TO PEAK, MEASURED. The tree sampler (host-memory-learning.ts, the per-key entry that raises peakMib every
+       TREE_SAMPLE_MS) also notes the tree's age when its peak was last raised. finish() returns it, and recordPeak
+       stores it on the sample (a new optional field). Old samples without it stay valid peak samples and are not counted
+       as time-to-peak samples.
+    3. DECAY. A live tree's remaining typical claim, and its tail, are multiplied by the class's measured survival at the
+       tree's age: the weighted share of the class's time-to-peak samples later than ageMs, with the same half-life
+       weighting and prior rule learnEstimate uses. A tree older than every measured time-to-peak claims nothing above
+       its resident. A class with no time-to-peak samples is not decayed, and the claim says so. A released occupancy
+       still claims nothing, as today.
+    4. ROWS. Each ShadowClaim gains chargedMib, decay (the survival factor, or null with its reason) and ageMs. numbers
+       gains hostClaimUndecayedMib beside hostClaimMib, so a re-measure can compare the two. memory_budget.shadow,
+       enforce_wait, enforce_defer and enforce_admit rows carry them, since they write the same numbers.
+    5. BOUNDARIES. No change to the reasons' order, hostReserveMib, containerReserveMib, the tiers in
+       host-memory-admission.ts, plan/policy.yaml modes, W1-T9557's capacity decision, or W1-T8879's candidate.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Fixture: the 10-12 class peaks above,
+    5,000 MiB MemAvailable, a 2,048 MiB reserve, one live build reservation, and an unseen garden start.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-unrealized-reservation-is-charged-its-typical-growth-and-decays.test.ts"
+    - claim: "an unseen start is charged its class typical, not its learned p90, and its tail competes for the one allowance"
+      proof: 'grep: test("W1-T9762: an unseen start is charged its class typical, not its learned p90" in test/an-unrealized-reservation-is-charged-its-typical-growth-and-decays.test.ts'
+    - claim: "a live tree past its class's measured time to peak claims nothing above its resident"
+      proof: 'grep: test("W1-T9762: a tree past its measured time to peak claims nothing above its resident" in test/an-unrealized-reservation-is-charged-its-typical-growth-and-decays.test.ts'
+    - claim: "a class with no time-to-peak samples is charged undecayed and the claim names that basis"
+      proof: 'grep: test("W1-T9762: a class with no time-to-peak samples is charged undecayed and says so" in test/an-unrealized-reservation-is-charged-its-typical-growth-and-decays.test.ts'
+    - claim: "the tree sampler records the age at which a tree peaked"
+      proof: 'grep: test("W1-T9762: a recorded peak carries the age the tree reached it" in test/an-unrealized-reservation-is-charged-its-typical-growth-and-decays.test.ts'
+    - claim: "the shadow verdict reports the undecayed claim beside the charged one"
+      proof: 'grep: hostClaimUndecayedMib in src/lib/host-memory-shadow.ts'
+  falsifier: |
+    At origin/main, gatherShadowInputs for an unseen garden start with a measured estimate of 1,100 MiB and a typical of
+    226 MiB yields inputs.start without typicalMib, and evaluateShadowMemory's hostTypicalMib includes the whole
+    1,100. So the second test fails. Remove the survival factor and the third test fails.
