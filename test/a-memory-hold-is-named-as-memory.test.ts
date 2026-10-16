@@ -8,7 +8,7 @@ import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { idleLaneCauseForRefillReason, idleLaneCauseForStep } from "../src/lib/idle-lane-accounting.js";
 import { loadPlan } from "../src/lib/plan.js";
 import type { QueueGovernorResult } from "../src/lib/sweep.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 
 const MINUTE = 60_000;
 const memoryHeld: QueueGovernorResult = {
