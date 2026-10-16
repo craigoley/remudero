@@ -23,7 +23,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -33,6 +33,24 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TEST_DIR = join(REPO_ROOT, "test");
 const HYGIENE_IMPORT = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 const THIS_FILE = "git-fixture-gc-hygiene.test.ts";
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: TEST_DIR, encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 
 // @host-capability isolated-git: real git proves the setup setting without reading user config.
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
@@ -189,9 +207,10 @@ test("no push-then-clone fixture in test/ builds a GIT_ENV the gc-disable settin
   // or passes no `env` override at all to its git calls (both fully reachable). This is the
   // GUARD: a future fixture that regresses into a GIT_ENV const without the spread fails HERE,
   // named in the assertion message, exactly like the synthetic case above.
-  const files = readdirSync(TEST_DIR)
-    .filter((f) => f.endsWith(".test.ts") && f !== THIS_FILE)
-    .map((f) => ({ name: f, content: readFileSync(join(TEST_DIR, f), "utf8") }));
+  const { dir, files: corpus } = testCorpus();
+  const files = corpus
+    .filter((f) => f.split("/").at(-1) !== THIS_FILE)
+    .map((f) => ({ name: f, content: readFileSync(join(dir, f), "utf8") }));
   const unreachable = findUnreachablePushCloneFixtures(files);
   assert.deepEqual(unreachable, [], `push-then-clone fixture(s) the gc-disable setting cannot reach: ${unreachable.join(", ")}`);
 });
