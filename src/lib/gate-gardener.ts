@@ -13,7 +13,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency } from "./test-slot.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
+import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retirementHoldsOrigin, taskLandedArgs } from "./plan.js";
 import { loadPolicy } from "./policy.js";
 
 /**
@@ -224,7 +224,11 @@ function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateD
     if (!prior || f.expiresAt < prior.expiresAt) byFile.set(f.file, f);
   }
   if (byFile.size === 0) return [];
-  const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks.filter((t) => t.status === "queued" && !t.retirement).map((t) => t.origin) : [];
+  // W1-T9729: a retirement whose superseding task has not landed still covers its origin.
+  const landed = (id: string) => run("git", taskLandedArgs(id)).trim() !== "";
+  const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks
+    .filter((t) => (t.status === "queued" && !t.retirement) || (t.origin?.startsWith("expiring-fixture:") === true && retirementHoldsOrigin(t, landed)))
+    .map((t) => t.origin) : [];
   const open = sources.openOrigins ? sources.openOrigins() : (JSON.parse(run("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"])) as Array<{ body: string }>).flatMap((pr) => [...pr.body.matchAll(/expiring-fixture:test\/[^\s"'`]+\.test\.ts/g)].map((m) => m[0]));
   const covered = new Set([...queued, ...open]);
   const runSuite = sources.runSuite ?? ((file: string, days: number) => runSuiteShifted(deps.repoRoot, file, days));

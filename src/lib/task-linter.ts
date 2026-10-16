@@ -97,7 +97,8 @@ export type LintCheck =
   | "proof-test-only-discrimination"
   | "new-shard-rule-suite"
   | "shard-shape"
-  | "unminted-task-id";
+  | "unminted-task-id"
+  | "superseded-by";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -2233,6 +2234,20 @@ export function blockedWithoutDispositionViolations(task: Task, plan: Plan): Lin
   ];
 }
 
+/** W1-T9729: `superseded_by` hands a RETIRED record's origin to another task, so it is refused on a
+ *  record with no `retirement:`, and on an id `planTaskIds` (when known) does not carry. */
+export function supersededByViolations(task: Task, planTaskIds?: Pick<ReadonlySet<string>, "has">): LintViolation[] {
+  if (task.superseded_by === undefined) return [];
+  const refuse = (message: string): LintViolation => ({ check: "superseded-by", severity: "block", message });
+  if (task.retirement === undefined) {
+    return [refuse(`task ${task.id} names superseded_by ${task.superseded_by} but carries no \`retirement:\` — only a retired record hands its origin on`)];
+  }
+  if (planTaskIds !== undefined && !planTaskIds.has(task.superseded_by)) {
+    return [refuse(`task ${task.id} is superseded_by ${task.superseded_by}, which is not in the plan`)];
+  }
+  return [];
+}
+
 /** Context the CALLER resolves via I/O and injects through {@link LintOpts} — see the section
  *  comment above for why it cannot be fetched here. */
 export interface PostMergeAmendmentContext {
@@ -3763,6 +3778,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...deferredFollowUpViolations(task));
   violations.push(...shardShapeViolations(task, opts));
   violations.push(...unmintedTaskIdViolations(task, opts));
+  violations.push(...supersededByViolations(task));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
@@ -3814,8 +3830,8 @@ export function lintPlan(
     const opts = optsFor(task);
     const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
     const base = lintTask(task, withSurfaces);
-    const blockedWithoutDisposition = blockedWithoutDispositionViolations(task, plan);
-    const violations = blockedWithoutDisposition.length > 0 ? [...base.violations, ...blockedWithoutDisposition] : base.violations;
+    const planOnly = [...blockedWithoutDispositionViolations(task, plan), ...(task.retirement === undefined ? [] : supersededByViolations(task, plan.byId))];
+    const violations = planOnly.length > 0 ? [...base.violations, ...planOnly] : base.violations;
     out.set(task.id, { ok: base.ok && violations.every((v) => v.severity !== "block"), violations });
   }
   return out;
