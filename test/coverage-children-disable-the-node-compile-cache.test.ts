@@ -75,7 +75,7 @@ function runProbe(t: TestContext, coverage: boolean, inheritedDisable?: string) 
     NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE ?? "",
     TEST_RETRY: "0",
   };
-  delete env.NODE_TEST_CONTEXT;
+  // This probe is not a nested test runner; retain its suite's child-attribution marker.
   delete env.GITHUB_STEP_SUMMARY;
   const result = spawnSync(process.execPath,
     [wrapper, ...(coverage ? ["--coverage-first-pass", raw] : []), process.execPath,
