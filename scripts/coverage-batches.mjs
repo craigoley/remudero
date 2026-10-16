@@ -128,7 +128,12 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
     const failLease = (error) => { lost = error; abort.abort(); };
     heartbeat = setInterval(() => { try { slot.refresh(); check(); } catch (error) { failLease(error); } }, TEST_SLOT_LEASE_MS / 3); heartbeat.unref();
     monitor = setInterval(() => { try { check(); } catch (error) { failLease(error); } }, 1000); monitor.unref();
-    const phase = async (args, opts) => { check(); const result = await run(args, { ...opts, signal: abort.signal }); check(); return result; };
+    const phase = async (args, opts) => {
+      check();
+      const result = await run(args, { ...opts, signal: abort.signal });
+      receipt.phases ??= []; receipt.phases.push({ args, result }); save();
+      check(); return result;
+    };
     rmSync(lcov, { force: true });
     const compact = [], lineLcov = [];
     for (let offset = 0; offset < selected.length; offset += batchSize) {

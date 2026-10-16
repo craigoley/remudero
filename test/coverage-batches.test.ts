@@ -6,7 +6,7 @@ import { testSlotProcessFacts } from "../src/lib/test-slot.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 // @ts-expect-error Plain repository CLI exports are exercised through their real implementation.
-import { guardCoverageLease, runCoverageBatches } from "../scripts/coverage-batches.mjs";
+import { guardCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
 
 function lease(dir: string) {
   const path = join(dir, "slot-1.json"), start = testSlotProcessFacts(process.pid)!.start;
@@ -16,6 +16,20 @@ function lease(dir: string) {
     childEnvironment: { RMD_TEST_SLOT_PARENT: JSON.stringify({ path, pid: process.pid, start, nonce: held.ownerNonce, concurrency: 1 }) },
     refresh() {}, release() { rmSync(path, { force: true }); } } };
 }
+
+test("coverage command waits for an aborted child's close even when its signal handler exits zero", async (t) => {
+  const fixture = ownedFixtureDir(t, "batch-child-close"), pidPath = join(fixture.dir, "pid");
+  const abort = new AbortController();
+  const running = runCoverageCommand(["-e", `const fs=require('node:fs');process.on('SIGTERM',()=>process.exit(0));fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));setInterval(()=>{},1000)`],
+    { cwd: fixture.dir, env: process.env, signal: abort.signal });
+  fixture.until(running);
+  for (let i = 0; i < 100 && !existsSync(pidPath); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(existsSync(pidPath), "real child reached its signal handler");
+  const pid = Number(readFileSync(pidPath, "utf8")); abort.abort();
+  const result = await running;
+  assert.equal(result.status, 0); assert.equal(result.interrupted, "lease-lost");
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+});
 
 test("coverage batch authority refuses released replaced and vanished lease anchors", (t) => {
   const { dir } = ownedFixtureDir(t, "batch-lease");
@@ -74,6 +88,13 @@ test("coverage batches refuse ghost inputs and retain an actual failing batch wi
   const blockedReceipt = JSON.parse(readFileSync(blocked.receiptPath, "utf8"));
   assert.equal(blockedReceipt.state, "not-run-disk-capacity"); assert.equal(blockedReceipt.batches.length, 0);
   f.write();
+  const lost = await runCoverageBatches(opts, { acquire: async () => f.slot, log() {},
+    run: async () => { rmSync(f.path); return { status: 7, signal: null }; } });
+  assert.notEqual(lost.status, 0);
+  const lostReceipt = JSON.parse(readFileSync(lost.receiptPath, "utf8"));
+  assert.equal(lostReceipt.phases[0].result.status, 7, "the original child failure survives later authority loss");
+  assert.equal(lostReceipt.batches.length, 1);
+  rmSync(lostReceipt.batches[0].raw, { recursive: true, force: true }); f.write();
   const result = await runCoverageBatches(opts, { acquire: async () => f.slot, log() {} });
   assert.notEqual(result.status, 0);
   const receipt = JSON.parse(readFileSync(result.receiptPath, "utf8"));
