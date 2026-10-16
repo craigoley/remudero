@@ -22,7 +22,7 @@
         test/a-retired-index-line-keeps-its-frozen-bullet.test.ts.
       - Its unresolved citation was doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md. That path
         is named in files: by plan/tasks.d/W1-T9875-new-test-minters-place-the-test.yaml, which #12389 (6841dac49, a
-        plan-only PR of 42 shards) added. The session is fixing that test on its own branch; this task does not touch it.
+        plan-only PR of 42 shards) added. The session repairs that red on its own branch; this task touches neither the test nor the shard.
     REPRODUCED at origin/main 07a425844, where scripts/diff-class.mjs and src/lib/plan-scope.ts are unchanged since
     6841dac49's parent (`git log 6841dac49^..origin/main -- scripts/diff-class.mjs src/lib/plan-scope.ts` is empty):
       - `node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files <file holding
