@@ -193,7 +193,11 @@ export function removedLinesByFile(diffText) {
 }
 
 /**
- * Every non-deleted TypeScript source path on the new side of a diff. A file every shard omits
+ * Every non-deleted TypeScript or native MJS production path on the new side of a diff.
+ * TypeScript keeps its existing src/ population; MJS includes src/ and scripts/, not test fixtures.
+ * LCOV identities remain canonical repository-relative paths, as emitted by the coverage merger.
+ * An absolute, file-URL or neighbouring SF must not stand in for that exact source identity.
+ * A file every shard omits
  * must fail rather than reaching findUncoveredAddedLines' "lcov never saw this file" carve-out.
  * @param {string} diffText
  */
@@ -204,7 +208,8 @@ export function changedSourceFiles(diffText) {
     const path = line.slice(4).trim();
     if (path === '/dev/null') continue;
     const relative = path.replace(/^b\//, '');
-    if (relative.startsWith('src/') && relative.endsWith('.ts')) files.add(relative);
+    if ((relative.startsWith('src/') && relative.endsWith('.ts'))
+      || ((relative.startsWith('src/') || relative.startsWith('scripts/')) && relative.endsWith('.mjs'))) files.add(relative);
   }
   return [...files].sort();
 }
@@ -243,6 +248,10 @@ export function classifyTypeOnlyModule(file, readSource = (f) => readFileSync(f,
   } catch (err) {
     return { verdict: 'undecidable', stage: 'read', message: err?.message ?? String(err) };
   }
+  // Native JavaScript has no TypeScript-erasure exemption. In particular, feeding typed text
+  // through the TS stripper must not excuse an invalid .mjs module with no coverage record.
+  // Read first so unavailable source still retains the existing explicit UNKNOWN diagnostic.
+  if (file.endsWith('.mjs')) return { verdict: 'emits-code' };
   // NODE'S OWN STRIPPER, NOT esbuild, AND THE REASON IS THE JOB THIS RUNS IN. `coverage-ratchet`
   // installs NOTHING -- W1-T3207 asserts it in test/workflow-single-suite-run.test.ts ("the artifact
   // consumer installs neither npm dependencies nor Playwright", and separately that it "must not
