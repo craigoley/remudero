@@ -77,6 +77,25 @@ export function guardCoverageLease(slot) {
   verify(); return verify;
 }
 
+export function releaseCoverageLease(slot) {
+  const claim = JSON.parse(slot.childEnvironment?.RMD_TEST_SLOT_PARENT ?? 'null');
+  slot.release();
+  // Borrowed parent leases deliberately remain. A lease this process created must leave no
+  // same-owner canonical reservation; silent release diagnostics are not cleanup confirmation.
+  if (claim?.pid !== process.pid) return;
+  let fd;
+  try {
+    fd = openSync(claim.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const st = fstatSync(fd), bytes = Buffer.alloc(65537);
+    if (!st.isFile() || st.size > 65536) throw new Error('released slot state is unknown');
+    const count = readSync(fd, bytes, 0, bytes.length, 0);
+    if (count === bytes.length) throw new Error('released slot state exceeds byte bound');
+    const holder = JSON.parse(bytes.subarray(0, count).toString('utf8'));
+    if (holder.ownerNonce === claim.nonce) throw new Error('owned slot release is unconfirmed');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
 function batchFlags(flags, dir, lcov) {
   const args = withLcovDestination(flags, lcov);
   // Keep every reporter, with private destinations for this batch's TAP and durations.
@@ -180,7 +199,7 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
     const gate = await phase([GATE, '--lcov', lcov, '--diff', diff], { cwd: root, env });
     receipt.state = gate.status === 0 && !gate.interrupted ? 'complete' : 'failed';
     receipt.aggregateSha256 = hash(readFileSync(lcov)); receipt.gate = gate;
-    check(); slot.release(); released = true; save();
+    check(); releaseCoverageLease(slot); released = true; save();
     return { status: receipt.state === 'complete' ? 0 : gate.status || 1, receiptPath };
   } catch (error) {
     receipt.state = 'failed'; receipt.reason = error.message; save(); log(error.message);

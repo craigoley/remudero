@@ -6,7 +6,7 @@ import { testSlotProcessFacts } from "../src/lib/test-slot.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 // @ts-expect-error Plain repository CLI exports are exercised through their real implementation.
-import { guardCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
+import { guardCoverageLease, releaseCoverageLease, runCoverageBatches, runCoverageCommand } from "../scripts/coverage-batches.mjs";
 
 function lease(dir: string) {
   const path = join(dir, "slot-1.json"), start = testSlotProcessFacts(process.pid)!.start;
@@ -62,6 +62,16 @@ test("coverage batch authority refuses released replaced and vanished lease anch
   assert.throws(verify, /identity changed/);
   rmSync(f.path); assert.throws(verify, /ENOENT/);
   assert.throws(() => guardCoverageLease({}), /physical owner claim/);
+});
+
+test("coverage completion refuses silent owned-release failure and preserves a replacement owner", (t) => {
+  const { dir } = ownedFixtureDir(t, "batch-release");
+  const f = lease(dir);
+  assert.throws(() => releaseCoverageLease({ ...f.slot, release() {} }), /unconfirmed/);
+  const other = { ...f.held, ownerNonce: "other-owner" }; f.write(other);
+  assert.doesNotThrow(() => releaseCoverageLease({ ...f.slot, release() {} }));
+  assert.equal(JSON.parse(readFileSync(f.path, "utf8")).ownerNonce, "other-owner");
+  f.slot.release(); assert.doesNotThrow(() => releaseCoverageLease(f.slot));
 });
 
 test("real serial coverage batches conserve positive line hits and dispose only closed raw scratch", async (t) => {
