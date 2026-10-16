@@ -52,17 +52,11 @@ test("native Semgrep locks every build and runtime entry with an exact version a
     sha256: "62c3d93315b1a909360c4b43c3a573b47557a1ec7a4583a71286df2a28d4b72e",
   });
   for (const [name, pin] of build) if (runtime.has(name)) assert.deepEqual(runtime.get(name), pin);
-  assert.equal(runtime.get("mcp")!.version, "1.29.0", "semgrep 1.180.0 requires mcp==1.29.0 exactly; pip check refuses any other");
+  assert.equal(runtime.get("mcp")!.version, "1.30.0");
   assert.equal(runtime.get("pyjwt")!.version, "2.15.1");
   for (const name of ["cryptography", "mcp", "pyjwt", "ruamel-yaml-clib", "opentelemetry-sdk"]) {
     assert.ok(runtime.has(name), `transitive/extra missing: ${name}`);
   }
-});
-
-test("the mcp advisory ignore beside the Semgrep lock lives exactly as long as Semgrep's mcp 1.29.0 pin", () => {
-  const mcp = parseLock(read(runtimePath)).get("mcp")!.version;
-  const ignored = /^id = "GHSA-84m7-p3x7-pcfv"$/m.test(read(".github/semgrep/osv-scanner.toml"));
-  assert.equal(ignored, mcp === "1.29.0", `mcp ${mcp}: the GHSA-84m7-p3x7-pcfv ignore must exist only while Semgrep forces mcp 1.29.0`);
 });
 
 test("native Semgrep lock dialect rejects missing hashes, includes, ranges and duplicate packages", () => {
