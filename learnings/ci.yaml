@@ -706,7 +706,7 @@
 - id: clock-sweep-report-refusal-needs-per-pr-cause
   subsystem: ci
   lifecycle: active
-  files: [".github/workflows/**", "package.json", "src/run-task.ts"]
+  files: [".github/workflows/**", "package.json"]
   fact: >-
     When the clock-sweep-report (merge the shards, classify, deliver) gate refuses a pull request, read
     that pull request's failed job step and its repair diff before choosing a remedy. A refusal that was
