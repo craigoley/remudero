@@ -103,7 +103,8 @@ export function censusSnapshotPaths(snapshot) {
 
 const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"];
 const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
-const FIXTURE_SCOPE_RE = /^test\/[^/]+\.test\.ts$/;
+/** A test file at any depth under test/, except test/fixtures/** (data, never a suite). */
+const FIXTURE_SCOPE_RE = /^test\/(?!fixtures\/)(?:[^/]+\/)*[^/]+\.test\.ts$/;
 
 /** A count is this branch's to answer for when it is over its ceiling here, and the base was
  *  either under its own ceiling or carried a smaller count. */
