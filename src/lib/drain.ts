@@ -157,6 +157,10 @@ export interface OrphanRunBranchEvidence {
   nowMs: number;
   liveTaskIds: ReadonlySet<string>;
   graceMs?: number;
+  /** W1-T9482: when the sweep last requeued a task (`sweep.strike_ladder.requeued`), epoch ms; absent when
+   *  it never did. A requeue is the sweep's order to rebuild, so a ref pushed before it is spent. Lazy so a
+   *  caller reads its ledger only for a task that actually has a proven no-PR ref. */
+  requeuedAtMs?: (taskId: string) => number | undefined;
 }
 
 /** True when one pushed run ref is an ORPHAN that must stop blocking dispatch: its exact tip sha is
@@ -170,7 +174,18 @@ export function orphanRunBranchReleased(ref: PushedRunRef, orphan: OrphanRunBran
   if (orphan.liveTaskIds.has(ref.taskId)) return false;
   const epoch = /-(\d{13})$/.exec(ref.ref);
   if (!epoch) return false;
-  return orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS);
+  return (
+    orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS) ||
+    requeueReleasesRef(ref, Number(epoch[1]), orphan)
+  );
+}
+
+/** W1-T9482: true when the sweep requeued `ref`'s task at or after the instant the ref was pushed. Only
+ *  reached past the sha proof, so the ref has no pull request; a ref pushed AFTER the requeue (epoch later)
+ *  is a build in flight and keeps blocking. */
+function requeueReleasesRef(ref: PushedRunRef, epochMs: number, orphan: OrphanRunBranchEvidence): boolean {
+  const requeuedAt = orphan.requeuedAtMs?.(ref.taskId);
+  return requeuedAt !== undefined && Number.isFinite(requeuedAt) && epochMs <= requeuedAt;
 }
 
 /** W1-T4002 — the ONE decision {@link runDrain}, {@link runDrainLanes} AND daemon.ts's own
@@ -217,7 +232,12 @@ export function logPlanOnlyRunBranchException(
         pr_number: match.prNumber,
       });
     } else if (orphanRunBranchReleased(ref, orphan)) {
-      log("dispatch.run_branch_exception", { task: taskId, reason: "orphan-run-branch-no-pr", ref: ref.ref, sha: ref.sha });
+      const epoch = /-(\d{13})$/.exec(ref.ref);
+      const graceElapsed = epoch !== null && orphan !== undefined &&
+        orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS);
+      // W1-T9482: name the requeue when it, and not the 24 h grace, is what released the ref.
+      const reason = graceElapsed ? "orphan-run-branch-no-pr" : "requeue-released";
+      log("dispatch.run_branch_exception", { task: taskId, reason, ref: ref.ref, sha: ref.sha });
     }
   }
 }

@@ -31,6 +31,7 @@ import {
   type BoardSnapshot,
   type PrQueueRow,
   type RecentActivityCache,
+  type RecentActivityEntry,
 } from "./board.js";
 import { boardSweepRepeat, createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type BoardProjectionOptions, type Row } from "./board-projection.js";
 import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
@@ -137,7 +138,7 @@ export interface NowTask {
   needsHuman?: true;
   verifyHumanPending?: true;
   escalation?: { title?: string; issueUrl?: string; unverified?: true; openedAt?: string };
-  worker?: { servedModel?: string; requestedModel?: string };
+  worker?: Pick<NonNullable<BoardRow["workerTelemetry"]>, "runId" | "role" | "provider" | "servedModel" | "requestedModel">;
   /** The run's worker liveness, carried from {@link BoardRow.workerState}: the console's fleet map evidences a
    *  worker process only from it (a phase or a model is task context, not process evidence). It moves only on a
    *  `worker.state` transition, so it does not churn the ETag the way per-event activity would. */
@@ -199,7 +200,7 @@ export interface NowViewData {
   };
   prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean; reviewState: PrQueueRow["reviewState"] }> };
   actions: NowAction[];
-  recent: { entries: Array<{ ts: string; verb: string; taskId: string; title: string; detail?: string; costUsd?: number; prUrl?: string }>; mergedToday: { count: number; day: string } };
+  recent: { entries: RecentActivityEntry[]; mergedToday: { count: number; day: string } };
   health: NowHealth;
   decisions: NowDecision[];
   /** How many open decisions past the cap `decisions` leaves out. */
@@ -428,7 +429,12 @@ function nowTask(row: BoardRow): NowTask {
     ...(row.startedAt ? { startedAt: row.startedAt } : {}),
     ...(row.needsHuman ? { needsHuman: row.needsHuman } : {}), ...(row.verifyHumanPending ? { verifyHumanPending: row.verifyHumanPending } : {}),
     ...(escalation ? { escalation } : {}),
-    ...(t?.servedModel || t?.requestedModel ? { worker: { ...(t.servedModel ? { servedModel: t.servedModel } : {}), ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}) } } : {}),
+    ...(t ? { worker: {
+      ...(t.runId ? { runId: t.runId } : {}), ...(t.role ? { role: t.role } : {}),
+      ...(t.provider ? { provider: t.provider } : {}),
+      ...(t.servedModel ? { servedModel: t.servedModel } : {}),
+      ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}),
+    } } : {}),
     ...(row.workerState ? { workerState: row.workerState } : {}),
     ...(row.workerState === "quiet" && row.workerStateSince ? { workerStateSince: row.workerStateSince } : {}),
     ...(row.processUnevidenced ? { processUnevidenced: true as const } : {}),
@@ -473,7 +479,22 @@ export function assembleNowView(input: {
     },
     actions: nowActions(snapshot, input.rows),
     recent: {
-      entries: input.recent.map((e) => ({ ts: e.ts, verb: e.verb, taskId: e.taskId, title: e.title, ...(e.detail ? { detail: e.detail } : {}), ...(e.costUsd !== undefined ? { costUsd: e.costUsd } : {}), ...(e.prUrl ? { prUrl: e.prUrl } : {}) })),
+      entries: input.recent.map((e) => ({
+        ts: e.ts, verb: e.verb, taskId: e.taskId, title: e.title,
+        ...(e.runId ? { runId: e.runId } : {}), ...(e.detail ? { detail: e.detail } : {}),
+        ...(e.costUsd !== undefined ? { costUsd: e.costUsd } : {}),
+        ...(e.numTurns !== undefined ? { numTurns: e.numTurns } : {}),
+        ...(e.prUrl ? { prUrl: e.prUrl } : {}), ...(e.prNumber !== undefined ? { prNumber: e.prNumber } : {}),
+        ...(e.eventKind ? { eventKind: e.eventKind } : {}), ...(e.eventAt ? { eventAt: e.eventAt } : {}),
+        ...(e.workerRole ? { workerRole: e.workerRole } : {}), ...(e.provider ? { provider: e.provider } : {}),
+        ...(e.requestedModel ? { requestedModel: e.requestedModel } : {}), ...(e.servedModel ? { servedModel: e.servedModel } : {}),
+        ...(e.turnsSoFar !== undefined ? { turnsSoFar: e.turnsSoFar } : {}),
+        ...(e.toolName ? { toolName: e.toolName } : {}), ...(e.toolReason ? { toolReason: e.toolReason } : {}),
+        ...(e.toolStartedAt ? { toolStartedAt: e.toolStartedAt } : {}), ...(e.toolCompletedAt ? { toolCompletedAt: e.toolCompletedAt } : {}),
+        ...(e.toolDurationMs !== undefined ? { toolDurationMs: e.toolDurationMs } : {}),
+        ...(e.toolOutcome ? { toolOutcome: e.toolOutcome } : {}),
+        ...(e.prTitle ? { prTitle: e.prTitle } : {}), ...(e.githubUnavailable ? { githubUnavailable: true as const } : {}),
+      })),
       mergedToday: mergedTodayCount(input.rows, input.plan, input.nowMs),
     },
     health: input.health,
