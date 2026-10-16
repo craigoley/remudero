@@ -12,8 +12,8 @@
   origin: "ci-learning:12108:coverage-ledger"
   ci_learning_prs: [12108]
   files:
-    - learnings/ci.d/ci-learning-12108-coverage-ledger.yaml
+    - learnings/ci.yaml
   acceptance:
     - claim: "the lane that trips the coverage-ledger gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
-      proof: "grep: ci-learning:12108:coverage-ledger in learnings/ci.d/ci-learning-12108-coverage-ledger.yaml"
+      proof: "grep: ci-learning:12108:coverage-ledger in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:12108:coverage-ledger. The coverage-ledger gate went red on #12108 and was repaired; the repair touched test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts, test/helpers/native-gh-and-jq.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
