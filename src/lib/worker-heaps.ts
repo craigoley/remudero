@@ -160,17 +160,35 @@ async function within<T>(read: () => Promise<T>, timeoutMs: number, late: T): Pr
 
 type ThreadHeap = { bytes: number; used_bytes?: number } | { error: string };
 
+/** A caller's deadline never cancels a native heap request. Keep one until it actually settles. */
+interface ThreadHeapRequest { exited: boolean; pending?: Promise<ThreadHeap> }
+const threadHeapRequests = new WeakMap<WorkerThread, ThreadHeapRequest>();
+
 async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<ThreadHeap> {
-  const unsized = (why: string): string => `thread ${thread.threadId} unsized: ${why}`;
+  const id = thread.threadId;
+  const unsized = (why: string): string => `thread ${id} unsized: ${why}`;
   if (typeof thread.getHeapStatistics !== "function") return { error: unsized("this runtime has no worker.getHeapStatistics()") };
   try {
+    if (id < 0) return { error: unsized("worker exited") };
+    let request = threadHeapRequests.get(thread);
+    if (!request) {
+      const created: ThreadHeapRequest = { exited: false };
+      thread.once("exit", () => { created.exited = true; });
+      threadHeapRequests.set(thread, created);
+      request = created;
+    }
+    if (request.exited) return { error: unsized("worker exited") };
+    // Later samples report unknown at once: even attaching another timeout race would retain another waiter.
+    if (request.pending) return { error: unsized("heap statistics request still pending") };
     const read = async (): Promise<ThreadHeap> => {
       const heap = await thread.getHeapStatistics();
+      if (request.exited) return { error: unsized("worker exited") };
       const bytes = heap.total_heap_size + heap.external_memory;
       // A runtime that does not report the used heap leaves it unknown: absent, never NaN or zero.
       return Number.isFinite(heap.used_heap_size) ? { bytes, used_bytes: heap.used_heap_size + heap.external_memory } : { bytes };
     };
-    return await within(read, timeoutMs, { error: unsized(`no heap statistics within ${timeoutMs}ms`) });
+    request.pending = read().finally(() => { request.pending = undefined; });
+    return await within(() => request.pending!, timeoutMs, { error: unsized(`no heap statistics within ${timeoutMs}ms`) });
   } catch (e) {
     return { error: unsized(String((e as Error)?.message ?? e)) };
   }
