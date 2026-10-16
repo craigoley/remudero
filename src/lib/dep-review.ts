@@ -1157,17 +1157,20 @@ export function renderDepReviewOwnRedFeedback(args: {
   title: string;
   body: string;
   headSha: string;
-  basis: "main-passes" | "survived-refresh";
+  basis: "main-passes" | "survived-refresh" | "outside-allowlist";
   bumps: readonly DependabotOwnRedBump[];
   redChecks: readonly string[];
   siblings: ReadonlyArray<{ prNumber: number; bumps: readonly DependabotOwnRedBump[] }>;
+  offendingFiles?: readonly string[];
 }): string {
   return [
     `Land the dependency bump(s) of Dependabot PR #${args.prNumber}, whose red is its own: ${args.title}`,
     "",
     args.basis === "main-passes"
       ? "Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes."
-      : "Dependabot proposed a minor/patch update whose red survived a requested Dependabot refresh.",
+      : args.basis === "outside-allowlist"
+        ? `Dependabot edited dependency file(s) outside the lane's allowlist: ${(args.offendingFiles ?? []).join(", ")}.`
+        : "Dependabot proposed a minor/patch update whose red survived a requested Dependabot refresh.",
     "A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest",
     "allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:",
     "tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked",
@@ -1305,4 +1308,57 @@ export function reconcileDependabotOwnRed(args: {
     red_checks: args.result.redChecks, folded_prs: siblings.map((s) => s.prNumber),
   });
   return "captured";
+}
+
+
+export type DependabotRefusedPathOutcome = "not-proposed" | "captured" | "folded" | "failed";
+
+export function reconcileDependabotRefusedPath(args: {
+  registryDir: string;
+  owner: string;
+  repo: string;
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  author: DepReviewAuthor;
+  commits: readonly DependabotHeadCommit[] | undefined;
+  result: DepReviewResult;
+  capture: (args: { raw: string; submissionKey: string }) => { id: string };
+  nowMs: number;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotRefusedPathOutcome {
+  const facts = { pr_number: args.prNumber, head_sha: args.headSha, offending_files: args.result.offendingFiles };
+  const bumps = parseDependabotBumpFacts(args.title, args.body)
+    .map((b) => ({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
+  const reason = !isDependabotAuthor(args.author) ? "non-dependabot-author"
+    : headCarriesForeignCommit(args.commits) ? "foreign-commit"
+      : bumps.length === 0 ? "unkeyed" : undefined;
+  if (reason !== undefined) {
+    args.log("dep-review.refused_path.not_proposed", { ...facts, reason });
+    return "not-proposed";
+  }
+  const registryPath = join(args.registryDir, OWN_RED_PROPOSALS_FILE);
+  const submissionKey = depReviewOwnRedSubmissionKey(args.owner, args.repo, bumps);
+  try {
+    const proposals = readOwnRedProposals(registryPath);
+    const mine = bumps.map(ownRedBumpKey);
+    const carrier = proposals.find((p) => mine.every((k) => p.bumps.includes(k)));
+    if (carrier !== undefined) {
+      args.log("dep-review.refused_path.folded", { ...facts, feedback_id: carrier.feedbackId });
+      return "folded";
+    }
+    const raw = renderDepReviewOwnRedFeedback({ ...args, basis: "outside-allowlist", bumps, redChecks: args.result.redChecks,
+      siblings: [], offendingFiles: args.result.offendingFiles });
+    const entry = args.capture({ raw, submissionKey });
+    writeAtomic(registryPath, `${JSON.stringify({ proposals: [...proposals, {
+      feedbackId: entry.id, submissionKey, bumps: [...new Set(mine)].sort(), prNumbers: [args.prNumber], filedAtMs: args.nowMs,
+    }] })}\n`);
+    args.log("dep-review.refused_path.feedback_captured", { ...facts, feedback_id: entry.id, submission_key: submissionKey });
+    return "captured";
+  } catch (error) {
+    args.log("dep-review.refused_path.capture_failed", { ...facts, submission_key: submissionKey, error: String((error as Error)?.message ?? error) });
+    return "failed";
+  }
 }

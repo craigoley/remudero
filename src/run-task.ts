@@ -1623,6 +1623,7 @@ import {
   reconcileDepReviewHold,
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
+  reconcileDependabotRefusedPath,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -24154,7 +24155,19 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
 
   if (result.decision === "refuse") {
-    console.log(`no remudero-review posted (refused): ${view.url}`);
+    const refused = reconcileDependabotRefusedPath({
+      registryDir: dirname(holdStatePath), owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "",
+      body: view.body ?? "", headSha: view.headRefOid, author: input.author, commits: view.commits, result, nowMs: clock.now(), log,
+      capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
+    });
+    if (refused === "failed") {
+      // W1-T9797: the sweep dedups every outcome but hold, so an unfiled remedy must read as hold.
+      log("dep-review.decided", { ...result, decision: "hold", review_decision: "refuse",
+        reason: "refused-path proposal not captured; will retry", pr_url: view.url, head_sha: view.headRefOid });
+      console.log(`refused, owned-build proposal NOT captured; will retry: ${view.url}`);
+      return 1;
+    }
+    console.log(`no remudero-review posted (refused; owned-build proposal ${refused}): ${view.url}`);
     return 2;
   }
   if (result.decision === "hold") {
