@@ -26,6 +26,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
+import { sameHost } from "./host-identity.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
@@ -1420,7 +1421,7 @@ export function isRotationLockHolderStale(
   opts: { hostname?: () => string; inContainer?: () => boolean; nowMs?: number; isPidAlive?: (pid: number) => boolean } = {},
 ): boolean {
   const myHost = (opts.hostname ?? hostname)();
-  if (held.host !== myHost) {
+  if (!sameHost(held.host, myHost)) {
     const startedMs = Date.parse(held.startedAt);
     return !Number.isFinite(startedMs) || (opts.nowMs ?? systemClock.now()) - startedMs > LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
   }

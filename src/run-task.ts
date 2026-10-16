@@ -202,6 +202,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic } from "./lib/fs-race-safe.js";
+import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDayAsync } from "./lib/fleet-lane.js";
 import { startDaemonSreLane } from "./lib/daemon.js";
@@ -1039,6 +1040,7 @@ import {
   type RetroAttemptRecord,
   type RetroBackoffDecision,
   type RetroBackoffPolicy,
+  serializeRetroDispatch,
 } from "./lib/retro.js";
 import {
   runRetroPrepublishPreflight,
@@ -1652,7 +1654,7 @@ import {
   gitClaimRunnerAsync,
   dispatchClaimRef,
   // W1-T2784: the dead-claimant arm's two probe leaves + the anchor decoder.
-  parseClaimAnchorMessage,
+  claimDropRefusal,
   pidIsPresent,
   readNamespaceBootMs,
   findClaimMintRow,
@@ -27885,7 +27887,7 @@ export function classifyReservationAnchor(message: string, caller?: ReservationC
     const holder = callerFromReservationAnchor(m);
     if (!caller) return "fleet";
     if (!holder) return "unknown";
-    return holder.pid === caller.pid && holder.host === caller.host ? "self" : "fleet";
+    return holder.pid === caller.pid && sameHost(holder.host, caller.host) ? "self" : "fleet";
   }
   if (/^reserve\s+W1-T\d+\b/.test(m)) return "operator";
   return "unknown";
@@ -33876,9 +33878,24 @@ async function retroCommand(
      * real dynamically-enumerated plan-reading preflight. */
     prepublishPreflight?: typeof runRetroPrepublishPreflight;
     openPrs?: GhApiFetcher;
+    /** W1-T9363: set only by the lane gate below, on its own re-entry, once it holds the lock. */
+    inRetroLane?: true;
   } = {},
 ): Promise<number> {
   const dryRun = rest.includes("--dry-run");
+  // W1-T9363: one retro at a time per root, held from the open-PR read through publication, so a
+  // second retro (an operator run beside the daemon's) defers instead of synthesizing from the same
+  // merge-base. A dry-run writes nothing, so it never takes the lock.
+  if (!dryRun && !opts.inRetroLane) {
+    const laneConfig = loadConfig();
+    const lane = await serializeRetroDispatch(join(laneConfig.root, "state", "retro.lock"),
+      () => retroCommand(rest, { ...opts, inRetroLane: true }));
+    if (lane.kind === "completed") return lane.value;
+    appendLedger(ledgerPathFor(laneConfig), { run_id: `RETRO-${nextLaneEpochMs()}`, task_id: "RETRO", step: "retro.skipped_in_flight",
+      lane: "retro", holder_pid: lane.holder.pid, holder_host: lane.holder.host, holder_started_at: lane.holder.startedAt });
+    console.log(`\n### [retro] retro skipped — another retro (pid ${lane.holder.pid} on ${lane.holder.host}) holds the lane`);
+    return 1;
+  }
   const checkoutRoot = opts.repoRoot ?? repoRoot;
   const spawn = opts.spawn ?? ledgeredNonDispatchSpawn("retro");
   const config = loadConfig();
@@ -40450,7 +40467,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
+            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).externalWaitFreshness,
             restartAtWorkerBoundary: runOptions?.restartAtWorkerBoundary,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
@@ -40547,8 +40564,8 @@ export async function daemonCommand(
         // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
         // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
-          ? daemonFreshnessReads(repoRoot).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
+          ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
+          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, liveEditLadderWiring(config)), escalationSpoolDrainWiring(config)),
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
@@ -53641,7 +53658,7 @@ export async function approveCommand(
       if (!candidate) return undefined;
       // W1-T9161: the approve that wrote this row may still be in its CI wait, about to merge the PR or arm it. A pid is
       // only a process on the host that wrote it; a dead pid, another host's, or a row naming none keeps the join.
-      if (candidate.actorPid !== undefined && candidate.host === hostname() && defaultIsPidAlive(candidate.actorPid)) {
+      if (candidate.actorPid !== undefined && sameHost(candidate.host, hostname()) && defaultIsPidAlive(candidate.actorPid)) {
         log("approve.join_skipped", { pr_url: candidate.prUrl, branch: candidate.branch, reason: "approving_pid_alive", actor_pid: candidate.actorPid });
         return undefined;
       }
@@ -56795,11 +56812,9 @@ export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
       console.error(`rmd claim: ${ref} is not held — nothing to drop`);
       return 1;
     }
-    const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
-    const localHost = opts.localHost ?? hostname();
-    if (!identity || identity.host !== localHost) {
-      const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
-      console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);
+    const refusal = claimDropRefusal(ref, reserver.anchorMessage?.(taskId), opts.localHost ?? hostname());
+    if (refusal !== undefined) {
+      console.error(`rmd claim: ${refusal}`);
       return 1;
     }
     if (!reserver.drop(taskId, { expect: sha })) {

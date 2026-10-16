@@ -86,6 +86,8 @@ export interface SelfSyncDeps {
   reexec?: () => void;
   ignoreReentrancyGuard?: boolean;
   gitAsync?: AsyncGitRunner;
+  /** W1-T9687: explicit daemon boot identity; absent keeps checkout semantics, present-but-unavailable degrades. */
+  loadedCodeSha?: string;
   fetchTimeoutMs?: number; // W1-T5282: the awaited fetch's bound; defaults to `GATEWAY_FETCH_TIMEOUT_MS`
   recentFetchFallback?: boolean; // W1-T6033: the reviewer opts in; the daemon's per-tick read would only wait twice
   clock?: Clock; // W1-T6033: the clock a recent-fetch ref's age is read against; defaults to `systemClock`
@@ -532,7 +534,7 @@ export async function checkServiceFreshnessAsync(
     if (!deps.recentFetchFallback || !isStalledHandshake(err)) return { status: "degraded", reason };
     return retryStalledHandshake(repoDir, deps, fetchMain, reason);
   }
-  return assessFetchedServiceAsync(repoDir, serviceGitAsync(repoDir, deps));
+  return assessFetchedServiceAsync(repoDir, serviceGitAsync(repoDir, deps), deps);
 }
 
 const DAEMON_POLL_INTERVAL_MS = 60_000;
@@ -550,7 +552,7 @@ async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchM
   const git = serviceGitAsync(repoDir, deps);
   try {
     await fetchMain();
-    return await assessFetchedServiceAsync(repoDir, git);
+    return await assessFetchedServiceAsync(repoDir, git, deps);
   } catch (retryErr) {
     const failed = `${reason}; retried once: ${String(retryErr)}`;
     let updated: RegExpExecArray | null;
@@ -564,7 +566,7 @@ async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchM
     if (refAgeMs < 0 || refAgeMs > RECENT_FETCH_MAX_AGE_MS) {
       return { status: "degraded", reason: `${failed}; origin/main was last updated ${refAgeMs} ms ago, outside ${RECENT_FETCH_MAX_AGE_MS} ms` };
     }
-    const assessed = await assessFetchedServiceAsync(repoDir, git);
+    const assessed = await assessFetchedServiceAsync(repoDir, git, deps);
     return assessed.status === "assessed" ? { ...assessed, source: "recent-fetch", refAgeMs } : assessed;
   }
 }
@@ -578,14 +580,18 @@ function serviceGitAsync(repoDir: string, deps: SelfSyncDeps): AsyncGitRunner {
   return localOverride ? async (args) => localOverride(args) : asyncGit(repoDir);
 }
 
-async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner): Promise<ServiceFreshness> {
+async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner, deps: Pick<SelfSyncDeps, "loadedCodeSha">): Promise<ServiceFreshness> {
+  const hasLoadedCodeSha = Object.hasOwn(deps, "loadedCodeSha");
+  if (hasLoadedCodeSha && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(deps.loadedCodeSha ?? "")) {
+    return { status: "degraded", reason: `daemon loaded-code SHA is missing or malformed in ${repoDir}` };
+  }
   let headSha: string;
   let originSha: string;
   try {
-    headSha = (await git(["rev-parse", "HEAD"])).trim();
+    headSha = (await git(hasLoadedCodeSha ? ["rev-parse", "--verify", `${deps.loadedCodeSha}^{commit}`] : ["rev-parse", "HEAD"])).trim();
     originSha = (await git(["rev-parse", "origin/main"])).trim();
   } catch (err) {
-    return { status: "degraded", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(err)}` };
+    return { status: "degraded", reason: `could not resolve ${hasLoadedCodeSha ? "daemon loaded-code SHA" : "HEAD"}/origin/main in ${repoDir}: ${String(err)}` };
   }
   const dirty_paths = (await git(["status", "--porcelain", "-uno"])).split("\n").filter(Boolean).map((line) => line.slice(3));
   const dirty = dirty_paths.length > 0;

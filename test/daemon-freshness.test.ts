@@ -4,7 +4,6 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
 import {
   DAEMON_EXIT_STALE,
   daemonExitCode,
@@ -22,6 +21,8 @@ import {
   type SweepDeps,
 } from "./helpers/sweep-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+
+type RunResult = Awaited<ReturnType<NonNullable<DaemonDeps["runOne"]>>>;
 
 // W1-T126 — DAEMON SELF-FRESHNESS. The same small linear plan test/daemon.test.ts uses
 // (A -> B -> C chain, D independent), trimmed to just A/B since these tests only need
