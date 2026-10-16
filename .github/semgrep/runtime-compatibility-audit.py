@@ -161,9 +161,9 @@ APPROVED_SPECIAL_MEMBERS = {
 }
 AUDIT_TEST_SOURCES = {
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "5bdd68c18b7f5526cc8ba7f142d92751772f65a2b074ad01e77e19a500704c29",
+    "test_runtime_compatibility_audit.py": "f60924048b15416a87ec20d92acf79de25b1bd30feed6a675103ec1b05a40939",
 }
-AUDIT_TEST_INVENTORY = "3ace2f7f45dfff9a2733b26941d74e3131400cf41bc191e59a893843d03b5b0c"
+AUDIT_TEST_INVENTORY = "c01d30b972030556e1d7a597344ef70151999007a032bb869faf5321feb9d2ca"
 
 
 class AuditBlocked(ValueError):
@@ -251,7 +251,7 @@ class _RawMetadata(importlib.metadata.Distribution):
         raise AuditBlocked("NO_METADATA_FILESYSTEM", str(path))
 
 
-def metadata_distribution(raw: bytes, entries: bytes, name: str, version: str, api):
+def metadata_distribution(raw: bytes, entries: bytes, name: str, version: str, api, *, source_kind="wheel"):
     need(0 < len(raw) <= MAX_METADATA and len(entries) <= MAX_METADATA, "METADATA_BOUND", name)
     msg = BytesParser(policy=email.policy.default.clone(raise_on_defect=True)).parsebytes(raw)
     for field in ("Metadata-Version", "Name", "Version"):
@@ -260,7 +260,13 @@ def metadata_distribution(raw: bytes, entries: bytes, name: str, version: str, a
     need(api.canonicalize_name(str(msg["Name"])) == name and api.Version(str(msg["Version"])) == api.Version(version), "METADATA_IDENTITY", name)
     need(len(msg.get_all("Requires-Python", [])) <= 1, "AMBIGUOUS_METADATA", "Requires-Python")
     dynamic = {v.strip().lower() for row in msg.get_all("Dynamic", []) for v in str(row).split(",")}
-    need(not dynamic.intersection({"requires-dist", "requires-python", "name", "version"}), "DYNAMIC_METADATA", name)
+    need(source_kind in {"wheel", "sdist"}, "METADATA_ORIGIN", name)
+    need(not dynamic.intersection({"name", "version", "metadata-version"}), "DYNAMIC_METADATA", name)
+    # PEP 643: Dynamic in a wheel is information about build-time calculation,
+    # NOT an instruction to run a hook or ignore final Requires-* values.
+    # Source distributions may still change those fields during an actual build.
+    if source_kind == "sdist":
+        need(not dynamic.intersection({"requires-dist", "requires-python"}), "DYNAMIC_METADATA", name)
     need(api.check_requires_python(msg.get("Requires-Python"), sys.version_info[:3]), "REQUIRES_PYTHON", name)
     # Full PEP 508 parsing is pip's vendored packaging, including inactive rows.
     for row in msg.get_all("Requires-Dist", []):
@@ -405,7 +411,7 @@ def scan_approved_peewee_sdist(filename: str, raw: bytes, api) -> dict:
                 need(info.isfile() and info.size <= MAX_METADATA, "METADATA_BOUND", info.name)
                 metadata = archive.extractfile(info).read()  # raw bytes, NOT extract()/setup.py
     need(metadata is not None, "MISSING_PKG_INFO", filename)
-    dist, dependencies = metadata_distribution(metadata, b"", "peewee", APPROVED_PEEWEE[0], api)
+    dist, dependencies = metadata_distribution(metadata, b"", "peewee", APPROVED_PEEWEE[0], api, source_kind="sdist")
     return {"name": "peewee", "version": APPROVED_PEEWEE[0], "sha256": digest(raw), "kind": "approved-sdist",
             "metadata": metadata, "dist": dist, "dependencies": dependencies, "destinations": [],
             "expandedBytes": len(tar_bytes), "postBuildWheelAuditRequired": True}
@@ -671,7 +677,7 @@ def _bootstrap_pip(root):
 def verify_unit_receipt(report, expected_sources):
     need(report.get("schema") == "semgrep-audit-unit-controls/v1" and
          report.get("state") == "SOURCE_MODULE_CONTROLS_PASS", "UNIT_RESULT", "wrong result type")
-    need(all(type(report.get(k)) is int and report[k] == 117 for k in ("selected", "executed", "pass")) and
+    need(all(type(report.get(k)) is int and report[k] == 121 for k in ("selected", "executed", "pass")) and
          all(type(report.get(k)) is int and report[k] == 0 for k in
              ("fail", "error", "skipped", "unrun", "expectedFailures", "unexpectedSuccesses")),
          "UNIT_COUNTS", "exact complete non-skipped inventory required")
@@ -680,8 +686,8 @@ def verify_unit_receipt(report, expected_sources):
          report.get("invariantErrors") == [] and report.get("failures") == [] and report.get("errors") == [],
          "UNIT_CLOSURE", "incomplete or failed source controls")
     ids = report.get("literalInventory")
-    need(isinstance(ids, list) and len(ids) == 117 and all(isinstance(v, str) for v in ids) and
-         len(set(ids)) == 117 and ids == sorted(ids) and
+    need(isinstance(ids, list) and len(ids) == 121 and all(isinstance(v, str) for v in ids) and
+         len(set(ids)) == 121 and ids == sorted(ids) and
          digest(("\n".join(ids) + "\n").encode()) == AUDIT_TEST_INVENTORY and
          report.get("inventorySha256") == AUDIT_TEST_INVENTORY and
          sorted(report.get("executedIds", [])) == ids and sorted(report.get("successfulIds", [])) == ids,
@@ -716,7 +722,7 @@ def phase_unit(root, workspace, head):
     report = json.loads(_regular(receipt, 65536))
     verify_unit_receipt(report, expected)
     summary = {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
-               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 117,
+               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 121,
                "pythonVersion": report["pythonVersion"], "productionLoader": production_loader.provenance,
                "runnerQualified": False}
     _json_once(root / "unit-audit.json", summary)

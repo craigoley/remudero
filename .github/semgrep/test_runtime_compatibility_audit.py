@@ -1,7 +1,6 @@
-"""Repo-owned 99 migrated audit controls plus eight loader/marker regressions.
+"""Literal-inventory source-module controls, NOT runtime qualification.
 
-PREPARED ONLY. Main must review/stage committed test, fixture and auditor bytes.
-Future admitted CLI:
+Admitted CLI, bound to committed test/fixture/auditor bytes:
   python -I -S test_runtime_compatibility_audit.py --pip-wheel ABSOLUTE_WHEEL \
     --auditor-sha256 REVIEWED_SHA256 --receipt PRIVATE_ABSOLUTE_JSON
 
@@ -9,18 +8,9 @@ Linux Python 3.12 only; the real patch is reported. No download/install/build,
 candidate import, production target-loader call or observed-host fallback.
 The reviewed auditor digest is mandatory and has no environment/default value.
 
-Migration: 44 original core cases and 55 policy cases retained. Only old private
-loader/setup and fixed-3.12.3 provenance assertions become portable repo-bound
-Linux-3.12 provenance assertions; the policy identity test is renamed accordingly.
-Main reported the predecessor 99-case run as 95 pass / 4 fail / 0 error / 0 skip:
-requested/nested/cyclic/second-requester missing-extra cases, NOT flaky. Preserve
-that evidence; this source file neither reruns nor rewrites its receipts.
-
-TAP wrapper PLAN, not an implemented or executed Node test: invoke this CLI with
-no selection/filter, require exit 0 and its exclusive JSON receipt, then verify
-literal IDs, selected/executed/pass=117, unrun/fail/error/skip/xfail/xpass=0,
-source/tool hashes and invariantErrors=[]. Keep Node's wrapper count distinct
-from the 117 native Python cases. No green result from stdout text alone.
+No selection/filter: require exclusive JSON, exit 0, literal inventory=121,
+zero other outcomes, source/tool hashes and invariantErrors=[]. Node wrappers
+are separate cases. Historical failed receipts remain immutable.
 """
 from __future__ import annotations
 
@@ -147,6 +137,44 @@ class AuditSyntheticModuleTests(unittest.TestCase):
 
     def test_missing_default_dependency_blocks(self):
         self.blocked("DEPENDENCY_CLOSURE", H.wheel("semgrep", "1.180.0", ["mcp==1.29.0"]))
+
+    def test_wheel_dynamic_dependency_is_final_and_original_bytes_are_preserved(self):
+        raw = H.metadata("semgrep", "1.180.0", ["mcp==1.29.0"]).replace(
+            b"Metadata-Version: 2.4\n", b"Metadata-Version: 2.4\nDynamic: Requires-Dist\n")
+        self.assertIn(b"Dynamic: Requires-Dist\n", raw)
+        fixture = H.wheel("semgrep", "1.180.0", metadata_bytes=raw)
+        self.assertEqual(H.scan(self.c, fixture)["metadata"], raw)
+        self.positive(fixture, H.wheel("mcp", "1.29.0"))
+        self.blocked("DEPENDENCY_CLOSURE", fixture, H.wheel("mcp", "1.30.0"))
+        self.assertEqual(H.scan(self.c, fixture)["metadata"], raw)
+
+    def test_wheel_dynamic_python_still_enforces_final_requires_python(self):
+        raw = H.metadata("attack", "1.0").replace(
+            b"Requires-Python: >=3.12\n", b"Dynamic: Requires-Python\nRequires-Python: >=99\n")
+        self.assertIn(b"Dynamic: Requires-Python\n", raw)
+        self.blocked("REQUIRES_PYTHON", H.wheel("attack", metadata_bytes=raw))
+
+    def test_sdist_dynamic_dependencies_remain_blocked_before_build(self):
+        for field in ("Requires-Dist", "Requires-Python"):
+            raw = H.metadata("attack", "1.0").replace(
+                b"Metadata-Version: 2.4\n", ("Metadata-Version: 2.4\nDynamic: " + field + "\n").encode())
+            self.assertIn(("Dynamic: " + field + "\n").encode(), raw)
+            with self.assertRaises(self.p.AuditBlocked) as raised:
+                self.p.metadata_distribution(raw, b"", "attack", "1.0", self.api, source_kind="sdist")
+            self.assertEqual(raised.exception.code, "DYNAMIC_METADATA")
+
+    def test_dynamic_identity_fields_and_unknown_origin_remain_blocked(self):
+        for field in ("Name", "Version", "Metadata-Version"):
+            raw = H.metadata("attack", "1.0").replace(
+                b"Metadata-Version: 2.4\n", ("Metadata-Version: 2.4\nDynamic: " + field + "\n").encode())
+            self.assertIn(("Dynamic: " + field + "\n").encode(), raw)
+            for kind in ("wheel", "sdist"):
+                with self.assertRaises(self.p.AuditBlocked) as raised:
+                    self.p.metadata_distribution(raw, b"", "attack", "1.0", self.api, source_kind=kind)
+                self.assertEqual(raised.exception.code, "DYNAMIC_METADATA")
+        with self.assertRaises(self.p.AuditBlocked) as raised:
+            self.p.metadata_distribution(H.metadata("attack", "1.0"), b"", "attack", "1.0", self.api, source_kind="unknown")
+        self.assertEqual(raised.exception.code, "METADATA_ORIGIN")
 
     def test_inactive_extra_uses_actual_pip_marker_filter(self):
         fixture = H.wheel("semgrep", "1.180.0", ['missing-extra==1.0; extra == "unused"'])
@@ -825,6 +853,7 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_default_special_inventory_is_bounded_nested_and_digest_bound",
     "AuditSyntheticModuleTests.test_direct_url_dependency_is_rejected_without_fetch",
     "AuditSyntheticModuleTests.test_duplicate_distribution_identity_is_not_a_complete_set",
+    "AuditSyntheticModuleTests.test_dynamic_identity_fields_and_unknown_origin_remain_blocked",
     "AuditSyntheticModuleTests.test_empty_population_is_not_positive_evidence",
     "AuditSyntheticModuleTests.test_exact_setuptools_pth_policy_tuple_positive_is_not_artifact_proof",
     "AuditSyntheticModuleTests.test_foreign_generated_semgrep_entrypoint_blocks",
@@ -854,6 +883,7 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_reviewed_namespace_tuples_are_exact_lower_seam_not_artifact_evidence",
     "AuditSyntheticModuleTests.test_root_pth_marker_is_rejected_without_execution",
     "AuditSyntheticModuleTests.test_same_package_root_and_data_alias_destination_collides",
+    "AuditSyntheticModuleTests.test_sdist_dynamic_dependencies_remain_blocked_before_build",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_data_path_alias",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_actual_digest",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_owner",
@@ -869,8 +899,10 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_unapproved_single_contributor_cannot_claim_a_reviewed_namespace",
     "AuditSyntheticModuleTests.test_unreviewed_shared_namespace_remains_blocked_not_waived",
     "AuditSyntheticModuleTests.test_usercustomize_marker_is_rejected_without_execution",
+    "AuditSyntheticModuleTests.test_wheel_dynamic_dependency_is_final_and_original_bytes_are_preserved",
+    "AuditSyntheticModuleTests.test_wheel_dynamic_python_still_enforces_final_requires_python",
 )
-EXPECTED_TEST_COUNT = 117
+EXPECTED_TEST_COUNT = 121
 
 
 def canonical_id(test):
@@ -889,8 +921,8 @@ def build_suite():
     first = unittest.defaultTestLoader.loadTestsFromTestCase(AuditSyntheticModuleTests)
     second = additionalCases(H, CONTEXT)
     third = unittest.defaultTestLoader.loadTestsFromTestCase(AuditLoaderMarkerRegressions)
-    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (54, 55, 8):
-        raise AssertionError("54+55+8 exact-layout inventory changed")
+    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (58, 55, 8):
+        raise AssertionError("58+55+8 exact-layout/Dynamic inventory changed")
     suite = unittest.TestSuite([first, second, third])
     actual = tuple(sorted(canonical_id(test) for test in flatten_suite(suite)))
     if len(EXPECTED_TEST_IDS) != EXPECTED_TEST_COUNT or len(set(EXPECTED_TEST_IDS)) != EXPECTED_TEST_COUNT:
@@ -939,7 +971,7 @@ def json_once(path, value):
 
 def main():
     global H, CONTEXT
-    parser = argparse.ArgumentParser(description="117 literal-inventory source-module controls; no runtime qualification")
+    parser = argparse.ArgumentParser(description="121 literal-inventory source-module controls; no runtime qualification")
     parser.add_argument("--pip-wheel", required=True, type=pathlib.Path)
     parser.add_argument("--auditor-sha256", required=True, help="reviewed workflow/controller literal, never computed as an approval")
     parser.add_argument("--receipt", required=True, type=pathlib.Path, help="new JSON in an existing private neutral directory")
