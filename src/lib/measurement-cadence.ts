@@ -332,8 +332,7 @@ export interface WipeTestCadenceReportResult {
   factors: WipeTestFactorCadenceResult[];
 }
 
-/** A decision's evidence read: its {@link WipeTestEvidenceCost}, and whether the decision is this slot's
- *  earlier one, reused because the evidence it was drawn over has not changed. */
+/** A decision's evidence-read cost, and whether it reused its slot's earlier skip. */
 export interface WipeTestCadenceEvidence extends WipeTestEvidenceCost {
   reused: boolean;
 }
@@ -2224,12 +2223,9 @@ export function scheduleWipeTestAblation(opts: {
   return { fire: true, reason: `${paced.reason}; ${why}`, factor: behind.factor, share: behind.share, draw, shares };
 }
 
-/** The two steps the ablation evidence folds: the measured pairs and the workers' claimed use. */
 export const WIPE_TEST_EVIDENCE_STEPS: readonly string[] = [WIPE_TEST_PAIR_STEP, "learnings.used"];
 
-/** The fields {@link wipeTestPairFromLedgerObject} and {@link wipeTestClaimedUse} read, plus `ts` and the
- *  run identity, which keep two distinct rows distinct under the union's replay dedupe. Bump the reader's
- *  `reducerVersion` whenever this changes. */
+/** The fields the fold reads, plus `ts` and the run id that keep rows apart under replay dedupe. Bump `reducerVersion` on change. */
 const WIPE_TEST_EVIDENCE_FIELDS: ReadonlySet<string> = new Set([
   "ts", "step", "run_id", "task_id", "factor", "arm_a_run_id", "arm_b_run_id", "verdict_a", "verdict_b",
   "turns_delta", "cost_delta", "strikes_delta", "proof_exec_pass_a", "proof_exec_pass_b",
@@ -2240,15 +2236,13 @@ function projectWipeTestEvidenceRow(row: Record<string, unknown>): Record<string
   return Object.fromEntries(Object.entries(row).filter(([field]) => WIPE_TEST_EVIDENCE_FIELDS.has(field)));
 }
 
-/** A step-filtered records read of the ledger union, the {@link createIncrementalLedgerUnion} shape. */
 export type WipeTestEvidenceUnion = (stateDir: string, readOpts: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead;
 
 export type WipeTestAblationEvidence =
   | { ok: true; pairs: WipeTestPair[]; claimedUse: Partial<Record<WipeTestFactor, number | null>> }
   | { ok: false; reason: string };
 
-/** Every measured pair plus the claimed-use shares, from one step-filtered ledger-union read. A torn row
- *  is never a record, so it is never a measured pair. */
+/** Every measured pair plus the claimed-use shares, from one ledger-union read. */
 export function readWipeTestAblationEvidence(stateDir: string, read: WipeTestEvidenceUnion): WipeTestAblationEvidence {
   const union = read(stateDir, { step: WIPE_TEST_EVIDENCE_STEPS, requireArchives: true, refuseIncomplete: true });
   if (!union.ok) {
@@ -2259,22 +2253,13 @@ export function readWipeTestAblationEvidence(stateDir: string, read: WipeTestEvi
   return { ok: true, pairs, claimedUse: wipeTestClaimedUse(union.rows) };
 }
 
-/** What one evidence read cost: disk bytes read (compressed rotations, digests, the live file's new tail),
- *  the rotations read off disk, and the rotations in the corpus. */
 export interface WipeTestEvidenceCost {
   bytesRead: number;
   rotationsRead: number;
   rotations: number;
 }
 
-/**
- * The wipe-test cadence's evidence reader, built once for the daemon's long-lived check. OBSERVED 2026-10-16
- * on the fleet host: the check re-read the union through {@link resolveLedgerUnion} on every pulse of a slot
- * that drew no ablation, opening 290 of 377 rotations (260.6 MB) per pass on the loop, to reach the same skip.
- * This reads through {@link createIncrementalLedgerUnion}: a rotation is parsed at most once, reduced to the
- * evidence steps, and kept in memory and as a durable digest, so a repeat read takes only the live file's new
- * tail, and a restarted daemon reads digests rather than archives. Each read reports its own cost.
- */
+/** Each rotation is parsed once and digested, so a repeat read takes only the live tail; each read reports its disk bytes. */
 export function createWipeTestEvidenceReader(
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): (stateDir: string) => { evidence: WipeTestAblationEvidence; cost: WipeTestEvidenceCost } {
@@ -2314,7 +2299,6 @@ export function createWipeTestEvidenceReader(
   };
 }
 
-/** The `wipetest.cadence.*` row fields for a decision's evidence read; none when the check stopped before it. */
 export function wipeTestCadenceEvidenceFields(decision: WipeTestCadenceDecision): Record<string, unknown> {
   if (!decision.evidence) return {};
   return {
