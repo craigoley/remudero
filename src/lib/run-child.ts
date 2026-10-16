@@ -291,6 +291,7 @@ export async function startRunChildProbe(input: RunChildProbeInput, seams: RunCh
     try {
       mainSha = (await (seams.mainSha ?? mainTipSha)(input.repoDir)).trim();
     } catch (error) {
+      // Not erased: the skip row carries the reason. A tip that cannot be read is never answered with HEAD.
       return skip(reasonOf(error));
     }
     const engine = await newestCurrentEngine(input.stateRoot, mainSha, { repoDir: input.repoDir, log, ...seams.engine });
