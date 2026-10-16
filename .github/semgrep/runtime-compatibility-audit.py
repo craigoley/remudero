@@ -29,6 +29,7 @@ import re
 import stat
 import sys
 import tarfile
+import types
 import zipfile
 from email.parser import BytesParser
 from types import SimpleNamespace
@@ -161,11 +162,15 @@ APPROVED_SPECIAL_MEMBERS = {
     },
 }
 AUDIT_TEST_SOURCES = {
-    "runtime_audit_metadata_tests.py": "8bc686e91f25fe56a7908d1ea7ed85b7173b385765b0e407c179436d7f05fd5b",
+    "runtime_audit_metadata_tests.py": "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737",
     "runtime_audit_test_fixtures.py": "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d",
-    "test_runtime_compatibility_audit.py": "3bc6ca7a19c539265ad537537b744f151b6efe5e710f49ea82886874c7702639",
+    "test_runtime_compatibility_audit.py": "4ca34ad14044c89eef7275ae16f4163fa2c434c57fe658867a741ff043080284",
+    "runtime_source_recipe.py": "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d",
+    "prepare-source-build.py": "96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274",
+    "source-build-policy.json": "5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a",
 }
-AUDIT_TEST_INVENTORY = "dda4360e711eac640d43dfc6c89b4f0190de7adf2067e851f067a713a176da7b"
+AUDIT_TEST_INVENTORY = "00ba284b8fb1dddd45b20336bee6c04cd3c71ec21b68a1cfb22496cb387f142f"
+SOURCE_RECIPE_SHA256 = "6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d"
 
 
 class AuditBlocked(ValueError):
@@ -181,6 +186,24 @@ def need(condition: bool, code: str, detail: str) -> None:
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _source_recipe():
+    path = pathlib.Path(__file__).absolute().with_name("runtime_source_recipe.py")
+    raw = _regular(path, 65536)
+    need(digest(raw) == SOURCE_RECIPE_SHA256, "SOURCE_RECIPE_HASH", "fixed first-party sibling")
+    module = types.ModuleType("_bound_semgrep_source_recipe")
+    module.__file__ = str(path)
+    exec(compile(raw, str(path), "exec", dont_inherit=True), module.__dict__)
+    return module
+
+
+def _runtime_recipe(runtime):
+    module = _source_recipe()
+    try:
+        return module.select_recipe(runtime)
+    except module.RecipeBlocked as error:
+        raise AuditBlocked(str(error), "unapproved runtime recipe") from error
 
 
 def approved_namespace_contributor(row: dict, root: str, destination: tuple) -> bool:
@@ -572,7 +595,8 @@ def audit_locked_artifacts(build_lock: bytes, runtime_lock: bytes, artifacts: li
     need(api.pip.__version__ == "26.2.1" and api.provenance["state"] == "PINNED_API_BYTES_VERIFIED", "PINNED_API_REQUIRED", "no host fallback")
     build, runtime = pins(build_lock), pins(runtime_lock)
     need(build == APPROVED_TOOLS, "BUILD_TOOL_POLICY", "tool pins differ from trusted constants")
-    need(runtime.get("peewee") == APPROVED_PEEWEE and runtime.get("semgrep", (None,))[0] == "1.180.0", "RUNTIME_RECIPE", "Peewee/semgrep")
+    need(runtime.get("peewee") == APPROVED_PEEWEE, "RUNTIME_RECIPE", "Peewee")
+    _runtime_recipe(runtime)
     for name in build.keys() & runtime.keys():
         need(build[name] == runtime[name], "LOCK_OVERLAP", name)
     expected, rows = build | runtime, []
@@ -655,8 +679,9 @@ def _locked_inputs(root):
     build = _regular(root / "build-requirements.txt", 131072)
     runtime = _regular(root / "requirements.txt", 131072)
     b, r = _lock_pins(build), _lock_pins(runtime)
-    need(b == APPROVED_TOOLS and r.get("peewee") == APPROVED_PEEWEE and r.get("semgrep", (None,))[0] == "1.180.0",
+    need(b == APPROVED_TOOLS and r.get("peewee") == APPROVED_PEEWEE,
          "RECIPE_POLICY", "fixed original build pins, approved Peewee and Semgrep version required")
+    _runtime_recipe(r)
     need(all(b[n] == r[n] for n in b.keys() & r.keys()), "LOCK_OVERLAP", "tool drift")
     return build, runtime, b | r
 
@@ -735,7 +760,7 @@ def _bootstrap_pip(root):
 def verify_unit_receipt(report, expected_sources):
     need(report.get("schema") == "semgrep-audit-unit-controls/v1" and
          report.get("state") == "SOURCE_MODULE_CONTROLS_PASS", "UNIT_RESULT", "wrong result type")
-    need(all(type(report.get(k)) is int and report[k] == 141 for k in ("selected", "executed", "pass")) and
+    need(all(type(report.get(k)) is int and report[k] == 168 for k in ("selected", "executed", "pass")) and
          all(type(report.get(k)) is int and report[k] == 0 for k in
              ("fail", "error", "skipped", "unrun", "expectedFailures", "unexpectedSuccesses")),
          "UNIT_COUNTS", "exact complete non-skipped inventory required")
@@ -744,8 +769,8 @@ def verify_unit_receipt(report, expected_sources):
          report.get("invariantErrors") == [] and report.get("failures") == [] and report.get("errors") == [],
          "UNIT_CLOSURE", "incomplete or failed source controls")
     ids = report.get("literalInventory")
-    need(isinstance(ids, list) and len(ids) == 141 and all(isinstance(v, str) for v in ids) and
-         len(set(ids)) == 141 and ids == sorted(ids) and
+    need(isinstance(ids, list) and len(ids) == 168 and all(isinstance(v, str) for v in ids) and
+         len(set(ids)) == 168 and ids == sorted(ids) and
          digest(("\n".join(ids) + "\n").encode()) == AUDIT_TEST_INVENTORY and
          report.get("inventorySha256") == AUDIT_TEST_INVENTORY and
          sorted(report.get("executedIds", [])) == ids and sorted(report.get("successfulIds", [])) == ids,
@@ -780,7 +805,7 @@ def phase_unit(root, workspace, head):
     report = json.loads(_regular(receipt, 65536))
     verify_unit_receipt(report, expected)
     summary = {"state": "PINNED_TARGET_SOURCE_CONTROLS_PASS", "head": head,
-               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 141,
+               "sourceHashes": expected, "inventorySha256": AUDIT_TEST_INVENTORY, "selected": 168,
                "pythonVersion": report["pythonVersion"], "productionLoader": production_loader.provenance,
                "runnerQualified": False}
     _json_once(root / "unit-audit.json", summary)
@@ -812,7 +837,10 @@ def phase_download(root, workspace, head):
     _bootstrap_pip(root)  # reuse ONLY independently hash-verified unit-phase tool bytes
     # Wheels ONLY. Do not invoke pip download on Peewee or ANY sdist: pip may
     # execute backend/metadata hooks even with --no-deps.
-    wheel_lock = "".join(f"{n}=={v} --hash=sha256:{h}\n" for n, (v, h) in sorted(pins.items()) if n != "peewee")
+    recipe = _source_recipe()
+    wheel_lock = recipe.wheel_download_lock(pins)
+    if _runtime_recipe(pins)["sourceBuilt"]:
+        recipe.prepare_source_artifact(root, _raw_release, _once, _json_once)
     _once(root / "wheels-only.txt", wheel_lock.encode())
     _trusted_pip(root, ["download", "--index-url", "https://pypi.org/simple", "--only-binary=:all:",
                         "--no-deps", "--require-hashes", "--dest", root / "artifacts", "-r", root / "wheels-only.txt"])
@@ -828,8 +856,7 @@ def phase_original(root, api):
 def phase_build(root, api):
     _, _, inventory = _artifact_rows(root, api)
     _require_original_audit(root, inventory)
-    venv = root / "build-env"
-    _run(root, [sys.executable, "-I", "-S", "-m", "venv", "--without-pip", venv])
+    venv = _source_recipe().create_private_venv(root, "build-env", _run)
     # Python 3.12 -S does NOT establish the venv prefix: always pass --prefix.
     # Use the venv executable so generated entrypoint shebangs name that venv.
     _trusted_pip(root, ["install", "--prefix", venv, "--ignore-installed", "--no-index", "--only-binary=:all:",
@@ -865,8 +892,7 @@ def phase_install(root, api):
     _, _, pins = _locked_inputs(root)
     pins["peewee"] = (APPROVED_PEEWEE[0], proof["sha256"])  # private derived install lock ONLY; repo locks unchanged
     _once(root / "install.txt", "".join(f"{n}=={v} --hash=sha256:{h}\n" for n, (v, h) in sorted(pins.items())).encode())
-    venv = root / "runtime-env"
-    _run(root, [sys.executable, "-I", "-S", "-m", "venv", "--without-pip", venv])
+    venv = _source_recipe().create_private_venv(root, "runtime-env", _run)
     _trusted_pip(root, ["install", "--prefix", venv, "--ignore-installed", "--no-index", "--only-binary=:all:", "--no-deps",
                         "--require-hashes", "--find-links", root / "artifacts", "--find-links", root / "built", "-r", root / "install.txt"],
                  python=venv / "bin/python")
@@ -874,15 +900,20 @@ def phase_install(root, api):
 
 def phase_verify(root):
     venv = root / "runtime-env"
+    _, _, pins = _locked_inputs(root)
+    recipe = _runtime_recipe(pins)
     _run(root, [venv / "bin/python", "-I", "-m", "pip", "check"])
     version = subprocess.run([str(venv / "bin/semgrep"), "--version"], cwd=root, env=_environment(root),
                              check=True, capture_output=True, text=True, timeout=30)
-    need(version.stdout.strip() == "1.180.0", "SCANNER_VERSION", version.stdout)
-    code = ("import pathlib,subprocess,sys;from semgrep.semgrep_core import SemgrepCore;"
-            "engine=pathlib.Path(SemgrepCore.executable_path()).resolve();"
-            "assert engine.is_relative_to(pathlib.Path(sys.prefix).resolve());"
-            "subprocess.run([str(engine),'-version'],check=True,timeout=15)")
-    _run(root, [venv / "bin/python", "-I", "-c", code])
+    need(version.stdout.strip() == recipe["cliVersion"], "SCANNER_VERSION", version.stdout)
+    if recipe["sourceBuilt"]:
+        _source_recipe().verify_source_runtime(root, _run)
+    else:
+        code = ("import pathlib,subprocess,sys;from semgrep.semgrep_core import SemgrepCore;"
+                "engine=pathlib.Path(SemgrepCore.executable_path()).resolve();"
+                "assert engine.is_relative_to(pathlib.Path(sys.prefix).resolve());"
+                "subprocess.run([str(engine),'-version'],check=True,timeout=15)")
+        _run(root, [venv / "bin/python", "-I", "-c", code])
     _json_once(root / "runtime-result.json", {"state": "INSTALLED_ADDITIONAL_CHECKS_CLOSED", "qualified": False,
         "note": "Original and built metadata audits are independent mandatory steps. No findings/SARIF scan or merge approval."})
 

@@ -20,7 +20,10 @@ jobs:
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       # Trusted workflow literal binds committed auditor bytes without extra API reads.
-      AUDITOR_SHA256: f4ac6ee7665a6fe1d7ca8139304d6f52413618d6b74e845128360a93260b06b2
+      AUDITOR_SHA256: 803a9edd12d2e6fbad45adf6463e72c6d5c62264f6579ec96b956f4fd1f786e3
+      SOURCE_RECIPE_SHA256: 6d1d2cc20e1a2fe225f913d9df815771b4e047c872bdaabbb59eceea52bcb35d
+      ASSEMBLER_SHA256: 96eb19457f4799979e691459ad19ba761ab498d6576470db7c77eb5708171274
+      SOURCE_POLICY_SHA256: 5cf435e3bb81a52e1583ea00008d0e46a3c0ec64d920fe6720d59f88870bd83a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,6 +54,8 @@ jobs:
             .github/semgrep/build-requirements.txt .github/semgrep/runtime-compatibility-audit.py \
             .github/semgrep/runtime_audit_test_fixtures.py .github/semgrep/test_runtime_compatibility_audit.py \
             .github/semgrep/runtime_audit_metadata_tests.py \
+            .github/semgrep/runtime_source_recipe.py .github/semgrep/prepare-source-build.py \
+            .github/semgrep/source-build-policy.json \
             .github/workflows/semgrep-runtime-compatibility.yml > "$RUNNER_TEMP/runtime-policy-changes"
           if test -s "$RUNNER_TEMP/runtime-policy-changes"; then
             echo 'test-policy=true' >> "$GITHUB_OUTPUT"
@@ -80,10 +85,11 @@ jobs:
           # Restage exact committed bytes for EACH phase. Never execute a mutable
           # PR checkout helper or reuse an auditor a prior build could replace.
           python -I -S - "$HEAD_SHA" "$AUDITOR_SHA256" "$AUDIT_PHASE" \
-            "$AUDIT_ROOT" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" <<'PY'
+            "$AUDIT_ROOT" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" \
+            "$SOURCE_RECIPE_SHA256" "$ASSEMBLER_SHA256" "$SOURCE_POLICY_SHA256" <<'PY'
           import hashlib, os, pathlib, re, subprocess, sys, tempfile
-          head, expected, phase, root, workspace, scratch = sys.argv[1:]
-          assert re.fullmatch(r"[a-f0-9]{40}", head) and re.fullmatch(r"[a-f0-9]{64}", expected)
+          head, auditor_sha, phase, root, workspace, scratch, recipe_sha, assembler_sha, policy_sha = sys.argv[1:]
+          assert re.fullmatch(r"[a-f0-9]{40}", head)
           assert phase in {"unit", "download", "original", "build", "built", "install", "verify"}
           env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
           env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
@@ -91,20 +97,26 @@ jobs:
               return subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", workspace, *args],
                                     env=env, check=True, capture_output=True, timeout=15).stdout
           assert git("rev-parse", "HEAD").decode().strip() == head
-          path = ".github/semgrep/runtime-compatibility-audit.py"
-          record = git("ls-tree", "-z", head, "--", path)
-          assert re.fullmatch(rb"100644 blob [a-f0-9]{40}\t" + re.escape(path.encode()) + rb"\x00", record)
-          blob = record.split(b"\t", 1)[0].split()[2].decode()
-          size = int(git("cat-file", "-s", blob))
-          assert 0 < size <= 65536
-          raw = git("cat-file", "blob", blob)
-          assert len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob
-          assert hashlib.sha256(raw).hexdigest() == expected, "auditor differs from trusted workflow literal"
-          stage = pathlib.Path(tempfile.mkdtemp(prefix="semgrep-audit-code-", dir=scratch)) / "runtime-compatibility-audit.py"
-          with stage.open("xb") as sink:
-              sink.write(raw)
-              sink.flush()
-              os.fsync(sink.fileno())
+          stage = pathlib.Path(tempfile.mkdtemp(prefix="semgrep-audit-code-", dir=scratch))
+          for name, expected in (("runtime-compatibility-audit.py", auditor_sha),
+                                 ("runtime_source_recipe.py", recipe_sha),
+                                 ("prepare-source-build.py", assembler_sha),
+                                 ("source-build-policy.json", policy_sha)):
+              assert re.fullmatch(r"[a-f0-9]{64}", expected)
+              path = ".github/semgrep/" + name
+              record = git("ls-tree", "-z", head, "--", path)
+              assert re.fullmatch(rb"100644 blob [a-f0-9]{40}\t" + re.escape(path.encode()) + rb"\x00", record)
+              blob = record.split(b"\t", 1)[0].split()[2].decode()
+              size = int(git("cat-file", "-s", blob))
+              assert 0 < size <= 65536
+              raw = git("cat-file", "blob", blob)
+              assert len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob
+              assert hashlib.sha256(raw).hexdigest() == expected, "first-party source differs from trusted workflow literal"
+              with (stage / name).open("xb") as sink:
+                  sink.write(raw)
+                  sink.flush()
+                  os.fsync(sink.fileno())
+          stage = stage / "runtime-compatibility-audit.py"
           os.execv(sys.executable, [sys.executable, "-I", "-S", str(stage), "--phase", phase,
                                    "--root", root, "--workspace", workspace, "--head", head])
           PY

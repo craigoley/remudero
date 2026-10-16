@@ -4,11 +4,11 @@ Admitted CLI, bound to committed test/fixture/auditor bytes:
   python -I -S test_runtime_compatibility_audit.py --pip-wheel ABSOLUTE_WHEEL \
     --auditor-sha256 REVIEWED_SHA256 --receipt PRIVATE_ABSOLUTE_JSON
 
-Linux Python 3.12 only; the real patch is reported. No download/install/build,
+Linux Python 3.12 only; the real patch is reported. No package download/install/build,
 candidate import, production target-loader call or observed-host fallback.
 The reviewed auditor digest is mandatory and has no environment/default value.
 
-No selection/filter: require exclusive JSON, exit 0, literal inventory=141,
+No selection/filter: require exclusive JSON, exit 0, literal inventory=168,
 zero other outcomes, source/tool hashes and invariantErrors=[]. Node wrappers
 are separate cases. Historical failed receipts remain immutable.
 """
@@ -32,7 +32,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 
-METADATA_TESTS_SHA256 = "8bc686e91f25fe56a7908d1ea7ed85b7173b385765b0e407c179436d7f05fd5b"
+METADATA_TESTS_SHA256 = "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737"
 FIXTURES_SHA256 = "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d"
 APPROVED_PIP_SHA = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
 RAW_CONFIGURATION_NAMES = (
@@ -87,38 +87,6 @@ class AuditSyntheticModuleTests(unittest.TestCase):
             H.audit(self.c, *wheels)
         self.assertEqual(raised.exception.code, code)
         return raised.exception
-
-    def test_real_pip_2621_api_and_raw_metadata_adapter_have_zip_origin(self):
-        row = H.scan(self.c, H.wheel("semgrep", "1.180.0", ["mcp==1.29.0"]))
-        self.assertIsInstance(row["dist"], self.api.Distribution)
-        self.assertEqual(str(row["dist"].version), "1.180.0")
-        self.assertEqual([str(r) for r in row["dependencies"]], ["mcp==1.29.0"])
-        details = self.api.PackageDetails(row["dist"].version, row["dependencies"])
-        missing, conflicting = self.api.check_package_set({"semgrep": details})
-        self.assertIn("semgrep", missing)
-        self.assertEqual(conflicting, {})
-        self.assertEqual(self.api.pip.__version__, "26.2.1")
-        self.assertEqual(self.c.provenance["platform"], sys.platform)
-        self.assertEqual(self.c.provenance["pythonVersion"], platform.python_version())
-        self.assertEqual(sys.platform, "linux")
-        self.assertEqual(sys.version_info[:2], (3, 12))
-        self.assertIs(self.c.provenance["linuxQualification"], False)
-
-    def test_synthetic_wheel_has_actual_crc_and_byte_correct_record(self):
-        fixture = H.wheel("attack", files={"attack/data.txt": b"positive bytes\n"})
-        with zipfile.ZipFile(io.BytesIO(fixture.raw)) as archive:
-            self.assertIsNone(archive.testzip())
-            rows = list(csv.reader(io.StringIO(archive.read(fixture.record_path).decode())))
-            self.assertEqual({r[0] for r in rows}, set(archive.namelist()))
-            for path, encoded, size in rows:
-                if path == fixture.record_path:
-                    self.assertEqual((encoded, size), ("", ""))
-                else:
-                    raw = archive.read(path)
-                    expected = base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b"=").decode()
-                    self.assertEqual(encoded, "sha256=" + expected)
-                    self.assertEqual(size, str(len(raw)))
-        self.positive(fixture)
 
     def test_original_mcp_129_dependency_accepts_129_positive(self):
         self.positive(H.wheel("semgrep", "1.180.0", ["mcp==1.29.0"]), H.wheel("mcp", "1.29.0"))
@@ -247,20 +215,6 @@ class AuditSyntheticModuleTests(unittest.TestCase):
         try:
             self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
             self.assertTrue(self.p.approved_special_member(*identity, path, data, ("site", *path.split("/"))))
-        finally:
-            self.p.APPROVED_SPECIAL_MEMBERS = original
-
-    def test_special_member_rejects_wrong_identity_path_and_body(self):
-        data = b"inert tuple control\n"
-        path = "setuptools/_vendor/fixture-1.0.dist-info/METADATA"
-        identity = ("fixture", "1.0", "a" * 64)
-        original = self.p.APPROVED_SPECIAL_MEMBERS
-        try:
-            self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
-            for args in [("other", "1.0", identity[2], path, data), ("fixture", "1.1", identity[2], path, data),
-                         ("fixture", "1.0", "b" * 64, path, data), (*identity, path.upper(), data),
-                         (*identity, path, data + b"changed")]:
-                self.assertFalse(self.p.approved_special_member(*args, ("site", *path.split("/"))))
         finally:
             self.p.APPROVED_SPECIAL_MEMBERS = original
 
@@ -871,6 +825,33 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_owner",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_version",
     "AuditSyntheticModuleTests.test_sitecustomize_marker_is_rejected_without_execution",
+    "AuditSyntheticModuleTests.test_source_recipe_01_exact_pins",
+    "AuditSyntheticModuleTests.test_source_recipe_02_legacy_closure",
+    "AuditSyntheticModuleTests.test_source_recipe_03_wrong_wheel_hash",
+    "AuditSyntheticModuleTests.test_source_recipe_04_wrong_mcp_pin",
+    "AuditSyntheticModuleTests.test_source_recipe_05_unknown_version",
+    "AuditSyntheticModuleTests.test_source_recipe_06_exclude_derived",
+    "AuditSyntheticModuleTests.test_source_recipe_07_legacy_download",
+    "AuditSyntheticModuleTests.test_source_recipe_08_bound_code",
+    "AuditSyntheticModuleTests.test_source_recipe_09_changed_assembler",
+    "AuditSyntheticModuleTests.test_source_recipe_10_changed_policy",
+    "AuditSyntheticModuleTests.test_source_recipe_11_real_loader",
+    "AuditSyntheticModuleTests.test_source_recipe_12_exact_profile",
+    "AuditSyntheticModuleTests.test_source_recipe_13_profile_drift",
+    "AuditSyntheticModuleTests.test_source_recipe_14_profile_shape",
+    "AuditSyntheticModuleTests.test_source_recipe_15_bound_receipt",
+    "AuditSyntheticModuleTests.test_source_recipe_16_receipt_profile",
+    "AuditSyntheticModuleTests.test_source_recipe_17_receipt_identity",
+    "AuditSyntheticModuleTests.test_source_recipe_18_no_assurance_transfer",
+    "AuditSyntheticModuleTests.test_source_recipe_19_bad_wheel_inert",
+    "AuditSyntheticModuleTests.test_source_recipe_20_fixed_raw_inputs",
+    "AuditSyntheticModuleTests.test_source_recipe_21_version_layers",
+    "AuditSyntheticModuleTests.test_source_recipe_22_new_metadata_graph",
+    "AuditSyntheticModuleTests.test_source_recipe_23_original_donor_graph",
+    "AuditSyntheticModuleTests.test_source_recipe_24_missing_receipt_fields",
+    "AuditSyntheticModuleTests.test_source_recipe_25_private_creation",
+    "AuditSyntheticModuleTests.test_source_recipe_26_existing_entry_refused",
+    "AuditSyntheticModuleTests.test_source_recipe_27_real_stdlib_creation",
     "AuditSyntheticModuleTests.test_special_member_default_policy_never_accepts_an_unreviewed_body",
     "AuditSyntheticModuleTests.test_special_member_exact_tuple_fixture_is_not_original_artifact_proof",
     "AuditSyntheticModuleTests.test_special_member_rejects_install_scheme_and_case_destination_aliases",
@@ -885,7 +866,7 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_wheel_dynamic_import_field_still_enforces_final_syntax",
     "AuditSyntheticModuleTests.test_wheel_dynamic_python_still_enforces_final_requires_python",
 )
-EXPECTED_TEST_COUNT = 141
+EXPECTED_TEST_COUNT = 168
 
 
 def canonical_id(test):
@@ -904,8 +885,8 @@ def build_suite():
     first = unittest.defaultTestLoader.loadTestsFromTestCase(AuditSyntheticModuleTests)
     second = additionalCases(H, CONTEXT)
     third = unittest.defaultTestLoader.loadTestsFromTestCase(AuditLoaderMarkerRegressions)
-    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (78, 55, 8):
-        raise AssertionError("78+55+8 exact-layout/metadata inventory changed")
+    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (105, 55, 8):
+        raise AssertionError("105+55+8 exact-layout/metadata/recipe inventory changed")
     suite = unittest.TestSuite([first, second, third])
     actual = tuple(sorted(canonical_id(test) for test in flatten_suite(suite)))
     if len(EXPECTED_TEST_IDS) != EXPECTED_TEST_COUNT or len(set(EXPECTED_TEST_IDS)) != EXPECTED_TEST_COUNT:
@@ -954,7 +935,7 @@ def json_once(path, value):
 
 def main():
     global H, CONTEXT
-    parser = argparse.ArgumentParser(description="141 literal-inventory source-module controls; no runtime qualification")
+    parser = argparse.ArgumentParser(description="168 literal-inventory source-module controls; no runtime qualification")
     parser.add_argument("--pip-wheel", required=True, type=pathlib.Path)
     parser.add_argument("--auditor-sha256", required=True, help="reviewed workflow/controller literal, never computed as an approval")
     parser.add_argument("--receipt", required=True, type=pathlib.Path, help="new JSON in an existing private neutral directory")
@@ -979,7 +960,9 @@ def main():
             raise AssertionError("actual Linux Python 3.12 -I -S required; no substituted runtime")
         if re.fullmatch(r"[a-f0-9]{64}", args.auditor_sha256) is None:
             raise AssertionError("explicit reviewed auditor SHA-256 required")
-        for source, limit in ((path, 262144), (fixture_path, 65536), (auditor_path, 65536), (metadata_tests_path, 65536)):
+        for source, limit in ((path, 262144), (fixture_path, 65536), (auditor_path, 65536), (metadata_tests_path, 65536),
+                              *((path.with_name(n), 65536) for n in
+                                ("runtime_source_recipe.py", "prepare-source-build.py", "source-build-policy.json"))):
             snapshots[source] = read_regular(source, limit)
         raw = snapshots[fixture_path]
         if digest(raw) != FIXTURES_SHA256:
@@ -1051,7 +1034,8 @@ def main():
         "predecessor99MainReport": PREDECESSOR_99_MAIN_REPORT,
         "failures": [{"test": test.id(), "traceback": trace[:12000]} for test, trace in result.failures] if result is not None else [],
         "errors": [{"test": test.id(), "traceback": trace[:12000]} for test, trace in result.errors] if result is not None else [],
-        "limits": ["synthetic source-module controls only", "no production target loader", "no build/install/network",
+        "limits": ["source-module controls; one real stdlib venv-creation child", "no production target loader", "no package build/install/network",
+                   "no child exact-runtime parity claim",
                    "no scanner or real-artifact positive", "no constrained runner/workflow/full-author/pilot qualification"],
     }
     json_once(receipt, report)
