@@ -209,6 +209,7 @@ import {
   type CapacityDecision,
   type ReviewDemandOptions,
 } from "./host-memory-priority.js";
+import { clearRepairMemoryDemand, noteRepairMemoryRefusal, repairMemoryDemandMark, repairYieldLedgerFields, settleRepairMemoryPass, type RepairYieldDecision } from "./repair-memory-demand.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
   workerTranscript,
@@ -15174,6 +15175,8 @@ export function createSweepFixAdmissionController(input: {
       refresh();
       if (available <= 0) {
         fixesRefused++;
+        if (charge) noteRepairMemoryRefusal({ prNumber: pr.prNumber, waitingSinceMs: since ?? systemClock.now(), refusedAtMs: systemClock.now(),
+          shortMib: Math.max(0, charge.fixEstimateMib - (charge.headroomMib - charge.reviewChargeMib - charge.fixChargeMib)) }); // W1-T9706
         emit(order());
         const arithmetic = refusalArithmetic();
         ahead = undefined;
@@ -15187,6 +15190,7 @@ export function createSweepFixAdmissionController(input: {
       }
       reservations++;
       fixesAdmitted++;
+      clearRepairMemoryDemand(pr.prNumber); // W1-T9706: an admission ends this repair's wait for memory.
       compute();
       if (since !== undefined) overtake(since);
       emit(order());
@@ -15591,6 +15595,7 @@ export async function runSweep(
   const readLedger = deps.readLedger ?? readLedgerLines;
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
+  const repairDemandMark = repairMemoryDemandMark(); // W1-T9706: what this pass did not refuse again, it clears at its end.
   const log = deps.log ?? (() => {});
   const mergeBaseKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const judgmentPool = sweepJudgmentPool(deps);
@@ -16900,6 +16905,7 @@ export async function runSweep(
   const freshReadAtMs = new Map<number, number>();
   const snapshotBaseMs = deps.snapshotPublishedAtMs ?? now;
   const passClockMs = (): number => (deps.now ? deps.now() : systemClock.now());
+  const snapshotAgeMs = (index: number): number => Math.max(0, passClockMs() - (freshReadAtMs.get(index) ?? snapshotBaseMs));
   // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
   let staleProofCloses = 0;
 
@@ -17071,7 +17077,7 @@ export async function runSweep(
         ...(deduped ? { deduped: true } : {}),
         // W1-T7734: how old the view was when this PR was ACTED on — now minus the generation's publish
         // time (a re-derived PR: minus its fresh read), read at the write, never at the pass's start.
-        snapshot_age_ms: Math.max(0, passClockMs() - (freshReadAtMs.get(index) ?? snapshotBaseMs)),
+        snapshot_age_ms: snapshotAgeMs(index),
         ...(rederivedIndices.has(index) ? { rederived: true } : {}),
         ...(depReviewOutcome ? { dep_review_outcome: depReviewOutcome } : {}),
         ...(actionError ? { action_error: actionError } : {}),
@@ -18393,7 +18399,7 @@ export async function runSweep(
                 // Claim before the write: a crash or partial rerun must never retry this head.
                 const receipt = { run_id: deps.runId, task_id: pr.taskId!, step: "sweep.disposed",
                   pr_number: pr.prNumber, head_sha: pr.headSha, disposition: "wait", acted: true,
-                  no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound };
+                  no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound, snapshot_age_ms: snapshotAgeMs(prIndex) };
                 if (readLedger(deps.ledgerPath).some(row => row.step === "sweep.disposed" &&
                     row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.no_commit_rerun_attempted === true)) {
                   standDownReason = "no-commit failed-job rerun already claimed by another pass";
@@ -20184,6 +20190,7 @@ export async function runSweep(
       }
     }
   }
+  settleRepairMemoryPass(repairDemandMark, deps.repairAdmissionSurface === "full" ? undefined : openPrs.map((pr) => pr.prNumber));
   return summary;
 }
 
@@ -20373,14 +20380,16 @@ export function lightPassMemoryWaitPorts(): Pick<AdmissionPorts, "sleep"> {
 }
 
 function lightPassMemoryWaitSummary(pr: OpenPrView, deps: SweepDeps, sinceMs?: number): SweepSummary {
+  const nowMs = deps.now ? deps.now() : systemClock.now();
   const reason = sinceMs === undefined
     ? "light-pass action detached while waiting for memory admission"
     : `light-pass action for this head is still waiting for memory admission (detached ` +
-      `${Math.round(Math.max(0, (deps.now ? deps.now() : systemClock.now()) - sinceMs) / 1000)}s ago) — not re-admitted until it settles`;
+      `${Math.round(Math.max(0, nowMs - sinceMs) / 1000)}s ago) — not re-admitted until it settles`;
   if (sinceMs !== undefined && !deps.dryRun) {
     (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
       step: "sweep.disposed", pr_number: pr.prNumber, pr_url: pr.prUrl, disposition: "wait", acted: false, reason,
-      stand_down_reason: reason, head_sha: pr.headSha, in_flight_action: "light-pass-action" });
+      stand_down_reason: reason, head_sha: pr.headSha, in_flight_action: "light-pass-action",
+      snapshot_age_ms: Math.max(0, nowMs - (deps.snapshotPublishedAtMs ?? nowMs)) }); // W1-T9743
   }
   const byDisposition = ZERO_COUNTS();
   byDisposition.wait = 1;
@@ -20628,8 +20637,9 @@ export async function runSweepLightPass(
         scopedDeps.standDownReasonFor = (d) => d === "mergeable"
           ? "one plan PR direct-merges per light pass (W1-T5901) — deferred to full sweep (light pass)" : laneReason?.(d);
       }
-      if (spawningNumbers.has(pr.prNumber)) {
-        scopedDeps.postReview = passPostReview;
+      // W1-T9743: every admitted review is detached, plan filings too — the ticker awaits this pass.
+      if (releases.has(pr.prNumber)) {
+        if (spawningNumbers.has(pr.prNumber)) scopedDeps.postReview = passPostReview;
         scopedDeps.detachReviewWait = (work) => {
           detachedNumbers.add(pr.prNumber);
           void work.finally(releases.get(pr.prNumber)).catch((error) => {
@@ -21470,9 +21480,10 @@ export interface MemoryGovernorResult {
   binding?: "host" | "container";
   /** fits; host-short or container-short (deferred); nothing-to-wait-for: the container is short but no live
    *  work in it can free memory, so waiting cannot help and the dispatch is admitted, named. */
-  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for";
+  tier?: "fits" | "host-short" | "container-short" | "nothing-to-wait-for" | "yield-to-repair"; // W1-T9706: deferred for a waiting repair.
   /** W1-T8401/W1-T9358: the daemon's reclaim before a container-short or host-short hold (see {@link reclaimBeforeHold}). */
   reclaim?: SlackReclaimRecord;
+  repairYield?: RepairYieldDecision; // W1-T9706: the build's yield decision against the top repair waiting for memory.
 }
 
 /** The memory governor's pure predicate: STRICTLY BELOW `policy.memoryFloorMib` available, NEW
@@ -21534,6 +21545,7 @@ export function logMemoryObservation(
       tier: result.tier,
     }),
     ...reclaimLedgerFields(result.reclaim),
+    ...repairYieldLedgerFields(result.repairYield),
   });
 }
 

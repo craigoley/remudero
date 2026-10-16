@@ -8,7 +8,7 @@
   risk: high
   band_meaning: span
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=9cd12c2bbc6233f7
   attempts: 0
   files:

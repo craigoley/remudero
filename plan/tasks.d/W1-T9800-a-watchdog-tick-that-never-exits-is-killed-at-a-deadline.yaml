@@ -15,7 +15,7 @@
     - test/a-watchdog-tick-that-never-exits-is-killed-at-a-deadline.test.ts
     - test/host-units-install.test.ts
     - test/fixtures/azure-host-units/rmd-fleet-watchdog.service
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

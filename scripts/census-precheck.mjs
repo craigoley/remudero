@@ -19,7 +19,7 @@
  * preflight` ran them, which no worker has run since W1-T464. A diff joining one's `walks` population
  * now RUNS those suites in a `node --test` child with every GIT_* variable stripped (the
  * W1-T3224 mechanism behind the damage W1-T3225 recorded), bounded, and read from its TAP. They run
- * on head; failing suites run again in a detached merge-base worktree borrowing node_modules.
+ * on head; failing suites run again in a private merge-base checkout borrowing node_modules.
  * Only head-red/base-green refuses; an unrunnable base is not measured (W1-T5663).
  *
  * ONLY GROWTH THIS BRANCH CAUSES REFUSES. Each count is taken twice, on this tree and on the merge
@@ -32,7 +32,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix, resolve } from "node:path";
+import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -577,12 +577,13 @@ const TEST_PRIORITY = await loadTestPriority();
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
-export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY, snapshotPath }) {
+export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY, snapshotPath, pathOverride }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
   const options = childOptions(root);
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
+  if (pathOverride !== undefined) options.env.PATH = pathOverride;
   const res = run(child.file, child.args, options);
   assertChildFinished(res, "census suite");
   const stdout = String(res.stdout ?? "");
@@ -780,7 +781,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
     trigger: (input) => input.changed.includes("scripts/error-subclass-baseline.json") || addsLiteral(input, ERROR_CLASS_RE, 1),
     remedy: "adopt RmdError in src/lib/errors.ts or record the reviewed ceiling in scripts/error-subclass-baseline.json" },
   // W1-T5693: whole-tree structural censuses, 4-13 s each alone; `structural` runs each in its OWN child.
-  { testFile: "test/cycle-ratchet.test.ts", script: "census:cycle-ratchet", structural: true,
+  { testFile: "test/cycle-ratchet.test.ts", gitFree: true, script: "census:cycle-ratchet", structural: true,
     trigger: (input) => input.changed.some((p) => [".dependency-cruiser.cjs", "scripts/cycle-baseline.json", "scripts/cycle-ratchet.mjs"].includes(p)) ||
       addsImport(input, IMPORT_SCOPE_RE),
     remedy: "break the import ring or record the reviewed ceiling in scripts/cycle-baseline.json" },
@@ -788,7 +789,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
     trigger: (input) => input.changed.some((p) => ["scripts/source-size-ratchet.mjs", "src/lib/ci-parity.ts", ".dependency-cruiser.cjs"].includes(p)) ||
       addsImport(input, LIB_SCOPE_RE, importsLayerAboveLib),
     remedy: "src/lib must not import src/cli, src/spike.ts or src/run-task.ts (.dependency-cruiser.cjs)" },
-  { testFile: "test/citation-anchor-census.test.ts", script: "census:citation-anchor", structural: true,
+  { testFile: "test/citation-anchor-census.test.ts", gitFree: true, script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
   // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
@@ -799,10 +800,10 @@ export const PRECHECK_TRIGGERED_SUITES = [
     remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
   { testFile: "test/node-24-runtime-compatibility.test.ts", script: "census:node24-runtime", trigger: node24RuntimeTrigger,
     remedy: "name --test-reporter=tap on the spawn (or mark it `node-test-reporter: exempt`) and let the Worker inherit execArgv" },
-  { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", script: "census:every-priced-ledger-step",
+  { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", gitFree: true, script: "census:every-priced-ledger-step",
     trigger: (input) => input.changed.includes("src/lib/config-gardener.ts") || addsMatch(input, CLOCK_SCOPE_RE, pricedWrites),
     remedy: "register CONFIG_GARDEN_LEDGER_STEPS in src/lib/config-gardener.ts or a reasoned exemption in test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts" },
-  { testFile: "test/host-capability-fixtures.test.ts", script: "census:host-capability-fixtures",
+  { testFile: "test/host-capability-fixtures.test.ts", gitFree: true, script: "census:host-capability-fixtures",
     trigger: (input) => addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => HOST_CAPABILITY_RE.test(line))),
     remedy: "own the fixture's host condition or declare its reason in test/host-capability-fixtures.test.ts" },
   { testFile: "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts", script: "census:no-nested-preflight",
@@ -811,7 +812,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
       addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
     remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
   // W1-T7812: changes to the measured fixture-crossing runner or its proof rerun that proof before push.
-  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", script: "census:near-fixture-crossing",
+  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", gitFree: true, script: "census:near-fixture-crossing",
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
       "src/lib/ci-parity.ts", "scripts/census-precheck.mjs",
@@ -819,17 +820,17 @@ export const PRECHECK_TRIGGERED_SUITES = [
     ].includes(p)),
     remedy: "preserve the 24 h control/shifted verdict and the private TMPDIR proof" },
   // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
-  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
+  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", gitFree: true, script: "census:host-worktree-git",
     trigger: (input) => gitSpawnTrigger(input),
     remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
-  { testFile: "test/worktree-creation-census.test.ts", script: "census:worktree-creation", trigger: worktreeCreationTrigger,
+  { testFile: "test/worktree-creation-census.test.ts", gitFree: true, script: "census:worktree-creation", trigger: worktreeCreationTrigger,
     remedy: "route the site through worktreeAdd (src/lib/worker.ts), or add a NAMED exempt row with its reason to WORKTREE_SITE_REGISTRY (src/lib/worktree-sites.ts)" },
 ];
 
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
-  { testFile: "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
+  { testFile: "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs",
       "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
@@ -1011,12 +1012,20 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
   if (failing.length === 0) return [];
   const temporary = mkdtempSync(join(tmpdir(), "rmd-census-base-"));
   const baseRoot = join(temporary, "tree");
-  // Hook GIT_* variables must not redirect worktree administration to the pushing checkout.
+  // Hook GIT_* variables must not redirect the private checkout into the pushing checkout.
   const options = { env: Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])) };
-  let added = false;
   try {
-    gitOut(root, ["worktree", "add", "--detach", baseRoot, mergeBase], options);
-    added = true;
+    mkdirSync(baseRoot);
+    gitOut(baseRoot, ["init", "--quiet"], options);
+    const objects = gitOut(root, ["rev-parse", "--path-format=absolute", "--git-path", "objects"], options).trim();
+    writeFileSync(join(baseRoot, ".git", "objects", "info", "alternates"), `${objects}\n`);
+    writeFileSync(join(baseRoot, ".git", "packed-refs"), gitOut(root, ["for-each-ref", "--format=%(objectname) %(refname)"], options));
+    writeFileSync(join(baseRoot, ".git", "HEAD"), `${mergeBase}\n`);
+    // Census children need the base index, HEAD and refs for baseline comparisons. checkout-index
+    // uses the source repo's checkout settings and keeps export-ignore/export-subst files intact.
+    options.env.GIT_INDEX_FILE = join(baseRoot, ".git", "index");
+    gitOut(root, ["-c", "core.sparseCheckout=false", "-c", "core.splitIndex=false", "read-tree", mergeBase], options);
+    gitOut(root, ["--work-tree", baseRoot, "checkout-index", "--all"], options);
     if (!existsSync(join(baseRoot, "node_modules"))) {
       symlinkSync(join(existsSync(join(root, "node_modules")) ? root : SCRIPT_REPO, "node_modules"), join(baseRoot, "node_modules"), "dir");
     }
@@ -1028,17 +1037,48 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
   } catch (e) {
     throw new Error(`merge-base census run could not be measured: ${String(e?.message ?? e)}`);
   } finally {
-    try {
-      if (added) gitOut(root, ["worktree", "remove", "--force", baseRoot], options);
-    } finally {
-      rmSync(temporary, { recursive: true, force: true });
-    }
+    rmSync(temporary, { recursive: true, force: true });
   }
 }
 
+const SNAPSHOT_REACH = "test/the-affected-suite-reach-ratchet.test.ts";
+const GIT_NAME_RE = /^git(?:[-.]|$)/;
+
+/** W1-T9484: the suites a snapshot-mode round can run with no git, declared `gitFree: true` on their census row. */
+export function gitFreeCensusSuites() {
+  return [...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES].filter((m) => m.gitFree === true).map((m) => m.testFile);
+}
+
+/**
+ * W1-T9484: a directory of symlinks to every executable on `pathValue` except git (and its `git-*` helpers), so a
+ * child run with it as PATH finds every tool but git and a git spawn dies ENOENT. Returns `{ bin, cleanup }`.
+ */
+export function makeGitAbsentBin(pathValue = process.env.PATH ?? "") {
+  const parent = mkdtempSync(join(tmpdir(), "rmd-census-nogit-"));
+  const bin = join(parent, "bin");
+  mkdirSync(bin);
+  const linked = new Set();
+  for (const dir of pathValue.split(delimiter).filter(Boolean)) {
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue; // a PATH entry that is not a readable directory contributes no tool
+    }
+    for (const name of names) {
+      if (GIT_NAME_RE.test(name) || linked.has(name)) continue;
+      linked.add(name);
+      try {
+        symlinkSync(join(dir, name), join(bin, name));
+      } catch {
+        linked.delete(name); // a later PATH entry may still supply this tool
+      }
+    }
+  }
+  return { bin, cleanup: () => rmSync(parent, { recursive: true, force: true }) };
+}
+
 function runSnapshotReach(snapshot, files) {
-  const reach = "test/the-affected-suite-reach-ratchet.test.ts";
-  if (files.some((file) => file !== reach)) throw new Error(`git-free snapshot reader unavailable for ${files.join(", ")}`);
   const run = (snapshotPath) => runCensusSuitesViaChild({ root: SCRIPT_REPO, files, snapshotPath,
     priority: { wrap: (file, args) => ({ file, args }) } });
   const failing = run();
@@ -1059,6 +1099,65 @@ function runSnapshotReach(snapshot, files) {
   }
 }
 
+/**
+ * W1-T9484: the `gitFree` suites run in ONE child over the round's own tree (`root`, not the harness's), with git
+ * absent from PATH. A red one re-runs over a base tree rebuilt from the snapshot's frozen base blobs, with every other
+ * top-level entry (node_modules, docs, .github) linked from `root`; only head-red/base-green is returned.
+ */
+function runSnapshotGitFree(snapshot, files, root) {
+  if (!existsSync(join(root, "node_modules"))) throw new Error(`${root} has no node_modules, so ${files.join(", ")} cannot run from it`);
+  const noGit = makeGitAbsentBin();
+  const identity = { wrap: (file, args) => ({ file, args }) };
+  try {
+    const run = (cwd) => runCensusSuitesViaChild({ root: cwd, files, priority: identity, pathOverride: noGit.bin });
+    const failing = run(root);
+    if (failing.length === 0) return [];
+    const temporary = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-base-"));
+    try {
+      for (const path of snapshot.basePaths) {
+        if (typeof snapshot.baseBlobs[path] !== "string") throw new Error(`snapshot lacks base blob ${path}`);
+        mkdirSync(dirname(join(temporary, path)), { recursive: true });
+        writeFileSync(join(temporary, path), snapshot.baseBlobs[path]);
+      }
+      const owned = new Set([...snapshot.basePaths.map((path) => path.split("/")[0]), ".git", "state"]);
+      for (const entry of readdirSync(root)) {
+        if (!owned.has(entry)) symlinkSync(join(root, entry), join(temporary, entry));
+      }
+      for (const file of failing) {
+        if (!existsSync(join(temporary, file))) throw new Error(`merge-base suite ${file} is absent`);
+      }
+      const baseFailing = new Set(run(temporary));
+      return failing.filter((file) => !baseFailing.has(file));
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  } finally {
+    noGit.cleanup();
+  }
+}
+
+/**
+ * W1-T9484: what a snapshot-mode round measures of `files`. The reach ratchet reads the snapshot itself; a
+ * `gitFree` suite runs over `root` with git absent; any other suite needs git, so it is returned in `notMeasured`
+ * (a reason string naming it) and never as a pass. A gitFree run that cannot be measured is a reason too, so one
+ * unrunnable kind cannot drop the verdict of the other.
+ */
+function runSnapshotSuites(snapshot, files, root) {
+  const gitFree = new Set(gitFreeCensusSuites());
+  const free = files.filter((file) => file !== SNAPSHOT_REACH && gitFree.has(file));
+  const needGit = files.filter((file) => file !== SNAPSHOT_REACH && !gitFree.has(file));
+  const failing = files.includes(SNAPSHOT_REACH) ? runSnapshotReach(snapshot, [SNAPSHOT_REACH]) : [];
+  const notMeasured = needGit.length === 0 ? [] : [`git-free snapshot reader unavailable for ${needGit.join(", ")}`];
+  if (free.length > 0) {
+    try {
+      failing.push(...runSnapshotGitFree(snapshot, free, root));
+    } catch (e) {
+      notMeasured.push(String(e?.message ?? e));
+    }
+  }
+  return { failing, notMeasured };
+}
+
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
   let values;
   try {
@@ -1074,6 +1173,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   let violations;
   let changed;
   const unmeasured = [];
+  const snapshotUnmeasured = [];
   try {
     const snapshot = readCensusSnapshot();
     if (snapshot && resolve(snapshot.root) !== root) throw new Error("census snapshot belongs to another worktree");
@@ -1124,11 +1224,14 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       loadMembers: () => admitted(root),
       runSuites: (files) => {
         if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites });
-        return runSnapshotReach(snapshot, files);
+        const measured = runSnapshotSuites(snapshot, files, root);
+        snapshotUnmeasured.push(...measured.notMeasured);
+        return measured.failing;
       },
     });
     violations.push(...suites.violations);
-    if (suites.unmeasured !== null) unmeasured.push(`census suites NOT MEASURED - ${suites.unmeasured}`);
+    const suiteReasons = [...(suites.unmeasured === null ? [] : [suites.unmeasured]), ...snapshotUnmeasured];
+    if (suiteReasons.length > 0) unmeasured.push(`census suites NOT MEASURED - ${suiteReasons.join("; ")}`);
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
