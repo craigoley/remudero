@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator instruction 2026-10-15: qualify actual selected-registry consumers before private staging; retain shadow-only, owner override, existing gates and deleted schedules"
   plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T4265, W1-T7753, W1-T7755, W1-T7756, W1-T7727]
-  files: [src/lib/instance-mode.ts, src/lib/instance-registry-selection.ts, src/run-task.ts, src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/config.ts, src/lib/config-schema.ts, test/shadow-instance-safety.test.ts, test/selected-registry-mode-consumers.test.ts, test/arm-auto-merge.test.ts, test/sweep-arm-parity.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  files: [src/lib/instance-mode.ts, src/lib/instance-registry-selection.ts, src/run-task.ts, src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/config.ts, src/lib/config-schema.ts, test/shadow-instance-safety.test.ts, test/selected-registry-mode-consumers.test.ts, test/arm-auto-merge.test.ts, test/sweep-arm-parity.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json, test/config-schema.test.ts, test/rest-merge-fallback.test.ts]
   status: queued
   attempts: 0
   rationale: |
