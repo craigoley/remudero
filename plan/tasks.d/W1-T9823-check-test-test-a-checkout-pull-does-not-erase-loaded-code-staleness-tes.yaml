@@ -1,0 +1,50 @@
+- id: W1-T9823
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts cost 71.2 PR minute(s) across 9 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts"
+  files:
+    - src/lib/daemon.ts
+    - test/check-test-test-a-checkout-pull-does-not-erase-loaded-code-staleness-tes.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts"
+      proof: "grep: test(\"W1-T9823: check:test:test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts is prevented, not retried\" in test/check-test-test-a-checkout-pull-does-not-erase-loaded-code-staleness-tes.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts cost 71.2 PR minute(s) (seven-day half-life) across 9 fix round(s) on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/daemon.ts: test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts imports it
+    - test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12294 (https://github.com/craigoley/remudero/pull/12294) at 2026-10-16T12:47:58.139Z: ci-log round — ci-shard (1/8): test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts
+        failing tests: W1-T9687: daemon freshness uses the once captured loaded code sha; test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          |     not ok 2 - W1-T9687: daemon freshness uses the once captured loaded code sha
+          |       ---
+          |       duration_ms: 7404.552446
+          |       type: 'test'
+          |       location: '/home/runner/work/remudero/remudero/test/a-checkout-pull-does-not-erase-loaded-code-staleness.test.ts:1:2756'
+          |       failureType: 'testCodeFailure'
+          |       error: 'the real daemon wiring must carry the loaded baseline after a checkout pull'
+          |       code: 'ERR_ASSERTION'
+          |       name: 'AssertionError'
+          |       expected: tru
+    - PR #11390 at 2026-10-13T15:51:56Z: hand fix PR #11390: src/lib/daemon.ts; minutes are the pass median proxy (6.14965), not measured repair time
+    - PR #11051 at 2026-10-12T10:39:58Z: hand fix PR #11051: src/lib/daemon.ts; minutes are the pass median proxy (6.14965), not measured repair time
+    - PR #10868 at 2026-10-11T13:36:53Z: hand fix PR #10868: src/lib/daemon.ts, src/lib/ledger.ts; minutes are the pass median proxy (6.14965), not measured repair time
+    - PR #10741 at 2026-10-10T22:38:39Z: hand fix PR #10741: src/lib/daemon.ts; minutes are the pass median proxy (6.14965), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
