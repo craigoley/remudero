@@ -153,7 +153,8 @@ test("acceptance 6: runTask's risk-judge input no longer duplicates task.title u
   const site = riskJudgeInputSite[0];
 
   assert.match(site, /change: \{ description: `\$\{task\.title\}/, "description still carries task.title");
-  assert.match(site, /planContext: \{ taskId: task\.id, taskType: task\.type \}/);
+  // W1-T9799: the plan context is the shard's own text, built by one helper; the title still rides only on description.
+  assert.match(site, /planContext: \{ \.\.\.riskJudgePlanContext\(task\.id, task\) \}/);
   assert.doesNotMatch(site, /planContext:.*title: task\.title/, "planContext must not also carry task.title");
 });
 

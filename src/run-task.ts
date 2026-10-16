@@ -1431,6 +1431,8 @@ import {
   realRiskJudge,
   resolveRiskJudgeMount,
   riskJudgeDiffInputBudget,
+  riskJudgePlanContext,
+  riskJudgePlanContextDigest,
   riskJudgeSpendCollector,
   runRiskJudge,
   type RiskJudgeChangedFile,
@@ -2990,6 +2992,11 @@ export function codeScanningJudgeDeps(
   };
 }
 
+/** W1-T9799 — the sweep's {@link SweepDeps.planContextDigestFor}: the digest of the shard the judge would be shown now. */
+export function handedOffHeadPlanContextDigest(plan: Plan): NonNullable<SweepDeps["planContextDigestFor"]> {
+  return (pr) => riskJudgePlanContextDigest(pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId));
+}
+
 /**
  * W1-T5403 — the sweep's risk judge for a head whose run ended `handed_off`: the SAME judge mount,
  * live risk policy, spend collector and BLOCKED escalation the in-run call in runTaskBody uses, with
@@ -3018,7 +3025,9 @@ export function handedOffHeadRiskJudge(
       input: {
         change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
         gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
-        planContext: { taskId: pr.taskId, taskType: task?.type },
+        // W1-T9799: the shard's own origin, design and rationale, and the digest a changed shard is re-judged on.
+        planContext: riskJudgePlanContext(pr.taskId, task),
+        planContextDigest: riskJudgePlanContextDigest(task),
       },
       config: (() => {
         const riskPolicy = readRiskPolicy(policyPath(repoRoot));
@@ -22073,7 +22082,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const riskJudgeInput: RiskJudgeInput = {
       change: { description: `${task.title} — ${prUrl}`, files: task.files },
       gatesState: { review_state: review.state, review_capped: review.capped, ci, arm_decision: armDecision.reason },
-      planContext: { taskId: task.id, taskType: task.type },
+      planContext: { ...riskJudgePlanContext(task.id, task) },
+      planContextDigest: riskJudgePlanContextDigest(task),
       prNumber: prNumberFromRef(prUrl),
       headSha: review.headSha,
     };
@@ -47301,6 +47311,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       behindMainByPr,
       baseChangedFilesByPr,
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+      planContextDigestFor: handedOffHeadPlanContextDigest(plan),
       handedOffHeadJudgments,
       ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
     }),
@@ -48696,6 +48707,7 @@ export function buildSweepHook(
           baseChangedFilesByPr,
           reviewerCodeRecovery,
           judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
+          planContextDigestFor: handedOffHeadPlanContextDigest(plan),
           ...codeScanningJudgeDeps(owner, repo, config, plan, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
@@ -49087,6 +49099,7 @@ export function buildSweepLightHook(
                 readMainPlan: resolvedReadMainPlan },
             }),
             judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
+            planContextDigestFor: handedOffHeadPlanContextDigest(activePlan),
             ...codeScanningJudgeDeps(owner, repo, config, activePlan, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest

@@ -5023,12 +5023,41 @@ export function rearmSpendsBound(
 /** W1-T5911 — the head-bound record that a non-fleet actor armed or enqueued a risk-refused head. */
 export const RISK_OVERRIDE_OBSERVED_STEP = "automerge.risk_override_observed";
 
-/** W1-T970's refusal, cleared for THIS head only by a capped override or an observed hand arm (W1-T219). */
+/** W1-T970's refusal, cleared for THIS head by a capped override, a hand arm (W1-T219), a later proceed or a stale shard (W1-T9799). */
 function riskRefusalStands(lines: ReadonlyArray<Record<string, unknown>>, riskRefused: Map<string, string | undefined>,
-  pr: OpenPrView): boolean {
+  pr: OpenPrView, planDigest?: string): boolean {
   return riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
     !(pr.taskId !== undefined && cappedOverrideFromLedger(lines, pr.taskId, pr.headSha, pr.prUrl) !== undefined) &&
-    rowsAtHead(lines, RISK_OVERRIDE_OBSERVED_STEP, pr).length === 0;
+    rowsAtHead(lines, RISK_OVERRIDE_OBSERVED_STEP, pr).length === 0 &&
+    !proceededSinceEscalation(lines, pr) && riskEscalationAwaitingRejudge(pr, lines, planDigest) === undefined;
+}
+
+function latestEscalation(lines: ReadonlyArray<Record<string, unknown>>, pr: Pick<OpenPrView, "prNumber" | "headSha">):
+  { row: Record<string, unknown>; decidedSince?: Record<string, unknown> } | undefined {
+  let row: Record<string, unknown> | undefined;
+  let decidedSince: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    if (line.pr_number !== pr.prNumber || line.head_sha !== pr.headSha) continue;
+    if (line.step === "risk_judge.escalated") {
+      row = line;
+      decidedSince = undefined;
+    } else if (row !== undefined && line.step === "risk_judge.decision" && line.availability !== "unavailable") {
+      decidedSince = line;
+    }
+  }
+  return row === undefined ? undefined : { row, decidedSince };
+}
+
+function proceededSinceEscalation(lines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
+  return latestEscalation(lines, pr)?.decidedSince?.action === "proceed";
+}
+
+export function riskEscalationAwaitingRejudge(pr: Pick<OpenPrView, "prNumber" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>, planDigest: string | undefined): "plan_context_changed" | undefined {
+  if (planDigest === undefined) return undefined;
+  const latest = latestEscalation(lines, pr);
+  if (latest === undefined || latest.decidedSince !== undefined || latest.row.plan_context_digest === planDigest) return undefined;
+  return "plan_context_changed";
 }
 
 /** W1-T5911 — the first non-fleet arm or enqueue after this head's latest escalation, or why none counts. */
@@ -12488,6 +12517,7 @@ export interface SweepDeps {
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView, signal?: AbortSignal) => Promise<HandedOffHeadJudgment>;
+  planContextDigestFor?: (pr: OpenPrView) => string | undefined;
   /** W1-T5523 — where that judgment runs: off the pass, capped and bounded. Omitted, the process-wide
    *  pool, so the dedup and the cap span every pass and both sweep entrypoints. */
   handedOffHeadJudgments?: HandedOffHeadJudgmentPool;
@@ -13187,8 +13217,8 @@ function reviewerCodeFreshnessBackoffReason(
 /** W1-T5403 — what the sweep's risk judgment of a handed-off head decided. `unavailable` is its own
  *  value, never folded into either action: it holds the arm this pass and is asked again next pass. */
 export type HandedOffHeadJudgment =
-  | { action: "proceed"; reason: string }
-  | { action: "escalate"; reason: string; issueUrl?: string }
+  | { action: "proceed"; reason: string; planContextDigest?: string }
+  | { action: "escalate"; reason: string; issueUrl?: string; planContextDigest?: string }
   | { action: "unavailable"; reason: string };
 
 /** W1-T5403 — one handed-off head's judgment: the input the judge is shown, and the orchestrator
@@ -13222,10 +13252,11 @@ export function riskJudgeHandedOffHead(
     if (result.verdict.availability === "unavailable") {
       return { action: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
     }
+    const digest = input.planContextDigest === undefined ? {} : { planContextDigest: input.planContextDigest };
     if (result.action.kind === "escalate") {
-      return { action: "escalate", reason: result.action.reason, issueUrl: result.escalationUrl };
+      return { action: "escalate", reason: result.action.reason, issueUrl: result.escalationUrl, ...digest };
     }
-    return { action: "proceed", reason: result.action.reason };
+    return { action: "proceed", reason: result.action.reason, ...digest };
   };
 }
 
@@ -17344,7 +17375,7 @@ export async function runSweep(
         // rule's `when` and never in the merge path — the SAME non-action shape every other dedup
         // has. It clears on a NEW head sha or an explicit operator override.
         const riskRefusedKey = `${pr.prNumber}@${pr.headSha}`;
-        let refused = riskRefusalStands(ledgerLines, prior.riskRefused, pr);
+        let refused = riskRefusalStands(ledgerLines, prior.riskRefused, pr, deps.planContextDigestFor?.(pr));
         // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM. Deliberately NEVER
         // sha-keyed, unlike `refused` above: a hold binds the PR, not any one head, so a push while
         // held changes nothing. No dedup key is seeded, so the pass re-derives whole the moment an
@@ -17783,7 +17814,13 @@ export async function runSweep(
                 break;
               }
               // W1-T5403: a handed-off head never met the in-run risk judge — judge it once here.
-              const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines);
+              const planDigest = deps.planContextDigestFor?.(pr);
+              const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines) ?? riskEscalationAwaitingRejudge(pr, ledgerLines, planDigest);
+              if (handoff === "plan_context_changed") {
+                const key = `${pr.prNumber}@${pr.headSha}`;
+                const settled = judgmentPool.settled.get(key);
+                if (settled !== undefined && settled.planContextDigest !== planDigest) judgmentPool.settled.delete(key);
+              }
               if (handoff !== undefined) {
                 const riskHold = await holdHandedOffHeadForRiskJudgment(
                   pr, handoff, deps.judgeHandedOffHead, log, judgmentPool,
