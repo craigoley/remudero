@@ -1,0 +1,70 @@
+- id: W1-T9734
+  title: "SIX MORE DAEMON-PATH FEEDBACK CAPTURES STILL LAND INLINE THROUGH THE SYNC PLAN-PR PREFLIGHT AFTER W1-T9696 — the coverage-improvement producer, the hand-run census, the worker source-size follow-up, the grilled-answer reply, the dependabot review's migration capture and the sweep's repair capture without a state root each call captureFeedback, whose landFeedback drives runInTree's spawnSync checks on the loop, so runInTree's census row cannot be deleted"
+  repo: remudero
+  depends_on: [W1-T9696]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the remaining daemon-path captures stage for the per-poll async sweep, W1-T9615's pattern; what is captured and landed is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 filing agent F4 lead 6: the runInTree census row's 'Still sync' list on run-W1-T9696-1792093598744 (e02b93474)"
+  plan_refs: [W1-T9696, W1-T9695, W1-T9615, W1-T9660, W1-T5460, W1-T100]
+  files:
+    - src/lib/coverage-improvement.ts
+    - src/lib/hand-run-census.ts
+    - src/lib/measurement-cadence.ts
+    - src/lib/source-size-followup.ts
+    - src/lib/escalation-answers.ts
+    - src/lib/panel-graph.ts
+    - src/run-task.ts
+    - test/the-remaining-daemon-feedback-captures-stage-for-the-async-sweep.test.ts
+  status: queued
+  priority: 2  # operator-2026-10-15: the class W1-T9615 measured at 60-190 s loop holds, one capture at a time
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf and at run-W1-T9696-1792093598744 (e02b93474, #12180 open), 2026-10-15:
+    - W1-T9696's head rewrites the runInTree row in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts:
+      "Still sync: captureFeedback from coverage-improvement, hand-run census, source-size follow-up, grilled reply,
+      dep-review, the CLI sweep's repair capture; recordDecision, setFeedbackStatus, landFoldDebt, gardenCheckout; by
+      name only, the planPrPreflight option and the sweepFeedbackLanding dep". This task takes the first group.
+      W1-T9735 takes the sync landings, and W1-T9736 the by-name reaches and the row.
+    - The callers on main, by enclosing function:
+      - src/lib/coverage-improvement.ts `injectCoverageImprovementTask`: `deps.capture ?? captureFeedback`. It is
+        the measurement cadence's producer (src/lib/measurement-cadence.ts, `opts.producer ?? injectCoverageImprovementTask`);
+      - src/lib/hand-run-census.ts `handRunCensus`: captureFeedback, run from the measurement cadence;
+      - src/lib/source-size-followup.ts `consumeSourceSizeFollowup`: `args.capture ?? captureFeedback`, from
+        src/run-task.ts `reportWorkerSourceSizeFollowup`;
+      - src/lib/panel-graph.ts `captureFeedbackReply`: captureFeedback, called by src/lib/escalation-answers.ts
+        `applyGrilledFeedbackAnswer` as well as by serve's panel route;
+      - src/run-task.ts `depReviewCommand`: the migration capture `captureFeedback(a.root, { ..., origin:
+        "repair#dep-review" })`, reached from the sweep's dependabot path (src/lib/sweep.ts, `depReviewCommandImpl`);
+      - src/run-task.ts `captureRepairFeedbackWithPriorVerdict`, wired as the sweep's `captureRepairFeedbackImpl`:
+        it lands inline when no landing state root is set.
+    - Each lands through `captureFeedback` > `landFeedback` > `syncPreflightOf` > `planPrPreflightAtCommit` >
+      `defaultPreflightChecks` > `runInTree` (spawnSync).
+  design: |
+    1. Each daemon-path caller above captures through `stageFeedbackCapture(root, stateRoot, opts)` with the daemon's
+       state root, as W1-T9615 and W1-T9696 do. Dedup reads `feedbackCaptured`, so a queued id is not captured twice.
+       A caller with no state root in hand gets one from its wiring. It never falls back to an inline landing on the
+       loop.
+    2. Serve's panel route and the operator CLI verbs keep `captureFeedback`. Serve is another process, and a CLI verb
+       is not the loop. `captureFeedbackReply` takes the capture as a seam so that each caller chooses.
+    3. Re-measure at the build's base. Update the runInTree row's comment to drop each converted caller. The row itself
+       is W1-T9736's to delete.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - the coverage-improvement producer and the hand-run census, run from the measurement cadence with a state
+         root, stage their entries, and a throwing sync preflight is never called;
+       - the grilled-answer reply and the sweep's repair capture stage the same way;
+       - serve's panel reply still captures inline (positive control).
+  acceptance:
+    - claim: "the measurement cadence's coverage-improvement and hand-run-census captures stage for the async sweep"
+      proof: 'grep: test("W1-T9734: the measurement cadence captures stage for the async sweep" in test/the-remaining-daemon-feedback-captures-stage-for-the-async-sweep.test.ts'
+    - claim: "the grilled-answer reply and the sweep's repair capture stage instead of landing inline"
+      proof: 'grep: test("W1-T9734: the grilled reply and the repair capture stage for the async sweep" in test/the-remaining-daemon-feedback-captures-stage-for-the-async-sweep.test.ts'
+    - claim: "serve's panel reply keeps its inline capture"
+      proof: 'grep: test("W1-T9734: the panel reply still captures inline" in test/the-remaining-daemon-feedback-captures-stage-for-the-async-sweep.test.ts'
+  falsifier: |
+    At origin/main, the measurement cadence with injectCoverageImprovementTask's default capture creates an entry
+    through captureFeedback, which lands inline through landFeedback's sync preflight, so a throwing planPrPreflight
+    reached through the landing opts fails the first test.

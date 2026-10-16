@@ -1,0 +1,62 @@
+- id: W1-T9736
+  title: "THE SYNC-SPAWN CENSUS REACHES A SYNC FUNCTION THROUGH A PROPERTY THAT ONLY SHARES ITS NAME — the planPrPreflight landing option and the daemon's sweepFeedbackLanding dep are keys and member reads the async wiring fills, yet the walk matches them as calls to the column-0 planPrPreflight and sweepFeedbackLanding, so runInTree stays reachable from daemonCommand by name after every real driver is converted, and its row can never be deleted"
+  repo: remudero
+  depends_on: [W1-T9734, W1-T9735, W1-T9701, W1-T9737]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — what the sync-spawn census reads as reach for a property key or member read; no src/ behaviour changes
+  band_meaning: span
+  origin: "operator session 2026-10-15 filing agent F4 lead 6: the runInTree row's 'by name only, the planPrPreflight option and the sweepFeedbackLanding dep' on run-W1-T9696-1792093598744 (e02b93474)"
+  plan_refs: [W1-T9660, W1-T9701, W1-T9696, W1-T9734, W1-T9735, W1-T9737, W1-T5689]
+  files:
+    - test/helpers/daemon-loop-walk.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: queued
+  priority: 2  # closes the runInTree row once W1-T9734 and W1-T9735 convert the real drivers
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf and at run-W1-T9696-1792093598744 (e02b93474), 2026-10-15:
+    - The walk (test/helpers/daemon-loop-walk.ts `topLevelFunctions`, then `loopReachable`) treats any identifier in
+      a body that equals a column-0 function's name as a call to it.
+    - src/lib/feedback-landing.ts has `planPrPreflight?:` as an option key on LandFeedbackOpts, and reads
+      `opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(...))`. The async opts reuse the key name for
+      `PlanPrPreflightAsyncFn`. Every body naming the key reaches src/lib/plan-pr-emitter.ts `planPrPreflight`, the
+      sync preflight.
+    - src/lib/daemon.ts has a `sweepFeedbackLanding?:` dep and calls `await deps.sweepFeedbackLanding()`. The daemon
+      wires that dep to `sweepFeedbackLandingAsync`, yet the walk reaches the sync src/lib/feedback-landing.ts
+      `sweepFeedbackLanding`.
+    - Type-position names count the same way, for example `Parameters<typeof gardenCheckout>` in src/run-task.ts.
+    - The W1-T9696 head's runInTree row lists both name-only reaches. W1-T9701 (run-W1-T9701-1792091409166, open)
+      changes the same walk's object-literal reading. This task edits the walk where it lives once W1-T9701 lands.
+      W1-T9737 (the factory guard) edits the same two files, so this task runs after it.
+  design: |
+    1. The walk reads an identifier as a property, not a reach of the column-0 function of that name, when it is:
+       - a member read (`.name` after an expression);
+       - an object or interface key (`name:` or `name?:` at a member's start);
+       - in a type position (`typeof name` inside a type).
+       A value-position identifier (`key: name`, `name(`, `?? name`) reaches as today. The rule is structural. It names
+       no function and adds no exemption list.
+    2. Re-measure at the build's base. With W1-T9734 and W1-T9735 landed, delete the runInTree row from
+       SYNC_SPAWN_LOOP_BASELINE when the walk no longer reaches it from daemonCommand. If a reach remains, name its
+       path in the row's comment; never hide it. Move W1-T9660's object-literal positive control off runInTree,
+       onto a remaining object-literal-only spawner or a synthetic Fn fixture, as W1-T9696 planned. Any OTHER row
+       the rule makes unreachable is named in the PR body with the path it lost. A seam's real default keeps its reach
+       through the value position (`deps.x ?? realDefault`). A row that loses reach any other way is a false negative,
+       so it is investigated before it is deleted.
+    3. Tests (in the census file, `test(` titles verbatim as in the proofs below):
+       - a synthetic Fn fixture whose body has only `deps.syncThing()` and `syncThing?: () => void` does not reach the
+         column-0 `syncThing`;
+       - a value-position `fallback: syncThing` and a bare `syncThing()` still reach it (positive control);
+       - `loopReachable(..., "daemonCommand")` holds no `runInTree` (the row's deletion).
+  acceptance:
+    - claim: "a member read, a key or a type-position name is not reach of the column-0 function it shares a name with"
+      proof: 'grep: test("W1-T9736: a property sharing a sync function name is not loop reach" in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts'
+    - claim: "a value-position identifier and a bare call still reach"
+      proof: 'grep: test("W1-T9736: a value-position name and a bare call still reach" in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts'
+    - claim: "runInTree is no longer reachable from daemonCommand and its row is gone"
+      proof: 'grep: test("W1-T9736: the daemon loop no longer reaches runInTree" in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts'
+  falsifier: |
+    At origin/main, a synthetic Fn `{ name: "caller", body: "await deps.syncThing();" }` beside a column-0 `syncThing`
+    that spawnSyncs is reported reachable from `caller`, so the first test fails.

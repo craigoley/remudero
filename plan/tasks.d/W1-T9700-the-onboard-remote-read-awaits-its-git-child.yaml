@@ -16,7 +16,7 @@
     - src/run-task.ts
     - test/the-onboard-remote-read-awaits-its-git-child.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 3  # census hygiene: only the onboard and recon verbs call it; the row keeps the name-based census exact
   attempts: 0
   rationale: |

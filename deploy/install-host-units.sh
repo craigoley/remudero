@@ -1002,17 +1002,30 @@ EDGE_HEAL
 # escalation once it persists (the deployer's REFUSAL_ESCALATE_AT), and withdraws or closes it when
 # the step next succeeds. A clear spawns rmd only while that condition has an open run, so a healthy
 # tick spawns nothing. Never fatal: the journal line stays, and the heartbeat reads the marker itself.
+# W1-T9669 -- host-alert runs on the HOST, so its GitHub App credential is the container's with the key
+# path mapped back to the host: the explicit mount source, else the CLAUDE_DIR file behind
+# /home/node/.claude. Neither maps: no key path, and hostGithubToken names the gap. The key is never read here.
+host_alert_key_path() {
+  if [ -n "$GH_APP_KEY_HOST_V" ]; then printf '%s' "$GH_APP_KEY_HOST_V"; return 0; fi
+  case "$GH_APP_KEY_V" in /home/node/.claude/?*) printf '%s/%s' "${CLAUDE_DIR%/}" "${GH_APP_KEY_V#/home/node/.claude/}" ;; esac
+}
+
 render_host_alerts() {
+  printf 'HOST_ALERT_GH_APP_ID=%q\nHOST_ALERT_GH_APP_INSTALLATION_ID=%q\nHOST_ALERT_GH_APP_PRIVATE_KEY_PATH=%q\n' \
+    "$GH_APP_ID_V" "$GH_APP_INST_V" "$(host_alert_key_path)"
   cat <<'HOST_ALERTS'
 host_alert() {
-  local condition="$1" code rmd out tmo=()
+  local condition="$1" code rmd out tmo=() cred=()
   daemon_code_resolve 2>/dev/null || :
   code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   rmd="$code/bin/rmd"
   shift
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
-  if out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
+  if [ -n "${HOST_ALERT_GH_APP_ID:-}" ]; then cred+=("GH_APP_ID=$HOST_ALERT_GH_APP_ID"); fi
+  if [ -n "${HOST_ALERT_GH_APP_INSTALLATION_ID:-}" ]; then cred+=("GH_APP_INSTALLATION_ID=$HOST_ALERT_GH_APP_INSTALLATION_ID"); fi
+  if [ -n "${HOST_ALERT_GH_APP_PRIVATE_KEY_PATH:-}" ]; then cred+=("GH_APP_PRIVATE_KEY_PATH=$HOST_ALERT_GH_APP_PRIVATE_KEY_PATH"); fi
+  if out="$(cd "$code" && env RMD_SELF_SYNC_DONE=1 ${cred[@]+"${cred[@]}"} ${tmo[@]+"${tmo[@]}"} "$rmd" host-alert --state-root "$STATE_DIR/state" \
       --instance "${HOST_ALERT_INSTANCE:-}" --condition "$condition" "$@" --json 2>/dev/null)"; then
     echo "rmd-relaunch: host alert -- $(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1)"
   else

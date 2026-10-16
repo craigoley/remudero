@@ -3,10 +3,10 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement, as for retired machine-authored records (W1-T5123): its risk ruling judged the record before this edit
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired  # not a flake: a census red each PR caused, superseded by W1-T9708 (a census red on a PR whose diff enters its walk is that PR's own). #10354's head 3440bd48b adds src/lib/read-model-worker.ts `if (!live?.readPaced)`, the negated optional-chain conflator CI run 37944299457 names, absent at its merge base; #10368 (3b8a3e02b) adds the same line and #10491 (819d77e49) adds `!quiet?.quiet`; main stayed green on the test (38 sweep.base_reproduction passes); 0 recovered on retry, 4 also failed; operator 2026-10-15 via the filing session
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/catch-erasure-ratchet.test.ts"

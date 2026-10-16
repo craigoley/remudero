@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: the boundary half of the 10-15 misattribution; W1-T9678 filters only the span"
   plan_refs: [W1-T9678, W1-T7760, W1-T6403, W1-T6023]
   files: [src/lib/main-health-rung.ts, src/lib/sweep.ts, test/the-first-red-boundary-never-takes-a-non-required-green.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a wrong boundary names the wrong merge and sends fix rounds after a commit that cannot be the cause, as on 10-15
   attempts: 0
   rationale: |

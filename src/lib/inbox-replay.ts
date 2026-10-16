@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, promises as fsPromises } from "node:fs";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
@@ -7,6 +7,9 @@ import { acquireDrainLock, DrainLockError } from "./drain-lock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import {
   composeStampLine,
+  createProposalShardReader,
+  proposalShardDir,
+  type ProposalShardReader,
   invalidateDraft,
   lintDraftedFragment,
   loadProposalRegistry,
@@ -18,6 +21,7 @@ import {
   type DraftLintViolation,
 } from "./inbox.js";
 import { inboxKind } from "./inbox-owner.js";
+import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { appendLedger } from "./ledger.js";
 import { createIncrementalLedgerUnion } from "./ledger-union.js";
 import { parseTasksFromYaml } from "./plan.js";
@@ -298,6 +302,40 @@ function registryIds(stateDir: string): ReadonlySet<string> | undefined {
   }
 }
 
+/** A refused current read is unknown, never an empty registry or a last-good absence proof. */
+export interface BandMeaningReplayRegistryReader {
+  readIds(): Promise<ReadonlySet<string> | undefined>;
+}
+
+/** W1-T9699: hold the incremental shard reader for the owner's life; the legacy blob is awaited too. */
+export function createBandMeaningReplayRegistryReader(
+  stateDir: string,
+  io: {
+    shards?: ProposalShardReader;
+    readBlob?: (path: string) => Promise<string>;
+    log?: (step: string, extra?: Record<string, unknown>) => void;
+    clock?: Clock;
+  } = {},
+): BandMeaningReplayRegistryReader {
+  const path = join(stateDir, "inbox-proposals.json");
+  const shards = io.shards ?? createProposalShardReader(proposalShardDir(path), { log: io.log, clock: io.clock });
+  const readBlob = io.readBlob ?? ((path: string) => fsPromises.readFile(path, "utf8"));
+  return {
+    async readIds() {
+      try {
+        const blob = parseProposalRegistryResult(await readBlob(path));
+        if (blob.kind !== "ok") return undefined;
+        const population = await shards.refresh();
+        return new Set([...blob.proposals.map((p) => p.id), ...[...population.values()].map(({ proposal }) => proposal.id)]);
+      } catch {
+        // Missing/unreadable blob, refused refresh and shard collisions all defer absence judgments.
+        // The shard reader may keep its memo, but only a successful CURRENT refresh can authorize absence.
+        return undefined;
+      }
+    },
+  };
+}
+
 /** Drop each proposal's cached draft and attempt key, applied to the caches as they are on disk NOW and under the
  *  draft rung's own lock, so a batch in flight cannot write the dropped draft back. False when the lock is held. */
 function invalidateDrafts(stateDir: string, ids: readonly string[]): boolean {
@@ -337,7 +375,19 @@ function deferred(deps: BandMeaningReplayInput, reason: string, seeded: boolean)
 /** One replay pass. Never throws: a failure is a deferral with its reason, and the next pass tries again. */
 export function replayBandMeaningRefusals(deps: BandMeaningReplayInput): BandMeaningReplayPass {
   try {
-    return replayPass(deps);
+    return runStepsSync(replayPass(deps, () => registryIds(deps.stateDir)));
+  } catch (e) {
+    return deferred(deps, `error: ${String((e as Error)?.message ?? e)}`, false);
+  }
+}
+
+/** The daemon's awaited driver over the same replay decisions, stores, locks and delivery. */
+export async function replayBandMeaningRefusalsAsync(
+  deps: BandMeaningReplayInput,
+  reader: BandMeaningReplayRegistryReader = createBandMeaningReplayRegistryReader(deps.stateDir),
+): Promise<BandMeaningReplayPass> {
+  try {
+    return await runStepsAsync(replayPass(deps, () => reader.readIds()));
   } catch (e) {
     return deferred(deps, `error: ${String((e as Error)?.message ?? e)}`, false);
   }
@@ -345,7 +395,7 @@ export function replayBandMeaningRefusals(deps: BandMeaningReplayInput): BandMea
 
 const completePass = (): BandMeaningReplayPass => ({ seeded: false, invalidated: [], recorded: [], reoffered: [], escalated: [], complete: true });
 
-function replayPass(deps: BandMeaningReplayInput): BandMeaningReplayPass {
+function* replayPass(deps: BandMeaningReplayInput, readRegistry: () => ReadonlySet<string> | undefined | Promise<ReadonlySet<string> | undefined>): Steps<BandMeaningReplayPass> {
   const clock = deps.clock ?? systemClock;
   const storePath = bandMeaningReplayStorePath(deps.stateDir);
   const writeStore = (s: BandMeaningReplayStore) => writeAtomic(storePath, JSON.stringify(s, null, 2) + "\n");
@@ -382,7 +432,7 @@ function replayPass(deps: BandMeaningReplayInput): BandMeaningReplayPass {
     writeStore(store);
   }
   const states = deps.classificationStates();
-  const registry = registryIds(deps.stateDir);
+  const registry = yield* step(readRegistry);
   const draftsPath = join(deps.stateDir, "inbox-drafts.json");
   const drafts = parseDraftCache(existsSync(draftsPath) ? readFileSync(draftsPath, "utf8") : undefined);
   const recorded: BandMeaningReplayPass["recorded"] = [];

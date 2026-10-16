@@ -22,11 +22,11 @@ const HOOK_PATH = fileURLToPath(new URL("../hooks/deny-floor.sh", import.meta.ur
 // refused by the first), and running the tests would silently consume the session's own cadence
 // budget. A fresh root per call keeps each case a statement about the hook, not about what ran
 // before it.
-function runDenyFloor(command: string): { status: number | null; stderr: string } {
+function runDenyFloor(command: string, args: readonly string[] = []): { status: number | null; stderr: string } {
   const input = JSON.stringify({ tool_input: { command } });
   const cacheHome = mkdtempSync(join(tmpdir(), "rmd-denyfloor-cache-"));
   try {
-    const result = spawnSync("bash", [HOOK_PATH], {
+    const result = spawnSync("bash", [HOOK_PATH, ...args], {
       input,
       encoding: "utf8",
       env: { ...process.env, XDG_CACHE_HOME: cacheHome },
@@ -111,7 +111,8 @@ test("deny-floor: refuses every ordinary worker route that merges or arms a pull
     `gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: "PR_x"}) { pullRequest { autoMergeRequest { enabledAt } } }'`,
   ];
   for (const command of commands) {
-    const { status, stderr } = runDenyFloor(command);
+    // W1-T9643: rule 5 binds the worker lane, which settings/worker.json enters with this flag.
+    const { status, stderr } = runDenyFloor(command, ["--confine-file-tools"]);
     assert.equal(status, 2, `expected refusal for: ${command}`);
     assert.match(stderr, /only the orchestrator|merge endpoint|GraphQL mutation/i);
   }

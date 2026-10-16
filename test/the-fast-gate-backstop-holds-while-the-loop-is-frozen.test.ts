@@ -17,7 +17,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { CHILD_ENTRY_SPAWNED_STEP } from "../src/lib/child-entry-argv.js";
 import {
   armedEnforcers, classifyGateExit, DEADLINE_RUNNER, defaultRunGate, findOnPath, GATE_DEADLINE_EXIT_CODE,
-  GATE_DEADLINE_MARKER, gateTimeoutBin, runPreopenGate, type PreopenGateResult,
+  GATE_DEADLINE_MARKER, gateTimeoutBin, runPreopenGate, type GateContain, type PreopenGateResult,
 } from "../src/lib/preopen-gate.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -70,6 +70,15 @@ function writeStubGate(dir: string): string {
 
 const lastAlive = (dir: string, name: string): number => Number(readFileSync(join(dir, name), "utf8"));
 
+/** W1-T9619: a stand-in sandbox (the gate is never run uncontained) that runs the command after `--` as a child. */
+function passThroughSandbox(dir: string): GateContain {
+  const file = join(dir, "pass-through-sandbox");
+  writeFileSync(file, `#!${process.execPath}\nconst args = process.argv.slice(2); const at = args.indexOf("--");\n` +
+    `const r = require("child_process").spawnSync(args[at + 1], args.slice(at + 2), { stdio: "inherit" }); process.exit(r.status ?? 1);\n`);
+  chmodSync(file, 0o755);
+  return () => ({ mode: "sandboxed", file, argv: ["--"] });
+}
+
 interface FrozenRun {
   dir: string;
   startedAt: number;
@@ -87,7 +96,8 @@ async function frozenRun(): Promise<FrozenRun> {
   mkdirSync(work);
   const stub = writeStubGate(dir);
   const startedAt = Date.now();
-  const pending = runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, stub, undefined, { backstopMs: DEADLINE_MS, timeoutBin: null }) });
+  const contain = passThroughSandbox(dir);
+  const pending = runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, stub, undefined, { backstopMs: DEADLINE_MS, timeoutBin: null }, { contain }) });
   // The freeze: no timer, no I/O callback, nothing on this loop runs until it ends.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, FREEZE_MS);
   const freezeEnd = Date.now();
@@ -160,16 +170,16 @@ test("W1-T9556: coreutils timeout is found by a spawn-free PATH walk, and the ro
   assert.deepEqual(armedEnforcers("/usr/bin/timeout"), ["timeout", "runner", "parent"]);
   assert.deepEqual(armedEnforcers(null), ["runner", "parent"]);
 
-  // A worktree's own bin/rmd gate, run through the default launch: it passes through the runner, and the row says
-  // which enforcers held its deadline.
+  // A gate run through the default launch (W1-T9619: the harness's bin/rmd, against the worktree): it passes
+  // through the runner, and the row says which enforcers held its deadline.
   const work = scratch("own");
-  mkdirSync(join(work, "bin"));
-  writeFileSync(join(work, "bin", "rmd"), `#!${process.execPath}\n` +
-    `const fs = require("fs"); fs.mkdirSync("coverage", { recursive: true });\n` +
-    `fs.writeFileSync("coverage/preflight-summary.json", JSON.stringify({ ok: true, finishedAt: new Date().toISOString(), steps: [] }));\n`);
-  chmodSync(join(work, "bin", "rmd"), 0o755);
+  const harness = scratch("harness");
+  mkdirSync(join(harness, "bin"));
+  writeFileSync(join(harness, "bin", "rmd"), `#!${process.execPath}\nprocess.exit(0);\n`);
+  chmodSync(join(harness, "bin", "rmd"), 0o755);
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const result = await runPreopenGate(work, { log: (step, extra) => rows.push({ step, extra }) });
+  const log = (step: string, extra?: Record<string, unknown>) => void rows.push({ step, extra });
+  const result = await runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, undefined, log, {}, { contain: passThroughSandbox(harness), harnessRoot: harness }) });
   assert.equal(result.kind, "pass", JSON.stringify(result));
   const spawned = rows.filter((r) => r.step === CHILD_ENTRY_SPAWNED_STEP);
   assert.equal(spawned.length, 1);

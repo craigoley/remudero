@@ -7305,9 +7305,10 @@ export function mainHealthFirstRedCommitFromRunHistory(
   allHistory: readonly MainHealthRunHistoryEntry[],
   options: MainHealthFirstRedOptions = {},
 ): MainHealthFirstRedCommit | "window-exhausted" | undefined {
-  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going
-  // green on a commit whose CI was cancelled is not a green main.
+  // Only a workflow that carries required checks can say a commit is green or red: CodeQL going green
+  // on a commit whose CI was cancelled is not a green main. W1-T9690: an EMPTY (unknown) set names none.
   const workflows = options.requiredWorkflows;
+  if (workflows && workflows.size === 0) return undefined;
   const history =
     workflows && workflows.size > 0
       ? allHistory.filter((run) => run.workflowName === undefined || workflows.has(run.workflowName))
@@ -7358,7 +7359,9 @@ export function enrichMainHealthObservation(
 
   let firstRedCommit: MainHealthFirstRedCommit | undefined;
   let runHistoryWindowExhausted: boolean | undefined;
-  if (enrichment.runHistory) {
+  if (enrichment.runHistory && enrichment.requiredWorkflows?.size === 0) {
+    enrichmentFailures.push("the workflows carrying required checks are unknown, so no first-red commit is named");
+  } else if (enrichment.runHistory) {
     const boundary = mainHealthFirstRedCommitFromRunHistory(enrichment.runHistory, {
       ...(enrichment.requiredWorkflows ? { requiredWorkflows: enrichment.requiredWorkflows } : {}),
     });
@@ -16796,7 +16799,8 @@ export async function runSweep(
   // legible state `judgeSweepLiveness` reads. RENDER_RELEVANT, rotating on recency (W1-T1237).
 
   deps.markPrelude?.("walk_setup", true);
-  log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true });
+  log("sweep.pass", { enumerated: openPrs.length, dry_run: deps.dryRun === true,
+    ...(deps.repairAdmissionSurface ? { surface: deps.repairAdmissionSurface } : {}) });
 
   // W1-T7734 — the walk is a queue, so a PR whose head moved under this pass can be put back at the
   // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per

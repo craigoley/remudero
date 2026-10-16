@@ -1,3 +1,4 @@
+// @census-reads: test/
 /** @source-text-subject: this census audits the host dependencies declared by test suites. */
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";

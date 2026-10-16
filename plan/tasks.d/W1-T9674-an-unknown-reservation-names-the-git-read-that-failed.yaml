@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-15: the review lane withheld #12011 while refs/rmd-id/W1-T9645 exists"
   plan_refs: [W1-T4414, W1-T6076, W1-T9654]
   files: [src/lib/review.ts, src/lib/task-id-reservation.ts, test/an-unknown-reservation-names-the-git-read-that-failed.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: a withheld review holds a ready filing until a human reads the anchor by hand
   attempts: 0
   rationale: |
