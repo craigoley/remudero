@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { acquireTestSlotAsync, lowPriorityCommand, TEST_SLOT_LEASE_MS, testSlotProcessFacts } from '../src/lib/test-slot.ts';
+import { testFileEstimates } from '../src/lib/host-memory-learning.ts';
 import { prepareJudgedRun, judgedNodeTestArgs, judgeRun, testFilesInArgv } from './pure-test-pool.mjs';
 import { extractCoverageFlags, readCiYaml, withLcovDestination } from './diff-coverage-local.mjs';
 import { gitOrThrow } from './lib/git.mjs';
@@ -114,7 +115,7 @@ export async function runCoverageBatches({ cwd = process.cwd(), flags, files, ba
     renameSync(receiptPath + '.part', receiptPath);
   };
   save(); log(`coverage-batches: receipt ${receiptPath}`);
-  const slot = await acquire('coverage:local-batches', { slots: 1, waitBoundMs: 0 });
+  const slot = await acquire('coverage:local-batches', { slots: 1, waitBoundMs: 0, filePeaks: testFileEstimates(selected) });
   let heartbeat, monitor, lost, released = false;
   const abort = new AbortController();
   const env = { ...process.env, ...slot.childEnvironment, NODE_TEST_CONTEXT: undefined,
