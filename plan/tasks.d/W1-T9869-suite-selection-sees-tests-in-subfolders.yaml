@@ -1,0 +1,55 @@
+- id: W1-T9869
+  title: "SUITE SELECTION SEES TESTS IN SUBFOLDERS — diff-class's plan-reading, plan-only and census suite lists read only the top level of test/, and affected-suites hard-codes 34 test paths, so a nested suite silently drops out of the fast lanes and merge-group selection (test restructure, letter D, part 1)"
+  repo: remudero
+  depends_on: [W1-T9860]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, suite selection over nested tests; spans diff-class and affected-suites
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter D (part 1 of 5)'
+  plan_refs: [W1-T9860, W1-T9876]
+  files:
+    - scripts/diff-class.mjs
+    - src/lib/affected-suites.ts
+    - test/suite-selection-sees-tests-in-subfolders.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Citations re-verified at origin/main 889966ea5 (2026-10-16). (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section B, rows 2 and 3)
+    - scripts/diff-class.mjs reads only the top level of test/:
+      - planReadingSuiteFiles (~289) reads `readdirSync(testDir, { withFileTypes: true })` at ~292;
+      - planOnlySuiteFiles (~309) does the same at ~312;
+      - censusSuiteFiles (~540) does the same at ~547.
+      A nested suite is therefore never selected for the PLAN_ONLY, DOCS or TEST_ONLY fast lanes, for
+      affected-suites' pathReaders, or for the author lane. A partial move narrows the selection silently.
+    - src/lib/affected-suites.ts holds 34 `"test/....test.ts"` literals between lines ~413 and ~540, each guarded by
+      `input.files.has(...)`. Two examples are mkdtempCensus "test/mkdtemp-allowlist-rekey.test.ts" and
+      declaredSenderCensus "test/every-message-names-one-declared-sender.test.ts". A moved suite drops out of
+      merge-group selection (live), out of the daemon's coveragePrecheck, and out of rmd preflight.
+  design: |
+    1. The three diff-class lists walk test/ recursively, over the same population as package.json's
+       "test/**/*.test.ts" glob, with test/fixtures/ excluded. Use git ls-files, or a recursive readdir with the same
+       exclusion; the test pins which one is used.
+    2. affected-suites resolves each hard-coded path through resolveTestPath (W1-T9860) and compares against the
+       resolved path.
+    3. A literal that resolves to nothing fails loudly: a test asserts that every literal resolves at head. It is never
+       silently "not selected".
+    New test flat in test/ (this task makes nested tests visible; moving it is a wave's job).
+  acceptance:
+    - claim: 'a nested suite that reads plan paths is selected for a plan-only diff'
+      proof: 'grep: test("W1-T9869: a nested suite that reads plan paths is selected for a plan-only diff" in test/suite-selection-sees-tests-in-subfolders.test.ts'
+    - claim: 'a nested census-named suite is selected by censusSuiteFiles'
+      proof: 'grep: test("W1-T9869: a nested census suite is selected by censusSuiteFiles" in test/suite-selection-sees-tests-in-subfolders.test.ts'
+    - claim: 'a moved edge-path suite is still selected by affected-suites'
+      proof: 'grep: test("W1-T9869: a moved edge-path suite is still selected by affected-suites" in test/suite-selection-sees-tests-in-subfolders.test.ts'
+    - claim: 'every hard-coded suite path in affected-suites resolves at head'
+      proof: 'grep: test("W1-T9869: every hard-coded suite path in affected-suites resolves at head" in test/suite-selection-sees-tests-in-subfolders.test.ts'
+    - claim: 'affected-suites resolves its hard-coded paths through the shared resolver'
+      proof: 'grep: resolveTestPath( in src/lib/affected-suites.ts'
+  falsifier: |
+    On origin/main readdirSync(testDir) lists only top-level entries and keeps those where isFile() is true, so a
+    planted test/x/y.test.ts is never selected. `input.files.has("test/mkdtemp-allowlist-rekey.test.ts")` is false for a
+    moved copy.

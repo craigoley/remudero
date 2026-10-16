@@ -650,6 +650,17 @@ interface BranchRunsResponse {
   workflow_runs?: ReadonlyArray<{ id?: unknown; html_url?: unknown; status?: unknown; head_sha?: unknown }>;
 }
 
+/** GitHub answers a workflow dispatch and a ref delete with 204 No Content: `gh` exits 0 and prints nothing, which
+ *  the JSON fetcher reports as an unreadable body. For these writes that is the request's success. Every probe
+ *  dispatch on 2026-10-16 was logged failed this way, so the red at bd42ca367 was never attributed. */
+async function writeWithNoContent(write: () => unknown): Promise<void> {
+  try {
+    await write();
+  } catch (error) {
+    if ((error as { reasonClass?: unknown } | undefined)?.reasonClass !== "gh_json_unreadable_response") throw error;
+  }
+}
+
 /** The production {@link MainRepairProbes}: GitHub's REST `git/refs`, workflow dispatch, runs and
  *  runners endpoints over the same `fetch` the rung reads with. */
 export function restMainProbes(owner: string, repo: string, fetch: GhApiFetcher): MainRepairProbes {
@@ -663,7 +674,7 @@ export function restMainProbes(owner: string, repo: string, fetch: GhApiFetcher)
         // A ref left by an earlier, unreleased probe of the same commit is reused, never an error.
         if (!/already exists/i.test(String((error as Error)?.message ?? error))) throw error;
       }
-      await fetch(["api", "--method", "POST", `${repoPath}/actions/workflows/${MAIN_PROBE_WORKFLOW}/dispatches`, "-f", `ref=${ref}`]);
+      await writeWithNoContent(() => fetch(["api", "--method", "POST", `${repoPath}/actions/workflows/${MAIN_PROBE_WORKFLOW}/dispatches`, "-f", `ref=${ref}`]));
       return { sha, ref };
     },
     async read(probe) {
@@ -680,7 +691,7 @@ export function restMainProbes(owner: string, repo: string, fetch: GhApiFetcher)
       return { status: completed ? "completed" : "running", runId, ...(runUrl ? { runUrl } : {}), jobs };
     },
     async release(probe) {
-      await fetch(["api", "--method", "DELETE", `${repoPath}/git/refs/heads/${probe.ref}`]);
+      await writeWithNoContent(() => fetch(["api", "--method", "DELETE", `${repoPath}/git/refs/heads/${probe.ref}`]));
     },
     async readRunnerLoad() {
       const queued = (await fetch(["api", `${repoPath}/actions/runs?status=queued&per_page=1`])) as { total_count?: unknown } | undefined;
@@ -2035,7 +2046,13 @@ export function buildMainHealthRung(
           estimated_runner_minutes: medianMs !== undefined ? Math.round((plan.estimatedProbes * medianMs) / 600) / 100 : null,
         });
       } else if (state.inFlight.size === 0) {
-        return { kind: "unlocated", reason: `no probe could be dispatched for the cancelled commits since ${first.afterGreenSha}: ${refused.join("; ")}` };
+        // No probe runs, so the span stays unattributed, yet the red is still repaired: a fix needs the failing
+        // tests, not a culprit. The completed red is named; its revert needs a culprit proof it does not have.
+        return {
+          ...asFirstRed,
+          method: "first-red-unattributed",
+          fields: { ...at, unattributed_span: [...span], attribution_refused: refused },
+        };
       }
     }
     return { kind: "probing" };
@@ -2095,7 +2112,11 @@ export function buildMainHealthRung(
       repairRow("main.repair.unlocated", { head_sha: sha, failing_checks: observation.failingChecks, first_red_sha: first.headSha, refused_sha: located.sha, reason: refusal });
       return false;
     }
-    const request = await fixRequestFor(observation, sha, branch, located.sha, located.pr, failures, observation.reason);
+    const reason = located.method === "first-red-unattributed"
+      ? `${observation.reason}. The commits after the last green \`${first.afterGreenSha}\` could not be attributed (no CI probe could ` +
+        `run), so \`${located.sha}\` is named only as the first completed red: repair the failing tests, whichever merge broke them`
+      : observation.reason;
+    const request = await fixRequestFor(observation, sha, branch, located.sha, located.pr, failures, reason);
     repairRow("main.repair.located", {
       head_sha: sha,
       offending_sha: located.sha,

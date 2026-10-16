@@ -1,5 +1,8 @@
 import { ghJsonAsync } from "./github-transport.js";
 import { RmdError } from "./errors.js";
+// @ts-expect-error — pure ESM mapping shared with the dependency-free producer; tsconfig includes TS only.
+import { securityMetadataGhArgs } from "./security-metadata-gh-args.mjs";
+export { securityMetadataGhArgs };
 // @ts-expect-error — pure ESM companion shared with the dependency-free producer; tsconfig includes TS only.
 import { readSecurityMergeDecision, readSecurityMergeDecisionSync } from "./code-scanning-merge-adapter.mjs";
 
@@ -29,7 +32,7 @@ export function securityMergeHead(prUrl: string, read: (path: string) => unknown
  return target ? allowedHead(readSecurityMergeDecisionSync({...target,expectedHead}, read)) : undefined;
 }
 export async function securityMergeHeadAsync(prUrl: string,
- read: (path: string) => Promise<unknown> = path => ghJsonAsync(["api", path]), expectedHead?: string): Promise<string | undefined> {
+ read: (path: string) => Promise<unknown> = path => ghJsonAsync(securityMetadataGhArgs(path)), expectedHead?: string): Promise<string | undefined> {
  const target = targetFor(prUrl);
  return target ? allowedHead(await readSecurityMergeDecision({...target,expectedHead}, read)) : undefined;
 }

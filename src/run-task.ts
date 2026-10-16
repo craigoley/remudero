@@ -1631,6 +1631,8 @@ import {
   reconcileDependabotRefresh,
   reconcileDependabotOwnRed,
   reconcileDependabotRefusedPath,
+  reconcileDependabotTitle,
+  overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
   type DependabotHeadCommit,
@@ -1900,6 +1902,7 @@ import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
   applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy,
@@ -11140,6 +11143,8 @@ export async function runFixRebase(
     return { rebased: false, reason: decision.reason };
   }
 
+  // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+  io.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber: target.number, forcedBy: "fix-rebase", nowMs: systemClock.now() }));
   const result = await io.updateBranch(target.number);
   if (!result.ok) {
     const reason = `update-branch failed — ${result.error ?? "no error reported"}`;
@@ -12735,6 +12740,9 @@ export async function runFixRung(opts: {
             ...(refreshMainSha === undefined ? {} : { main_sha: refreshMainSha }), checks: refreshChecks, test_files: refreshTestFiles }, clearance));
         }
         if (decision.refresh && clearance?.refresh !== false) {
+          // W1-T7735: a repair-driven refresh keeps its own trigger but still writes its decision row.
+          deps.log(REFRESH_DECIDED_STEP, forcedRefreshFields({ prNumber, headSha: review.headSha, forcedBy: "fix-base-refresh",
+            nowMs: systemClock.now() }));
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             const reason =
@@ -24036,6 +24044,12 @@ export function defaultNodePinSyncIo(
 export interface DepReviewPrMutations {
   comment(prUrl: string, body: string): void;
   close(prUrl: string, opts: { comment: string; deleteBranch: false }): void;
+  /** W1-T9828: the REST title PATCH under the daemon's own gh identity, so `pull_request.edited` fires. */
+  retitle?(prUrl: string, title: string): Promise<void>;
+}
+
+export async function defaultDepReviewRetitle(prUrl: string, title: string): Promise<void> {
+  await ghTextAsync(prMetadataRestArgs(prUrl, { title }));
 }
 
 function depReviewMigrationFeedbackId(submissionKey: string): string {
@@ -24057,6 +24071,7 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
     close(prUrl, opts) {
       ghExec(["pr", "close", prUrl, "--repo", repoArg, "--comment", opts.comment], { stdio: "pipe" });
     },
+    retitle: defaultDepReviewRetitle,
   };
 }
 
@@ -24103,8 +24118,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "dep-review", ...extra });
   const proposalRoot = deps.root ?? repoRoot;
   const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
+  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
+  const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
 
-  if (isDependabotAuthor({ login: view.author?.login ?? "" })) {
+  if (dependabot) {
     const sync = syncNodePinForImageBump(
       diff,
       { sha: view.headRefOid, ref: view.headRefName },
@@ -24117,6 +24134,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     if (sync.kind === "refused") {
       log("dep-review.node_pin_refused", { pr_url: view.url, head_sha: view.headRefOid, reason: sync.reason, detail: sync.detail });
+    }
+    const retitle = deps.prMutations?.retitle ?? defaultDepReviewRetitle;
+    const titled = await reconcileDependabotTitle({
+      statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, title: view.title ?? "", body: view.body ?? "",
+      retitle: (title) => retitle(view.url, title), log,
+    });
+    if (titled === "retitled" || titled === "failed") {
+      console.log(`### rmd dep-review PR #${view.number} — title over header-max-length, retitle ${titled}; holding for the re-run`);
+      return 1;
     }
   }
 
@@ -24146,7 +24172,6 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
-  const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   try {
     reconcileDepReviewHold({
       statePath: holdStatePath,
@@ -24201,7 +24226,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
     try {
       const ownRedFlag = flagValue(rest, "--dependabot-own-red");
-      const ownRed = reconcileDependabotOwnRed({
+      // W1-T9828: a commitlint red on a title still over header-max-length is the title's, never a fleet build.
+      const titleRed = dependabot && overHeaderLimit(view.title ?? "") && result.redChecks.includes("commitlint");
+      const ownRed = titleRed ? "none" : reconcileDependabotOwnRed({
         statePath: holdStatePath, owner, repo, prUrl: view.url, prNumber: view.number, title: view.title ?? "", body: view.body ?? "",
         headSha: view.headRefOid, result, signal: DEPENDABOT_OWN_RED_SIGNALS.find((signal) => signal === ownRedFlag), nowMs: clock.now(), log,
         capture: ({ raw, submissionKey }) => captureProposal({ root: proposalRoot, id: depReviewMigrationFeedbackId(submissionKey), raw, submissionKey }),
