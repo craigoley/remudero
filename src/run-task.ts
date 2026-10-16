@@ -39319,9 +39319,9 @@ export interface RunInChildInput {
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
 export async function runInChildWhenOn(
   input: RunInChildInput,
-  seams: { readMode?: () => RunChildMode; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
+  seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
 ): Promise<RunChildHandle | undefined> {
-  const mode = runChildModeIsOn(seams.readMode);
+  const mode = runChildModeIsOn(seams.readMode, seams.evidence);
   const fallback = (reason: string): undefined => {
     input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
     return undefined;
@@ -39941,24 +39941,38 @@ export async function daemonCommand(
   } catch (censusError) {
     log("run_child.boot_census_failed", { error: String((censusError as Error)?.message ?? censusError).slice(0, 240) });
   }
-  const childMode = runChildModeIsOn(deps.readRunChildMode).on;
+  // W1-T9087: under `auto` the mode is decided from the ledger's own evidence since the previous boot. The tracker is seeded
+  // from the ledger this boot opened with and fed every run-child row this daemon writes since (`childLog`); it keeps counts.
+  // Read here, before adoption, so the boot's adoption pass is folded once, live.
+  const bootLedgerLines = readLedgerLines(ledgerPath);
+  const childPolicy = deps.readRunChildMode ?? (() => loadRunChildMode());
+  const childModeTracker = createRunChildModeTracker(bootLedgerLines);
+  const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
+    log(step, extra);
+    childModeTracker.observe(step, extra);
+  };
+  const bootChildPolicy = readRunChildPolicy(childPolicy);
+  // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
+  const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const adoptedRunIds = new Set<string>();
   const childSettlements = childMode ? readLedgerUnionRecordsSync(dirname(ledgerPath), {
     step: ["run_child.settled"], refuseIncomplete: true,
   }) : undefined;
   if (childSettlements && !childSettlements.ok) throw new Error(`run child settlements unreadable: ${childSettlements.unread.join(", ")}`);
   const adoptedChildren: AdoptedRunChild[] = childMode ? adoptRunChildren({
-    stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log,
+    stateRoot: join(config.root, "state"), instance: defaultInstance(config.root).name, log: childLog,
     settledRunIds: new Set((childSettlements?.rows ?? []).flatMap((row) => typeof row.run_id === "string" ? [row.run_id] : [])),
   }) : [];
   for (const child of adoptedChildren) {
     adoptedRunIds.add(child.runId);
     void child.settled.then(() => adoptedRunIds.delete(child.runId), () => adoptedRunIds.delete(child.runId));
   }
+  // Once per boot, after the adoption pass the decision reads: `auto` ledgers what it decided and why.
+  if (bootChildPolicy.mode === "auto") childModeTracker.record(runChildModeFor("auto", childModeTracker.evidence()).decision, log, true);
   // W1-T215 crash-loop input, snapshotted EAGERLY — before daemonBoot writes this boot's own
   // `daemon.boot` line — so the check's `priorBoots` contract (prior boots ONLY) holds even
   // though the closure is invoked after that write. See the crashLoopCheck argument below.
-  const priorDaemonBootTs = readLedgerLines(ledgerPath)
+  const priorDaemonBootTs = bootLedgerLines
     .filter((l) => l.step === "daemon.boot")
     .map((l) => String(l.ts ?? ""))
     .filter(Boolean)
@@ -40412,10 +40426,14 @@ export async function daemonCommand(
         ...(childMode ? { adoptRunChildren: () => adoptedChildren } : {}),
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
+          // W1-T9087: each dispatch asks the mode; under `auto` that is the evidence's current answer, ledgered when it changes.
+          const dispatchPolicy = readRunChildPolicy(childPolicy);
+          const dispatchMode = dispatchPolicy.mode === undefined ? undefined : runChildModeFor(dispatchPolicy.mode, childModeTracker.evidence());
+          childModeTracker.record(dispatchMode?.decision, log);
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
           const inChild = await runInChildWhenOn({
-            taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log, planSync: planSyncCoalescer.sync,
-          }, { readMode: deps.readRunChildMode });
+            taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+          }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
             runOptions?.onChild?.(inChild);
             return inChild.settled;
@@ -40423,9 +40441,9 @@ export async function daemonCommand(
           // W1-T9082: under mode shadow an unawaited, never-rejecting probe child measures a run child's cost beside this run.
           const admittedPlan = createAdmittedPlanSlot();
           void startRunChildProbe({
-            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log,
+            taskId, stateRoot: join(config.root, "state"), repoDir: effectiveRepoRoot, root: config.root, plan: admittedPlan.promise, log: childLog,
             options: childOptions,
-          });
+          }, dispatchMode ? { readMode: () => dispatchMode.mode } : {});
           return runTaskFn(taskId, {
             planPath: target.planPath,
             config,
@@ -57574,7 +57592,8 @@ import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
   type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
-import type { RunChildMode } from "./lib/policy.js";
+import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
+import { createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
 export { hashInstallInputs, installHashMarkerPath };
 

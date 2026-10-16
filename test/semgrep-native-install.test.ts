@@ -52,7 +52,7 @@ test("native Semgrep locks every build and runtime entry with an exact version a
     sha256: "62c3d93315b1a909360c4b43c3a573b47557a1ec7a4583a71286df2a28d4b72e",
   });
   for (const [name, pin] of build) if (runtime.has(name)) assert.deepEqual(runtime.get(name), pin);
-  assert.equal(runtime.get("mcp")!.version, "1.29.0");
+  assert.equal(runtime.get("mcp")!.version, "1.30.0");
   assert.equal(runtime.get("pyjwt")!.version, "2.15.1");
   for (const name of ["cryptography", "mcp", "pyjwt", "ruamel-yaml-clib", "opentelemetry-sdk"]) {
     assert.ok(runtime.has(name), `transitive/extra missing: ${name}`);
