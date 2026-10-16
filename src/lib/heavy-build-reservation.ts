@@ -3,6 +3,7 @@ import { closeSync, constants, fsyncSync, fstatSync, lstatSync, mkdirSync, mkdte
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { systemClock } from "./clock.js";
+import { sameHost } from "./host-identity.js";
 import { readPidNamespace, testSlotProcessFacts } from "./test-slot.js";
 
 /** Human-approved READY-to-escalation SLA. A repair/restart never renews it. */
@@ -156,7 +157,7 @@ export function releaseHeavyNewBuilds(handle: HeavyReservationHandle, opts: { no
   const current = validateHeavyRequest(readOptionalHeavyRecord(heavyRecordPath(handle.dir, handle.request.id)));
   const actual = heavyOwnerIdentity();
   if (heavyRecordDigest(current) !== heavyRecordDigest(handle.request) || current.owner.pid !== actual.pid || current.owner.start !== actual.start ||
-      current.owner.host !== actual.host || current.owner.namespace !== actual.namespace) return false;
+      !sameHost(current.owner.host, actual.host) || current.owner.namespace !== actual.namespace) return false;
   if (!Number.isSafeInteger(now) || now < current.readyAtMs) throw new Error("invalid heavy READY release time");
   closeHeavyRequest(handle.dir, current, now);
   assertHeavyDirectoryIdentity(handle.dir, identity);
