@@ -48,12 +48,16 @@ function heldBoot(o: { holdReview?: boolean } = {}) {
   const laneHeld = new Promise<void>((resolve) => (releaseLane = resolve));
   let releaseReview!: () => void;
   const reviewHeld = new Promise<void>((resolve) => (releaseReview = resolve));
+  // The boot pass is held, never leaked: a pass still pending when its daemon returns keeps the
+  // process-wide in-flight ticker, and a later daemon in the same process ticks on this one's deps.
+  let releaseSweep!: () => void;
+  const sweepHeld = new Promise<void>((resolve) => (releaseSweep = resolve));
   const steps = (step: string): Line[] => lines.filter((l) => l.step === step);
   const deps: daemon.DaemonDeps = {
     refreshMerged: () => (id: string) => merged.has(id),
     sweep: async () => {
       if (++passes > 1) return;
-      await new Promise<void>(() => {});
+      await sweepHeld;
     },
     sweepLight: async (scope) => {
       if (scope?.reviewOnly && o.holdReview) await reviewHeld;
@@ -81,6 +85,12 @@ function heldBoot(o: { holdReview?: boolean } = {}) {
     events, lines, steps, deps,
     releaseLane: () => (events.push("lane-released"), releaseLane()),
     releaseReview: () => (events.push("review-released"), releaseReview()),
+    /** Settles the held boot pass and waits for it, so its ticker is stopped before the test ends. */
+    settleSweep: async () => {
+      releaseSweep();
+      assert.ok(await within(() => steps("daemon.sweep.settled").length > 0), "fixture: the held boot pass settled");
+      await new Promise((resolve) => setImmediate(resolve));
+    },
     ran: (prefix: string): boolean => events.some((e) => e.startsWith(prefix)),
   };
 }
@@ -105,6 +115,7 @@ test("W1-T9321: the due rungs run while a tick-1 lane outlives the boot gate", a
     h.releaseLane();
   }
   const summary = await running;
+  await h.settleSweep();
   assert.deepEqual(summary.merged, ["A"]);
   const exit = h.steps("daemon.summary")[0]?.extra;
   assert.equal(exit?.gate_opened_without_cadence, false, "the exit row says the opened gate's cadences ran");
@@ -130,6 +141,7 @@ test("W1-T9321: the retro trigger and auto-triage run without a second tick", as
     h.releaseLane();
   }
   await running;
+  await h.settleSweep();
 
   // Only behind the spend gates: tick 1 passes the governors, so it owes both spending cadences, and every later tick
   // defers on the cost governor. The gate opens during those ticks: the debt is not paid past a closed spend gate,
@@ -142,6 +154,7 @@ test("W1-T9321: the retro trigger and auto-triage run without a second tick", as
     checkCostGovernor: () => (tick() >= 2 ? { deferred: true as const, observedDayCostUsd: 9, ceilingUsd: 5 } : undefined),
     checkStop: () => (governed.events.filter((e) => e === "measurement").length >= 20 || tick() > 400 ? "fixture stop" : undefined),
   }, { pollIntervalMs: 5, sweepWallClockBoundMs: 1_500, bootCadenceGateBoundMs: 50 });
+  await governed.settleSweep();
   const saw = `saw ${[...new Set(governed.events)].join(", ")}`;
   assert.equal(summary.stopReason, "stopped");
   assert.ok(governed.steps("daemon.boot_gate.deferred").some((l) => l.extra.cadence === "checkRetroTrigger"),
@@ -175,6 +188,7 @@ test("W1-T9321: nothing gated runs before the gate opens and the boot review set
     h.releaseLane();
   }
   await running;
+  await h.settleSweep();
 });
 
 test("W1-T9321: the exit row names a process that opened its gate but never ran a cadence", async () => {
@@ -187,6 +201,7 @@ test("W1-T9321: the exit row names a process that opened its gate but never ran 
     h.releaseLane();
   }
   await running;
+  await h.settleSweep();
   h.releaseReview();
   const exit = h.steps("daemon.summary")[0]?.extra;
   assert.equal(exit?.gate_opened_without_cadence, true, `the exit row names it (${JSON.stringify(exit)})`);
@@ -203,4 +218,29 @@ test("W1-T9321: the exit row names a process that opened its gate but never ran 
   const plain = lines.find((l) => l.step === "daemon.summary")?.extra;
   assert.ok(plain, "positive control: the summary row was written");
   assert.equal("gate_opened_without_cadence" in plain, false);
+});
+
+test("W1-T9321: these fixtures leave no in-flight ticker behind, so a later daemon in the process ticks on its own clock", async () => {
+  // Runs LAST in this file. The in-flight ticker is process-wide: a boot pass still pending when its daemon returned
+  // kept it, and the next daemon's dispatch took it over still ticking on the dead fixture's deps (CI 38972373415:
+  // seven pooled tests after this file timed out). The next daemon's ticker must call its OWN sleep.
+  let sleeps = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const running = daemon.runDaemon(fixturePlan(["A"]), {
+    refreshMerged: () => () => false,
+    runOne: async (id) => (await gate, okResult(id)),
+    sweepLight: async () => {},
+    sleep: async () => {
+      if (++sleeps >= 3) release();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+    log: () => {},
+  }, { max: 1, pollIntervalMs: 5 });
+  try {
+    assert.ok(await within(() => sleeps >= 3), `a later daemon's ticker must run on its own sleep; it was called ${sleeps} time(s)`);
+  } finally {
+    release();
+  }
+  await running;
 });
