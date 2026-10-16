@@ -12,10 +12,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gitRepo } from "./helpers/git-repo.js";
 import {
-  ENGINE_RECORD, engineModules, enginePath, ensureEngineTree, listEngines, newestCurrentEngine, pruneEngineTrees, resolveTrustedModules,
-  workerWritableRoots,
+  buildEngineAfterStore, ENGINE_RECORD, engineModules, enginePath, ensureEngineTree, listEngines, newestCurrentEngine, pruneEngineTrees,
+  resolveTrustedModules, workerWritableRoots,
 } from "../src/lib/engine-tree.js";
-import { buildEngineAfterStore } from "../src/run-task.js";
 
 const hashOf = (n: number): string => n.toString(16).padStart(64, "0");
 const shaOf = (n: number): string => n.toString(16).padStart(40, "0");
@@ -92,6 +91,14 @@ test("W1-T9738: an engine links node_modules to the install, never into a worktr
   });
   assert.equal(built.kind, "built", JSON.stringify(second.rows));
   assert.equal(readlinkSync(join(enginePath(g.state, hashOf(92)), "node_modules")), realpathSync(g.install));
+
+  // The pass never rejects: a git that throws is ledgered, and a store fill that built nothing cuts nothing.
+  const thrown = collect();
+  const down = async (): Promise<string> => { throw new Error("git down"); };
+  await buildEngineAfterStore(f.repo, f.state, join(f.state, "store"), { kind: "built", hash: hashOf(94), ms: 1, bytes: 1 }, thrown.log, { git: down });
+  assert.deepEqual(thrown.rows, [{ step: "engine.build_failed", extra: { source_hash: hashOf(94), reason: "engine pass threw: git down" } }]);
+  await buildEngineAfterStore(f.repo, f.state, join(f.state, "store"), { kind: "failed", reason: "x" }, thrown.log, { git: down });
+  assert.equal(thrown.rows.length, 1);
 });
 
 test("W1-T9738: an untrusted or missing node_modules source publishes no engine", async () => {

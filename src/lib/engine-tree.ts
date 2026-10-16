@@ -8,9 +8,9 @@
 // W1-T9738: that link names the RESOLVED install, never a path under a worker's worktree, which the worker can rewrite.
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import { materializeFromStore, type StoreLog, type StoreLookup } from "./child-entry-store.js";
+import { materializeFromStore, type StoreBuildResult, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
 import { linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
@@ -98,7 +98,9 @@ export type TrustedModules =
 
 /** The root `path` sits at or under, compared on real paths so a symlinked root cannot hide a worktree. */
 function rootHolding(path: string, roots: readonly string[]): string | undefined {
-  return roots.map((r) => (existsSync(r) ? realpathSync(r) : resolve(r))).find((r) => path === r || path.startsWith(r.endsWith(sep) ? r : `${r}${sep}`));
+  return roots
+    .map((r) => (existsSync(r) ? realpathSync(r) : resolve(r)))
+    .find((r) => path === r || path.startsWith(r.endsWith(sep) ? r : `${r}${sep}`));
 }
 
 /**
@@ -138,7 +140,9 @@ export function engineModules(root: string, recorded: string | undefined, roots:
   if (!resolved.ok) return { kind: resolved.reason === "node-modules-missing" ? "dangling" : "untrusted", detail: resolved.detail };
   const named = resolve(root, readlinkSync(link));
   if (named !== resolved.target) return { kind: "untrusted", detail: `${link} links through ${named}, not directly to ${resolved.target}` };
-  if (recorded !== undefined && recorded !== resolved.target) return { kind: "untrusted", detail: `${link} resolves to ${resolved.target}, not the recorded ${recorded}` };
+  if (recorded !== undefined && recorded !== resolved.target) {
+    return { kind: "untrusted", detail: `${link} resolves to ${resolved.target}, not the recorded ${recorded}` };
+  }
   return { kind: "trusted", target: resolved.target };
 }
 
@@ -405,4 +409,38 @@ export async function pruneEngineTrees(stateRoot: string, deps: PruneEngineOptio
   }
   if (removed.length) log("engine.pruned", { removed });
   return removed;
+}
+
+// ── after a store fill ───────────────────────────────────────────────────────────────────────
+
+/**
+ * W1-T9077: once the store holds the bundle for the managed checkout's revision, cut its engine tree (a detached worktree a
+ * run child that outlives the daemon runs from), ledger how far the newest current engine lags main, and remove the engine
+ * trees no run names. Off the loop, never rejects: a failure is ledgered and the previous engine stays the newest.
+ * W1-T9738 moved it here from run-task.ts. `repoDir` may be a run's worktree; the engine's node_modules comes from the
+ * managed checkout it was cut from (its git common dir's parent), never from the worktree, which its worker can rewrite.
+ */
+export async function buildEngineAfterStore(
+  repoDir: string,
+  stateRoot: string,
+  storeRoot: string,
+  stored: StoreBuildResult,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  /** Seams for the git, node_modules and store steps; the defaults are the real ones. */
+  seams: Partial<Pick<EngineBuildOptions, "git" | "linkNodeModules" | "materialize" | "clock">> & { isCurrent?: (root: string) => boolean } = {},
+): Promise<void> {
+  if (stored.kind !== "built" && stored.kind !== "present") return;
+  try {
+    const git = seams.git ?? hardenedEngineGit;
+    const sha = (await git(repoDir, ["rev-parse", "HEAD"])).trim();
+    const common = (await git(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    const nodeModulesFrom = basename(common) === ".git" ? dirname(common) : repoDir;
+    const { isCurrent, ...buildSeams } = seams;
+    const built = await ensureEngineTree(stateRoot, sha, stored.hash, { repoDir, nodeModulesFrom, storeRoot, log, ...buildSeams });
+    if (built.kind === "failed") return;
+    const newest = await newestCurrentEngine(stateRoot, sha, { repoDir, log, git: seams.git, ...(isCurrent ? { isCurrent } : {}) });
+    await pruneEngineTrees(stateRoot, { repoDir, log, git: seams.git, ...(newest ? { keep: newest.sourceHash } : {}) });
+  } catch (error) {
+    log("engine.build_failed", { source_hash: stored.hash, reason: `engine pass threw: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
+  }
 }
