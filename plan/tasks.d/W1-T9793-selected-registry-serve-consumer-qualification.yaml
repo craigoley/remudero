@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator instruction 2026-10-16: complete remaining registry-consumer qualification without duplicate work, schedules, activation or loss of owner override"
   plan_refs: [W1-T9435, W1-T9493, W1-T9559, W1-T9571, W1-T9572, W1-T4227, W1-T4265, W1-T4266, W1-T5433, W1-T5434]
-  files: [src/lib/selected-registry-consumers.ts, src/lib/serve.ts, src/lib/instance-gateway.ts, src/lib/repositories-view.ts, src/lib/repo-dashboard-route.ts, src/lib/benchmark-aa-readiness.ts, src/lib/inbox.ts, src/lib/config-schema.ts, src/run-task.ts, test/selected-registry-serve-consumers.test.ts, test/one-registry-for-the-fleet.test.ts, test/one-gateway-serves-every-instance.test.ts, test/onboarding-readiness.test.ts, test/repo-dashboard-route.test.ts, test/benchmark-aa-readiness.test.ts, test/instances-view.test.ts, test/config-schema.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  files: [src/lib/selected-registry-consumers.ts, src/lib/serve.ts, src/lib/instance-gateway.ts, src/lib/repositories-view.ts, src/lib/read-model-worker.ts, src/lib/repo-dashboard-route.ts, src/lib/benchmark-aa-readiness.ts, src/lib/inbox.ts, src/lib/config-schema.ts, src/run-task.ts, test/selected-registry-serve-consumers.test.ts, test/one-registry-for-the-fleet.test.ts, test/one-gateway-serves-every-instance.test.ts, test/onboarding-readiness.test.ts, test/repo-dashboard-route.test.ts, test/benchmark-aa-readiness.test.ts, test/instances-view.test.ts, test/config-schema.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
   status: queued
   attempts: 0
   rationale: |
