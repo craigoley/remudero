@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { serveCommand, benchmarkAaReadinessRuntime, buildInboxDraftSpawnArgs, lintPlanCommand, main, approveCommand, draftProposalBatch } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import { inboxDraftExampleFragmentYaml, composeStampLine, fileRatificationDraft, fileRatificationBatch, RatificationDraftRefusedError, checkoutRepoFacts, lintDraftedFragment } from "../src/lib/inbox.js";
+import { inboxDraftExampleFragmentYaml, composeStampLine, fileRatificationDraft, fileRatificationBatch, RatificationDraftRefusedError, checkoutRepoFacts, lintDraftedFragment, planProjectionForDependsOn } from "../src/lib/inbox.js";
 import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -57,15 +57,19 @@ test("selected real daemon draft batch retains its captured intent through the a
   const { home, root } = instance(), seed = gitRepo({ kind: "selected-draft-origin" });
   t.after(() => { seed.cleanup(); rmSync(home, { recursive: true, force: true }); });
   mkdirSync(join(seed.dir, "plan")); mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
-  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
+  const fragment = inboxDraftExampleFragmentYaml(), planText = fragment.replaceAll("NEW-1", "W1-T1")
+    .replace("Tighten the empty-input guard in parseTasksFromYaml", "Qualify xenolith riverbed alpenglow context") + "\n";
+  assert.throws(() => planProjectionForDependsOn("[]\n"), /projected to zero tasks/);
+  assert.match(planProjectionForDependsOn(planText), /W1-T1/);
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), planText);
   copyFileSync(join(REPO_ROOT, "src", "lib", "plan.ts"), join(seed.dir, "src", "lib", "plan.ts"));
   seed.git("add", "."); seed.git("commit", "-m", "chore: seed a private draft fixture");
   seed.git("update-ref", "refs/remotes/origin/main", "HEAD");
   mkdirSync(join(root, "repos"), { recursive: true }); seed.git("clone", "--quiet", seed.dir, join(root, "repos", "fixture"));
   const selectedPath = join(home, "selected.yaml");
   writeFileSync(selectedPath, "instances:\n  fixture:\n    github_repo: owner/repo\n    mode: shadow\n");
-  const fragment = inboxDraftExampleFragmentYaml(), facts = checkoutRepoFacts(seed.dir), id = "P-selected-draft";
-  assert.deepEqual(lintDraftedFragment(fragment, id, composeStampLine(id, "qualification only", ["NEW-1"]), undefined,
+  const facts = checkoutRepoFacts(seed.dir), id = "P-selected-draft";
+  assert.deepEqual(lintDraftedFragment(fragment, id, composeStampLine(id, "qualification only", ["NEW-1"]), planText,
     facts.moduleExists, facts.readGrepProofFile, facts.pathIsDirectory, facts.pathExistsAtBase), [],
     "prove this exact fixture is lint-clean BEFORE any real batch can reach an uninjected escalation default");
   for (const enabled of [false, true]) {
@@ -76,6 +80,7 @@ test("selected real daemon draft batch retains its captured intent through the a
       `SELECTED-DRAFT-${enabled ? "shadow" : "legacy"}`, (step, fields) => rows.push({ step, ...fields }), async args => {
         calls++; assert.equal(calls, 1, "this clean fixture must never retry or reach an escalation capacity port");
         assert.deepEqual(args.tools, ["Read", "Grep", "Glob"]);
+        assert.ok(args.prompt.includes("W1-T1"), "the real draft prompt must project the seeded plan before spawning");
         assert.ok(!args.prompt.includes(selectedPath), "private intent cannot be added to an untrusted prompt");
         config.selectedRegistryMode = undefined; await Promise.resolve();
         return fakeWorkerResult(`=== FRAGMENT START ===\n${fragment}\n=== FRAGMENT END ===\nSTAMP: qualification only`);
@@ -85,7 +90,7 @@ test("selected real daemon draft batch retains its captured intent through the a
     assert.equal(selected.length, enabled ? 1 : 0, "the REAL batch, not only a fixture-supplied context, must own its post-spawn lint");
     assert.ok(selected.every(row => row.action === "inbox-discovery" && row.selected_state === "unknown" && row.publication_permission === "not-granted"));
     assert.ok(!JSON.stringify(selected).includes(selectedPath));
-    assert.equal(readFileSync(join(root, "repos", "fixture", "plan", "tasks.yaml"), "utf8"), "[]\n");
+    assert.equal(readFileSync(join(root, "repos", "fixture", "plan", "tasks.yaml"), "utf8"), planText);
   }
 });
 
