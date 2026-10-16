@@ -876,11 +876,11 @@ test("landFeedback's full commit message (header + body) passes the REAL commitl
 // up so much as an untracked file from this call.
 
 test("landContent carry-forward: a pending file whose blob will not resolve is SKIPPED, never fatal", () => {
-  // Covers the `continue` in landContent's carry-forward rev-parse catch. `ls-tree` lists a path on
-  // the landing branch, then the per-file `rev-parse origin/<branch>:<path>` fails — the ref moved
-  // between the two reads, or the entry is not a resolvable blob. That file must simply be dropped
-  // from the carry-forward set: the batch still lands. A throw here would take the whole bridge down
-  // on a benign race, and the bridge's contract is NEVER-THROWS.
+  // Covers the `continue` in landContent's carry-forward for a pending path the tip holds no blob
+  // for. Since W1-T9753 the landing's own diff names the path and one `ls-tree` of the tip reads
+  // the blobs; a path the tip does not hold (the branch deleted it, or the entry is not a blob)
+  // must simply be dropped from the carry-forward set: the batch still lands. A throw here would
+  // take the whole bridge down, and the bridge's contract is NEVER-THROWS.
   const bareOrigin = makeBareOrigin();
   const root = cloneRoot(bareOrigin);
   const { gh } = fakeGh("https://github.com/o/r/pull/101");
@@ -892,13 +892,13 @@ test("landContent carry-forward: a pending file whose blob will not resolve is S
   ));
   assert.equal(first.landed, true, "the first record is on the decisions-landing branch");
 
-  // Second record. Real git for everything EXCEPT the carry-forward blob lookup, which throws the
-  // way git does when the path is not resolvable in that ref.
+  // Second record. Real git for everything EXCEPT the carry-forward blob lookup: the tip's
+  // `ls-tree` answers that it holds none of the paths the landing's own diff names.
   let skipped = 0;
   const racingGit = (args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
-    if (args[0] === "rev-parse" && String(args[1]).startsWith(`origin/${DECISIONS_LANDING_BRANCH}:`)) {
+    if (args[0] === "ls-tree" && args[3] !== "origin/main") {
       skipped++;
-      throw new Error(`fatal: path does not exist in 'origin/${DECISIONS_LANDING_BRANCH}'`);
+      return "";
     }
     return execFileSync("git", ["-C", root, ...args], {
       encoding: "utf8",
