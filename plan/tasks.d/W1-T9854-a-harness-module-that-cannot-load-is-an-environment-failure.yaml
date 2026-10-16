@@ -1,0 +1,75 @@
+- id: W1-T9854
+  title: "A HARNESS MODULE THAT CANNOT LOAD IS AN ENVIRONMENT FAILURE, NOT THE TASK'S — a run child whose engine lost its node_modules ended W1-T8827 and W1-T9327 (P1s whose workers had succeeded) as `failed` cause run-error, its lost children settled as `unclassified failure`, and the daemon stopped on it (daemon.summary stopReason error, 2026-10-16T15:29Z)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how a thrown harness-module failure is classified; high for blast radius: it changes what the daemon defers instead of stopping on
+  band_meaning: blast-radius
+  origin: "fan-out 2026-10-16 agent E1: S1 lead (a), split worker versus environment causes at the thrown arm"
+  plan_refs: [W1-T9738, W1-T9077, W1-T4655, W1-T4597, W1-T113, W1-T5344, W1-T9855]
+  files: [src/run-task.ts, src/lib/status.ts, src/lib/run-child-contract.ts, test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts]
+  status: queued
+  priority: 2  # a design call (the brief's own words); W1-T9738 stops today's trigger
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 on the core daemon's ledger (host remudero, ~/rmd-state2/state), read-only and niced, over the
+    2026-10-13..16 rotations and the live file (63 forms, every one contributed rows: the coverage control).
+    - run_child.mode_decision promoted shadow -> on at 15:06:59Z. Three run children were spawned from engine 6a34d2fd
+      (sha 65f87ae06): W1-T8827 15:10:35Z, W1-T9327 15:12:44Z, W1-T9482 15:25:38Z. The engine's node_modules linked
+      into run-W1-T9124-1792160420189, which was pruned at 15:13:40Z.
+    - W1-T8827-1792163461259 and W1-T9327-1792163565718 wrote implement.done subtype success (15:15:46Z, 15:18:02Z),
+      then run.error "Cannot find module 'tsx' / Require stack: .../state/engines/6a34d2fd.../src/lib/child-entry-argv.ts"
+      and verdict failed, stage run.error, cause run-error ($0.44 and $0.53). W1-T9482's child exited 1 before
+      writing status.json: "ERR_MODULE_NOT_FOUND: Cannot find package 'yaml' imported from .../state/engines/...".
+    - All three settled run_child.lost "unclassified failure" at 15:25:40Z. daemon.summary at 15:29:02Z reads
+      stopReason "error". The daemon rebooted at 15:31:46Z and demoted the mode on -> shadow ("3 lost child(ren)").
+    - Run children spawned 2026-10-13..16: 3, all in that 25-minute window, all lost. 0 since. Positive control: the
+      same corpus holds 202 run.start and 201 verdict rows. W1-T5971 (in-process, started 15:35Z) reached its own
+      verdict.
+    - The only two "Cannot find module" verdicts in the window are these two.
+    READ at origin/main (symbols, not lines):
+    - run-task.ts `runErrorCause` is a closed set of harness causes. A module-resolution throw falls to the generic
+      `run-error`, the same cause a defect in the run's own path takes.
+    - status.ts `isEnvironmentalBlock` reads only ENVIRONMENTAL_BLOCK_VERDICTS and ENVIRONMENTAL_BLOCK_STAGES
+      (worker.bounded_output). A thrown verdict keeps the streak but is never environmental.
+    - run-child-contract.ts `fromRunChildFailure` sends every class it does not name to `{ kind: "lost", detail:
+      "unclassified failure: ..." }`. daemon.ts `classifyRejection` treats that as fatal, because it is not
+      blocked_toolchain, transient gh, a gh read or a lane delivery failure.
+    W1-T9738 (#12345, merged 16:00Z) stops engines linking a worktree, which was today's trigger. It does not change how
+    the next unloadable harness module is charged.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the open heads for runErrorCause,
+    isEnvironmentalBlock and MODULE_NOT_FOUND. W1-T4597 made the Codex output cap environmental. W1-T9680 parks a
+    credential refusal. Neither covers a harness module.
+  design: |
+    A DESIGN CALL, recorded here for the builder and the reviewer. The rule: a module the HARNESS process fails to load
+    is the environment's, because worker code never runs in the harness process.
+    1. run-task.ts `runErrorCause` gains `harness-module-unresolved` for an error whose code is MODULE_NOT_FOUND or
+       ERR_MODULE_NOT_FOUND, checked before the generic arm. The verdict row is unchanged apart from `cause`.
+    2. status.ts: `isEnvironmentalBlock` also accepts a `failed` verdict whose cause is in a new
+       ENVIRONMENTAL_BLOCK_CAUSES set ({harness-module-unresolved}). It is re-offered on W1-T4597's existing
+       environment-changed rule (a later daemon.boot on other code, another host, or the cooldown), never as a strike.
+    3. run-child-contract.ts: a child failure with either code, and a lost child whose stderr tail shows either code
+       before it wrote status.json, settle as `spawn_infra_blocked` (reasonClass blocked_toolchain). The daemon's
+       `isSpawnInfraBlocked` then defers the lane, and the daemon keeps running. The run-child mode evidence still
+       counts the child as lost, so the mode demotes exactly as it did on 2026-10-16.
+    Tests go in a new file, test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts, with `test(`
+    titles verbatim as in the proofs below, using the live messages above as fixtures.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts"
+    - claim: "a thrown harness module failure names its own cause"
+      proof: 'grep: test("W1-T9854: a thrown harness module failure names its own cause" in test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts'
+    - claim: "that verdict is an environmental block, not a task failure"
+      proof: 'grep: test("W1-T9854: that verdict is an environmental block, not a task failure" in test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts'
+    - claim: "a run child that cannot load its modules defers instead of stopping the daemon"
+      proof: 'grep: test("W1-T9854: a run child that cannot load its modules defers instead of stopping the daemon" in test/a-harness-module-that-cannot-load-is-an-environment-failure.test.ts'
+  falsifier: |
+    Leave the classification as it is, and the first test reads cause run-error, and the third reads a `lost` settlement
+    that classifyRejection would stop the daemon on, as at 15:29:02Z on 2026-10-16.
+  note: |
+    EFFECT, measured after merge with no numeric pass mark: no daemon.summary stopReason "error" whose stopDetail is a
+    module-not-found. A harness-module-unresolved verdict is followed by a re-offer after the next boot, with no
+    failure latch.
