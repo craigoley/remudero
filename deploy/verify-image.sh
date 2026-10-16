@@ -714,11 +714,14 @@ out="$(docker run --rm --entrypoint /bin/sh --user 1000:1000 "${REF}" -c '
   # jq is not process inspection; it is the ci-gate workflow script the three ci-gate suites
   # extract and RUN. Absent, they exit 127 and 14 tests fail — measured on this image.
   jq --version >/dev/null 2>&1    || { echo "MISS jq";     fail=1; }
+  # Review executes Python helper proofs on Linux too. Isolate Python from host
+  # environment/site customizations and prove its required stdlib actually imports.
+  python3 -I -c "import argparse, contextlib, hashlib, json, os, pathlib, plistlib, pwd, re, shutil, stat, subprocess, sys, tempfile, time, uuid; assert sys.version_info >= (3, 9); print(sys.version)" >/dev/null 2>&1 || { echo "MISS python3 stdlib"; fail=1; }
   [ "$fail" -eq 0 ] && echo ALL_RUNNABLE
 ' 2>&1)"
 set -e
 if printf '%s\n' "${out}" | grep -q '^ALL_RUNNABLE$'; then
-  echo "  OK    ps, pgrep, lsof and jq all executed as uid 1000"
+  echo "  OK    ps, pgrep, lsof, jq and python3 stdlib all executed as uid 1000"
 else
   echo "  FAIL  a shelled binary is missing or unrunnable as uid 1000:" >&2
   printf '%s\n' "${out}" | sed 's/^/        /' >&2
