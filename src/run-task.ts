@@ -53607,12 +53607,12 @@ export async function approveCommand(
 
     // ONE SHARD PER DRAFTED TASK, never a monolith append (`monolith-filing`). W1-T4700: re-linted
     // WITH the stamp first, refusing before any write; returns only the paths it changed.
-    shardRelPaths = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () => fileRatificationDraft(
+    shardRelPaths = fileRatificationDraft(
       worktreePath,
       { fragmentYaml: materialized.fragmentYaml, proposalId: payload.proposalId, stampLine: materialized.stampLine },
       { mkdirSync, writeFileSync, readFileSync },
       join,
-    ));
+    );
     log("approve.shards_written", { proposal_id: payload.proposalId, paths: shardRelPaths });
 
     // materialized.fragmentYaml carries only REAL ids now (materializeDraftTaskIds already
@@ -53874,7 +53874,8 @@ export async function approveCommand(
         payload: { proposalId, fragmentYaml: "", stampLine: "" },
       };
     } else {
-      result = approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus });
+      result = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
+        approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus }));
     }
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
@@ -54082,7 +54083,7 @@ async function approveBatchCommand(
       // fileRatificationBatch, so each member gets the single lane's refusal and written-paths list,
       // and every member's stamp folds over this worktree's own MASTER-PLAN.md in order (Q2).
       const batchWorktree = worktreePath;
-      const filed = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () => fileRatificationBatch(
+      const filed = fileRatificationBatch(
         batchWorktree,
         payloads,
         (payload) => {
@@ -54130,7 +54131,7 @@ async function approveBatchCommand(
         },
         { mkdirSync, writeFileSync, readFileSync },
         join,
-      ));
+      );
       allWrittenPaths = filed.writtenPaths;
       allFiledTaskIds = filed.filedIds;
       log("approve.shards_written", { proposal_ids: payloads.map((p) => p.proposalId), paths: allWrittenPaths });
@@ -54170,7 +54171,7 @@ async function approveBatchCommand(
 
   let result: BatchApproveResult;
   try {
-    result = approveBatch(
+    result = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () => approveBatch(
       found.map((f) => f.classification),
       // Unused by the real gateway above — it reads/folds MASTER-PLAN.md itself, inside the
       // worktree it just created off a FRESH `git fetch` (worktreeAdd), which is the only base
@@ -54179,7 +54180,7 @@ async function approveBatchCommand(
       "",
       gateway,
       { ledgerPath, runId, duplicateCorpus: filedShardSlugCorpus(repoRoot) },
-    );
+    ));
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlocks.forEach((b) => b.releaseAll());
