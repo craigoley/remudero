@@ -12,7 +12,7 @@
   plan_refs: []
   files: [src/run-task.ts, test/the-benchmark-cohort-runs-only-when-its-inputs-changed.test.ts]
   status: queued
-  priority: 2
+  priority: 1  # raised 2026-10-16 (operator approval): readCheckpoint was the top frame of a 14.4-min daemon-loop freeze (daemon.loop_stall_profile 06:10:39Z, lag 863,946 ms, a 328 s readFileSync of a 37.15 MB checkpoint, up from 29.6 MB)
   attempts: 0
   rationale: |
     READ 2026-10-12 at origin/main 42dae2eb8; ledger 48 h, deduplicated.

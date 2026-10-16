@@ -303,6 +303,13 @@ const COVERAGE_VALUE_FLAGS = new Set([
   "--test-reporter-destination",
 ]);
 
+/** Node's compile cache can reduce V8 coverage precision, including branch detail. */
+export function coverageChildEnvironment(env) {
+  const childEnv = { ...env, NODE_DISABLE_COMPILE_CACHE: "1" };
+  delete childEnv.NODE_COMPILE_CACHE;
+  return childEnv;
+}
+
 /** W1-T4398 — pass two of the coverage lane: the same Node test command narrowed to the failed files,
  *  with every coverage and reporter flag removed and NODE_V8_COVERAGE emptied in the environment,
  *  so the retry writes nothing the coverage gates read. `null` when there is no file to retry or
@@ -535,7 +542,7 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
     return reportTrackedTreeDirt(treeBefore, first.code);
   }
   if (dropped.length === 0 || !coverageOptions(args).output) return reportTrackedTreeDirt(treeBefore, first.code);
-  const env = { ...process.env, NODE_V8_COVERAGE: "" };
+  const env = coverageChildEnvironment({ ...process.env, NODE_V8_COVERAGE: "" });
   // The rebuild is this script, not a test run, even though the coverage command's own args ride along.
   const rebuilt = await runChild(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
   let code = rebuilt.code;
@@ -572,7 +579,10 @@ export async function main(argv) {
   const treeBefore = readTrackedTreeState();
 
   const startedAt = Date.now();
-  const first = await runOnce(cmd, args, coverageFirstPass ? { ...process.env, NODE_V8_COVERAGE: rawCoverageDir } : process.env);
+  const firstEnv = coverageFirstPass
+    ? coverageChildEnvironment({ ...process.env, NODE_V8_COVERAGE: rawCoverageDir })
+    : process.env;
+  const first = await runOnce(cmd, args, firstEnv);
   if (first.code === 0) {
     return reportTrackedTreeDirt(treeBefore, 0);
   }

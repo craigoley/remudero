@@ -32,7 +32,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { cacheHitRatio, type CacheHitTokens } from "./digest.js";
 import { readSourceSnapshotBody, sourceSnapshotStates, type ReadModelDb } from "./read-model-db.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
-import { foldGardenerSpend, GARDENER_SPEND_MAX_BYTES, type GardenerSpend, type GardenerSpendSource } from "./gardener-spend.js";
+import { foldGardenerSpend, unavailableGardenerWorkerCalls, GARDENER_SPEND_MAX_BYTES, type GardenerSpend, type GardenerSpendSource, type GardenerWorkerCalls } from "./gardener-spend.js";
 import { publicRepositoryFlow, REPOSITORY_FLOW_FLEET_MAX_BYTES, type RepositoryFlow } from "./repository-flow.js";
 
 export const ANALYTICS_VIEW_NAME = "analytics";
@@ -411,10 +411,16 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
       });
       const merged = mergeAnalytics(inputs, now);
       let spendBytes = 0;
+      const callCoverage = new Map<number, GardenerWorkerCalls>();
       merged.data.instances = merged.data.instances.map((instance, index) => {
         const snapshot = inputs[index]?.snapshot;
         if (snapshot === undefined || snapshot.console.gardenerSpendSource === undefined) return instance;
         let gardenerSpend = foldGardenerSpend(snapshot.console.gardenerSpendSource, instance.repository, snapshot.asOf);
+        if (gardenerSpend.workerCalls !== undefined) {
+          callCoverage.set(index, gardenerSpend.workerCalls);
+          const { workerCalls: _calls, ...money } = gardenerSpend;
+          gardenerSpend = money;
+        }
         if (spendBytes + Buffer.byteLength(JSON.stringify(gardenerSpend)) > GARDENER_SPEND_MAX_BYTES) {
           gardenerSpend = foldGardenerSpend({ reason: "over_budget" }, instance.repository, snapshot.asOf);
         }
@@ -422,6 +428,22 @@ export function createAnalyticsView(opts: { modelApprovalConfig?: HostModelAppro
         if (spendBytes + bytes > GARDENER_SPEND_MAX_BYTES) return instance;
         spendBytes += bytes;
         return { ...instance, gardenerSpend };
+      });
+      // Reserve the original monetary allocation across EVERY repository first. Optional
+      // call coverage may consume only the remainder, never another repository's money.
+      merged.data.instances = merged.data.instances.map((instance, index) => {
+        const calls = callCoverage.get(index), money = instance.gardenerSpend;
+        if (!calls || !money) return instance;
+        for (const workerCalls of [calls, unavailableGardenerWorkerCalls("over_budget")]) {
+          const candidate = { ...money, workerCalls };
+          const extra = Buffer.byteLength(JSON.stringify(candidate)) - Buffer.byteLength(JSON.stringify(money));
+          if (spendBytes + extra > GARDENER_SPEND_MAX_BYTES) continue;
+          spendBytes += extra;
+          return { ...instance, gardenerSpend: candidate };
+        }
+        // Even a bounded failure receipt may not fit. Optional omission is unknown,
+        // not a zero-call measurement; the independently valid money stays intact.
+        return instance;
       });
       return [{ key: "", ...withHostModelApprovals(merged, opts.modelApprovalConfig, now) }];
     },
