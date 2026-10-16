@@ -12,10 +12,34 @@
   files:
     - scripts/diff-class.mjs
     - test/a-plan-only-diff-runs-every-suite-that-walks-the-plan.test.ts
-  status: queued
-  priority: 1  # a plan-only filing that a skipped suite would fail reddens main for every PR until a human fixes it; 2026-10-16 is the observed instance
+  status: blocked
+  retirement: withdrawn  # AMENDED 2026-10-16 (overlap): #12418 (bfde61305) shipped the fix before this shard merged; see the rationale's first paragraph
   attempts: 0
   rationale: |
+    AMENDED 2026-10-16 (overlap): WITHDRAWN, because main already ships this task's fix. #12418 (bfde61305,
+    merged 20:02Z) landed before this shard's filing PR #12415 merged (21:13Z).
+      - WHAT LANDED. `censusSuiteFiles` (scripts/diff-class.mjs) now gates its inline-walker arm on
+        `namesAreaLoosely`, so a quoted bare segment walked through `join(REPO_ROOT, d)` selects the suite. That is
+        design point 1. Its test "a suite walking a bare plan or docs segment runs for a plan or docs edit"
+        (test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts) pins the #12389 shape, the real
+        frozen-bullet suite for the W1-T9875 shard path, and the naming-without-walking negative control. That
+        covers this shard's first three acceptance criteria.
+      - THE CENSUS. Its second test, "every suite that walks the repository and spells a plan path in any literal
+        form runs for a filed shard", fails on any repo walker that spells a plan path in any literal form and is not
+        selected. It has a positive control (at least 5 walkers). The 10 bare-segment suites this rationale lists are
+        therefore judged on every CI run instead of by hand. Measured at origin/main 6fb8ee06f, the selection is 522
+        suites for the W1-T9875 shard path (514 when filed).
+      - WHAT REMAINS, AND WHY IT IS NOT DISPATCHABLE. Design point 2 (the read-map arm) is left. It is for suites
+        that read plan/ only through a spawned child or more than one import hop. Measured at 6fb8ee06f, there is no
+        static route to them:
+          - following imports two hops reaches a plan walker from 2,275 of the unselected suites, because
+            src/lib/plan.ts is reachable from nearly every module;
+          - the 12 unselected suites that spawn a plan-walking script, sampled, use the script path as data or run it
+            in a fixture repo.
+        No live miss is observed either. Only observed reads can tell the cases apart. No consumption-ready read map
+        is published: `collect` in scripts/read-map-corpus.mjs never emits one, and its output says
+        liveNarrowingAllowed false, the W1-T6084 operator opt-in. A build of point 2 today would ship an arm that
+        selects nothing live, behind a fixture-only green proof. File it again once CI publishes a usable read map.
     EVIDENCE, 2026-10-16:
       - Main went red at bd42ca367 (CI run 38946416242, ci-shard 4/8). The one failing test was
         "a doctrine path cited outside doctrine/ still reaches its rule — on disk or through the merge registry" in
