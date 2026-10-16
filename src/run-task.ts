@@ -9894,6 +9894,13 @@ export const CI_LOG_DIAGNOSTIC_RE = new RegExp(
   ].join("|"),
 );
 
+// W1-T5378: `ci` only collapses the shard matrix; drop it beside real failures or when its log is empty.
+export function dropDerivativeAggregateCiFailure(failures: readonly CiFailure[]): CiFailure[] {
+  const others = failures.filter((f) => f.name !== "ci");
+  if (others.length > 0) return others;
+  return failures.filter((f) => (f.logTail ?? "").trim() !== "");
+}
+
 function summarizeCiFailure(f: CiFailure): string {
   const rawLines = (f.logTail ?? "").split("\n");
   const diagnostic = rawLines
@@ -12978,6 +12985,7 @@ export async function runFixRung(opts: {
     // check arm (`runSweep`, sweep.ts) already use: never fall through to a strike, never log
     // `fix.dispatch` (the one ledger step a strike is counted from) — ledger the reason and stand
     // down, exactly as those sites do.
+    if (noReviewYet && currentCiFailures !== undefined) currentCiFailures = dropDerivativeAggregateCiFailure(currentCiFailures);
     if (currentMergeConflict === undefined && noReviewYet && currentCiFailures !== undefined && currentCiFailures.length === 0) {
       const reason =
         "blocked_ci dispatch with zero enumerable failing check(s) — the checks-red rollup and the ci-log " +
