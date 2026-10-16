@@ -44,7 +44,7 @@ interface Row { step: string; extra: Record<string, unknown> }
 
 /** One lane (task A) runs; a dispatch tick at `latch()` latches the restart; `settle()` ends the lane, and the
  *  daemon exits for freshness. `drainClock` flips the wake seam to an immediate wake once the lane has settled. */
-function latchedLane(t: TestContext, ledger: readonly string[] = []) {
+function latchedLane(t: TestContext, ledger: readonly string[] | ((exiting: boolean) => readonly string[]) = []) {
   assert.equal(inFlightReviewCount(), 0, "precondition: no review leaked from another test");
   assert.equal(detachedSweepActionCount(), 0, "precondition: no detached action leaked from another test");
   const dir = mkdtempSync(join(tmpdir(), "rmd-t8172-"));
@@ -64,7 +64,7 @@ function latchedLane(t: TestContext, ledger: readonly string[] = []) {
     changes: [{ sha: NEW_SHA, subject: "fix: update worker", files: ["src/lib/worker.ts"] }] };
   const daemon = runDaemon(loadPlan(planPath), {
     now: () => new Date(nowMs),
-    readLedgerLines: () => ledger,
+    readLedgerLines: () => typeof ledger === "function" ? ledger(exiting) : ledger,
     refreshMerged: () => (id) => id === "A" && exiting,
     checkFreshness: () => stale ? material : { stale: false },
     log: (step, extra = {}) => rows.push({ step, extra }),
@@ -187,7 +187,7 @@ test("W1-T8172: the drain bound runs from the latch", async (t) => {
 
 /** A detached fix held from before the latch keeps the drain's clock running; the exit is at 5 min, so the drain's
  *  bound, counted from the latch at 1 min, leaves 6 min. */
-async function drainClockRun(t: TestContext, ledger: readonly string[]) {
+async function drainClockRun(t: TestContext, ledger: Parameters<typeof latchedLane>[1]) {
   let releaseFix!: () => void;
   const fix = new Promise<void>((resolve) => { releaseFix = resolve; });
   const h = latchedLane(t, ledger);
@@ -226,6 +226,10 @@ test("W1-T8172: with no review history the clock admits as today", async (t) => 
   assert.equal(run.completed.review_length_ms, null);
   assert.ok(run.drainPasses.length >= 1, "with nothing measured, the drain's clock still runs its passes");
   assert.equal(run.completed.review_passes_held, 0);
+  // A ledger the drain cannot read is no history either, named as such on the completion row.
+  const unreadable = await drainClockRun(t, (exiting) => { if (exiting) throw new Error("EIO: ledger"); return []; });
+  assert.equal(unreadable.completed.review_length_source, "unreadable");
+  assert.ok(unreadable.drainPasses.length >= 1);
 });
 
 test("W1-T8172: the review length pairs each start with its own PR's post", () => {
