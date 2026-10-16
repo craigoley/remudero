@@ -168,7 +168,8 @@ test("W1-T9722: a bundled read-plane worker runs under plain node and returns th
   // Inside the tree, at dist/child-entries' depth (gitignored): the bundle resolves its packages from the tree's
   // node_modules and each module's source URL relative to itself, as a real build's bundle does.
   mkdirSync(join(REPO_ROOT, "dist"), { recursive: true });
-  const out = mkdtempSync(join(REPO_ROOT, "dist", "w9722-bundle-"));
+  const distDir = join(REPO_ROOT, "dist"); // already gitignored (`dist/`), so this fixture is never tree dirt
+  const out = mkdtempSync(join(distDir, "w9722-bundle-"));
   t.after(() => rmSync(out, { recursive: true, force: true }));
   await build.buildChildEntries({ root: REPO_ROOT, entries: [], workers: [ENTRY], outDir: out });
   const bundle = join(out, build.workerBundleName(ENTRY));
