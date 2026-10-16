@@ -50,6 +50,9 @@ import {
   type RiskPolicy,
 } from "./risk-judge.js";
 import { deterministicEscalation, UNPRICED_PRIORITY, withoutRulingBlock } from "./machine-filing.js";
+import {
+  FLAKE_INCIDENT_MAIN_INHERITED_STEP, flakeIncidentMainInherited, type FlakeIncidentRecordEvidence, type FlakeJudgeEvidencePort, type MainRedAtBase,
+} from "./flake-incident-gardener.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, rulingVerifyViolation, taskRulingPin, type LintViolation } from "./task-linter.js";
 
 /** The operator's escalation rule, handed to the judge verbatim in its gates state. */
@@ -268,13 +271,13 @@ function machineEvidence(task: Task, pathExists: ((path: string) => boolean) | u
  *  escalation rule, the family's record, and the evidence the record carries (W1-T9042, 2026-10-13: 14 of
  *  15 model verdicts escalated for missing evidence the record's `rationale:` already held). `pathExists`
  *  defaults to the record's own checkout, read from its shard's path. */
-export function machineJudgeInput(task: Task, record: FamilyTrackRecord, pathExists?: (path: string) => boolean): RiskJudgeInput {
+export function machineJudgeInput(task: Task, record: FamilyTrackRecord, pathExists?: (path: string) => boolean, extraEvidence?: string): RiskJudgeInput {
   const root = shardRepoRoot(task);
   const exists = pathExists ?? (root === undefined ? undefined : (p: string) => existsSync(join(root, p)));
   // Judged AS IT WOULD DISPATCH: shown `verify: human`, the judge counted on a person who, on
   // proceed, is never asked (measured 2026-09-29: "verify: human is set, giving a human checkpoint").
   const base = buildFilingRiskJudgeInput({ ...task, verify: "auto" });
-  const description = `${base.change.description}\n${machineEvidence(task, exists)}`;
+  const description = `${base.change.description}\n${machineEvidence(task, exists)}${extraEvidence === undefined ? "" : `\n${extraEvidence}`}`;
   return {
     ...base,
     // Stated first, in the operator's words: the judge's generic framing leans LOW on a defect title.
@@ -298,7 +301,7 @@ export type MachineJudgement =
 export async function judgeMachineShard(
   task: Task,
   record: FamilyTrackRecord,
-  ports: { riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>; policy: RiskPolicy; clock: Clock },
+  ports: { riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>; policy: RiskPolicy; clock: Clock; evidence?: string },
 ): Promise<MachineJudgement> {
   const bar = earnedConfidenceBar(ports.policy.confidenceThreshold, record.mean);
   const backstop = deterministicEscalation(task);
@@ -308,7 +311,7 @@ export async function judgeMachineShard(
   }
   let verdict: RiskJudgeVerdict;
   try {
-    verdict = await ports.riskJudge(machineJudgeInput(task, record));
+    verdict = await ports.riskJudge(machineJudgeInput(task, record, undefined, ports.evidence));
   } catch (e) {
     return { kind: "unavailable", task, reason: `the risk judge threw: ${String((e as Error)?.message ?? e)}` };
   }
@@ -329,6 +332,72 @@ export async function judgeMachineShard(
       judgedAt: ports.clock.iso(),
     },
   };
+}
+
+/** What the judge knows about one flake-incident record beyond its own text. */
+export interface FlakeJudgeFacts {
+  retries?: FlakeIncidentRecordEvidence;
+  mainRed: MainRedAtBase;
+  mainRedBaseSha?: string;
+  repair?: { offendingSha: string; fixPrUrl?: string };
+}
+
+const isFlakeIncident = (task: Pick<Task, "origin">): boolean => task.origin?.startsWith("flake-incident:") === true;
+
+async function flakeFacts(task: Task, retries: ReadonlyMap<string, FlakeIncidentRecordEvidence>, port: FlakeJudgeEvidencePort): Promise<FlakeJudgeFacts> {
+  const r = retries.get(task.id);
+  if (r === undefined) return { mainRed: "unread" };
+  const main = port.mainRedAt === undefined ? { mainRed: "unread" as const } : await port.mainRedAt(r.file, r.baseShas);
+  const repair = port.repairFor?.(r.file, r.title);
+  return { retries: r, mainRed: main.mainRed, ...(main.redSha ? { mainRedBaseSha: main.redSha } : {}), ...(repair ? { repair } : {}) };
+}
+
+/** The flake-incident facts as one line of the judge's evidence: unread evidence is said to be unread, never false. */
+export function flakeEvidenceLine(facts: FlakeJudgeFacts): string {
+  const r = facts.retries;
+  return [
+    "FLAKE-INCIDENT EVIDENCE (from the harness's ledger and main's own CI, not written by the filer):",
+    r === undefined
+      ? "retry outcomes: unread (no flake_incident.filed row for this record in the ledger window);"
+      : `retry outcomes: ${r.recovered} recovered on retry, ${r.alsoFailed} also failed, over ${r.prs.length} filed PR(s), ${r.alsoFailedPrs} of them with a retry that also failed;`,
+    facts.mainRed === "unread"
+      ? "main's own CI failed the test at the PRs' bases: unread;"
+      : `main's own CI failed the test at the PRs' bases: ${facts.mainRed}${facts.mainRedBaseSha ? ` (at ${facts.mainRedBaseSha})` : ""};`,
+    facts.repair
+      ? `a main-health repair names the test: offending ${facts.repair.offendingSha}${facts.repair.fixPrUrl ? `, fix ${facts.repair.fixPrUrl}` : ""}.`
+      : "no main-health repair naming the test was read.",
+    "A test that never passes on retry across PRs that do not touch it is the signature of a red inherited from main, not a flake.",
+  ].join(" ");
+}
+
+/** Why a main-inherited record is retired, on one line: the evidence and the route. */
+function flakeRetirementReason(facts: FlakeJudgeFacts & { retries: FlakeIncidentRecordEvidence }, atIso: string): string {
+  const r = facts.retries;
+  const main = facts.mainRed === true ? `main's own CI failed it at ${facts.mainRedBaseSha ?? "a base"}` : `main's own CI at the bases: ${facts.mainRed}`;
+  return `not a flake: a red inherited from main. ${r.recovered} recovered and ${r.alsoFailed} also failed on retry over ${r.prs.length} PR(s) ` +
+    `that do not touch the test, ${r.alsoFailedPrs} with a failed retry; ${main}. Routed to main-health as ${FLAKE_INCIDENT_MAIN_INHERITED_STEP} ` +
+    `by the machine-filing judge (W1-T9694), ${atIso}`;
+}
+
+/** W1-T9694: ONE shard's text with the record retired, as the operator retired W1-T9532: `status: blocked`,
+ *  `retirement: retired` with the reason, and `verify: human`. Undefined, with the reason, when it cannot be. */
+export function renderRetiredShard(text: string, relPath: string, reason: string): { contents: string } | { refused: string } {
+  if ((text.match(/^- id:/gm) ?? []).length !== 1) return { refused: `${relPath} does not hold exactly one record` };
+  const lines = text.replace(/\n+$/, "").split("\n").filter((l) => !/^ {2}retirement:/.test(l));
+  const verifyAt = lines.findIndex((l) => /^ {2}verify:/.test(l));
+  const statusAt = lines.findIndex((l) => /^ {2}status:/.test(l));
+  if (verifyAt < 0 || statusAt < 0) return { refused: `${relPath} has no verify: or status: line` };
+  lines[verifyAt] = "  verify: human  # parked with the retirement: any risk ruling judged the record before this edit";
+  lines[statusAt] = "  status: blocked";
+  lines.splice(statusAt + 1, 0, `  retirement: retired  # ${reason.replace(/\s+/g, " ").trim()}`);
+  const contents = lines.join("\n") + "\n";
+  const before = shardRecord(text, relPath);
+  const after = shardRecord(contents, relPath);
+  if (after.id !== before.id || after.status !== "blocked" || after.retirement !== "retired") return { refused: `${relPath}: the retirement did not parse back` };
+  const checks = (vs: readonly LintViolation[]) => new Set(vs.filter((v) => v.severity === "block").map((v) => v.check));
+  const had = checks(lintTask(before).violations);
+  const added = [...checks(promoteIntroducedPlanOnlyDiagnostics(lintTask(after).violations, lintTask(before).violations, false))].filter((c) => !had.has(c));
+  return added.length > 0 ? { refused: `${after.id}: the retirement fails lint (${added.join(", ")})` } : { contents };
 }
 
 const q = (v: string): string => JSON.stringify(v);
@@ -429,6 +498,7 @@ interface RulingPins {
   relPath: string;
   pin: string;
   sourcePin: string;
+  action?: string;
 }
 
 function mainRecords(root: string, paths: string[]): Map<string, string> {
@@ -451,9 +521,11 @@ function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id
     const text = main.get(record.relPath);
     const task = text === undefined ? undefined : parseTasksFromYaml(text, record.relPath).find((t) => t.id === record.id);
     const pin = task === undefined ? null : taskRulingPin(task);
-    // The source pin covers the unruled record; the rendered pin covers verify/priority after release.
-    return task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)
-      ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
+    // The source pin covers the unruled record; the rendered pin covers verify/priority after release,
+    // and a retirement (W1-T9694) is current while the tree reads the record as it was written.
+    const current = (task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)) ||
+      (record.action === "retire" && pin === record.pin);
+    return current ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
   });
 }
 
@@ -479,6 +551,8 @@ interface MachineJudgeState {
   reask?: Record<string, ReaskEntry>;
   /** W1-T8830: each family's re-asks and how many flipped, which set its cadence ({@link reaskIntervalMs}). */
   reaskRecord?: Record<string, ReaskRecord>;
+  /** W1-T9694: for each released flake-incident record, the pin and evidence it was last reconsidered on. */
+  flakeReleased?: Record<string, string>;
 }
 
 interface ReaskEntry {
@@ -518,6 +592,8 @@ export interface MachineJudgePorts {
   /** The cost a record's origin names, as its family's gardener prices it now (W1-T8830). When this is
    *  absent or returns undefined, no cost is compared, and the bar, the deps and the cadence decide a re-ask. */
   costEvidence?: (task: Task) => number | undefined;
+  /** W1-T9694: the retry and main-health facts for flake-incident records. Absent: judged on their text alone. */
+  flakeEvidence?: FlakeJudgeEvidencePort;
 }
 
 /** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
@@ -552,7 +628,7 @@ export async function machineJudgeInputsAsync(repoRoot: string, stateDir: string
 export function machineJudgeFoundWork(report: MachineJudgeReport): boolean {
   const unlanded = new Set(report.unlanded);
   const moved = (ids: readonly string[]) => ids.some((id) => !unlanded.has(id));
-  return report.prUrl !== undefined || moved(report.proceeded) || moved(report.escalated) ||
+  return report.prUrl !== undefined || moved(report.proceeded) || moved(report.escalated) || moved(report.retired ?? []) ||
     report.refused.length > 0 || report.settled.length > 0;
 }
 
@@ -569,6 +645,8 @@ export interface MachineJudgeReport {
   unlanded?: string[];
   /** W1-T8830: the parked escalations asked again this pass, whatever they answered. */
   reasked?: string[];
+  /** W1-T9694: flake-incident records retired as main-inherited, routed to main-health. */
+  retired?: string[];
 }
 
 /** The Beta record gardener.ts keeps for a family, summed over its classes. */
@@ -704,6 +782,69 @@ export function refusedReleaseProposal(task: Task, reason: string): Proposal {
   };
 }
 
+/** A flake-incident record the judge read as main-inherited; `key` is set for one it had already released. */
+interface Retirement {
+  task: Task;
+  facts: FlakeJudgeFacts & { retries: FlakeIncidentRecordEvidence };
+  key?: string;
+}
+
+const mainInherited = (facts: FlakeJudgeFacts): facts is FlakeJudgeFacts & { retries: FlakeIncidentRecordEvidence } =>
+  facts.retries !== undefined && flakeIncidentMainInherited({ ...facts.retries, mainRed: facts.mainRed });
+
+/** A flake-incident record this judge released: queued at `verify: auto` under its own proceed pin. */
+function releasedFlake(task: Task, operatorReleases: ReadonlySet<string>): boolean {
+  return isFlakeIncident(task) && task.status === "queued" && task.retirement === undefined && task.verify === "auto" &&
+    !operatorReleases.has(task.id) && shardRelPath(task) !== undefined &&
+    task.risk_ruling?.action === "proceed" && task.risk_ruling.pin === taskRulingPin(task);
+}
+
+/**
+ * W1-T9694: a released flake-incident record is reconsidered once, on the first pass whose computed evidence
+ * differs from what it was released on (W1-T8830's moved-input rule). Main-inherited, it is retired; else the
+ * judge is asked again with the evidence, and only an escalation is landed. A record with no evidence read moved nothing.
+ */
+async function reconsiderReleasedFlakes(c: {
+  ports: MachineJudgePorts;
+  port: FlakeJudgeEvidencePort;
+  plan: Plan;
+  state: MachineJudgeState;
+  report: MachineJudgeReport;
+  records: Map<string, FamilyTrackRecord>;
+  isMerged: (id: string) => boolean;
+  policy: RiskPolicy;
+  releasedFlakes: readonly Task[];
+  retries: ReadonlyMap<string, FlakeIncidentRecordEvidence>;
+  retire: Retirement[];
+}): Promise<Extract<MachineJudgement, { kind: "ruled" }>[]> {
+  const ids = new Set(c.releasedFlakes.map((t) => t.id));
+  c.state.flakeReleased = Object.fromEntries(Object.entries(c.state.flakeReleased ?? {}).filter(([id]) => ids.has(id)));
+  const out: Extract<MachineJudgement, { kind: "ruled" }>[] = [];
+  for (const task of c.releasedFlakes) {
+    const r = c.retries.get(task.id);
+    if (r === undefined) continue;
+    const key = `${task.risk_ruling!.pin}:${JSON.stringify([r.recovered, r.alsoFailed, r.alsoFailedPrs, r.prs, r.baseShas])}`;
+    if (c.state.flakeReleased[task.id] === key) continue;
+    const facts = await flakeFacts(task, c.retries, c.port);
+    if (mainInherited(facts)) {
+      c.retire.push({ task, facts, key });
+      continue;
+    }
+    const family = judgementFamily(task);
+    if (!c.records.has(family)) c.records.set(family, familyTrackRecord(c.plan, family, c.isMerged, c.ports.gardenRecord?.(family)));
+    const judged = await judgeMachineShard(task, c.records.get(family)!, { riskJudge: c.ports.riskJudge, policy: c.policy, clock: c.ports.clock, evidence: flakeEvidenceLine(facts) });
+    if (judged.kind === "unavailable") {
+      c.report.unavailable.push(task.id);
+      c.ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason, flake_reconsidered: true });
+      continue;
+    }
+    c.state.flakeReleased[task.id] = key;
+    c.ports.log("machine_judge.flake_reconsidered", { task_id: task.id, action: judged.ruling.action, verdict: judged.ruling.verdict, main_red: facts.mainRed });
+    if (judged.ruling.action === "escalate") out.push(judged);
+  }
+  return out;
+}
+
 /** One pass: rule on every unjudged or stale machine record, then land or write the rewrites. */
 export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<MachineJudgeReport> {
   const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
@@ -777,9 +918,26 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   );
   const records = new Map<string, FamilyTrackRecord>();
   const ruled: Extract<MachineJudgement, { kind: "ruled" }>[] = [];
-  for (const task of due.slice(0, ports.limit ?? due.length)) {
+  // W1-T9694: a flake-incident record is judged with the harness's retry and main-health facts, and one the
+  // gardener's own classifier reads as main-inherited is retired rather than asked about.
+  const flakePort = ports.flakeEvidence;
+  const releasedFlakes = flakePort === undefined ? [] : plan.tasks.filter((t) => releasedFlake(t, released));
+  const judgedNow = due.slice(0, ports.limit ?? due.length);
+  const flakeTasks = [...judgedNow.filter((t) => isFlakeIncident(t) && !released.has(t.id)), ...releasedFlakes];
+  const retries = flakePort !== undefined && flakeTasks.length > 0 ? flakePort.retries(flakeTasks) : new Map<string, FlakeIncidentRecordEvidence>();
+  const retire: Retirement[] = [];
+  for (const task of judgedNow) {
     const family = judgementFamily(task);
     if (!records.has(family)) records.set(family, familyTrackRecord(plan, family, isMerged, ports.gardenRecord?.(family)));
+    let flakeLine: string | undefined;
+    if (flakePort !== undefined && isFlakeIncident(task) && !released.has(task.id)) {
+      const facts = await flakeFacts(task, retries, flakePort);
+      if (mainInherited(facts)) {
+        retire.push({ task, facts });
+        continue;
+      }
+      flakeLine = flakeEvidenceLine(facts);
+    }
     const cached = state.rulings[task.id];
     const judged: MachineJudgement = released.has(task.id)
       ? {
@@ -788,7 +946,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         }
       : cached !== undefined
         ? { kind: "ruled", task, bar: cached.bar, record: records.get(family)!, ruling: cached.ruling }
-        : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock });
+        : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock, ...(flakeLine ? { evidence: flakeLine } : {}) });
     if (judged.kind === "unavailable") {
       report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason });
@@ -813,15 +971,46 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   }
   const reasks = await reaskParkedEscalations({ ports, plan, state, report, records, released, excluded, isMerged, policy, room: ports.limit === undefined ? Infinity : ports.limit - due.length });
   ruled.push(...[...reasks.values()].map((r) => r.judged));
+  if (flakePort !== undefined) {
+    ruled.push(...await reconsiderReleasedFlakes({ ports, port: flakePort, plan, state, report, records, isMerged, policy, releasedFlakes, retries, retire }));
+  }
   // Persisted before landing, so a landing that throws never costs these rulings again.
   writeAtomic(statePath, JSON.stringify(state) + "\n");
-  if (ruled.length === 0) return report;
+  if (ruled.length === 0 && retire.length === 0) return report;
 
   const ws = ports.writeRoot === undefined ? await ports.openWorkspace?.() : undefined;
   const root = ports.writeRoot ?? ws?.root;
   if (root === undefined) throw new Error("machine judge: neither a workspace nor a write root was supplied");
   try {
     let landed: (RulingPins & { action: string })[] = [];
+    for (const { task, facts, key } of retire) {
+      try {
+        const relPath = shardRelPath(task)!;
+        const text = readFileIfExists(join(root, relPath));
+        const out = text === undefined ? { refused: `${relPath} is absent from the landing tree` } : renderRetiredShard(text, relPath, flakeRetirementReason(facts, ports.clock.iso()));
+        if (key !== undefined) (state.flakeReleased ??= {})[task.id] = key;
+        if ("refused" in out) {
+          (state.declined ??= {})[task.id] = taskRulingPin(task);
+          report.refused.push(task.id);
+          ports.log("machine_judge.refused", { task_id: task.id, reason: out.refused, main_inherited: true });
+          continue;
+        }
+        writeAtomic(join(root, relPath), out.contents);
+        landed.push({ id: task.id, relPath, pin: taskRulingPin(shardRecord(out.contents, relPath)), sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: "retire" });
+        (report.retired ??= []).push(task.id);
+        const r = facts.retries;
+        // The row W1-T9551's main-health rung reads, so the red is routed where a new main-inherited one is.
+        ports.log(FLAKE_INCIDENT_MAIN_INHERITED_STEP, {
+          origin: task.origin, file: r.file, title: r.title, prs: r.prs, prs_count: r.prs.length, runs: r.runs, base_shas: r.baseShas,
+          main_red: facts.mainRed, ...(facts.mainRedBaseSha ? { main_red_base_sha: facts.mainRedBaseSha } : {}), also_failed: r.alsoFailed,
+          route: "main-health", task_id: task.id, source: "machine-judge",
+        });
+        ports.log("machine_judge.main_inherited", { task_id: task.id, origin: task.origin, recovered: r.recovered, also_failed: r.alsoFailed, main_red: facts.mainRed });
+      } catch (e) {
+        report.failed.push(task.id);
+        ports.log("machine_judge.record_failed", { task_id: task.id, error: String((e as Error)?.message ?? e) });
+      }
+    }
     for (const r of ruled) {
       try {
         const relPath = shardRelPath(r.task)!;
@@ -896,6 +1085,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       landed = landed.filter((l) => !staleIds.has(l.id));
       report.proceeded = report.proceeded.filter((id) => !staleIds.has(id));
       report.escalated = report.escalated.filter((id) => !staleIds.has(id));
+      if (report.retired) report.retired = report.retired.filter((id) => !staleIds.has(id));
       for (const r of ruled) if (report.escalated.includes(r.task.id)) ports.stageProposal(machineJudgeProposal(r));
     }
     if (ws && landed.length > 0) {
@@ -906,7 +1096,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       });
       if (report.prUrl) state.pending = {
         prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
-        repoRoot: dirname(dirname(dirname(ruled[0]!.task.sourcePath!))),
+        repoRoot: dirname(dirname(dirname((ruled[0]?.task ?? retire[0]!.task).sourcePath!))),
       };
       else report.unlanded = landed.map((l) => l.id);
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
@@ -922,10 +1112,12 @@ function machineJudgePrBody(landed: { id: string; relPath: string; pin: string; 
   return [
     "The machine-filing judge (operator ruling 2026-09-29) ruled on these machine-filed records. A `proceed` ruling releases the record to `verify: auto`; an `escalate` ruling keeps it parked and stages its reasons in the inbox. Each ruling is pinned to the record it judged, so `machineAuthorVerifyViolation` refuses it if the record changes. Close this PR to decline; the judge will not ask again until a record changes.",
     "",
-    ...landed.map((l) => `- \`${l.id}\`: **${l.action}**`),
+    ...landed.map((l) => `- \`${l.id}\`: **${l.action}**${l.action === "retire" ? " (a red inherited from main, routed to main-health; W1-T9694)" : ""}`),
     "",
     "## Acceptance",
-    ...landed.flatMap((l) => [`- claim: ${l.id} carries the judge's pinned ${l.action} ruling`, `  proof: grep: pin: "${l.pin}" in ${l.relPath}`]),
+    ...landed.flatMap((l) => l.action === "retire"
+      ? [`- claim: ${l.id} is retired as a red inherited from main`, `  proof: grep: ^  retirement: retired in ${l.relPath}`]
+      : [`- claim: ${l.id} carries the judge's pinned ${l.action} ruling`, `  proof: grep: pin: "${l.pin}" in ${l.relPath}`]),
   ].join("\n");
 }
 

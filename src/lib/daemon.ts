@@ -140,7 +140,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
 import {
-  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, type DaemonMemoryGovernor, type HeapShadowOptions,
+  createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
 } from "./daemon-memory-policy.js";
 import {
   IDLE_LANE_SUMMARY_WINDOW_MS,
@@ -3491,7 +3491,11 @@ export async function runDaemon(
     if (cause !== undefined) {
       idleLaneTickCause = cause;
       idleLaneTickHold = cause === "pause" || cause === "operator_pause" || cause === "recycle_drain"
-        ? pauseHoldRecord(fields) : undefined;
+        ? pauseHoldRecord(fields) : cause === "memory" ? {
+          reason: step === "daemon.queue_governor"
+            ? `${fields?.pressure_tier} (${fields?.pressure_binding}): ${fields?.pressure_available_mib} MiB available, floor ${fields?.pressure_floor_mib} MiB`
+            : String(fields?.reason),
+        } : undefined;
     }
     livenessPulse?.note(step);
   };
@@ -3585,6 +3589,14 @@ export async function runDaemon(
         tick,
         observed_open_count: verdict.result.observedOpenCount,
         wip_limit: verdict.result.wipLimit,
+        held_by: verdict.result.measuredBound === 0 && verdict.result.pressure ? "memory" : "wip",
+        measured_bound: verdict.result.measuredBound,
+        pressure_tier: verdict.result.pressure?.tier,
+        pressure_binding: verdict.result.pressure?.binding,
+        pressure_available_mib: verdict.result.pressure?.availableMib,
+        pressure_floor_mib: verdict.result.pressure?.floorMib,
+        pressure_host_available_mib: verdict.result.pressure?.hostAvailableMib,
+        ...reclaimLedgerFields(verdict.result.pressure?.reclaim),
         // W1-T4465 design (iii): the owned/foreign split, the tier, and the trailing flow this
         // verdict was decided against, so a held daemon's own ledger names WHY it is held and
         // which way the queue is moving — never just a bare count-vs-limit pair.
@@ -6673,6 +6685,11 @@ export async function runDaemon(
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished, wake }));
       }
       const governed = refillClosed || phaseBound ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const memoryPressure = governed?.kind === "queue" && governed.result.measuredBound === 0
+        ? governed.result.pressure : undefined;
+      const governorReason = memoryPressure
+        ? `governor: memory ${memoryPressure.tier} (${memoryPressure.binding}): ${memoryPressure.availableMib} MiB available, floor ${memoryPressure.floorMib} MiB`
+        : governed ? `governor: ${governed.kind}` : undefined;
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
@@ -6691,10 +6708,10 @@ export async function runDaemon(
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
-        (governed ? `governor: ${governed.kind}` : undefined);
+        governorReason;
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
-      if (governed && reason === `governor: ${governed.kind}` && inFlightTasks.size > 0) {
+      if (governed && reason !== undefined && reason === governorReason && inFlightTasks.size > 0) {
         if (governorParked.get(lane) !== reason) log("dispatch.lane_parked", { lane, finished_task: finished.id, reason,
           phase_age_ms: phaseAgeMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
         sampleLaneChange();
