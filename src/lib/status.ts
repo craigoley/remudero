@@ -1724,21 +1724,6 @@ export function lifetimeDispatchTally(
   return { starts, capacityBlocked };
 }
 
-/** Combine independently-read archive and live tallies without making the live file immutable at
- * daemon boot. Exported so the command layer can discard an incomplete archive projection rather
- * than guessing from a partial corpus. */
-export function addLifetimeDispatchTallies(
-  ...tallies: readonly LifetimeDispatchTally[]
-): LifetimeDispatchTally {
-  let starts = 0;
-  let capacityBlocked = 0;
-  for (const tally of tallies) {
-    starts += tally.starts;
-    capacityBlocked += tally.capacityBlocked;
-  }
-  return { starts, capacityBlocked };
-}
-
 /** Capacity receipts cannot outnumber starts in a complete corpus. If they do, retain the old
  * all-starts count: a partial or malformed join must never make a task dispatchable. */
 export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): number {

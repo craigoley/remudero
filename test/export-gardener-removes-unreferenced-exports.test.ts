@@ -45,3 +45,8 @@ test("triageNeedsModel is not exported from escalation-triage", async () => {
   const module = await import("../src/lib/escalation-triage.js");
   assert.equal(Object.hasOwn(module, "triageNeedsModel"), false);
 });
+
+test("addLifetimeDispatchTallies is not exported from status", async () => {
+  const module = await import("../src/lib/status.js");
+  assert.equal(Object.hasOwn(module, "addLifetimeDispatchTallies"), false);
+});
