@@ -3075,6 +3075,7 @@ export function handedOffHeadRiskJudge(
   });
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
+import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import {
   DEFAULT_PRUNE_GRACE_MS,
@@ -9893,13 +9894,6 @@ export const CI_LOG_DIAGNOSTIC_RE = new RegExp(
     "Expected:|Received:", // jest assertion diff
   ].join("|"),
 );
-
-// W1-T5378: `ci` only collapses the shard matrix; drop it beside real failures or when its log is empty.
-export function dropDerivativeAggregateCiFailure(failures: readonly CiFailure[]): CiFailure[] {
-  const others = failures.filter((f) => f.name !== "ci");
-  if (others.length > 0) return others;
-  return failures.filter((f) => (f.logTail ?? "").trim() !== "");
-}
 
 function summarizeCiFailure(f: CiFailure): string {
   const rawLines = (f.logTail ?? "").split("\n");

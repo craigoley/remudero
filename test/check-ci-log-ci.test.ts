@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dropDerivativeAggregateCiFailure } from "../src/run-task.js";
+import { dropDerivativeAggregateCiFailure } from "../src/lib/derivative-ci-failure.js";
 
 test("W1-T5378: check:ci-log:ci is prevented, not retried", () => {
   const shard = { name: "ci-shard (3/8)", logTail: "not ok 1 - x" };
