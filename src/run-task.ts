@@ -732,6 +732,7 @@ import {
   type PreflightFastDeps,
   type RemedyFileForGate,
 } from "./lib/ci-parity.js";
+import { discoverSourceTextReaders, readerJoins, type SourceTextReader } from "./lib/source-text-readers.js";
 // W1-T4434 — `rmd census fix`'s own orchestrator: applies each census red's registered
 // MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
 // worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
@@ -1675,11 +1676,10 @@ import {
   ghGateway,
   ghRequiredStatusCheckContexts,
   isGhRateLimitError,
-  addLifetimeDispatchTallies,
   effectiveLifetimeDispatches,
   hasRepeatedTaskAttributableLifetimeDispatches,
-  lifetimeInfrastructureRefusal,
-  lifetimeDispatchTally,
+  orphanedRunIds,
+  streakRefusal,
   taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
   projectPlan,
@@ -13710,7 +13710,7 @@ export async function runFixRung(opts: {
       ...lastCommitRefusalPromptLines(
         (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(),
         opts.taskId,
-        opts.task.files ?? [],
+        fixDeclaredPaths,
       ),
       ...(censusRefusalIsCurrent()
         ? ["", "PRE-PUSH CENSUS (W1-T4693): hooks/pre-push refused the last round's push with the census rows above; the PR still shows its old head.", CENSUS_PUSH_NEVER_BYPASS]
@@ -26568,7 +26568,13 @@ export function boardCommand(rest: string[], deps: BoardCommandOptions = {}): nu
  */
 export function censusMembershipCommand(
   rest: string[],
-  deps: { repoRoot?: string; spawn?: PreflightSpawn; changedPaths?: readonly string[]; readFile?: (path: string) => string } = {},
+  deps: {
+    repoRoot?: string;
+    spawn?: PreflightSpawn;
+    changedPaths?: readonly string[];
+    readFile?: (path: string) => string;
+    readers?: () => readonly SourceTextReader[];
+  } = {},
 ): number {
   const badArg = unknownArgError("census-membership", rest, ["--base"], ["--files"]);
   if (badArg) {
@@ -26602,6 +26608,9 @@ export function censusMembershipCommand(
   }
 
   const report = censusSuiteMembershipFor(changed, root, deps.spawn ?? defaultPreflightSpawn, deps.readFile);
+  const joinedReaders = (deps.readers ?? (() => discoverSourceTextReaders(root)))().filter((r) => changed.some((p) => readerJoins(r, p)));
+  const censusReaders = joinedReaders.filter((r) => r.censusShaped).map((r) => r.testFile);
+  const textReaders = joinedReaders.filter((r) => !r.censusShaped).map((r) => r.testFile);
   if (rest.includes("--files")) {
     // W1-T3059 — ONE PREDICATE, NEVER TWO. The pre-push hook that RUNS these suites reads this
     // list; it does not carry its own copy of the table. A second copy is the drift this repo has
@@ -26618,7 +26627,9 @@ export function censusMembershipCommand(
         else files.add(file);
       }
     }
+    for (const file of censusReaders) files.add(file);
     for (const file of [...files].sort()) console.log(file);
+    for (const file of textReaders) if (!files.has(file)) console.error(`reads-as-text: ${file}`);
     // STDOUT stays a clean file list a caller can splice; INCOMPLETENESS goes to stderr, so a
     // partial enumeration cannot be mistaken for a complete one. An unmodelled census is a suite
     // this diff may join and this cannot run — the caller must say so rather than imply coverage.
@@ -26636,13 +26647,20 @@ export function censusMembershipCommand(
   }
   console.log(`rmd census-membership — ${changed.length} changed path(s) against ${base}`);
   const joining = report.entries.filter((e) => e.suites.length > 0);
-  if (joining.length === 0) {
+  if (joining.length === 0 && censusReaders.length === 0) {
     // A MEASURED ABSENCE, not a bare zero: say which corpus was read (P48).
     console.log(`  joins no known census (${CENSUS_MEMBERSHIP_SUITES.length} modelled)`);
   }
   for (const e of joining) {
     console.log(`  ${e.path}`);
     for (const s of e.suites) console.log(`    -> ${s}`);
+  }
+  if (censusReaders.length > 0) {
+    console.log(`  SOURCE-TEXT census suite(s) that read a changed path (${censusReaders.length}):`);
+    for (const file of censusReaders) console.log(`    -> ${file}`);
+  }
+  if (textReaders.length > 0) {
+    console.log(`  also reads a changed path as text (${textReaders.length}): ${textReaders.join(" ")}`);
   }
   if (report.unknownCoverage.length > 0) {
     // NAMED, never dropped: a suite the model cannot place is the difference between "joins
@@ -35295,16 +35313,73 @@ function replayedLifetimeLedgerLine(
   return false;
 }
 
-function recordLifetimeTally(
-  tallies: Map<string, LifetimeDispatchTally>,
-  row: Record<string, unknown>,
-): void {
-  const taskId = row.step === "run.start" ? row.task_id : row.task;
-  if (typeof taskId !== "string") return;
-  const tally = tallies.get(taskId) ?? { starts: 0, capacityBlocked: 0 };
-  if (row.step === "run.start" && row.task_id === taskId) tally.starts += 1;
-  if (row.step === "daemon.spawn_infra_blocked" && row.task === taskId) tally.capacityBlocked += 1;
-  tallies.set(taskId, tally);
+function lifetimeAccounting() {
+  const tallies = new Map<string, LifetimeDispatchTally>();
+  const starts = new Set<string>();
+  const pending = new Map<string, { taskId: string; charged: boolean }>();
+  const earlyVerdicts = new Map<string, boolean>();
+  let unavailableReason: LifetimeArchiveHistoryUnavailableReason | undefined;
+  const tallyFor = (taskId: string) => {
+    const tally = tallies.get(taskId) ?? { starts: 0, capacityBlocked: 0 };
+    tallies.set(taskId, tally);
+    return tally;
+  };
+  const record = (row: Record<string, unknown>) => {
+    if (row.step === "daemon.spawn_infra_blocked") {
+      if (typeof row.task === "string") tallyFor(row.task).capacityBlocked += 1;
+      return;
+    }
+    const identity = lifetimeStartIdentity(row);
+    if (identity === undefined) {
+      if (row.step === "run.start") unavailableReason ??= "start_identity_missing";
+      return;
+    }
+    if (row.step === "verdict") {
+      const excluded = streakRefusal(row) !== undefined;
+      const run = pending.get(identity);
+      if (run) {
+        tallyFor(run.taskId).starts += Number(!excluded) - Number(run.charged);
+        pending.delete(identity);
+      } else if (!starts.has(identity)) {
+        // Retention can put a terminal row before its start. This join is bounded too.
+        if (!earlyVerdicts.has(identity) && starts.size + earlyVerdicts.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
+          unavailableReason ??= "start_identity_ceiling";
+          return;
+        }
+        earlyVerdicts.set(identity, excluded);
+      }
+      return;
+    }
+    if (row.step !== "run.start" || starts.has(identity)) return;
+    const terminal = earlyVerdicts.get(identity);
+    earlyVerdicts.delete(identity);
+    if (starts.size + earlyVerdicts.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
+      unavailableReason ??= "start_identity_ceiling";
+      return;
+    }
+    starts.add(identity);
+    const taskId = row.task_id as string;
+    tallyFor(taskId).starts += Number(terminal !== true);
+    if (terminal === undefined) pending.set(identity, { taskId, charged: true });
+  };
+  return {
+    record,
+    unavailableReason: () => unavailableReason,
+    tallyFor(taskId: string, rows: ReadonlyArray<Record<string, unknown>>): LifetimeDispatchTally | undefined {
+      if (unavailableReason !== undefined) return undefined;
+      const orphans = orphanedRunIds(rows, taskId);
+      const visible = new Set(rows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
+      for (const [identity, run] of pending) {
+        if (run.taskId !== taskId) continue;
+        const runId = identity.slice(identity.indexOf("\u0000") + 1);
+        if (!visible.has(runId)) continue; // a start rotated out after boot keeps its last attribution
+        const charged = !orphans.has(runId);
+        tallyFor(taskId).starts += Number(charged) - Number(run.charged);
+        run.charged = charged;
+      }
+      return { ...tallyFor(taskId) };
+    },
+  };
 }
 
 /** The live overlay is incremental while a daemon is running. On a rotation its inode changes;
@@ -35313,35 +35388,29 @@ function recordLifetimeTally(
  * double-charging the same dispatch. */
 export interface LifetimeHistory {
   /** W1-T6358: `live` is a pass-shared read; absent, the overlay reads the file itself. */
-  tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content">) => LifetimeDispatchTally;
+  tallyFor: (taskId: string, live?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => LifetimeDispatchTally | undefined;
 }
 
 function lifetimeHistory(
   ledgerPath: string,
-  historic: ReadonlyMap<string, LifetimeDispatchTally>,
+  accounting: ReturnType<typeof lifetimeAccounting>,
   recentByStep: Map<string, LifetimeReplayWindow>,
 ): LifetimeHistory {
-  const live = new Map<string, LifetimeDispatchTally>();
   let identity: string | undefined;
   let offsetChars = 0;
-  const refresh = (supplied?: Pick<LedgerSnapshot, "identity" | "content">) => {
-    let snapshot: { identity: string; content: string };
-    let fd: number | undefined;
+  const refresh = (supplied?: Pick<LedgerSnapshot, "identity" | "content" | "lines">) => {
+    let snapshot: Pick<LedgerSnapshot, "identity" | "content" | "lines">;
     if (supplied) {
-      if (supplied.identity === undefined) return;
-      snapshot = { identity: supplied.identity, content: supplied.content };
+      snapshot = supplied;
     } else try {
-      fd = openSync(ledgerPath, "r");
-      const stat = fstatSync(fd);
-      snapshot = { identity: `${stat.dev}:${stat.ino}`, content: readFileSync(fd, "utf8") };
+      snapshot = readLedgerSnapshot(ledgerPath);
     } catch (error) {
       return {
         ok: false,
         reason: error instanceof Error ? error.message : "live ledger unreadable",
       };
-    } finally {
-      if (fd !== undefined) closeSync(fd);
     }
+    if (snapshot.identity === undefined) return { ok: true, rows: snapshot.lines };
     const nextIdentity = snapshot.identity;
     const content = snapshot.content;
     const sameFile = identity === nextIdentity && content.length >= offsetChars;
@@ -35361,23 +35430,24 @@ function lifetimeHistory(
         // Keep the live reader's existing torn-line behaviour: a malformed tail buys neither a
         // capacity exemption nor a daemon failure; later complete rows remain observable.
       }
-      if (row === undefined || (row.step !== "run.start" && row.step !== "daemon.spawn_infra_blocked")) continue;
+      if (row === undefined || (row.step !== "run.start" && row.step !== "daemon.spawn_infra_blocked" && row.step !== "verdict")) continue;
       if (replayedLifetimeLedgerLine(recentByStep, row.step, line)) continue;
-      recordLifetimeTally(live, row);
+      accounting.record(row);
     }
     identity = nextIdentity;
     offsetChars = sameFile ? offsetChars + completedAt + 1 : completedAt + 1;
+    return { ok: true, rows: snapshot.lines };
   };
   return {
     tallyFor(taskId, supplied) {
-      refresh(supplied);
-      return addLifetimeDispatchTallies(historic.get(taskId) ?? { starts: 0, capacityBlocked: 0 }, live.get(taskId) ?? { starts: 0, capacityBlocked: 0 });
+      const refreshed = refresh(supplied);
+      return accounting.tallyFor(taskId, refreshed.rows ?? []);
     },
   };
 }
 
-/** The one archive-side projection W1-T3758 needs. It retains one two-integer tally per task
- * plus the producer-bounded replay window, never raw corpus rows or a global `seen` set.
+/** Archive attribution retains per-task tallies and bounded start identities and pending verdict joins.
+ * Per-run attribution is released at its terminal verdict; unknown starts remain charged.
  * `auditLedgerUnion` scans both rotation forms; if any archive is unreadable, this returns
  * `undefined` and the caller deliberately keeps the old live-only lifetime decision. */
 export async function auditedLifetimeTalliesFromArchives(
@@ -35390,35 +35460,20 @@ export async function auditedLifetimeTalliesFromArchives(
   unread: readonly string[];
   records: number;
 }> {
-  const tallies = new Map<string, LifetimeDispatchTally>();
+  const accounting = lifetimeAccounting();
   const recentByStep = new Map<string, LifetimeReplayWindow>();
-  const startIdentities = new Set<string>();
-  let startIdentityUnavailable: LifetimeArchiveHistoryUnavailableReason | undefined;
   const scan = await auditLedgerUnion(stateDir, {
-    step: ["run.start", "daemon.spawn_infra_blocked"],
+    step: ["run.start", "daemon.spawn_infra_blocked", "verdict"],
     dedupeWindowPerStep: MAX_RETAINED_LINES_PER_STEP,
     onRecord: (row, raw) => {
       const step = typeof row.step === "string" ? row.step : "";
       if (replayedLifetimeLedgerLine(recentByStep, step, raw)) return;
-      if (step === "run.start") {
-        const identity = lifetimeStartIdentity(row);
-        if (identity === undefined) {
-          startIdentityUnavailable ??= "start_identity_missing";
-          return;
-        }
-        if (startIdentities.has(identity)) return;
-        if (startIdentities.size >= MAX_LIFETIME_ARCHIVE_START_IDENTITIES) {
-          startIdentityUnavailable ??= "start_identity_ceiling";
-          return;
-        }
-        startIdentities.add(identity);
-      }
-      recordLifetimeTally(tallies, row);
+      accounting.record(row);
     },
   });
-  const unavailableReason = !scan.ok ? "archive_unreadable" : startIdentityUnavailable;
+  const unavailableReason = !scan.ok ? "archive_unreadable" : accounting.unavailableReason();
   return {
-    history: unavailableReason === undefined ? lifetimeHistory(ledgerPath, tallies, recentByStep) : undefined,
+    history: unavailableReason === undefined ? lifetimeHistory(ledgerPath, accounting, recentByStep) : undefined,
     unavailableReason,
     archiveCount: scan.archiveCount,
     unread: scan.unread,
@@ -35504,17 +35559,12 @@ export function breakerGateFor(
     const snap = current();
     let pressure = pressures.get(taskId);
     if (pressure === undefined) {
-      // W1-T4025: the old count is now a SENSOR. Archive history is the audited boot projection;
-      // the live ledger contributes only attributable attempts so orphaned workers and capacity
-      // refusals do not spend adaptive pressure. A repeated signal routes through the judge but
-      // never refuses the task here.
-      const live = snap.lines;
-      const liveTally = lifetimeDispatchTally(live, taskId);
-      const attributableLive = taskAttributableLifetimeDispatches(live, taskId);
-      const archived = auditedLifetimeHistory?.tallyFor(taskId, snap) ?? { starts: 0, capacityBlocked: 0 };
-      pressure =
-        hasRepeatedTaskAttributableLifetimeDispatches(live, taskId) ||
-        effectiveLifetimeDispatches(addLifetimeDispatchTallies(archived, { starts: attributableLive, capacityBlocked: liveTally.capacityBlocked })) > 1;
+      // The audited history already overlays live attribution; net its capacity receipts once.
+      // Unavailable history keeps the live-only sensor. Pressure still never refuses dispatch.
+      const tally = auditedLifetimeHistory?.tallyFor(taskId, snap);
+      pressure = tally === undefined
+        ? hasRepeatedTaskAttributableLifetimeDispatches(snap.lines, taskId)
+        : effectiveLifetimeDispatches(tally) > 1;
       pressures.set(taskId, pressure);
     }
     return pressure;
@@ -38697,7 +38747,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // `issueRevalidation.mode` to act; the plan and the judge's mount load on the first pass, not here.
     case "issue-revalidation":
       return issueRevalidationGardenPass(stateDir, productionIssueRevalidationPorts({
-        owner, repo, stateDir, repoRoot, operatorLogins: config.operatorGithubLogins, log,
+        owner, repo, stateDir, repoRoot, landingStateRoot: config.root, operatorLogins: config.operatorGithubLogins, log,
         ...issueRevalidationRunTaskPorts({ owner, repo, repoRoot, stateDir, log }),
       }));
     case "evidence-coverage":
@@ -38757,8 +38807,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         stateDir,
         log,
         readHeartbeats: gitHeartbeatSource(repoRoot),
-        handoff: (h: { id: string; raw: string; origin: string }) => void captureFeedback(repoRoot, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
-        openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
+        handoff: (h: { id: string; raw: string; origin: string }) => void stageFeedbackCapture(repoRoot, config.root, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
+        openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot, config.root),
         escalate: raiseDuplicate,
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
         fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId, log),
@@ -52295,7 +52345,7 @@ export async function routeAdaptiveLifetimePressure(
     const lastTerminal = terminalRows.at(-1);
     const lastVerdict = typeof lastTerminal?.verdict === "string" ? lastTerminal.verdict : "unavailable";
     const attributableHistory = terminalRows
-      .filter((row) => lifetimeInfrastructureRefusal(row) === undefined)
+      .filter((row) => streakRefusal(row) === undefined)
       .map((row) => `${String(row.verdict ?? "unavailable")}: ${String(row.reason ?? row.stage ?? "no reason recorded")}`);
     const ruling = latestLifetimeOperatorRuling(task.note);
     const key = `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
@@ -54307,6 +54357,7 @@ export async function opsCommand(
     runId,
     root: repoRoot,
     dryRun,
+    capture: captureFeedback,
   });
   console.log(`### rmd ops${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\nalerts: ${renderAlertsSummary(result.summary)}`);
   if (dryRun) {
@@ -55378,6 +55429,7 @@ async function issuesCommand(rest: string[]): Promise<number> {
     runId,
     dryRun,
     admission: feedbackIntakeAdmission(config, ledgerPath, runId),
+    capture: captureFeedback,
   });
   console.log(`### rmd issues${dryRun ? " --dry-run" : ""}\nissues reviewed: ${renderIssuesSummary(result.summary)}`);
   if (dryRun) {

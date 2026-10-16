@@ -10,7 +10,7 @@ import {
   type BenchmarkTerminalEvidence,
 } from "./benchmark-evidence.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { captureFeedback, feedbackEntryPath, feedbackEntryRepoPath, readFeedbackEntry } from "./feedback.js";
+import { feedbackEntryPath, feedbackEntryRepoPath, readFeedbackEntry, stageFeedbackCapture } from "./feedback.js";
 import { landFeedbackStatusContent, type LandFeedbackOpts } from "./feedback-landing.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -543,7 +543,7 @@ export function feedbackEvidenceCoverageFiler(root: string, land: LandFeedbackOp
       landFeedbackStatusContent(root, feedbackEntryRepoPath(followup.id), stringifyYaml({ ...entry, raw: followup.raw }), land);
       return;
     }
-    captureFeedback(root, { raw: followup.raw, origin: "cli", id: followup.id, land });
+    stageFeedbackCapture(root, land.stateRoot, { raw: followup.raw, origin: "cli", id: followup.id });
   };
 }
 
