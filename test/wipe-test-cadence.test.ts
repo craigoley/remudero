@@ -9,10 +9,13 @@ import type { LedgerUnionResult } from "../src/lib/ledger-grep.js";
 import type { LearningsIndex } from "../src/lib/learnings.js";
 import type { Policy } from "../src/lib/policy.js";
 import {
+  readWipeTestAblationEvidence,
   recordWipeTestCadenceFire,
   runMeasurementCadenceReport,
   wipeTestCadenceCheck,
   wipeTestCadenceMarkerPath,
+  type WipeTestAblationEvidence,
+  type WipeTestEvidenceCost,
 } from "../src/lib/measurement-cadence.js";
 import { runDaemon } from "../src/lib/daemon.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
@@ -58,6 +61,22 @@ function unreadableUnion(): LedgerUnionResult {
     ok: false,
     matches: [],
   };
+}
+
+/** The hooks' evidence seam over a canned union: the raw lines {@link okUnion} or {@link unreadableUnion}
+ *  carries, as the records a step-filtered union read returns. */
+function evidenceOf(union: () => LedgerUnionResult): (stateDir: string) => {
+  evidence: WipeTestAblationEvidence;
+  cost: WipeTestEvidenceCost;
+} {
+  return (stateDir) => ({
+    evidence: readWipeTestAblationEvidence(stateDir, () => {
+      const read = union();
+      const rows = read.matches.map((line) => JSON.parse(line) as Record<string, unknown>);
+      return { ...read, rows, torn: 0, filesRead: 0, unclassified: read.unclassified ?? [] };
+    }),
+    cost: { bytesRead: 0, rotationsRead: 0, rotations: 1 },
+  });
 }
 
 function pairLine(overrides: Record<string, unknown> = {}): string {
@@ -113,7 +132,7 @@ test("buildWipeTestCadenceDaemonHooks rotates generated sandbox subjects and alt
       config: { root } as Config,
       policy: policy(),
       learningsIndex: index,
-      ledgerUnion: () => okUnion(rows),
+      readEvidence: evidenceOf(() => okUnion(rows)),
       now: () => NOW,
     });
 
@@ -145,7 +164,7 @@ test("buildWipeTestCadenceDaemonHooks refuses unreadable ledgers and bad generat
       config: { root } as Config,
       policy: policy(),
       learningsIndex: index,
-      ledgerUnion: () => unreadableUnion(),
+      readEvidence: evidenceOf(() => unreadableUnion()),
       now: () => NOW,
     }).checkWipeTestCadence();
     assert.equal(unreadable.fire, false);
@@ -155,7 +174,7 @@ test("buildWipeTestCadenceDaemonHooks refuses unreadable ledgers and bad generat
       config: { root } as Config,
       policy: policy(),
       learningsIndex: () => ({ files: { "a.yaml": { entries: ["a"], globs: [] } }, bySubsystem: {} }),
-      ledgerUnion: () => okUnion(),
+      readEvidence: evidenceOf(() => okUnion()),
       now: () => NOW,
     }).checkWipeTestCadence();
     assert.equal(badSubject.fire, false);
@@ -173,7 +192,7 @@ test("runWipeTestCadence refuses an unresolvable target before any worker spawn"
       config: { root } as Config,
       policy: policy(),
       learningsIndex: index,
-      ledgerUnion: () => okUnion(),
+      readEvidence: evidenceOf(() => okUnion()),
       targetArgs: ["--repo", "remudero"],
       runTaskFn: (async () => {
         dispatches++;

@@ -36,7 +36,7 @@ import type {
   WipeTestCadenceDecision,
   WipeTestCadenceRunResult,
 } from "./measurement-cadence.js";
-import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
+import { buildMeasurementCadenceRow, wipeTestCadenceEvidenceFields } from "./measurement-cadence.js";
 import { runOpportunityIntake, openOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
 import { reconcileOpportunityOutcomesAsync, openOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
@@ -5056,7 +5056,7 @@ export async function runDaemon(
       if (decision?.fire) {
         const hold = holdWorkerAdmission("wipe-test");
         if (hold) {
-          log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id });
+          log("wipetest.cadence.held", { reason: hold.reason, seq: decision.seq, subject: decision.subject.id, ...wipeTestCadenceEvidenceFields(decision) });
           return true;
         }
         log("wipetest.cadence.fired", {
@@ -5065,6 +5065,7 @@ export async function runDaemon(
           subject: decision.subject.id,
           selected_shards: decision.subject.selectedShards ?? [],
           factor: decision.factor,
+          ...wipeTestCadenceEvidenceFields(decision),
         });
         if (deps.runWipeTestCadence) {
           try {
@@ -5087,7 +5088,8 @@ export async function runDaemon(
           }
         }
       } else if (decision) {
-        log("wipetest.cadence.skipped", { reason: decision.reason });
+        // The evidence read's cost rides on the row, so the fleet can see a repeat check read only what is new.
+        log("wipetest.cadence.skipped", { reason: decision.reason, ...wipeTestCadenceEvidenceFields(decision) });
       }
     }
     return false;
