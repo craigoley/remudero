@@ -25,7 +25,7 @@
  * rung reads.
  */
 import { dirname, join, normalize } from "node:path/posix";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -218,20 +218,24 @@ interface Evidence {
   fixRound: number;
 }
 
+/** Every {@link FLAKE_INCIDENT_EVIDENCE_STEPS} row since `sinceIso`. A pass runs in a fresh child, so each
+ *  archive in the window is answered from its durable digest and only a rotation cut since is decompressed. */
+export function readFlakeIncidentRows(stateDir: string, sinceIso: string): Record<string, unknown>[] {
+  const steps = new Set(FLAKE_INCIDENT_EVIDENCE_STEPS);
+  return readLedgerUnionRecordsSync(stateDir, {
+    step: FLAKE_INCIDENT_EVIDENCE_STEPS, since: sinceIso,
+    rotationRecords: ledgerRotationDigests(stateDir, (all) => all.filter((r) => steps.has(r.step as string)),
+      { holder: FLAKE_INCIDENT_GARDEN_NAME, reducerVersion: FLAKE_INCIDENT_DIGEST_VERSION }).rotationRecords,
+  }).rows;
+}
+
 /** One pass. Never throws on a single group's trouble: an unreadable PR is simply not counted. */
 export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: FlakeIncidentSources): Promise<void> {
   const policy: FlakeIncidentPolicy = { ...FLAKE_INCIDENT_POLICY, ...sources.policy };
   const clock = deps.clock ?? systemClock;
   const nowMs = clock.now();
   const sinceIso = fixedClock(nowMs - policy.windowMs).iso();
-  const steps = new Set(FLAKE_INCIDENT_EVIDENCE_STEPS);
-  // The pass runs in a fresh child every time, so each archive in the window is answered from its durable
-  // digest and only a rotation cut since the last pass is decompressed.
-  const { rows } = readLedgerUnionRecordsSync(deps.stateDir, {
-    step: FLAKE_INCIDENT_EVIDENCE_STEPS, since: sinceIso,
-    rotationRecords: ledgerRotationDigests(deps.stateDir, (all) => all.filter((r) => steps.has(r.step as string)),
-      { holder: FLAKE_INCIDENT_GARDEN_NAME, reducerVersion: FLAKE_INCIDENT_DIGEST_VERSION }).rotationRecords,
-  });
+  const rows = readFlakeIncidentRows(deps.stateDir, sinceIso);
   const byStep = (step: string) => rows.filter((r) => r.step === step);
   const observations = observationsOf(byStep(FLAKE_RETRY_STEP));
   const rerouted = unreachableByReroute(byStep(FIX_SCOPE_REROUTED_STEP));
@@ -303,22 +307,6 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   };
 
   /** Whether main's own CI failed `file` at any base sha: an unread or cancelled base is no evidence. */
-  const mainRedAt = async (file: string, baseShas: readonly string[]): Promise<{ mainRed: MainRedAtBase; redSha?: string }> => {
-    if (sources.mainFailures === undefined || baseShas.length === 0) return { mainRed: "unread" };
-    let unread = false;
-    for (const sha of baseShas) {
-      let failed: readonly string[] | undefined;
-      try {
-        failed = await sources.mainFailures(sha);
-      } catch (error) {
-        deps.log("flake_incident.main_unread", { file, base_sha: sha, error: String((error as Error)?.message ?? error) });
-      }
-      if (failed === undefined) unread = true;
-      else if (failed.some((f) => f === file || f.endsWith(`/${file}`))) return { mainRed: true, redSha: sha };
-    }
-    return { mainRed: unread ? "unread" : false };
-  };
-
   let plan: PlanTaskLite[] | undefined;
   const planTasks = async (): Promise<PlanTaskLite[]> => (plan ??= await (sources.planTasks ?? (() => selectorShadowPlanTasksAsync(deps.repoRoot)))());
   const closed = new Set(["merged", "done"]);
@@ -354,8 +342,8 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
     if (evidence.recovered === 0) {
       // Re-written only when its PR set grows, like the watch row; an unchanged one costs no main read.
       if (byStep(FLAKE_INCIDENT_MAIN_INHERITED_STEP).some((r) => r.origin === origin && isCount(r.prs_count) && r.prs_count >= evidence.prs.length)) continue;
-      const { mainRed, redSha } = await mainRedAt(file, evidence.baseShas);
-      if (evidence.alsoFailedPrs >= policy.watchPrs || mainRed === true) {
+      const { mainRed, redSha } = await flakeMainRedAt(file, evidence.baseShas, sources.mainFailures, deps.log);
+      if (flakeIncidentMainInherited({ ...evidence, mainRed }, policy)) {
         deps.log(FLAKE_INCIDENT_MAIN_INHERITED_STEP, {
           origin, file, title, prs: evidence.prs, prs_count: evidence.prs.length, runs: [...evidence.runs].sort((a, b) => a - b),
           base_shas: evidence.baseShas, main_red: mainRed, ...(redSha ? { main_red_base_sha: redSha } : {}), also_failed: evidence.alsoFailed, route: "main-health",
@@ -388,7 +376,136 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   }
 }
 
-type MainRedAtBase = boolean | "unread";
+/** Whether main's own CI failed the test at a base: `"unread"` when no base could be read, never shown as false. */
+export type MainRedAtBase = boolean | "unread";
+
+/** Whether main's own CI failed `file` at any base sha: an unread or cancelled base is no evidence. */
+export async function flakeMainRedAt(
+  file: string, baseShas: readonly string[], mainFailures: SelectorShadowMainFailures | undefined, log: GardenerDeps["log"],
+): Promise<{ mainRed: MainRedAtBase; redSha?: string }> {
+  if (mainFailures === undefined || baseShas.length === 0) return { mainRed: "unread" };
+  let unread = false;
+  for (const sha of baseShas) {
+    let failed: readonly string[] | undefined;
+    try {
+      failed = await mainFailures(sha);
+    } catch (error) {
+      log("flake_incident.main_unread", { file, base_sha: sha, error: String((error as Error)?.message ?? error) });
+    }
+    if (failed === undefined) unread = true;
+    else if (failed.some((f) => f === file || f.endsWith(`/${file}`))) return { mainRed: true, redSha: sha };
+  }
+  return { mainRed: unread ? "unread" : false };
+}
+
+/** W1-T9694 — THE one main-inherited test, called by this gardener and by the machine-filing judge, so the two
+ *  cannot disagree: no retry recovered, and the red failed on `watchPrs` PRs or main's own CI failed it at a base. */
+export function flakeIncidentMainInherited(
+  evidence: { recovered: number; alsoFailedPrs: number; mainRed: MainRedAtBase },
+  policy: Pick<FlakeIncidentPolicy, "watchPrs"> = FLAKE_INCIDENT_POLICY,
+): boolean {
+  return evidence.recovered === 0 && (evidence.alsoFailedPrs >= policy.watchPrs || evidence.mainRed === true);
+}
+
+/** W1-T9694: the harness's own facts about flake-incident records, for the machine-filing judge's evidence line. */
+export interface FlakeJudgeEvidencePort {
+  /** Each record's retry outcomes from the ledger, read once per pass; a record missing from the map is unread. */
+  retries: (tasks: readonly { id: string; origin?: string }[]) => ReadonlyMap<string, FlakeIncidentRecordEvidence>;
+  /** Whether main's own CI failed the test at one of the PRs' bases. Absent: unread. */
+  mainRedAt?: (file: string, baseShas: readonly string[]) => Promise<{ mainRed: MainRedAtBase; redSha?: string }>;
+  /** A main-health repair whose red names the test. */
+  repairFor?: (file: string, title: string) => { offendingSha: string; fixPrUrl?: string } | undefined;
+}
+
+/** The fields of a main-health repair record a flake judgement reads: what it fixed and the red it named. */
+export interface FlakeRepairRecord {
+  offendingSha: string;
+  fixPrUrl?: string;
+  red?: { detail?: readonly string[] };
+  inherited?: { testFiles: readonly string[] };
+}
+
+/** The judge's facts from the rows and main CI this gardener reads. A completed main verdict at a sha never
+ *  changes, so each is read once; `repairs` is read at most once per pass, and a repair names the test as
+ *  W1-T9551's rung matches a hint: by its `not ok <title>` line, or for a file-level incident, the file. */
+export function flakeJudgeEvidencePort(o: {
+  stateDir: string;
+  log: GardenerDeps["log"];
+  clock: Clock;
+  mainFailures: SelectorShadowMainFailures;
+  repairs: () => readonly FlakeRepairRecord[];
+}): FlakeJudgeEvidencePort {
+  const mainReads = new Map<string, readonly string[]>();
+  const mainFailures = async (sha: string): Promise<readonly string[] | undefined> => {
+    const read = mainReads.get(sha) ?? (await o.mainFailures(sha));
+    if (read !== undefined) mainReads.set(sha, read);
+    return read;
+  };
+  let repairs: readonly FlakeRepairRecord[] | undefined;
+  return {
+    retries: (tasks) => {
+      repairs = undefined;
+      const rows = readFlakeIncidentRows(o.stateDir, fixedClock(o.clock.now() - FLAKE_INCIDENT_POLICY.windowMs).iso());
+      return new Map(tasks.flatMap((t) => {
+        const evidence = flakeIncidentRecordEvidence(rows, t.origin ?? "", t.id);
+        return evidence === undefined ? [] : [[t.id, evidence] as const];
+      }));
+    },
+    mainRedAt: (file, baseShas) => flakeMainRedAt(file, baseShas, mainFailures, o.log),
+    repairFor: (file, title) => {
+      repairs ??= o.repairs();
+      const hit = repairs.find((r) => (title !== "" ? r.red?.detail?.includes(`not ok ${title}`) : r.inherited?.testFiles.includes(file)) === true);
+      return hit === undefined ? undefined : { offendingSha: hit.offendingSha, ...(hit.fixPrUrl ? { fixPrUrl: hit.fixPrUrl } : {}) };
+    },
+  };
+}
+
+/** W1-T9694: a filed flake incident's retry outcomes, as the harness's own ledger rows state them. */
+export interface FlakeIncidentRecordEvidence {
+  file: string;
+  title: string;
+  prs: number[];
+  recovered: number;
+  alsoFailed: number;
+  /** Distinct filed PRs with a retry that also failed. */
+  alsoFailedPrs: number;
+  baseShas: string[];
+  runs: number[];
+}
+
+/** The evidence for the incident `taskId` filed: the `test.flake_retry` rows of its filed PRs still in the
+ *  window, or, when none is, the counts its `flake_incident.filed` row carries. Undefined with no filing row. */
+export function flakeIncidentRecordEvidence(
+  rows: readonly Record<string, unknown>[], origin: string, taskId: string,
+): FlakeIncidentRecordEvidence | undefined {
+  const file = flakeIncidentOriginFile(origin);
+  const filed = rows.filter((r) => r.step === "flake_incident.filed" && r.task_id === taskId)
+    .sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
+  if (file === undefined || filed === undefined) return undefined;
+  const title = origin.slice(`flake-incident:${file}`.length).replace(/^#/, "");
+  const prs = (Array.isArray(filed.prs) ? filed.prs.filter(isCount) : []).sort((a, b) => a - b);
+  const mine = new Set(prs);
+  const seen = observationsOf(rows.filter((r) => r.step === FLAKE_RETRY_STEP))
+    .filter((o) => o.file === file && o.title === title && o.prs.some((pr) => mine.has(pr)));
+  const retries = seen.filter((o) => o.duplicate !== true);
+  const ids = (v: unknown) => (Array.isArray(v) ? v.filter(isCount) : []);
+  if (retries.length === 0) {
+    return {
+      file, title, prs, recovered: isCount(filed.recovered) ? filed.recovered : 0, alsoFailed: isCount(filed.also_failed) ? filed.also_failed : 0,
+      alsoFailedPrs: isCount(filed.also_failed_prs) ? filed.also_failed_prs : 0,
+      baseShas: Array.isArray(filed.base_shas) ? filed.base_shas.filter((s): s is string => typeof s === "string") : [], runs: ids(filed.run_ids),
+    };
+  }
+  const failed = retries.filter((o) => o.outcome === "also_failed");
+  return {
+    file, title, prs,
+    recovered: retries.length - failed.length,
+    alsoFailed: failed.length,
+    alsoFailedPrs: new Set(failed.flatMap((o) => o.prs.filter((pr) => mine.has(pr)))).size,
+    baseShas: [...new Set(seen.flatMap((o) => (o.baseSha === undefined ? [] : [o.baseSha])))].sort(),
+    runs: [...new Set(seen.flatMap((o) => (o.runId === undefined ? [] : [o.runId])))].sort((a, b) => a - b),
+  };
+}
 
 /** What {@link runFlakeIncidentGardener}'s open-task read answers for an origin already routed to main-health. */
 const MAIN_INHERITED_HANDLED = "main-inherited";
@@ -451,7 +568,7 @@ async function fileIncident(
     if (!prUrl) throw new Error("flake-incident: task PR was not opened");
     deps.log("flake_incident.filed", {
       origin, task_id: taskId, pr_url: prUrl, file, title, prs, run_ids: runs,
-      recovered: evidence.recovered, also_failed: evidence.alsoFailed,
+      recovered: evidence.recovered, also_failed: evidence.alsoFailed, also_failed_prs: evidence.alsoFailedPrs, base_shas: evidence.baseShas,
     });
     return taskId;
   } finally {
