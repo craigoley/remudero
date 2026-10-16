@@ -17,7 +17,8 @@ import * as daemonModule from "../src/lib/daemon.js";
 import { runDaemon, type DaemonDeps, type LightPassScope } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { detachSweepAction, detachedSweepActionCount, drainDetachedSweepActions, inFlightReviewCount, trackInFlightReview } from "../src/lib/sweep.js";
-import type { RunResult } from "../src/run-task.js";
+
+type RunResult = Awaited<ReturnType<DaemonDeps["runOne"]>>;
 
 const minute = 60_000;
 const BOUND_MS = 10 * minute;

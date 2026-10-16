@@ -4212,11 +4212,12 @@ export async function runDaemon(
     // A light pass's review sat in no registry the drain waited on, so the exit killed it mid-judgement.
     const reviewsAtExit = inFlightReviewRunsNow();
     const reviewsAtFreshness = reviewsAtExit.length;
-    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || fromLatch?.started) {
-      const drainStartedAtMs = fromLatch?.started ? fromLatch.latchAtMs : exitAtMs;
+    const latchStarted = fromLatch?.started === true ? fromLatch : undefined;
+    if (detachedAtFreshness > 0 || reviewsAtFreshness > 0 || latchStarted) {
+      const drainStartedAtMs = latchStarted ? latchStarted.latchAtMs : exitAtMs;
       const latchFields = fromLatch ? { started_at: fromLatch.started ? "latch" : "exit", latched_at: fixedClock(fromLatch.latchAtMs).iso() }
         : stepPrefix === "daemon.freshness_drain" ? { started_at: "exit" } : {};
-      if (!fromLatch?.started) log(`${stepPrefix}.started`, {
+      if (!latchStarted) log(`${stepPrefix}.started`, {
         ...latchFields,
         detached_sweep_actions: detachedAtFreshness,
         in_flight_reviews: reviewsAtFreshness,
@@ -4243,8 +4244,8 @@ export async function runDaemon(
       // held 327 minutes with no review admitted. A review-only clock runs BESIDE the drain, never inside it
       // (W1-T2744), and its stop awaits a pass already posting, exactly as the drain awaits a detached fix.
       // Only a detached action earns that clock: a drain for reviews alone admits nothing new.
-      const admitPass = reviewLength?.ms === undefined ? undefined
-        : () => deadlineMs - daemonClock.now() > reviewLength.ms!;
+      const reviewMs = reviewLength?.ms;
+      const admitPass = reviewMs === undefined ? undefined : () => deadlineMs - daemonClock.now() > reviewMs;
       const drainReviewClock =
         detachedAtFreshness > 0 ? startInterphaseReviewClock(deps, pollIntervalMs, log, "drain", admitPass) : undefined;
       let abandoned: Awaited<ReturnType<typeof drainDetachedSweepActions>>;
@@ -4283,10 +4284,10 @@ export async function runDaemon(
       const nowMs = daemonClock.now();
       log(`${stepPrefix}.completed`, {
         ...latchFields,
-        detached_sweep_actions: fromLatch?.started ? fromLatch.detached : detachedAtFreshness,
+        detached_sweep_actions: latchStarted ? latchStarted.detached : detachedAtFreshness,
         remaining_detached_sweep_actions: detachedSweepActionCount(),
         abandoned_detached_sweep_actions: abandoned.length,
-        in_flight_reviews: fromLatch?.started ? fromLatch.reviews.size : reviewsAtFreshness,
+        in_flight_reviews: latchStarted ? latchStarted.reviews.size : reviewsAtFreshness,
         abandoned_in_flight_reviews: abandonedReviews,
         review_passes: reviewPasses,
         duration_ms: Math.max(0, nowMs - drainStartedAtMs),
