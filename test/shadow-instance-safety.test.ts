@@ -135,7 +135,7 @@ test("selected mode shadow evidence reaches actual run and sweep consumers", asy
     const sweepRows: Array<Record<string, unknown>> = [];
     const effects = buildSweepEffects({ owner: "owner", repo: "remudero", config: selectedConfig,
       ledgerPath: join(root, "state", "ledger.ndjson"), runId: "selected-sweep", plan: { tasks: [], byId: new Map() } as Plan,
-      instanceRegistryTextImpl: () => undefined, armImpl: async () => "armed",
+      instanceRegistryTextImpl: () => undefined, armImpl: async () => "armed" as const,
       log: (step, fields = {}) => { if (step === "instance_mode.shadow_observed") sweepRows.push(fields); } });
     assert.equal(await effects.arm({ prUrl: "https://github.com/owner/remudero/pull/1", prNumber: 1,
       taskId: "T-SELECTED", headSha: head } as OpenPrView), "armed");
