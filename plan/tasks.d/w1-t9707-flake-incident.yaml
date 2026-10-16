@@ -5,8 +5,8 @@
   type: implement
   verify: human
   risk: low
-  priority: 2.5
-  status: queued
+  status: blocked
+  retirement: retired  # not a flake: the same deterministic main red as W1-T9668 (re-filed because openTaskFor ignores retired records — W1-T9729). Main was red on this test from 037a58d8f until #12034 (cd482d436), a #11987 (W1-T9503) x #11997 collision; its own evidence reads "0 recovered on retry, 12 also failed". Superseded by W1-T9551 (#12088, merged e2c23cb32): a no-recovery red now routes to main-health and is never filed
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts#W1-T9503: a cause owned by a test alone escalates as no-owner"

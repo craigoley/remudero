@@ -1,0 +1,23 @@
+- id: W1-T9768
+  title: Correct W1-T9307's rationale, which still calls W1-T9062 queued and unbuilt after it merged
+  repo: remudero
+  depends_on:
+    - W1-T9307
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/W1-T9307-a-draft-repair-names-only-callers-the-tree-holds.yaml
+  acceptance:
+    - claim: The W1-T9307 rationale states that W1-T9062 is merged and its CREATES floor is on main
+      proof: "grep: W1-T9062 (merged in plan/tasks.d/W1-T9307-a-draft-repair-names-only-callers-the-tree-holds.yaml"
+  origin: followup:W1-T9307-1792028133814:2026-10-15T01:38:05.712Z:0
+  rationale: >-
+    From the 2026-10-15 follow-up on W1-T9307-1792028133814, ratified via rmd approve:
+  
+    follow-up harvest [task]: Correct W1-T9307's `rationale`, which says W1-T9062 is "queued, not
+    built". It is now merged and its `CREATES:` floor is on main (see the `ccec3f20f` reconcile).
+    The note is stale and could mislead the implementer. — from W1-T9307 (run
+    W1-T9307-1792028133814)

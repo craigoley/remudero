@@ -19,8 +19,9 @@ import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, feedbackContentDigest, type AdmissionSettings, type AdmissionDecision } from "./contributor-admission.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { loadPlan } from "./plan.js";
+import { loadPlan, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 const MIN_MS = 60_000;
 const DAY_MS = 24 * 60 * MIN_MS;
@@ -303,12 +304,14 @@ export function flowCiReader(
   };
 }
 
-type FlowPlanTask = { id: string; origin?: string; status?: string; retirement?: string };
+type FlowPlanTask = { id: string; origin?: string; status?: string; retirement?: string; superseded_by?: string };
 
 export interface FlowGardenSources {
   readLedger?: (sinceIso: string) => FlowLedgerRead;
   readCi?: (headSha: string) => Promise<FlowCiReading | undefined>;
   planTasks?: () => FlowPlanTask[];
+  /** Whether a superseding task has landed (W1-T9729). Absent: its `Remudero-Task:` trailer on the checkout's origin/main. */
+  isLanded?: (taskId: string) => boolean | Promise<boolean>;
   mintTaskId: GardenTaskIdMinter;
   admission?: AdmissionFlowInput;
 }
@@ -630,7 +633,17 @@ async function fileRegressions(
     deps.log(FLOW_INPUT_UNREADABLE_STEP, { input: "plan", error: String((e as Error)?.message ?? e) });
     return { decided: false, keys: [] };
   }
-  const closed = (t: FlowPlanTask) => t.status === "merged" || t.status === "done" || t.retirement !== undefined;
+  // W1-T9729: a retirement whose superseding task has not landed still holds its origin.
+  const landed = new Set<string>();
+  try {
+    const isLanded = sources.isLanded ?? ((id: string) => taskLandedOnMain(id, (args) => hostWorktreeGitAsync(deps.repoRoot, args)));
+    const keys = new Set(regressed.map((s) => origin(s.key)));
+    for (const t of tasks) if (t.superseded_by !== undefined && keys.has(t.origin ?? "") && await isLanded(t.superseded_by)) landed.add(t.superseded_by);
+  } catch (e) {
+    deps.log(FLOW_INPUT_UNREADABLE_STEP, { input: "landed", error: String((e as Error)?.message ?? e) });
+    return { decided: false, keys: [] };
+  }
+  const closed = (t: FlowPlanTask) => t.status === "merged" || t.status === "done" || (t.retirement !== undefined && !retirementHoldsOrigin(t, (id) => landed.has(id)));
   const filed = { ...(state.filed ?? {}) };
   const filings = [...(state.filings ?? [])].slice(-30);
   const keys: string[] = [];
@@ -640,7 +653,7 @@ async function fileRegressions(
     const planned = tasks.find((t) => t.origin === origin(stat.key) && !closed(t));
     const mine = filed[stat.key];
     const mineInPlan = mine ? tasks.find((t) => t.id === mine.taskId) : undefined;
-    const openId = planned?.id ?? (mine && (mineInPlan ? !closed(mineInPlan) : at.nowMs - mine.atMs < FLOW_UNPLANNED_FILING_OPEN_MS) ? mine.taskId : undefined);
+    const openId = planned?.superseded_by ?? planned?.id ?? (mine && (mineInPlan ? !closed(mineInPlan) : at.nowMs - mine.atMs < FLOW_UNPLANNED_FILING_OPEN_MS) ? mine.taskId : undefined);
     if (openId !== undefined) {
       deps.log(FLOW_REGRESSION_OPEN_STEP, { key: stat.key, task_id: openId });
       continue;

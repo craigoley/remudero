@@ -19,7 +19,7 @@
     - src/run-task.ts
     - test/a-daemon-loop-feedback-capture-stages-for-the-async-sweep.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 2  # operator-2026-10-15: the class W1-T9615 measured at 60-190 s loop holds, one capture at a time
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-15: found reviewing #12041, which changes deploy/entrypoint.sh and leaves its forensics doc as written"
   plan_refs: [W1-T9631, W1-T9623]
   files: [docs/forensics/entrypoint.md]
-  status: queued
+  status: merged
   priority: 2  # a stale forensics doc misleads the next outage reader; no runtime effect
   attempts: 0
   rationale: |

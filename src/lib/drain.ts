@@ -1035,7 +1035,7 @@ export function isWorktreeNodeModulesRefusal(err: unknown): err is { reasonClass
 }
 
 /** W1-T5344 — which kind of per-task DELIVERY failure ended a lane. */
-export type LaneDeliveryFailureClass = "command_failed" | "pr_open_refused";
+export type LaneDeliveryFailureClass = "command_failed" | "pr_open_refused" | "push_credential_missing";
 
 /** W1-T5344 — a lane's rejection recognised as ONE TASK's delivery failure: its class and the
  *  first line of its message (the ledger carries no multi-line stderr). */
@@ -1075,6 +1075,16 @@ export function laneDeliveryFailure(err: unknown): LaneDeliveryFailure | undefin
   const stderr = (err as { stderr?: unknown }).stderr;
   if (CREDENTIAL_REFUSAL_RE.test(`${err.message}\n${stderr == null ? "" : String(stderr)}`)) return undefined;
   return { failureClass: "command_failed", firstLine: firstLineOf(err.message) };
+}
+
+/** W1-T9680 — a spawned command's failure whose text is a credential refusal ({@link CREDENTIAL_REFUSAL_RE}): its
+ *  first line and its stderr, bounded. One lane's refusal is not yet the fleet's — the daemon probes before it stops. */
+export function laneCredentialRefusal(err: unknown): { firstLine: string; stderr: string } | undefined {
+  if (!(err instanceof Error) || !SPAWNED_COMMAND_FAILED_RE.test(err.message)) return undefined;
+  const raw = (err as { stderr?: unknown; stderrText?: unknown }).stderr ?? (err as { stderrText?: unknown }).stderrText;
+  const stderr = raw == null || String(raw) === "" ? err.message.split("\n").slice(1).join("\n") : String(raw);
+  if (!CREDENTIAL_REFUSAL_RE.test(`${err.message}\n${stderr}`)) return undefined;
+  return { firstLine: firstLineOf(err.message), stderr: stderr.trim().slice(0, 500) };
 }
 
 function isPrOpenRefusal(err: unknown): err is Error {

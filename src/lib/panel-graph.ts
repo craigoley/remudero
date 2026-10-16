@@ -52,6 +52,7 @@ import {
   type GhFailureReason,
   type GitHub,
   type LedgerLines,
+  type PrRef,
   type StatusProjection,
 } from "./status.js";
 import { buildDrainPreview, dispatchOrder, runnableCandidateIds, workflowPaths, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
@@ -1972,6 +1973,7 @@ function prepareInboxPass(
   projection: Map<string, StatusProjection>,
   ledgerLines: LedgerLines,
   grepAnchorTrue: (anchor: EvidenceAnchor) => boolean,
+  boardReferents: ReturnType<typeof inboxBoardReferents>,
   archiveReleases: ReadonlyMap<string, string> = new Map(),
 ): InboxPass {
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
@@ -1991,7 +1993,6 @@ function prepareInboxPass(
   // still looks READY (a drifted write) — re-derived from the ledger on every pass,
   // never trusted from the registry's own state.
   const verdicts = ledgerProposalVerdicts(ledgerLines);
-  const boardReferents = inboxBoardReferents(projection);
   const releasedHumanTasks = releasedHumanTaskIds(ledgerLines);
   // W1-T3518: the last adoption scan's own output. Same posture as the ledger read — read
   // ONCE per pass here, re-derived every pass that recomputes.
@@ -2030,6 +2031,14 @@ function prepareInboxPass(
   return { registryPath, proposals, ledgerLines, classifyOne };
 }
 
+function projectInboxPlan(deps: PanelGraphDeps, plan: Plan, ledgerLines?: LedgerLines) {
+  let openPrs: readonly PrRef[] | undefined;
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
+    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }),
+    observeOpenPrCount: rows => { openPrs = rows; } });
+  return { projection, boardReferents: inboxBoardReferents(projection, openPrs) };
+}
+
 /**
  * Shared read + classify step every /v1/inbox* WRITE route needs, recomputed on every call. `loadPlanFn` defaults to
  * {@link loadPlan}'s torn-read-guarded read (W1-T2220 remedy (a)); `POST /v1/inbox/approve` passes {@link
@@ -2039,10 +2048,10 @@ function prepareInboxPass(
  */
 function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
+  const { projection, boardReferents } = projectInboxPlan(deps, plan);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
-  const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha));
+  const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
   return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines, projection };
 }
 
@@ -2054,10 +2063,10 @@ function planFilesStamp(planPath: string, stat: (path: string) => string | undef
 }
 
 /** What classifyProposal reads: task credit, unavailable dependencies and observed board referents. */
-function projectionDigest(projection: Map<string, StatusProjection>): string {
+function projectionDigest(projection: Map<string, StatusProjection>, boardReferents: ReturnType<typeof inboxBoardReferents>): string {
   const parts: string[] = [];
   for (const [id, p] of projection) parts.push(`${id}:${p.merged ? 1 : 0}:${p.indeterminate ? (p.unavailableReason ?? "unknown") : ""}`);
-  return JSON.stringify([parts, [...inboxBoardReferents(projection).states].sort(([a], [b]) => a.localeCompare(b))]);
+  return JSON.stringify([parts, [...boardReferents.states].sort(([a], [b]) => a.localeCompare(b))]);
 }
 
 /** Exact task-scoped release receipts, not a verdict inferred from proposal prose. */
@@ -2085,6 +2094,7 @@ interface InboxFingerprint {
   plan: Plan;
   planKey?: string;
   projection: Map<string, StatusProjection>;
+  boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
   archiveReleases?: ReadonlyMap<string, string>;
 }
@@ -2118,10 +2128,10 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : threadStrictPlan(deps.planPath);
   }
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
+  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
-  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection), archiveKey]);
-  return { key, sha, plan, planKey, projection, ledgerLines, archiveReleases };
+  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
+  return { key, sha, plan, planKey, projection, boardReferents, ledgerLines, archiveReleases };
 }
 
 /** The previous result, when `fp` names exactly its inputs and the commit is known. Its ledger rows are this pass's. */
@@ -2145,7 +2155,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
   if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
   return result;
@@ -2189,7 +2199,7 @@ export async function classifyAllProposalsSliced(
     ? reused : { ...reused, attentionEvidence };
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases);
   const run = async (): Promise<ClassifiedInbox> => {
     const classifications: InboxClassification[] = [];
     for (let i = 0; i < pass.proposals.length; i += INBOX_CLASSIFY_SLICE) {
