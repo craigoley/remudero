@@ -4,6 +4,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { loadProposalRegistry } from "../src/lib/inbox.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
@@ -36,8 +37,8 @@ const PLAN_YAML = `
 
 type Fixture = { dir: string; plan: Plan; ledgerPath: string; config: Config };
 
-function fixture(): Fixture {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-lifetime-age-"));
+function fixture(inRepo = false): Fixture {
+  const dir = inRepo ? gitRepo({ seedCommit: false, kind: "lifetime-age" }).dir : mkdtempSync(join(tmpdir(), "rmd-lifetime-age-"));
   writeFileSync(join(dir, "tasks.yaml"), PLAN_YAML);
   mkdirSync(join(dir, ".remudero"), { recursive: true });
   copyFileSync(join(import.meta.dirname, "..", ".remudero", "mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
@@ -48,11 +49,10 @@ function fixture(): Fixture {
 /** Commit the shard file `daysAgo` days before NOW_MS, so `git log --diff-filter=A` dates it. */
 function commitShard(dir: string, daysAgo: number): void {
   const when = new Date(NOW_MS - daysAgo * DAY_MS).toISOString();
+  const { name, email } = GIT_REPO_FIXTURE_IDENTITY;
   const env = { ...process.env, GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when,
-    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
-  const git = (...args: string[]): void => void execFileSync("git",
-    ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { env, stdio: "pipe" });
-  git("init", "-q");
+    GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+  const git = (...args: string[]): void => void execFileSync("git", ["-C", dir, ...args], { env, stdio: "pipe" });
   mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(dir, "plan", "tasks.d", `${ID}-old.yaml`), "- id: x\n");
   git("add", "plan");
@@ -90,7 +90,7 @@ async function route(f: Fixture): Promise<{ prompts: string[]; summaries: string
 }
 
 test("W1-T8827: a lifetime-pressure proposal says the build kept failing and how long", async () => {
-  const f = fixture();
+  const f = fixture(true);
   try {
     commitShard(f.dir, 30);
     writeLedger(f.ledgerPath, failedAttempts(4, 3));
@@ -104,7 +104,7 @@ test("W1-T8827: a lifetime-pressure proposal says the build kept failing and how
 });
 
 test("W1-T8827: an old task is judged with its real age", async () => {
-  const f = fixture();
+  const f = fixture(true);
   try {
     commitShard(f.dir, 30);
     writeLedger(f.ledgerPath, failedAttempts(4, 3));
