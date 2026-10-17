@@ -3,7 +3,7 @@ import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { censusRunawayThresholdMs } from "../src/lib/ci-parity.js";
+import { censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE } from "../src/lib/ci-parity.js";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore executable module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
@@ -14,6 +14,7 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SUITE = "test/source-census.test.ts";
 const SUBJECT = "src/subject.ts";
 const ADMITTED = { testFile: "test/admitted.test.ts", script: "census:fixture", walks: ["other/"] };
+const READER_POLICY = { floorMs: FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: FAST_GATE_CENSUS_RUNAWAY_MULTIPLE };
 const CENSUS = [
   'import assert from "node:assert/strict";',
   'import { readFileSync } from "node:fs";',
@@ -34,7 +35,7 @@ function fixture(t: TestContext, readers = true, baseRed = false) {
   put("package.json", '{"type":"module"}');
   put("src/lib/ci-parity.ts", [
     `export const CENSUS_ADMITTED_MEMBERS = [${JSON.stringify({ ...ADMITTED, verdict: { measuredMs: 1000 } })}];`,
-    `export { censusRunawayThresholdMs } from ${JSON.stringify(join(ROOT, "src/lib/ci-parity.ts"))};`,
+    `export { censusRunawayThresholdMs, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE } from ${JSON.stringify(join(ROOT, "src/lib/ci-parity.ts"))};`,
   ].join("\n"));
   if (readers) symlinkSync(join(ROOT, "src/lib/source-text-readers.ts"), join(repo.dir, "src/lib/source-text-readers.ts"));
   put(SUITE, CENSUS);
@@ -55,11 +56,9 @@ function capture(t: { mock: { method: (o: object, k: string, f: (...a: unknown[]
   return { err, out };
 }
 
-function realChildren(options: { root: string; files: string[]; timeoutMs?: number }) {
-  assert.equal(options.timeoutMs, censusRunawayThresholdMs([1000]));
-  // Exercise head/base behaviour with the runner's normal backstop. The fixture's synthetic
-  // measurement is for the timeout wiring tests, not a measurement of a loaded CI host.
-  return precheck.runCensusSuitesViaChild({ root: options.root, files: options.files });
+function realChildren(options: { root: string; files: string[]; readerRuntimePolicy?: object }) {
+  assert.deepEqual(options.readerRuntimePolicy, READER_POLICY);
+  return precheck.runCensusSuitesViaChild(options);
 }
 
 test("W1-T9757: the precheck runs a source-text census the diff joins", (t) => {
@@ -93,9 +92,9 @@ test("W1-T9757: joined readers run separately with a measured bound and name an 
   const result = precheck.evaluateAdmittedCensusSuites({
     changed: [SUBJECT],
     loadMembers: () => members,
-    runSuites: (files: string[], options: { timeoutMs: number }) => {
+    runSuites: (files: string[], options: { readerRuntimePolicy: object }) => {
       runs.push(files);
-      assert.equal(options.timeoutMs, censusRunawayThresholdMs([1000]));
+      assert.deepEqual(options.readerRuntimePolicy, READER_POLICY);
       if (files.includes(SUITE)) throw new Error("ETIMEDOUT");
       return files;
     },
@@ -105,8 +104,8 @@ test("W1-T9757: joined readers run separately with a measured bound and name an 
   assert.match(result.violations[0], /test\/other-census.test.ts fails/);
   const io = capture(t);
   assert.equal(precheck.main(["--root", repo.dir, "--base", "main"], {
-    runSuites: ({ files, timeoutMs }: { files: string[]; timeoutMs: number }) => {
-      assert.equal(timeoutMs, censusRunawayThresholdMs([1000]));
+    runSuites: ({ files, readerRuntimePolicy }: { files: string[]; readerRuntimePolicy: object }) => {
+      assert.deepEqual(readerRuntimePolicy, READER_POLICY);
       assert.equal(files.length, 1);
       throw new Error("ETIMEDOUT");
     },

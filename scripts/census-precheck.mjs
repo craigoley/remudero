@@ -30,14 +30,17 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
+import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
@@ -496,7 +499,7 @@ function isMember(m) {
 
 /**
  * The tree's admission table and census-shaped source-text readers, read under tsx. Readers run
- * separately, bounded by the table's measured census durations. Older trees append no readers.
+ * separately, calibrated on that reader, never on unrelated historical census durations.
  * A missing table admits nothing; a failed read or empty table is never a clean set.
  */
 export function listAdmittedCensusMembers(root, run = spawnSync) {
@@ -509,10 +512,10 @@ export function listAdmittedCensusMembers(root, run = spawnSync) {
     (existsSync(readers) ?
       'if (members.length === 0) throw new Error("the admission table lists no admitted member");' +
       `const r = await import(${JSON.stringify(pathToFileURL(readers).href)});` +
-      "const timeoutMs = m.censusRunawayThresholdMs(m.CENSUS_ADMITTED_MEMBERS.map((x) => x.verdict.measuredMs));" +
-      'if (!(timeoutMs > 0 && Number.isFinite(timeoutMs))) throw new Error("no measured census runaway threshold");' +
+      "const readerRuntimePolicy = { floorMs: m.FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: m.FAST_GATE_CENSUS_RUNAWAY_MULTIPLE };" +
+      'if (![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((x) => Number.isFinite(x) && x > 0)) throw new Error("no measured census runtime policy");' +
       `members.push(...r.discoverSourceTextReaders(${JSON.stringify(root)}).filter((x) => x.censusShaped && x.walks.length > 0)` +
-      '.map((x) => ({ testFile: x.testFile, script: "", walks: [...x.walks], structural: true, timeoutMs })));' : "") +
+      '.map((x) => ({ testFile: x.testFile, script: "", walks: [...x.walks], structural: true, readerRuntimePolicy })));' : "") +
     "console.log(JSON.stringify(members));";
   const res = run(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", code], childOptions(root));
   assertChildFinished(res, "admission table");
@@ -587,14 +590,56 @@ const TEST_PRIORITY = await loadTestPriority();
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
-export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs }) {
+export function censusReaderBudget(measurement, context, policy, nowMs) {
+  if (!policy || ![policy.floorMs, policy.multiple].every((n) => Number.isFinite(n) && n > 0) ||
+      !measurement || measurement.context !== context || measurement.complete !== true || measurement.passed !== true ||
+      !Number.isFinite(measurement.elapsedMs) || measurement.elapsedMs <= 0 ||
+      !Number.isSafeInteger(measurement.tests) || measurement.tests <= 0 ||
+      !Number.isFinite(nowMs) || !Number.isFinite(measurement.finishedMs) || nowMs < measurement.finishedMs ||
+      nowMs - measurement.finishedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+    throw new Error("source-reader runtime is UNKNOWN: missing, stale, mismatched or incomplete calibration");
+  }
+  const budgetMs = Math.ceil(Math.max(policy.floorMs, measurement.elapsedMs) * policy.multiple);
+  if (budgetMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+    throw new Error(`source-reader calibration cannot fit its ${budgetMs}ms measured budget inside the existing ${CENSUS_SUITE_CHILD_TIME_BOUND_MS}ms backstop`);
+  }
+  return budgetMs;
+}
+
+function runCensusChild(file, args, options) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
+  const result = captureStepSync(file, args, { cwd: options.cwd, env: options.env, runtimeMs: options.timeout,
+    maxBytes: options.maxBuffer, stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
+  if (result.outputComplete) rmSync(dir, { recursive: true, force: true });
+  else result.error = new Error(`${result.error?.message ?? "incomplete census capture"}; capture retained at ${dir}`);
+  return result;
+}
+
+function censusReaderContext(root, child, options) {
+  const env = { ...Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])), ...options.env };
+  const readGit = (args) => gitOut(root, args, { env, timeout: CENSUS_SUITE_CHILD_TIME_BOUND_MS });
+  const untracked = readGit(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
+  const input = { root: resolve(root), head: readGit(["rev-parse", "HEAD"]).trim(),
+    tracked: readGit(["ls-files", "--stage", "-z"]), diff: readGit(["diff", "--binary", "HEAD"]),
+    untracked: untracked.map((p) => [p, readFileSync(join(root, p)).toString("base64")]),
+    runtime: [process.execPath, process.version, process.versions.v8, process.platform, process.arch],
+    command: child, environment: Object.entries(options.env).sort(([a], [b]) => a.localeCompare(b)),
+    snapshot: options.env[CENSUS_SNAPSHOT_ENV] ? readFileSync(options.env[CENSUS_SNAPSHOT_ENV]).toString("base64") : null };
+  return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+
+export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
+  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
   const options = childOptions(root, timeoutMs);
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
   if (pathOverride !== undefined) options.env.PATH = pathOverride;
+  const once = () => {
+  const startedMs = now();
   const res = run(child.file, child.args, options);
+  const finishedMs = now();
   assertChildFinished(res, "census suite");
   const stdout = String(res.stdout ?? "");
   const total = stdout.match(/^# tests (\d+)$/m);
@@ -608,7 +653,33 @@ export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority
   if (res.status !== 0 && failing.length === 0) {
     throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
   }
-  return failing;
+  const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
+    const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
+    return [key, matches.length === 1 ? Number(matches[0][1]) : null];
+  }));
+  const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+  return { failing, tests: Number(total[1]), passed, elapsedMs: finishedMs - startedMs, finishedMs };
+  };
+  if (readerRuntimePolicy === undefined) return once().failing;
+  if (files.length !== 1 || timeoutMs !== undefined) throw new Error("source-reader calibration requires one reader and no timeout override");
+  if (!lstatSync(join(root, files[0])).isFile()) throw new Error("source-reader calibration requires a physical test file");
+  if (!readerRuntimePolicy || ![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((n) => Number.isFinite(n) && n > 0)) {
+    throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
+  }
+  const context = readContext(root, child, options);
+  const calibration = once();
+  if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during calibration");
+  if (calibration.failing.length > 0) return calibration.failing;
+  if (!calibration.passed) throw new Error("source-reader runtime is UNKNOWN: calibration has no complete unskipped pass");
+  const measurement = { ...calibration, context, complete: true, passed: true };
+  options.timeout = censusReaderBudget(measurement, context, readerRuntimePolicy, now());
+  const measured = once();
+  if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during qualification");
+  if (!(measured.elapsedMs > 0 && Number.isFinite(measured.elapsedMs))) throw new Error("source-reader runtime is UNKNOWN: invalid native duration");
+  if (measured.elapsedMs > options.timeout) throw new Error(`source-reader runtime exceeded its ${options.timeout}ms measured budget`);
+  if (!measured.passed && measured.failing.length === 0) throw new Error("source-reader runtime is UNKNOWN: qualification has no complete unskipped result");
+  console.log(`census-reader-runtime: ${files[0]} calibration=${Math.ceil(calibration.elapsedMs)}ms budget=${options.timeout}ms measured=${Math.ceil(measured.elapsedMs)}ms; fresh timing only, no cached test verdict`);
+  return measured.failing;
 }
 
 const STEP_LITERAL_RE = /(?:\bstep\s*===|\bcase|\blog\w*\s*\(|\bstep\s*:)\s*(["'`])([^"'`\r\n$]+)\1/g;
@@ -904,6 +975,7 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
       script: member.script || prior?.script || "",
       structural: member.structural || prior?.structural,
       timeoutMs: member.timeoutMs ?? prior?.timeoutMs,
+      readerRuntimePolicy: member.readerRuntimePolicy ?? prior?.readerRuntimePolicy,
     });
   }
   const joined = [...byFile.values()];
@@ -918,10 +990,11 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
     let failing;
     try {
       const files = [...new Set(group.map((m) => m.testFile))];
-      failing = new Set(group[0].timeoutMs === undefined ? runSuites(files) : runSuites(files, { timeoutMs: group[0].timeoutMs }));
+      failing = new Set(group[0].readerRuntimePolicy !== undefined ? runSuites(files, { readerRuntimePolicy: group[0].readerRuntimePolicy }) :
+        group[0].timeoutMs === undefined ? runSuites(files) : runSuites(files, { timeoutMs: group[0].timeoutMs }));
     } catch (e) {
       const reason = String(e?.message ?? e);
-      unmeasured.push(group[0].timeoutMs === undefined ? reason : `${group[0].testFile}: ${reason}`);
+      unmeasured.push(!group[0].structural ? reason : `${group[0].testFile}: ${reason}`);
       continue;
     }
     violations.push(
