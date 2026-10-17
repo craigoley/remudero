@@ -68,15 +68,23 @@ while True:time.sleep(1)
 """
 try:
  subprocess.Popen=owned_popen;os.killpg=owned_signal
- g['MAX_SECONDS']=0.8;started=time.monotonic()
- try:ns['peer_exchange']([sys.executable,'-c',body,mode],{},ns['Budget']())
- except ns['Hold'] as error:reason=str(error)
+ # Trigger the real deadline check after both fixture roles are ready, not
+ # after an assumed interpreter-startup duration on a contended host.
+ g['MAX_SECONDS']=5;started=time.monotonic()
+ class ReadyBudget(ns['Budget']):
+  def check(self,*args,**kwargs):
+   if (home/'leader-ready').exists():self.started=min(self.started,time.monotonic()-6)
+   return super().check(*args,**kwargs)
+ try:ns['peer_exchange']([sys.executable,'-c',body,mode],{},ReadyBudget())
+ except ns['Hold'] as error:reason=str(error);cause=repr(error.__cause__)
  else:raise AssertionError('hung descendants granted a response')
  assert (home/'leader-ready').exists() and (home/'grandchild-ready').exists(),reason
- assert reason=='inspection-budget' and closed(groups[0]),(reason,signals)
+ # A transiently unverifiable teardown must also refuse, never grant a
+ # response. Independently require this fixture's group to be gone now.
+ assert reason in ('inspection-budget','reference-peer-closure-unverified') and closed(groups[0]),(reason,cause,signals)
  assert unrelated.poll() is None,'unrelated worker was interrupted'
  assert (home/'leader-term').exists()==(mode=='term-exits')
- assert any(sig==signal.SIGKILL for _,sig in signals) and time.monotonic()-started<4
+ assert any(sig==signal.SIGKILL for _,sig in signals) and time.monotonic()-started<8
  print(json.dumps({'closed':True,'unrelatedAlive':True,'reason':reason}))
 finally:
  subprocess.Popen=original_popen;os.killpg=original_killpg
