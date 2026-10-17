@@ -1121,6 +1121,9 @@ function* finishLanding(
     if (b.treeSha !== (yield* net.git(["rev-parse", `${b.mainSha}^{tree}`])).trim()) return undefined;
     opts.log?.("landing.nothing_to_land", { family: kind.family, branch: kind.branch, mainSha: b.mainSha });
     const result: LandFeedbackResult = { landed: false, files: [], ...(b.refused.length > 0 ? { refused: b.refused } : {}) };
+    // A wholly refused build must stop here: even PR inspection would contact gh for content
+    // this call explicitly declined to land (W1-T3561).
+    if (b.refused.length > 0) return result;
     try {
       yield* closeRedundantLandingPr(kind, net, b);
       return result;
