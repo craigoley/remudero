@@ -8,8 +8,7 @@ import { inboxDraftExampleFragmentYaml, runDraftRung, type Proposal } from "../s
 import { seededRandom } from "../src/lib/knowledge-value.js";
 import { loadMounts, mountsPath } from "../src/lib/mounts.js";
 import { withTempDir } from "../src/lib/tmp.js";
-import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "../src/lib/worker.js";
-import { buildInboxDraftSpawnArgs } from "../src/run-task.js";
+import { buildInboxDraftWorkerArgs, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "../src/lib/worker.js";
 
 const ladder = ["gpt-oss-120b", "gpt-5-nano"];
 const mount = { model: "haiku", effort: "high", provider: "cash", maxTurns: 400, contextBudget: 180000 } as const;
@@ -25,7 +24,7 @@ function result(model: string, text = clean): WorkerResult {
 }
 
 async function fixture(run: (f: {
-  spawn: (avoidModels: readonly string[], prompt?: string, contractFailure?: boolean) => Promise<WorkerResult>;
+  spawn: (avoidModels: readonly string[] | undefined, prompt?: string, contractFailure?: boolean) => Promise<WorkerResult>;
   attempts: string[];
   rows: Array<{ step: string; extra: Record<string, unknown> }>;
 }) => Promise<void>) {
@@ -47,15 +46,15 @@ async function fixture(run: (f: {
     process.env.HOME = root;
     try {
       await run({ attempts, rows, spawn: async (avoidModels, prompt = "draft P9", contractFailure = false) => {
-        const args = buildInboxDraftSpawnArgs({ cwd: root, settingsFile, config, prompt, mount,
-          disallowedTools: [], proposalId: "P9", avoidModels,
-          draftRoutingLog: (step, extra = {}) => rows.push({ step, extra }) });
-        args.draftRouting!.readStats = () => ({
-          "gpt-oss-120b": { attempts: 10000, clean: 10000, contractFailures: 0, costUsd: 1 },
-          "gpt-5-nano": { attempts: 10000, clean: 0, contractFailures: 10000, costUsd: 100 },
-        });
-        args.draftRouting!.random = seededRandom(9067);
-        args.draftRouting!.evaluate = () => ({ clean: !contractFailure, contractFailed: contractFailure });
+        const args = buildInboxDraftWorkerArgs({ cwd: root, settingsFile, config, prompt, mount,
+          disallowedTools: [], avoidModels, maxBudgetUsd: 100, tools: ["Read", "Grep", "Glob"] });
+        args.draftRouting = { lane: "inbox-draft", proposalId: "P9",
+          log: (step, extra = {}) => rows.push({ step, extra }),
+          readStats: () => ({
+            "gpt-oss-120b": { attempts: 10000, clean: 10000, contractFailures: 0, costUsd: 1 },
+            "gpt-5-nano": { attempts: 10000, clean: 0, contractFailures: 10000, costUsd: 100 },
+          }), random: seededRandom(9067),
+          evaluate: () => ({ clean: !contractFailure, contractFailed: contractFailure }) };
         return spawnWorker({ ...args, providerRouting: { spawnOpenWeight: async (_args, _config, selection) => {
           attempts.push(selection.model);
           return result(selection.model, selection.model === ladder[0] ? dirty : clean);
@@ -70,8 +69,9 @@ async function fixture(run: (f: {
 
 test("W1-T9067: the draft spawn passes avoidModels to the worker", async () => {
   const ctx = { attempt: 2, avoidModels: ["gpt-oss-120b"] };
-  const args = buildInboxDraftSpawnArgs({ cwd: process.cwd(), settingsFile: "/unused", prompt: "draft P9",
-    mount, config: { root: "/unused" } as Config, disallowedTools: [], avoidModels: ctx.avoidModels });
+  const args = buildInboxDraftWorkerArgs({ cwd: process.cwd(), settingsFile: "/unused", prompt: "draft P9",
+    mount, config: { root: "/unused" } as Config, disallowedTools: [], avoidModels: ctx.avoidModels,
+    maxBudgetUsd: 100, tools: ["Read", "Grep", "Glob"] });
   const recorded: SpawnWorkerArgs[] = [];
   const rawSpawn: typeof spawnWorker = async (request) => { recorded.push(request); return result("gpt-5-nano"); };
   await rawSpawn(args);
@@ -114,5 +114,15 @@ test("W1-T9067: the walking ladder cannot return to an avoided model", async () 
   await fixture(async ({ spawn, attempts }) => {
     await spawn(["gpt-oss-120b"], "draft P9", true);
     assert.deepEqual(attempts, ["gpt-5-nano"]);
+  });
+});
+
+test("W1-T9067: absent, empty and unrelated avoid lists preserve the preferred model", async () => {
+  await fixture(async ({ spawn, attempts, rows }) => {
+    for (const avoidModels of [undefined, [], ["unrelated-model"]]) await spawn(avoidModels);
+    assert.deepEqual(attempts, [ladder[0], ladder[0], ladder[0]]);
+    const choices = rows.filter((row) => row.step === "draft.routing.choice");
+    assert.equal(choices.length, 3);
+    assert.equal(choices.some((row) => row.extra.reason === "avoid-exhausted"), false);
   });
 });

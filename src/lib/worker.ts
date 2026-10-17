@@ -80,7 +80,7 @@ import {
   type ClaudeModelHealthSource,
   type ClaudeModelHealthState,
 } from "./claude-model-health.js";
-import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel, type CapabilityLadder } from "./mounts.js";
+import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel, type CapabilityLadder, type Mount } from "./mounts.js";
 import {
   experimentDrawSeed,
   experimentIntentionToTreat,
@@ -1316,6 +1316,35 @@ export interface SpawnWorkerArgs {
    *  with `credentialHelperSocketPath`, `args.cwd`'s worktree git config points at the socket helper.
    *  The daemon (W1-T5115) passes the git half ALONE, leaving the model credential env untouched. */
   secretBoundary?: SecretBoundaryHandles;
+}
+
+/** Pure inbox draft spawn boundary; registry observation and lint evaluation belong to the caller. */
+export function buildInboxDraftWorkerArgs(args: {
+  cwd: string;
+  settingsFile: string;
+  prompt: string;
+  mount: Mount;
+  config: Config;
+  disallowedTools: readonly string[];
+  avoidModels?: readonly string[];
+  maxBudgetUsd: number;
+  tools: string[];
+}): SpawnWorkerArgs {
+  return {
+    cwd: args.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: args.settingsFile,
+    model: args.mount.model,
+    mountProvider: args.mount.provider,
+    effort: args.mount.effort,
+    maxTurns: args.mount.maxTurns,
+    disallowedTools: args.disallowedTools,
+    maxBudgetUsd: args.maxBudgetUsd,
+    config: args.config,
+    prompt: args.prompt,
+    avoidModels: args.avoidModels,
+    tools: args.tools,
+  };
 }
 
 /** W1-T3573, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
@@ -2878,7 +2907,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       },
     );
     const remaining = [openWeight.model, ...openWeight.alternatives]
-      .filter((model) => !args.avoidModels?.includes(model));
+      .filter((model) => !(args.avoidModels ?? []).includes(model));
     const avoidExhausted = remaining.length === 0;
     if (!avoidExhausted) openWeight = { ...openWeight, model: remaining[0]!, alternatives: remaining.slice(1) };
     let draftChoice: DraftChoice | undefined;
