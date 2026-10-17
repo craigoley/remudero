@@ -14,7 +14,7 @@
     - src/lib/dep-review.ts
     - src/run-task.ts
     - test/an-over-long-dependabot-title-is-retitled.test.ts
-  status: queued
+  status: merged
   priority: 2  # every over-long Dependabot title (a one-update group names the dependency in full) is a red only a hand retitle clears
   attempts: 0
   rationale: |

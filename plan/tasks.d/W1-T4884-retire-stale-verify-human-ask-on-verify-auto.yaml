@@ -38,9 +38,9 @@
     - claim: "verify:auto alone preserves an unanswered human ask and its registry history"
       proof: 'grep: test("W1-T4884: verify-auto alone preserves an unanswered human ask without erasing the registry" in test/a-released-human-ask-leaves-the-inbox.test.ts'
     - claim: "a held or unverified unanswered task ask remains visible without exact release evidence"
-      proof: 'grep: test("W1-T4884: a held or unverified task keeps its human ask" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+      proof: 'grep: an ID without producer purpose cannot borrow the exact release in test/a-released-human-ask-leaves-the-inbox.test.ts'
     - claim: "a positively released exact ask remains source-qualified history with honest partial counts"
-      proof: 'grep: test("W1-T4884: a stale verify-human ask remains in source-qualified history" in test/operator-attention-census.test.ts'
+      proof: 'grep: the exact typed release supplies authority in test/operator-attention-census.test.ts'
   falsifier: |
     Seed a normal producer-owned verify-human ask whose task is now verify:auto and an
     unanswered held or untyped human ask. Without an exact release both remain visible.
