@@ -1314,6 +1314,7 @@ import {
   readBlobsAtRef,
   mergePlanBlobs,
   loadPlanAtRefAsync,
+  TaskAdmissionError,
 } from "./lib/plan.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
@@ -38991,6 +38992,10 @@ export interface RunInChildInput {
   options: RunChildSpecOptions;
   planSync: (options: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T10000: the daemon is told while the run waits for its child's admission. */
+  onPending?: (pending: RunChildPending) => void;
+  /** W1-T10000: asked before the run stays in-process; `false` ends the lane with a {@link TaskAdmissionError}. */
+  mayRunInProcess?: (reason: string) => boolean;
 }
 
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
@@ -38999,23 +39004,35 @@ export async function runInChildWhenOn(
   seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
 ): Promise<RunChildHandle | undefined> {
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
-  const fallback = (reason: string): undefined => {
-    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+  const inProcess = (reason: string): undefined => {
+    if (input.mayRunInProcess?.(reason) === false) {
+      throw new TaskAdmissionError(`restart latched: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
+    }
     return undefined;
   };
+  const fallback = (reason: string): undefined => {
+    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+    return inProcess(reason);
+  };
   if (mode.unreadable !== undefined) return fallback(`sweep.runChild.mode unreadable: ${mode.unreadable}`);
-  if (!mode.on) return undefined;
+  if (!mode.on) return inProcess("sweep.runChild.mode is not on");
   if (input.options.skipGitSync) return fallback("an explicit --plan is read literally; the run stays in-process");
   const start = seams.spawn ?? ((spawnInput, spawnPorts) => spawnRunChild(spawnInput, spawnPorts));
   const launched = await start({
     taskId: input.taskId, stateRoot: join(input.config.root, "state"), repoDir: input.repoDir, root: input.config.root,
     log: input.log, options: input.options,
     plan: async () => input.planSync({ allowStale: input.allowStale }),
+    ...(input.onPending ? { onPending: input.onPending } : {}),
   }, {
     abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), systemClock.now()).yieldCost.ms },
     ...seams.ports,
   });
-  return launched.started ? launched : undefined;
+  if (launched.started) return launched;
+  // W1-T10000: an abandoned wait took no claim and wrote no spec; the next daemon dispatches it, never this one in-process.
+  if (launched.abandoned) {
+    throw new TaskAdmissionError(`task ${input.taskId}'s run child was abandoned after ${launched.waitedMs} ms waiting for memory admission`);
+  }
+  return inProcess(launched.reason);
 }
 
 export async function daemonCommand(
@@ -40112,6 +40129,7 @@ export async function daemonCommand(
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+            onPending: runOptions?.onChildPending, mayRunInProcess: runOptions?.mayRunInProcess,
           }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
             runOptions?.onChild?.(inChild);
@@ -54622,7 +54640,7 @@ import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
-  type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
+  type AdoptedRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
 import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";
