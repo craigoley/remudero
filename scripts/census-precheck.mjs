@@ -103,7 +103,8 @@ export function censusSnapshotPaths(snapshot) {
 
 const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"];
 const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
-const FIXTURE_SCOPE_RE = /^test\/[^/]+\.test\.ts$/;
+/** A test file at any depth under test/, except test/fixtures/** (data, never a suite). */
+const FIXTURE_SCOPE_RE = /^test\/(?!fixtures\/)(?:[^/]+\/)*[^/]+\.test\.ts$/;
 
 /** A count is this branch's to answer for when it is over its ceiling here, and the base was
  *  either under its own ceiling or carried a smaller count. */
@@ -479,8 +480,8 @@ function childEnv() {
   return Object.fromEntries(Object.entries(process.env).filter(([k]) => !CHILD_ENV_DROPPED.test(k)));
 }
 
-function childOptions(root) {
-  return { cwd: root, encoding: "utf8", env: childEnv(), timeout: CENSUS_SUITE_CHILD_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 };
+function childOptions(root, timeoutMs = CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+  return { cwd: root, encoding: "utf8", env: childEnv(), timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 };
 }
 
 /** Throws, naming why, when a child did not run to a status: a spawn error (the time bound included) or a signal. */
@@ -494,16 +495,25 @@ function isMember(m) {
 }
 
 /**
- * The tree's own `CENSUS_ADMITTED_MEMBERS` as `{ testFile, script, walks }`, read by a child under tsx because
- * the table is TypeScript. A tree that carries no table has no admitted suites; every failure to read one that
- * exists THROWS, and an empty list is a failed read, never a clean set.
+ * The tree's admission table and census-shaped source-text readers, read under tsx. Readers run
+ * separately, bounded by the table's measured census durations. Older trees append no readers.
+ * A missing table admits nothing; a failed read or empty table is never a clean set.
  */
 export function listAdmittedCensusMembers(root, run = spawnSync) {
   const table = join(root, ADMISSION_TABLE);
   if (!existsSync(table)) return [];
+  const readers = join(root, "src/lib/source-text-readers.ts");
   const code =
     `const m = await import(${JSON.stringify(pathToFileURL(table).href)});` +
-    "console.log(JSON.stringify(m.CENSUS_ADMITTED_MEMBERS.map((x) => ({ testFile: x.testFile, script: x.script, walks: [...(x.walks ?? [])] }))));";
+    "const members = m.CENSUS_ADMITTED_MEMBERS.map((x) => ({ testFile: x.testFile, script: x.script, walks: [...(x.walks ?? [])] }));" +
+    (existsSync(readers) ?
+      'if (members.length === 0) throw new Error("the admission table lists no admitted member");' +
+      `const r = await import(${JSON.stringify(pathToFileURL(readers).href)});` +
+      "const timeoutMs = m.censusRunawayThresholdMs(m.CENSUS_ADMITTED_MEMBERS.map((x) => x.verdict.measuredMs));" +
+      'if (!(timeoutMs > 0 && Number.isFinite(timeoutMs))) throw new Error("no measured census runaway threshold");' +
+      `members.push(...r.discoverSourceTextReaders(${JSON.stringify(root)}).filter((x) => x.censusShaped && x.walks.length > 0)` +
+      '.map((x) => ({ testFile: x.testFile, script: "", walks: [...x.walks], structural: true, timeoutMs })));' : "") +
+    "console.log(JSON.stringify(members));";
   const res = run(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", code], childOptions(root));
   assertChildFinished(res, "admission table");
   if (res.status !== 0) {
@@ -577,11 +587,11 @@ const TEST_PRIORITY = await loadTestPriority();
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
-export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY, snapshotPath, pathOverride }) {
+export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
-  const options = childOptions(root);
+  const options = childOptions(root, timeoutMs);
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
   if (pathOverride !== undefined) options.env.PATH = pathOverride;
   const res = run(child.file, child.args, options);
@@ -886,7 +896,17 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
     return { violations: [], unmeasured: String(e?.message ?? e) };
   }
   const admitted = members.filter((m) => changed.some((p) => m.walks.some((w) => p.startsWith(w))));
-  const joined = [...new Map([...admitted, ...triggered].map((m) => [m.testFile, m])).values()];
+  const byFile = new Map();
+  for (const member of [...admitted, ...triggered]) {
+    const prior = byFile.get(member.testFile);
+    byFile.set(member.testFile, {
+      ...prior, ...member,
+      script: member.script || prior?.script || "",
+      structural: member.structural || prior?.structural,
+      timeoutMs: member.timeoutMs ?? prior?.timeoutMs,
+    });
+  }
+  const joined = [...byFile.values()];
   if (joined.length === 0) return { violations: [], unmeasured: null };
   // W1-T5693: the slow whole-tree suites each run in their OWN child, so one that exceeds its time bound reads
   // NOT MEASURED alone and cannot turn the others' verdicts into a silent pass.
@@ -897,9 +917,11 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
   for (const group of groups) {
     let failing;
     try {
-      failing = new Set(runSuites([...new Set(group.map((m) => m.testFile))]));
+      const files = [...new Set(group.map((m) => m.testFile))];
+      failing = new Set(group[0].timeoutMs === undefined ? runSuites(files) : runSuites(files, { timeoutMs: group[0].timeoutMs }));
     } catch (e) {
-      unmeasured.push(String(e?.message ?? e));
+      const reason = String(e?.message ?? e);
+      unmeasured.push(group[0].timeoutMs === undefined ? reason : `${group[0].testFile}: ${reason}`);
       continue;
     }
     violations.push(
@@ -935,6 +957,7 @@ export const PRECHECK_PARITY = {
   // W1-T5737: the script gates ci.yml runs, read out of ci.yml whenever a push edits it or the parity baseline.
   "test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts": { modeled: scriptRatchetViolations },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  "test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
   "test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
@@ -1031,8 +1054,8 @@ function gitOut(root, args, options = {}) {
   return res.stdout;
 }
 
-function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
-  const failing = [...new Set(runSuites({ root, files }))];
+function runCausedCensusSuites({ root, files, mergeBase, runSuites, ...optionsForSuites }) {
+  const failing = [...new Set(runSuites({ root, files, ...optionsForSuites }))];
   if (failing.length === 0) return [];
   const temporary = mkdtempSync(join(tmpdir(), "rmd-census-base-"));
   const baseRoot = join(temporary, "tree");
@@ -1056,7 +1079,7 @@ function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
     for (const file of failing) {
       if (!existsSync(join(baseRoot, file))) throw new Error(`merge-base suite ${file} is absent`);
     }
-    const baseFailing = new Set(runSuites({ root: baseRoot, files: failing }));
+    const baseFailing = new Set(runSuites({ root: baseRoot, files: failing, ...optionsForSuites }));
     return failing.filter((file) => !baseFailing.has(file));
   } catch (e) {
     throw new Error(`merge-base census run could not be measured: ${String(e?.message ?? e)}`);
@@ -1246,8 +1269,8 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       changed,
       ...readers,
       loadMembers: () => admitted(root),
-      runSuites: (files) => {
-        if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites });
+      runSuites: (files, options = {}) => {
+        if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options });
         const measured = runSnapshotSuites(snapshot, files, root);
         snapshotUnmeasured.push(...measured.notMeasured);
         return measured.failing;

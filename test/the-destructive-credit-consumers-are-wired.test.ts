@@ -40,7 +40,8 @@ test("W1-T3067: every DESTRUCTIVE credit consumer supplies mergedPathsByPr", () 
   // other. Structural because these builders construct DeriveDeps inline — nothing but the source
   // says whether the evidence reaches them.
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const src = readFileSync(join(root, "src", "run-task.ts"), "utf8");
+  // W1-T9722: both builders moved with the tick-read producer.
+  const src = readFileSync(join(root, "src", "lib", "tick-read-worker.ts"), "utf8");
   for (const fn of ["buildCreditCandidates", "buildEscalationReconcileCandidates"]) {
     const body = functionBody(src, fn);
     assert.match(body, /DeriveDeps = \{/, fn + " should construct DeriveDeps");

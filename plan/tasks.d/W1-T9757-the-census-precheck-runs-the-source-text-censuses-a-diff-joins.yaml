@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-15: #12019 (W1-T9426) and #12104 (W1-T9667) passed every local check and reddened CI on an unnamed source-text census; #12175 fixed membership, this is the precheck half"
   plan_refs: [W1-T5617, W1-T5693, W1-T5663, W1-T9050, W1-T9740]
   files: [scripts/census-precheck.mjs, test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts]
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: root-cause the census reds hand PRs only meet in CI
   attempts: 0
   rationale: |

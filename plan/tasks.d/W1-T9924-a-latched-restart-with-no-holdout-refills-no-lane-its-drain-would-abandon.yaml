@@ -14,7 +14,7 @@
     - src/lib/daemon.ts
     - src/run-task.ts
     - test/a-latched-restart-with-no-holdout-refills-no-lane-its-drain-would-abandon.test.ts
-  status: queued
+  status: merged
   priority: 2  # each refill wastes its claim, start and recon, and holds the lane until the boot; it self-heals at the restart, so not P1
   attempts: 0
   rationale: |

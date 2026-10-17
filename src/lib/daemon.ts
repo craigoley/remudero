@@ -110,6 +110,7 @@ import {
   detachedActionInFlight,
   detachedSweepActionCount,
   drainDetachedSweepActions,
+  abandonDetachedSweepAction,
   drainInFlightReviews,
   inFlightReviewCount,
   inFlightReviewRunsNow,
@@ -121,7 +122,7 @@ import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type Me
 import { resolveReleasedIds, closedUnmergedRunBranchTaskIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, type IndependentBlockRelease } from "./status.js";
-import type { DispatchValueContext } from "./dispatch-value.js";
+import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { LedgerRecord, RetroTriggerDecision } from "./retro.js";
@@ -142,6 +143,8 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
+import { defaultLaneGovernorPorts, LANE_TARGET_STEP, laneTarget, laneTargetPayload, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
 } from "./daemon-memory-policy.js";
@@ -1635,6 +1638,9 @@ export interface DaemonDeps {
   recommendationBackfill?: RecommendationBackfill;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
   fleetLane?: FleetLaneDeps<number | Promise<number>>;
+  /** W1-T9097: the lane governor's mode, memory reading and CPU count (lib/lane-governor.ts). Absent, the real ports over
+   *  `fleetLane`'s state directory; neither, no governor. Consulted only at two or more lanes. */
+  laneGovernor?: LaneGovernorPorts;
   /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
    *  ledger ({@link stepSreGovernor}). Absent, it reads `fleetLane`'s state root — TRAP: the
    *  registry (W1-T4227) names no instance `state_dir` yet, and the SRE lane runs on this daemon's
@@ -1997,6 +2003,30 @@ export function runBranchDispatchOpts(
     // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
     // row, which has three emitters and no reader.
     onSkipRunBranch: (t: Task) => log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+  };
+}
+
+function captureDispatchFrontier(plan: Plan, opts: NextRunnableOpts) {
+  const eligible: Task[] = [];
+  return { eligible, opts: { ...opts, hasPushedRunBranch: (id: string) => {
+    // This is eligibility's final guard; retain its answer and observe without a second selection pass.
+    const blocked = opts.hasPushedRunBranch?.(id) ?? false;
+    if (!blocked) eligible.push(plan.byId.get(id)!);
+    return blocked;
+  } } };
+}
+
+function dispatchPickPayload(
+  task: Task, site: "tick" | "lane-refill", eligible: readonly Task[], context: DispatchValueContext | undefined,
+  started: readonly Task[], occupied: readonly Task[], observed: ObservedScopeByTask,
+): Record<string, unknown> {
+  const startedIds = new Set(started.map(t => t.id));
+  const runner = eligible.find(t => !startedIds.has(t.id));
+  const serialized = runner && !partitionByFileOverlap([...occupied, ...started, runner], observed).dispatch.includes(runner);
+  return {
+    task: task.id, site, rank: Math.max(1, eligible.findIndex(t => t.id === task.id) + 1),
+    ...explainDispatchScore(task, context),
+    runner_up: runner ? { task: runner.id, ...explainDispatchScore(runner, context), reason: serialized ? "serialized" : "order" } : null,
   };
 }
 
@@ -4032,6 +4062,34 @@ export async function runDaemon(
   // never 0, so a misconfigured lane count can never silently mean "dispatch nothing"; the budget helper floors its
   // own input the same way, so a value below 1 clamps up here rather than producing two disagreeing floors (W1-T343).
   const laneCount = Math.max(1, opts.laneCount ?? 1);
+  // W1-T9097 (ADR 0007 C): the lane target, re-read at most once per poll interval and ledgered on each reading.
+  // Shadow changes nothing; enforce caps NEW admissions only, so a running lane is never stopped by a lower target.
+  const laneGovernorPorts = laneCount < 2 ? undefined
+    : deps.laneGovernor ?? (deps.fleetLane ? defaultLaneGovernorPorts(deps.fleetLane.stateDir) : undefined);
+  let laneGovernorMode: LaneGovernorMode = "shadow";
+  try { if (laneGovernorPorts) laneGovernorMode = laneGovernorPorts.mode(); }
+  catch (error) {
+    // An unreadable mode never enforces: the governor stays in shadow and the row names why.
+    log(LANE_TARGET_STEP, { mode: "shadow", mode_unread: error instanceof Error ? error.message : String(error) });
+  }
+  let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
+  /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
+  const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
+    if (!laneGovernorPorts) return Infinity;
+    const nowMs = daemonClock.now();
+    if (!laneTargetReading || nowMs - laneTargetReading.atMs >= pollIntervalMs) {
+      let memory: LaneMemoryReading | { unread: string };
+      try { memory = laneGovernorPorts.read(); }
+      catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        memory = { unread: reason };
+      }
+      const result = laneTarget({ previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount() });
+      laneTargetReading = { atMs: nowMs, result };
+      log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
+    }
+    return laneGovernorMode === "enforce" ? laneTargetReading.result.target : Infinity;
+  };
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
   const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
@@ -4457,7 +4515,9 @@ export async function runDaemon(
         abandonedReviews = await drainInFlightReviews({ boundMs: Math.max(0, deadlineMs - daemonClock.now()) });
       }
       for (const action of abandoned) {
+        const release = await abandonDetachedSweepAction(action);
         log("daemon.detached_action_abandoned", {
+          ...release,
           action_kind: action.actionKind,
           task_id: action.taskId,
           age_ms: action.ageMs,
@@ -6406,6 +6466,7 @@ export async function runDaemon(
       return task;
     });
     let dispatchSet: Task[];
+    let tickEligible: Task[] = [];
     // Hoisted here because the partition is scoped to the else branch below while the rung now runs
     // outside the idle branch. Zero means nothing was deferred this tick; the forced path leaves it zero,
     // which is correct — an operator-forced dispatch is not evidence of a collision.
@@ -6416,24 +6477,31 @@ export async function runDaemon(
     bootFirstSelectionAtMs ??= daemonClock.now();
     if (forcedNext) {
       dispatchSet = hasChildTask(forcedNext.id) || occupiedTasks.length >= laneCount ? [] : [forcedNext];
+      tickEligible = [...dispatchSet];
     } else {
-      const budget = Math.max(0, (
-        laneCount <= 1
-          ? laneCount
-          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission })) - occupiedTasks.length);
+      const wipBudget = laneCount <= 1
+        ? laneCount
+        : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
+      const tickLaneTarget = enforcedLaneTarget(occupiedTasks.length, tickQueueAdmission?.wipLimit);
+      const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length);
       if (laneCount >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
-        log("dispatch.wip_deferred", {
+        // W1-T9097: a zero the enforced lane target produced (the WIP budget had room) is named as the target's.
+        const targetHeld = wipBudget > occupiedTasks.length;
+        log(targetHeld ? "dispatch.lane_target_held" : "dispatch.wip_deferred", {
           lane_count: laneCount,
+          ...(targetHeld ? { target: tickLaneTarget, in_flight: occupiedTasks.length } : {}),
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: deps.openPrCount?.() ?? null,
           ...wipDeferredAdmissionFields(tickQueueAdmission),
         });
       }
-      const candidates = runnableCandidates(planForBatch, isMerged, budget, {
+      const selection = captureDispatchFrontier(planForBatch, {
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
+      const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
+      tickEligible = selection.eligible;
       // Passed explicitly rather than relying on the partition's own default parameter — see
       // `DaemonDeps.observedByTask` (W1-T2286).
       const partition = partitionByFileOverlap([...occupiedTasks, ...candidates], deps.observedByTask ?? NO_OBSERVED_SCOPE);
@@ -6753,6 +6821,7 @@ export async function runDaemon(
     const inFlightTasks = new Set<Task>();
     const refillAdmissions = new WeakMap<Task, {
       snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
+      eligible: Task[]; context: DispatchValueContext | undefined;
     }>();
     // A promised handoff owns only its proposal, never an attempt or active-worker slot.
     // Other freed lanes must not choose its ID/scope before the pool accepts it.
@@ -6903,7 +6972,8 @@ export async function runDaemon(
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
-        governorReason;
+        governorReason ??
+        (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
       if (governed && reason !== undefined && reason === governorReason && inFlightTasks.size > 0) {
@@ -6923,6 +6993,8 @@ export async function runDaemon(
         let drainHeld: { task: string; taskClass: string; measuredMs: number; samples: number } | undefined;
         const refillDeferrals: PriorityDeferral[] = [];
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
+        let refillEligible: Task[] = [];
+        let refillContext: DispatchValueContext | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
           const budget = laneDispatchBudget({
             laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
@@ -6931,7 +7003,7 @@ export async function runDaemon(
             runBranchListing, withRequeueReceipts(deps.readOrphanRunBranchEvidence?.(), deps.readLedgerLines), resumableHandoffs,
             lazyClosedUnmerged(deps.readClosedRunBranchPrs),
           );
-          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
+          const selection = captureDispatchFrontier(snapshot.plan, {
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
@@ -6943,6 +7015,9 @@ export async function runDaemon(
             inFlight: [...inFlightTasks, ...refillProposals],
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
+          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, selection.opts);
+          refillEligible = selection.eligible;
+          refillContext = selection.opts.dispatchValueContext;
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
           const poolIds = new Set(pool.map((t) => t.id));
@@ -7060,7 +7135,8 @@ export async function runDaemon(
           // A promised refill still crosses the pool's handoff before it actually starts. No
           // attempt/snapshot/overlap slot is committed here. Give concurrent decisions distinct keys.
           const candidate = { ...next };
-          refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished.id });
+          refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished.id,
+            eligible: refillEligible, context: refillContext });
           refillProposals.add(candidate);
           return candidate;
         };
@@ -7150,6 +7226,7 @@ export async function runDaemon(
           (passIds.has(task.id) ? "already dispatched this phase" : undefined) ??
           (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
           (budget <= inFlightTasks.size ? "lane budget" : undefined) ??
+          (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined) ??
           (!partitionByFileOverlap([...inFlightTasks, task], deps.observedByTask ?? NO_OBSERVED_SCOPE).dispatch.includes(task)
             ? "file overlap at start" : undefined);
         if (reason !== undefined) {
@@ -7226,6 +7303,8 @@ export async function runDaemon(
       }
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts], ...latchAdmissions.get(task.id) } : {}) });
+      if (isRefill) log("dispatch.pick_scored", dispatchPickPayload(task, "lane-refill", refill!.eligible, refill!.context,
+        [task], [...inFlightTasks].filter(t => t !== task), deps.observedByTask ?? NO_OBSERVED_SCOPE));
       log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null,
         ...(resumableHandoffs.has(task.id) ? { resumes_handoff: resumableHandoffs.get(task.id)!.branch } : {}) });
       // The first wave is sampled once, by the tick (below): a refill is the lane change.
@@ -7332,6 +7411,9 @@ export async function runDaemon(
     try {
       let phase = "dispatch.concurrent_set";
       try {
+        const tickStarted = admitted.filter(t => !occupiedChildren.has(t));
+        for (const task of tickStarted) log("dispatch.pick_scored", dispatchPickPayload(task, "tick", tickEligible,
+          dispatchOpts.dispatchValueContext, tickStarted, occupiedTasks, deps.observedByTask ?? NO_OBSERVED_SCOPE));
         if (dispatchSet.length > 1 && admitted.length > 0) {
           log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
         }

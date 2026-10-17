@@ -50,7 +50,8 @@ const build = (n: number, created: string) => pr({ prNumber: n, createdAt: creat
 // ── acceptance 1: the producer populates the signal ─────────────────────────────────────────
 
 test("W1-T2439 (acceptance 1): buildOpenPrViews assigns isPlanFiling from the ledger predicate", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  // W1-T9722: buildOpenPrViews moved with the tick-read producer.
+  const src = readFileSync(new URL("../src/lib/tick-read-worker.ts", import.meta.url), "utf8");
   assert.match(src, /new Map\(raw\.map\(\(pr\) => \[pr\.number, isPlanOnlyFilingPr\(ledger, pr\.url\)\]\)\)/,
     "the producer must still derive the emitter fast path from the shared ledger predicate");
   assert.match(src, /isPlanFiling: planFiling\.isPlanFiling,/,

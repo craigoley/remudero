@@ -330,7 +330,7 @@ test("W1-T9604: a restarted projection and a rotated ledger read the same bucket
 test("W1-T9604: the board oracle audits the step cache and the board derives as it did", (t) => {
   const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const w = world(t, rowsFrom(T0, 500));
-  const board = w.board({ log: (step, extra) => void logged.push({ step, extra }) });
+  const board = w.board({ oracleSlices: 1, log: (step, extra) => void logged.push({ step, extra }) });
   // The reference arm: every row kept and the derive made from them in memory, as before W1-T9436; no store index.
   const reference = w.board({ keepEveryRow: true, deriveFromRows: true });
   for (let round = 0; round < 4; round++) {
@@ -367,7 +367,7 @@ test("W1-T9604: the board oracle audits the step cache and the board derives as 
   // The in-memory arm derives from its rows, so it has no store index, no cache and no step_cache to report.
   const before = logged.length;
   const referenceLog: Array<Record<string, unknown>> = [];
-  const inMemory = w.board({ keepEveryRow: true, deriveFromRows: true, log: (_step, extra) => void referenceLog.push(extra) });
+  const inMemory = w.board({ keepEveryRow: true, deriveFromRows: true, oracleSlices: 1, log: (_step, extra) => void referenceLog.push(extra) });
   inMemory.update({ force: true });
   assert.equal(inMemory.oracle().mismatches.length, 0);
   assert.equal(referenceLog.at(-1)?.step_cache, undefined);

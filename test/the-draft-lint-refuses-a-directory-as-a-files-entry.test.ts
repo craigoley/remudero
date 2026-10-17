@@ -30,6 +30,8 @@ const isDirectory = (path: string) => statSync(join(ROOT, path), { throwIfNoEntr
 
 function fragment(files: string[], proof = "unit test: the directory draft is refused"): string {
   const [task] = parseTasksFromYaml(inboxDraftExampleFragmentYaml(), "directory draft fixture");
+  // Keep the companion test as this fixture task's own falsifier while varying directory inputs.
+  task.title = files.includes("test/future.test.ts") ? "Future" : "Example";
   task.files = files;
   task.design = "CREATES: test/future.test.ts";
   task.acceptance = [{ claim: "the directory draft is refused", proof }];

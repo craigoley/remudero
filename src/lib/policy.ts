@@ -1078,6 +1078,41 @@ export function loadRunChildMode(path: string = installPolicyPath()): RunChildMo
   return parseRunChildMode(isPlainObject(raw) ? raw.sweep : undefined);
 }
 
+// ── sweep.laneGovernor.mode (W1-T9097, ADR 0007 C) ──────────────────────────────────────────
+// Read optionally, exactly like `sweep.runChild.mode` above. An absent block reads as `shadow`, which changes nothing.
+
+/** `shadow` ledgers the lane target and changes nothing; `enforce` lets it cap new admissions (lib/lane-governor.ts). */
+export const LANE_GOVERNOR_MODES = ["shadow", "enforce"] as const;
+export type LaneGovernorMode = (typeof LANE_GOVERNOR_MODES)[number];
+
+/** Validate `sweep.laneGovernor.mode` out of the `sweep` mapping. An absent `laneGovernor` block reads as `shadow`. */
+export function parseLaneGovernorMode(sweep: unknown): LaneGovernorMode {
+  const block = isPlainObject(sweep) ? sweep.laneGovernor : undefined;
+  if (block === undefined) return "shadow";
+  if (!isPlainObject(block)) throw new PolicyError("policy.yaml: 'sweep.laneGovernor' must be a mapping.");
+  const row = block.mode;
+  if (!isPlainObject(row)) throw new PolicyError("policy.yaml: 'sweep.laneGovernor.mode' must be a mapping with 'value'/'origin'.");
+  if (row.origin !== "proposal") {
+    throw new PolicyError(`policy.yaml: 'sweep.laneGovernor.mode.origin' must be "proposal", got ${JSON.stringify(row.origin)}.`);
+  }
+  const found = LANE_GOVERNOR_MODES.find((mode) => mode === row.value);
+  if (found === undefined) {
+    throw new PolicyError(`policy.yaml: 'sweep.laneGovernor.mode' accepts only "shadow", "enforce", got ${JSON.stringify(row.value)}.`);
+  }
+  return found;
+}
+
+/** `sweep.laneGovernor.mode` from the policy at `path` (default: this installation's). A missing or unparseable file throws. */
+export function loadLaneGovernorMode(path: string = installPolicyPath()): LaneGovernorMode {
+  let raw: unknown;
+  try {
+    raw = parseYaml(readFileSync(path, "utf8"));
+  } catch (err) {
+    throw new PolicyError(`policy.yaml is not valid YAML (${path}): ${String(err)}`);
+  }
+  return parseLaneGovernorMode(isPlainObject(raw) ? raw.sweep : undefined);
+}
+
 // ── Daily-cost-ceiling override store (W1-T332) ─────────────────────────────────────────────
 // A runtime-tunable value belongs in a store the console can write at runtime, not the committed
 // `plan/policy.yaml` behind a PR and a deploy (operator ruling 2026-08-04) — reuses

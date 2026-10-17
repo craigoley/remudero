@@ -80,7 +80,7 @@ import {
   type ClaudeModelHealthSource,
   type ClaudeModelHealthState,
 } from "./claude-model-health.js";
-import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel, type CapabilityLadder } from "./mounts.js";
+import { loadMounts, mountsPath, resolveClaudeModelAlias, subscriptionOnlyModel, type CapabilityLadder, type Mount } from "./mounts.js";
 import {
   experimentDrawSeed,
   experimentIntentionToTreat,
@@ -251,6 +251,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  notStarted?: "admission-abandoned";
+  admissionSinceMs?: number;
   /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
   mcpIsolation?: WorkerMcpIsolationEvidence;
   /** W1-T9489: set on every Claude spawn made under the strict MCP boundary, so a census tells post-fix rows from pre-fix
@@ -1121,6 +1123,8 @@ export interface SpawnWorkerArgs {
    * `bypassPermissions` (claude-code#20946), whereas a disallowed tool is never presented to the model at all. Default
    * UNRESTRICTED for the caller (W1-T2591); the claude.ai account-connector denies are merged in on every spawn (W1-T9489). */
   disallowedTools?: readonly string[];
+  /** Models whose drafts already failed this proposal's lint; context fit still applies first. */
+  avoidModels?: readonly string[];
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
@@ -1291,6 +1295,8 @@ export interface SpawnWorkerArgs {
   /** W1-T5659 — a caller's cancel. Aborting it aborts THIS call's query (chained into the same `options.abortController` the
    * clock bound uses; one is constructed when only this is set). Omitted leaves behaviour byte-identical. */
   signal?: AbortSignal;
+  memoryAdmissionSinceMs?: number;
+  onMemoryAdmissionEnd?: () => void;
   /** Observe the per-spawn worker-home reap this teardown already runs. `reapWorkerHome` ALREADY COMPUTES a {@link
    * WorkerHomeReapResult} naming what it removed and why, and that value was discarded in statement position until this.
    * Called on EVERY exit path including a thrown error, never allowed to throw. INSTRUMENTATION ONLY: it observes, it never
@@ -1310,6 +1316,35 @@ export interface SpawnWorkerArgs {
    *  with `credentialHelperSocketPath`, `args.cwd`'s worktree git config points at the socket helper.
    *  The daemon (W1-T5115) passes the git half ALONE, leaving the model credential env untouched. */
   secretBoundary?: SecretBoundaryHandles;
+}
+
+/** Pure inbox draft spawn boundary; registry observation and lint evaluation belong to the caller. */
+export function buildInboxDraftWorkerArgs(args: {
+  cwd: string;
+  settingsFile: string;
+  prompt: string;
+  mount: Mount;
+  config: Config;
+  disallowedTools: readonly string[];
+  avoidModels?: readonly string[];
+  maxBudgetUsd: number;
+  tools: string[];
+}): SpawnWorkerArgs {
+  return {
+    cwd: args.cwd,
+    permissionMode: "bypassPermissions",
+    settingsFile: args.settingsFile,
+    model: args.mount.model,
+    mountProvider: args.mount.provider,
+    effort: args.mount.effort,
+    maxTurns: args.mount.maxTurns,
+    disallowedTools: args.disallowedTools,
+    maxBudgetUsd: args.maxBudgetUsd,
+    config: args.config,
+    prompt: args.prompt,
+    avoidModels: args.avoidModels,
+    tools: args.tools,
+  };
 }
 
 /** W1-T3573, PRIMARY CONTROL (test/bound-kind-declared.test.ts): the declaration below IS what
@@ -2356,12 +2391,26 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
   const childReservationId = currentRunChildReservationId();
+  const admissionStartedAtMs = systemClock.now();
   const admission = childReservationId ? undefined : await awaitMemoryAdmission({
     workerClass: workerClassOf(args),
+    signal: args.signal,
+    sinceMs: args.memoryAdmissionSinceMs,
     root: () => (args.config ?? loadConfig()).root,
     ...(args.runId ? { runId: args.runId } : {}),
     ...(args.taskId ? { taskId: args.taskId } : {}),
   }, args.memoryShadow);
+  args.onMemoryAdmissionEnd?.();
+  if (admission?.kind === "abandoned" || args.signal?.aborted) {
+    if (admission && "reservation" in admission) admission.reservation?.releaseOccupancy();
+    if (admission?.kind === "admitted") admission.endAged?.();
+    return { notStarted: "admission-abandoned", subtype: "admission_abandoned",
+      admissionSinceMs: Math.min(admissionStartedAtMs, args.memoryAdmissionSinceMs ?? admissionStartedAtMs),
+      sessionId: "", costUsd: 0, numTurns: 0,
+      text: "", blocks: [], stderr: "", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+      model: args.model ?? "", effort: args.effort ?? "", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+      modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+  }
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   const memoryReservation = childReservationId ? undefined :
     (admission && "reservation" in admission ? admission.reservation : undefined) ??
@@ -2857,6 +2906,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
+    const remaining = [openWeight.model, ...openWeight.alternatives]
+      .filter((model) => !(args.avoidModels ?? []).includes(model));
+    const avoidExhausted = remaining.length === 0;
+    if (!avoidExhausted) openWeight = { ...openWeight, model: remaining[0]!, alternatives: remaining.slice(1) };
     let draftChoice: DraftChoice | undefined;
     let draftReadError: string | undefined;
     if (args.draftRouting) {
@@ -2901,7 +2954,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             openWeight.alternatives.slice(openWeight.alternatives.indexOf(selection.model) + 1));
           if (args.draftRouting) recordDraftRouting(args.draftRouting.log, "draft.routing.choice", {
             lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, deployment: selection.model,
-            reason: draftFallback?.reason ?? (draftReadError ? "stats-read-failed-row-order" : draftChoice?.reason),
+            reason: avoidExhausted ? "avoid-exhausted"
+              : draftFallback?.reason ?? (draftReadError ? "stats-read-failed-row-order" : draftChoice?.reason),
             ...(draftFallback ? { previous_deployment: draftFallback.model } : {}),
             posterior: draftChoice?.arms.find((arm) => arm.deployment === selection.model) ?? {
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
