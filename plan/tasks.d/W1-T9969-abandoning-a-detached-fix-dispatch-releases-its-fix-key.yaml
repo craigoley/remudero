@@ -1,0 +1,163 @@
+- id: W1-T9969
+  title: "ABANDONING A DETACHED FIX DISPATCH RELEASES ITS FIX KEY, AND THE STAND-DOWN NAMES THE REAL WAIT — `inFlightFixKeys` is freed only when the detached `dispatchFix` settles, so on 2026-10-16 #12413's key W1-T9913@5036fa4b stayed claimed from 20:56:37Z until its worker cleared memory admission at 21:55:42Z, through two `daemon.detached_action_abandoned` rows, while every pass logged a false 'a concurrent sweep is already dispatching'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern, the fix-dispatch key's lifecycle while its detached dispatch waits for memory admission (naming the hold, ending it on abandonment, re-admitting). Strike caps, the progress judge, the restart drain's bound and the admission's tiers are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16/17 fix-lane triage, agent C31's ledger read of #12413 (W1-T9913), filed by the session's filing agent F12 with the dispatch-order rulings"
+  plan_refs: [W1-T2520, W1-T2379, W1-T2913, W1-T5721, W1-T9780, W1-T5659, W1-T1127, W1-T9114, W1-T9955, W1-T9933, W1-T9913, W1-T100, W1-T147, W1-T9748]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/daemon.ts
+    - src/lib/host-memory-admission.ts
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts
+  status: queued
+  priority: 1  # a fix dispatch held in memory admission blocks its PR's fix lane for the whole wait (59 min on #12413) under a false reason
+  attempts: 0
+  rationale: |
+    MEASURED by agent C31 from the core ledger, 2026-10-16. Not re-read by this filing: the code half below was.
+    - #12413's fix key W1-T9913@5036fa4b was claimed at 20:56:37Z.
+    - Its worker waited 2,621,609 ms (44 attempts) in memory admission and was admitted at 21:55:42Z.
+    - Throughout, every pass's stand-down read "duplicate fix-dispatch key (W1-T9913@5036fa4b) already claimed this
+      pass — a concurrent sweep is already dispatching this PR's fix rung", for example `sweep.disposed` at 21:39:14Z.
+      That is false. No concurrent sweep existed. The holder was this process's own detached dispatch, waiting for memory.
+    - `daemon.detached_action_abandoned` fired at 21:39:22Z and at 21:48:52Z (age_ms ~2.5M and ~3.1M, bound_ms 559000).
+      Neither released the key, and the process did not exit after either drain. The key stayed held until the
+      worker was admitted.
+    READ on origin/main 0209f6837 (symbols, not lines), confirming each claim:
+    - `inFlightFixKeys` is a module-level `Set` in src/lib/sweep.ts (W1-T2520).
+    - `claimFixDispatch` builds `fixKey = <fixLedgerTaskIdFor(pr)>@<headSha>`. A key already in the set is refused
+      with exactly the reason quoted above, whatever holds it. Otherwise it adds the key.
+    - The key leaves the set in three ways:
+      - one of the claim's own two refusal arms (strikes under the claim, history changed);
+      - an explicit `fixClaim.release()` (the host-admission refusal);
+      - the `finally` of `fixClaim.run`, which fires only when the dispatched work settles.
+      Nothing else deletes it.
+    - Each detached site hands `fixClaim.run(() => deps.dispatchFix(...))` to `detachFixDispatch` / `detachSweepAction`.
+      The `DetachedSweepActionRegistration` holds `{actionKind, taskId: escalationTaskIdFor(pr), startedAtMs, phase}`.
+      It holds NO fix key and no release.
+    - A fix-dispatch registration starts in phase `worker` and changes only to `ci-wait` and back (`waitForCiGreen` in
+      the default `dispatchFix`). So a dispatch waiting in memory admission is indistinguishable from a live worker.
+    - src/lib/daemon.ts `drainBeforeRestart` gets the stragglers back from `drainDetachedSweepActions` and only logs
+      `daemon.detached_action_abandoned` for each. It touches no key and ends no wait.
+    - The round's `fix.dispatch` row is written in run-task.ts before `deps.spawn`, and memory admission happens INSIDE
+      the spawn: `spawnWorker` calls `awaitMemoryAdmission` (src/lib/worker.ts). A dispatch waiting for memory has
+      therefore already written its strike row, and has started no worker.
+    - `awaitMemoryAdmission` "NEVER throws: an error is an admission". A sleep port that throws to cancel the wait
+      would ADMIT the worker. Cancelling needs its own outcome.
+    - `spawnWorker` already takes `signal?: AbortSignal` (W1-T5659), but it is read only after admission, to abort the query.
+    - The admission's aged tier ranks a waiter from `streaks` keyed `root + runId`, so a NEW dispatch run starts its
+      wait from zero.
+    WHY NOT SIMPLY DELETE THE KEY ON ABANDONMENT: the abandoned work keeps waiting, and admission would then start its
+    worker. The next pass, seeing a free key, would dispatch a second round for the same head. That is W1-T2520's race:
+    13 dispatches across two PRs against a cap of 2. Releasing safely means ending the wait first, and only a wait that
+    has started no worker can be ended without losing work.
+    NEIGHBOURS. W1-T9780 (merged, #12309) did the light-pass analogue: an action waiting for memory admission detaches,
+    and its stand-down names the wait. W1-T9114 (queued) moves detached actions into run children adopted across a
+    restart. That is a different lifecycle, and it would inherit this key rule. W1-T9955 and W1-T9933 (queued) also edit
+    src/lib/sweep.ts in other functions.
+    lint-plan's duplicate-surface notice names W1-T100 (blocked_ci routing to the ci-log fix path), W1-T147 (an overnight
+    chaos drill) and W1-T9748 (a trace of how declared files reach staging). They share only the whole-file surfaces
+    src/lib/sweep.ts, src/lib/daemon.ts and src/run-task.ts, and none touches the fix-dispatch key, the detached registry
+    or memory admission. This task supersedes none of them.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main 0209f6837 for inFlightFixKeys, claimFixDispatch,
+    detached_action_abandoned and "duplicate fix-dispatch key". The hits (W1-T2913, W1-T5721, W1-T4903, W1-T5030,
+    W1-T5032, W1-T9502) are merged and different. Also swept the added lines of all 430 open origin heads (2026-10-17
+    01:20Z) for the same terms. The only hit is a ledger-steps catalogue entry on feat/ledger-steps-gate.
+  design: |
+    No new fixed bound (standing operator rule). The restart drain's existing measured bound decides when an action
+    is abandoned. This task changes only what abandonment does to a fix dispatch that has started no worker.
+    1. THE REGISTRY KNOWS THE KEY AND THE WAIT (src/lib/sweep.ts).
+       - `DetachedSweepActionRegistration` gains, for `fix-dispatch` only:
+         - `fixKey`;
+         - `release`, the claim's release;
+         - `abandon`, an `AbortController` whose signal is threaded to the round's spawn.
+       - `DetachedFixPhase` gains `admission`. The default `dispatchFix` sets it from the spawn's admission-wait hook,
+         the same `memoryShadow.sleep` seam W1-T9780's `lightPassMemoryWaitPorts` uses, with `sinceMs` and the attempt
+         count. It goes back to `worker` once the admission returns.
+       - `drainDetachedSweepActions`'s freshness filter awaits `admission` exactly as it awaits `worker`. What a
+         restart waits for is unchanged.
+    2. THE REFUSAL NAMES THE REAL HOLDER (`claimFixDispatch`).
+       - On a key already in `inFlightFixKeys`, look the key up in the registry.
+       - If this process's own detached dispatch holds it, refuse with
+         "fix-dispatch key (<key>) is held by its own detached fix dispatch, <phase> for <age>s". Add
+         "(<attempts> admission attempts)" in phase `admission`.
+       - The `sweep.disposed` row carries `in_flight_action: "fix-dispatch"`, `in_flight_phase` and `in_flight_age_ms`,
+         as W1-T9780's light-pass row carries `in_flight_action`.
+       - Only a key with NO registration keeps today's "a concurrent sweep is already dispatching" text. That is the
+         genuine same-pass race the mutex exists for.
+    3. ABANDONMENT ENDS A WAIT THAT HAS STARTED NO WORKER, AND RELEASES ITS KEY.
+       - src/lib/sweep.ts exports `abandonDetachedSweepAction(descriptor)`. `drainBeforeRestart` (src/lib/daemon.ts)
+         calls it for each action it logs as `daemon.detached_action_abandoned`.
+       - For a `fix-dispatch` in phase `admission`, it aborts the registration's signal.
+       - `awaitMemoryAdmission` (src/lib/host-memory-admission.ts) accepts the signal. An aborted signal ends the wait
+         with a new outcome `{kind: "abandoned", reason: "admission-abandoned", waitedMs, attempts}`. It is never an
+         admission and never an error-admits.
+       - `spawnWorker` (src/lib/worker.ts) returns on that outcome BEFORE `claimWorkerOccupancy`, with a named
+         not-started result.
+       - The fix round records `fix.done` with `subtype: "admission_abandoned"` and `worker_exit: "not_spawned"`, in
+         run-task.ts where the round's other `fix.done` rows are written. `fixRoundTally` / `isRealStrike` count that
+         round as no strike: no worker ran. That is the same rule as W1-T1127, where a round that never ran its
+         worker spends nothing.
+       - The work then settles, and `fixClaim.run`'s `finally` releases the key through the existing path.
+       - The abandoned row gains `released_fix_key: <key>`.
+       - For a `fix-dispatch` in phase `worker` (a live worker) or `ci-wait`, abandonment changes nothing. The key stays
+         held, because releasing it while a worker can still push would reopen W1-T2520's race. The row says
+         `released_fix_key: null` with `held_by: "live-worker"` or `"ci-wait"`.
+    4. A RELEASED KEY RE-ADMITS ON THE NEXT PASS.
+       - With the key free, the next pass's `claimFixDispatch` takes it and the round is re-judged from fresh evidence.
+       - Its memory admission keeps the abandoned wait's rank. The claim records the first admission wait's start per
+         fix key, and the re-dispatch's admission request carries it, so the aged tier's `since` is the original wait.
+       - So abandonment can never reset a waiter to the back of the admission queue, and repeated restarts cannot
+         starve it.
+    5. TESTS. A new file, test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts, with `test(` titles verbatim as
+       in the proofs. Use the module-level registry with fakes:
+       - a `dispatchFix` fake whose admission-wait hook fires and then waits on the injected signal;
+       - `detachFixWait: true`;
+       - `resetMemoryAdmissionStateForTests` between cases;
+       - fixed timestamps.
+       No real spawn, no network. One test drives the real `awaitMemoryAdmission` with an aborted signal through
+       injected ports (sleep, random, enforceHere, withLock), to cover the new outcome arm.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts"
+    - claim: "a duplicate fix claim held by this process's own detached dispatch names that dispatch, its phase and its wait age, not a concurrent sweep"
+      proof: 'grep: test("W1-T9969: a duplicate fix claim names its own waiting dispatch and that wait age" in test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts'
+    - claim: "abandoning a fix dispatch still waiting for memory admission ends that wait and releases its key"
+      proof: 'grep: test("W1-T9969: abandoning a fix dispatch still waiting for memory admission releases its key" in test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts'
+    - claim: "a released fix key is claimed again on the next pass"
+      proof: 'grep: test("W1-T9969: a released fix key re-admits on the next pass" in test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts'
+    - claim: "an abandoned fix dispatch whose worker is already running keeps its key"
+      proof: 'grep: test("W1-T9969: an abandoned fix dispatch whose worker is running keeps its key" in test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts'
+    - claim: "an abandoned admission wait starts no worker and spends no strike"
+      proof: 'grep: test("W1-T9969: an abandoned admission wait spends no strike and starts no worker" in test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts'
+    - claim: "the re-admitted dispatch keeps the admission age of the wait it replaced"
+      proof: 'grep: test("W1-T9969: a re-admitted dispatch keeps the admission age of the wait it replaced" in test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts'
+    - claim: "the refusal text names its own detached dispatch"
+      proof: "grep: held by its own detached fix dispatch in src/lib/sweep.ts"
+    - claim: "the restart drain hands each abandoned action back to the registry"
+      proof: "grep: abandonDetachedSweepAction( in src/lib/daemon.ts"
+    - claim: "an aborted admission wait is its own outcome, never an admission"
+      proof: "grep: admission-abandoned in src/lib/host-memory-admission.ts"
+  falsifier: |
+    The #12413 timeline in miniature:
+    - claim key K at t0;
+    - the fake dispatch enters its admission wait;
+    - a second pass at t0+30 min is refused;
+    - the drain abandons the action at t0+43 min;
+    - a third pass at t0+44 min.
+    At origin/main, the second pass's reason says "a concurrent sweep is already dispatching", so the naming test
+    fails. The abandonment changes nothing, so the third pass is refused again and the release and re-admission tests
+    fail. With the fix, the second pass names "admission for 1800s". The abandonment aborts the wait, writes
+    `fix.done` admission_abandoned with no strike and frees K. The third pass claims K, and its admission's since is t0.
+    Ways to break it, and the test that catches each:
+    - Release the key on abandonment WITHOUT ending the wait: the fake's wait completes and starts a worker beside the
+      third pass's round, and the no-worker test fails.
+    - Abort a live worker's key: the live-worker test fails.
+    - Start the re-dispatch's admission at its own time: the admission-age test fails.
