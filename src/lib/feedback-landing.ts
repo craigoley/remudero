@@ -1121,6 +1121,7 @@ function* finishLanding(
     if (b.treeSha !== (yield* net.git(["rev-parse", `${b.mainSha}^{tree}`])).trim()) return undefined;
     opts.log?.("landing.nothing_to_land", { family: kind.family, branch: kind.branch, mainSha: b.mainSha });
     const result: LandFeedbackResult = { landed: false, files: [], ...(b.refused.length > 0 ? { refused: b.refused } : {}) };
+    if (b.refused.length > 0 && b.unlanded.length === 0) return result;
     try {
       yield* closeRedundantLandingPr(kind, net, b);
       return result;
