@@ -29,6 +29,7 @@ export interface DispatchValueContext {
   readonly openDependentFanoutByTaskId: ReadonlyMap<string, number>;
   readonly costOfDelayByTaskId?: ReadonlyMap<string, number>;
   readonly stridePassByTaskId?: ReadonlyMap<string, number>;
+  readonly costOfDelayInputsByTaskId?: ReadonlyMap<string, DispatchScoreInputs>;
   readonly costOfDelayFallback?: boolean;
   /** W1-T7534: open tasks the filing history cannot date — left unscored, ordered after the scored tier. */
   readonly costOfDelayUnscored?: readonly string[];
@@ -36,6 +37,34 @@ export interface DispatchValueContext {
   readonly costOfDelayImputed?: readonly string[];
   /** W1-T9967: each tier's measured wait, highest tier first; the ready row reports it as `tier_waits`. */
   readonly costOfDelayTierWaits?: readonly TierWait[];
+}
+
+export interface DispatchScoreInputs {
+  /** The installed urgency formula's priority factor, 2^-tierGap (W1-T9325). */
+  readonly priority_head_start: number;
+  readonly filing_age_ms: number;
+  readonly median_wait_ms: number;
+  readonly urgency: number;
+  readonly starts: number;
+}
+
+/** Explain the captured selection evidence without rebuilding it or consulting a clock. */
+export function explainDispatchScore(task: DispatchValueTask, context?: DispatchValueContext) {
+  const priority = Number.isFinite(task.priority) ? task.priority! : null;
+  if (!context?.stridePassByTaskId || context.costOfDelayFallback) return { basis: "priority-first" as const, priority };
+  const inputs = context.costOfDelayInputsByTaskId?.get(task.id);
+  return {
+    basis: "cost-of-delay" as const, priority,
+    priority_head_start: inputs?.priority_head_start ?? null,
+    filing_age_ms: inputs?.filing_age_ms ?? null,
+    median_wait_ms: inputs?.median_wait_ms ?? null,
+    urgency: inputs?.urgency ?? null,
+    score: context.costOfDelayByTaskId?.get(task.id) ?? null,
+    stride_pass: context.stridePassByTaskId.get(task.id) ?? null,
+    starts: inputs?.starts ?? null,
+    open_dependents: context.openDependentFanoutByTaskId.get(task.id) ?? 0,
+    imputed: context.costOfDelayImputed?.includes(task.id) ?? false,
+  };
 }
 
 /** W1-T9967: one tier's censoring-aware wait. `priority` is null for the absent-priority tier. */
@@ -438,7 +467,7 @@ function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
-): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits"> }
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
@@ -540,6 +569,7 @@ function costOfDelayContext(
   const prior = (valid + 1) / (total + 2);
   const costOfDelayByTaskId = new Map<string, number>();
   const stridePassByTaskId = new Map<string, number>();
+  const costOfDelayInputsByTaskId = new Map<string, DispatchScoreInputs>();
   const costOfDelayImputed: string[] = [];
   for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
     if (!openIds.has(task.id)) continue;
@@ -566,10 +596,14 @@ function costOfDelayContext(
     if (!Number.isFinite(score) || !Number.isFinite(pass) || score <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-score`] };
     costOfDelayByTaskId.set(task.id, score);
     stridePassByTaskId.set(task.id, pass);
+    costOfDelayInputsByTaskId.set(task.id, Object.freeze({
+      priority_head_start: 2 ** -tierOf(task), filing_age_ms: age,
+      median_wait_ms: unitByTier.get(tierKey(task)) as number, urgency, starts: counts.get(task.id) ?? 0,
+    }));
   }
   return {
     kind: "ready",
-    context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayTierWaits, ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
+    context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayInputsByTaskId, costOfDelayTierWaits, ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
   };
 }
 
