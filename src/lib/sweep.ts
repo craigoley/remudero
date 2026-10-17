@@ -17,7 +17,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
+import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
@@ -12364,6 +12364,87 @@ export const REFUSED_POST_HOST_GAP_REREVIEW_STEP = "sweep.review_host_gap_rerevi
 /** W1-T9124: the ledger step that records one stale-body re-review request. */
 export const STALE_BODY_REREVIEW_STEP = "sweep.stale_body_rereview";
 
+/** W1-T9970: the ledger step that records one re-review of an unchanged head, and the reason a newer reviewer image earns it. */
+export const REVIEW_REQUEUED_STEP = "sweep.review_requeued";
+export const REVIEWER_IMAGE_CHANGED = "reviewer-image-changed";
+
+/** W1-T9970: the image this process runs in, from {@link IMAGE_BUILD_SHA_PATH}. Off-container, or unreadable, it is
+ *  `undefined`: unknown, which no caller may read as "unchanged". */
+export function readRuntimeImageSha(path: string = IMAGE_BUILD_SHA_PATH): string | undefined {
+  try {
+    return readFileSync(path, "utf8").trim() || undefined;
+  } catch {
+    return undefined; // deliberate: absent and unreadable are both "image unknown", never "unchanged"
+  }
+}
+
+/** W1-T9970: one re-review a review-failed head is due because the reviewer image changed under it. */
+export interface ReviewerImageRequeue {
+  failureAt?: string;
+  failureImageSha?: string;
+  runningImageSha: string;
+  handoff: { step: string; site?: string; ts?: string };
+}
+
+/** The fix lane gave this head back: a design hand-off, an unfiled scope stand-down, or a sandbox refusal. */
+function isFixHandoff(line: Record<string, unknown>): boolean {
+  if (line.step === "fix.needs_design") return true;
+  if (line.step === "fix.stood_down" && line.site === "rung.unfiled_scope") return true;
+  return typeof line.step === "string" && line.step.startsWith("fix.") && typeof line.report_excerpt === "string" &&
+    extractRefusal(line.report_excerpt).some((refusal) => refusal.refusalClass === "proof-unexecutable-at-head");
+}
+
+/**
+ * W1-T9970 — A REVIEW FAILURE THE FIX LANE HANDED BACK IS RE-REVIEWED ONCE PER (HEAD, RUNNING IMAGE). Due when the
+ * newest delivered review at this head failed, the fix lane at this head handed back under the PR's fix key, and the
+ * running image differs from the one the failure recorded (or the failure recorded none). An unknown running image is
+ * never due, and a requeue row already naming this head and image means the same image never repeats one.
+ */
+export function reviewerImageRequeueDue(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha"> & Partial<Pick<OpenPrView, "taskId">>,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  runningImageSha: string | undefined,
+): ReviewerImageRequeue | undefined {
+  if (runningImageSha === undefined) return undefined;
+  const fixKey = reviewLedgerKeyFor(pr.taskId, pr.prNumber);
+  let newest: Record<string, unknown> | undefined;
+  let handoff: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    if (line.head_sha !== pr.headSha) continue;
+    if (line.step === "review.posted" && line.pr_url === pr.prUrl && (line.state === "success" || line.state === "failure")) {
+      newest = line;
+    } else if (line.step === REVIEW_REQUEUED_STEP) {
+      if (line.reason === REVIEWER_IMAGE_CHANGED && line.pr_number === pr.prNumber && line.new_image_sha === runningImageSha) return undefined;
+    } else if (line.task_id === fixKey && isFixHandoff(line)) {
+      handoff = line;
+    }
+  }
+  if (newest?.state !== "failure" || handoff === undefined) return undefined;
+  const failureImageSha = typeof newest.runtime_image_sha === "string" ? newest.runtime_image_sha : undefined;
+  if (failureImageSha === runningImageSha) return undefined;
+  return {
+    ...(typeof newest.ts === "string" ? { failureAt: newest.ts } : {}),
+    ...(failureImageSha !== undefined ? { failureImageSha } : {}),
+    runningImageSha,
+    handoff: { step: String(handoff.step), ...(typeof handoff.site === "string" ? { site: handoff.site } : {}),
+      ...(typeof handoff.ts === "string" ? { ts: handoff.ts } : {}) },
+  };
+}
+
+/** W1-T9970 — the decision identity of a review a {@link REVIEW_REQUEUED_STEP} row requested for this head on this
+ *  image. The same input on another image is another decision, so the re-review computes instead of replaying the
+ *  failure (and a new verdict is not a conflict with it). Any other review keeps its digest. */
+export function reviewerImageDecisionDigest(
+  digest: string,
+  ctx: { headSha: string; runtimeImageSha: string | undefined; requeues: ReadonlyArray<Record<string, unknown>> },
+): string {
+  const image = ctx.runtimeImageSha;
+  if (image === undefined) return digest;
+  const requested = ctx.requeues.some((line) => line.step === REVIEW_REQUEUED_STEP && line.reason === REVIEWER_IMAGE_CHANGED &&
+    line.head_sha === ctx.headSha && line.new_image_sha === image);
+  return requested ? `v2:${createHash("sha256").update(`${digest}\0runtime-image:${image}`, "utf8").digest("hex")}` : digest;
+}
+
 /** The slice of an open PR view {@link detectStaleBody} reads. */
 export type StaleBodyPrView = Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "reviewInputDigest" | "reviewState"> &
   Partial<Pick<OpenPrView, "taskId">>;
@@ -12817,6 +12898,8 @@ export interface StrikeLadderEffects {
 
 export interface SweepDeps {
   fixProgressJudge?: FixProgressJudge;
+  /** W1-T9970 test seam: the running reviewer image. Default {@link readRuntimeImageSha}. */
+  runtimeImageSha?: () => string | undefined;
   /** The CURRENT task contract revision ({@link taskContractRevision}) of a plan task on main, or `undefined`
    *  when the plan does not hold it. An escalated fix-progress latch records the revision it stands on;
    *  a different one means the plan was amended under it (remudero-console #2035). Omitted: the latch
@@ -14051,6 +14134,12 @@ function priorActionsFromLedger(
           refused.requestedForRefusal = true;
         }
       }
+      continue;
+    }
+    // W1-T9970: a reviewer-image re-review releases the key it names, until the next review.posted re-adds it.
+    if (line.step === REVIEW_REQUEUED_STEP && typeof line.review_key === "string") {
+      reviewDelivered.delete(line.review_key);
+      reviewDeliveredFailureAt.delete(line.review_key);
       continue;
     }
     // W1-T254/W1-T1213: OUTCOME-KEYED, off the review lane's OWN ledger lines — never
@@ -15838,6 +15927,8 @@ export async function runSweep(
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
+  // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
+  let runningImage: { sha: string | undefined } | undefined;
   // W1-T9124: a body-only edit leaves the head-keyed status on the old verdict; queue one re-review of the new input.
   if (!deps.dryRun) {
     const staleBodies = detectStaleBody(openPrs, ledgerLines);
@@ -17483,6 +17574,26 @@ export async function runSweep(
         disposition = hostGapPlan.kind === "escalate" ? "blocked-ambiguous" : "wait";
         reason = hostGapPlan.reason;
         if (hostGapPlan.progress?.verdict === "unavailable") judgedUnavailable.set(pr.prNumber, hostGapPlan.progress.reason);
+      }
+    }
+    // W1-T9970 — a review failure the fix lane handed back is re-reviewed once on a newer reviewer image.
+    if (disposition === "blocked-fixable") {
+      runningImage ??= { sha: (deps.runtimeImageSha ?? readRuntimeImageSha)() };
+      const due = reviewerImageRequeueDue(pr, ledgerLines, runningImage.sha);
+      if (due !== undefined) {
+        const reviewKey = reviewOutcomeKeyForPr(pr);
+        if (!deps.dryRun) {
+          appendLine(deps.ledgerPath, { ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId,
+            task_id: reviewOutcomeTaskIdFor(pr), step: REVIEW_REQUEUED_STEP, reason: REVIEWER_IMAGE_CHANGED,
+            pr_number: pr.prNumber, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: reviewKey,
+            old_image_sha: due.failureImageSha ?? null, new_image_sha: due.runningImageSha, failure_at: due.failureAt,
+            handoff: due.handoff });
+        }
+        prior.reviewDelivered.delete(reviewKey);
+        disposition = "post-review";
+        reason = `review failed under reviewer image ${due.failureImageSha?.slice(0, 7) ?? "unrecorded"} and the fix lane ` +
+          `handed this head back (${due.handoff.step}${due.handoff.site ? ` ${due.handoff.site}` : ""}); image ` +
+          `${due.runningImageSha.slice(0, 7)} is running now — re-reviewing the unchanged head once on it`;
       }
     }
     if (headIdentityRed(pr) && !isDispatchedRunBranch(pr.headRefName)) {
