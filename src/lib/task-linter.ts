@@ -31,7 +31,7 @@ import {
 import { BRE_CONSTRUCT_AFTER_BACKSLASH, breMetacharsIn } from "./bre-metachars.js";
 export { breMetacharsIn };
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
-import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
+import { isRuleSuitePath } from "./rule-suites.js";
 import { unresolvedDoctrineCitations, type DoctrineCitationFacts } from "./doctrine-citations.js";
 
 /** Deterministic task linter (MASTER-PLAN §5C Layer A).
@@ -1827,11 +1827,13 @@ export function newShardRuleSuiteViolations(task: Task, opts: LintOpts = {}): Li
   if (!isNew) return [];
   const proofs = (task.acceptance ?? []).map((c) => c.proof ?? "").filter((p) => /^\s*`?unit test:/i.test(p));
   const named = [...(task.files ?? []), ...proofs.flatMap((p) => p.match(/test\/[^\s"'`,;()]+\.test\.ts/g) ?? [])];
-  const paths = [...new Set(named)].filter(
-    (p) => /^test\/.+\.test\.ts$/.test(p) && RULE_SUITE_NAME_RE.test(p.slice("test/".length)) && !opts.pathExistsAtBase?.(p),
-  );
   const prose = [task.rationale, task.note, task.prompt, (task as Task & { design?: string }).design].join("\n");
-  if (paths.length === 0 || /@not-a-rule-suite[ \t]*:[ \t]*\S/.test(prose)) return [];
+  // The design promises a future header; use only a reasoned marker as that header.
+  const marker = prose.match(/@not-a-rule-suite[ \t]*:[ \t]*\S[^\r\n]*/)?.[0];
+  const paths = [...new Set(named)].filter(
+    (p) => isRuleSuitePath(p, marker ? `// ${marker}` : "") && !opts.pathExistsAtBase?.(p),
+  );
+  if (paths.length === 0) return [];
   const parityRow = (p: string): boolean =>
     (task.files ?? []).includes("scripts/census-precheck.mjs") &&
     [...prose.matchAll(/PRECHECK_PARITY/g)].some((m) =>
@@ -1845,8 +1847,8 @@ export function newShardRuleSuiteViolations(task: Task, opts: LintOpts = {}): Li
       severity: "block",
       message:
         `new shard ${task.id} names ${refused.join(", ")}, which listRuleSuites reads as a CI rule suite ` +
-        "(census/ratchet/baseline in the name) and every-ci-census-is-asked-before-the-push refuses with no " +
-        "parity row — rename the slug, declare `@not-a-rule-suite: <reason>` in the design, or list " +
+        "(test/rules/, census roster, or census/ratchet/baseline basename) and every-ci-census-is-asked-before-the-push refuses with no " +
+        "parity row — for a legacy name match rename the slug or declare `@not-a-rule-suite: <reason>` in the design; otherwise list " +
         "scripts/census-precheck.mjs in files and name the test's basename beside PRECHECK_PARITY",
     },
   ];
