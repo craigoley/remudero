@@ -64,7 +64,7 @@ async function spool(config) {
   let err;
   try { err = openSync(config.stderrPath, 'wx', 0o600); }
   catch (error) { closeSync(out); throw error; }
-  let storedBytes = 0, observedBytes = 0, error, closed = false, escalation, parentWatch, parentLost = false, spawnFailed = false;
+  let storedBytes = 0, observedBytes = 0, error, closed = false, escalation, killedAt, parentWatch, parentLost = false, spawnFailed = false;
   const childEnv = { ...process.env };
   delete childEnv[AUTHOR_CAPTURE_PARENT_ENV];
   if (config.trackParent) childEnv[AUTHOR_CAPTURE_PARENT_ENV] = String(process.pid);
@@ -72,6 +72,7 @@ async function spool(config) {
     stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   const kill = (signal) => {
     if (closed || !child.pid) return;
+    if (signal === 'SIGKILL') killedAt ??= performance.now();
     try {
       if (process.platform === 'win32') child.kill(signal);
       else process.kill(-child.pid, signal);
@@ -115,6 +116,10 @@ async function spool(config) {
     checkParent();
   }
   const native = await new Promise((resolve) => child.once('close', (status, signal) => resolve({ status, signal })));
+  const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch (cause) { return cause.code !== 'ESRCH'; } };
+  // A leader that obeyed SIGTERM closes the pipes while members that ignored it live on: finish the escalation.
+  while (escalation && child.pid && process.platform !== 'win32' && groupAlive() &&
+    !(killedAt !== undefined && performance.now() - killedAt > 2000)) await new Promise((resolve) => setTimeout(resolve, 50));
   closed = true;
   clearTimeout(timer);
   clearTimeout(escalation);

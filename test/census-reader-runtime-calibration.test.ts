@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { test, type TestContext } from "node:test";
 import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-ignore executable gate module.
@@ -11,6 +12,7 @@ const POLICY = { floorMs: 1000, multiple: 4 };
 const FILE = "test/reader.test.ts";
 const PASS = "TAP version 13\nok 1 - reader works\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
 const FAIL = `TAP version 13\nnot ok 1 - reader fails\n  ---\n  location: '${FILE}:1:1'\n  ...\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n`;
+// Niced fixture readers starve behind a loaded runner (flake screen, #12600); the wrap is not under test here.
 const priority = { wrap: (file: string, args: string[]) => ({ file, args }) };
 
 function fixture(t: TestContext, body = 'test("reader works", () => assert.equal(1, 1));') {
@@ -88,8 +90,8 @@ test("source-reader qualification rejects source drift and a new runtime overrun
 
 test("source-reader calibration exercises real native context and children without a synthetic pass", (t) => {
   const repo = fixture(t);
-  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY }), []);
-  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: ["test/ghost.test.ts"], readerRuntimePolicy: POLICY }), /ENOENT/);
+  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority }), []);
+  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: ["test/ghost.test.ts"], readerRuntimePolicy: POLICY, priority }), /ENOENT/);
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, timeoutMs: 4000 }), /no timeout override/);
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE, FILE], readerRuntimePolicy: POLICY }), /one reader/);
 });
@@ -131,20 +133,28 @@ test("source-reader snapshot dispatch reports unavailable calibration instead of
 
 test("source-reader calibration admits a healthy real nested proof beyond the unrelated four-second limit", (t) => {
   const repo = fixture(t, 'import { spawnSync } from "node:child_process"; test("nested proof", () => { const r = spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 4200)"]); assert.equal(r.status, 0); });');
-  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY }), []);
+  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority }), []);
 });
 
 test("source-reader native timeout preserves its started runaway and closed capture rather than reporting a pass", (t) => {
+  // The timer counts startup, so the runaway gets the budget this host's measured healthy startup earns.
+  const healthy = fixture(t), startedMs = performance.now();
+  assert.deepEqual(runCensusSuitesViaChild({ root: healthy.dir, files: [FILE], priority }), []);
+  const finishedMs = performance.now();
+  const timeoutMs = censusReaderBudget({ context: "startup", complete: true, passed: true, tests: 1,
+    elapsedMs: finishedMs - startedMs, finishedMs }, "startup", POLICY, finishedMs);
   const marker = "OWN_READER_RUNAWAY_STARTED";
-  const repo = fixture(t, `import { writeFileSync } from "node:fs"; process.on("SIGTERM", () => {}); writeFileSync("started-control", ${JSON.stringify(marker)}); test("owned runaway", async () => new Promise(() => { setInterval(() => {}, 100); }));`);
-  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], timeoutMs: 2000 }), (error: Error) => {
-    assert.match(error.message, /exceeded 2000 ms.*capture retained at/);
+  const repo = fixture(t, `import { writeFileSync } from "node:fs"; process.on("SIGTERM", () => {}); writeFileSync("started-control", ${JSON.stringify(marker)} + " " + process.pid); test("owned runaway", async () => new Promise(() => { setInterval(() => {}, 100); }));`);
+  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], timeoutMs, priority }), (error: Error) => {
+    assert.match(error.message, new RegExp(`exceeded ${timeoutMs} ms.*capture retained at`));
     const dir = error.message.match(/capture retained at (.+)$/)![1];
     const native = JSON.parse(readFileSync(join(dir, "native.json"), "utf8"));
     assert.equal(native.error.code, "ERR_AUTHOR_STEP_TIMEOUT");
     assert.equal(native.outputComplete, false);
     assert.ok(native.finishedAt);
-    assert.equal(readFileSync(join(repo.dir, "started-control"), "utf8"), marker);
+    const [started, pid] = readFileSync(join(repo.dir, "started-control"), "utf8").split(" ");
+    assert.equal(started, marker);
+    assert.throws(() => process.kill(Number(pid), 0), { code: "ESRCH" }, "the SIGTERM-ignoring runaway outlived its capture");
     return true;
   });
 });

@@ -657,10 +657,16 @@ test('author preflight leaves a running receipt and live private logs when its w
     assert.equal(statSync(logRoot).mode & 0o077, 0);
     assert.equal(parent.kill('SIGKILL'), true);
     assert.equal(await closed, 'SIGKILL');
-    writeFileSync(release, 'release');
+    // No release: the held step can only end because its parent-tracked capture cancels it.
     const native = join(logRoot, 'static-preflight.native-result.json');
     await waitFor(() => existsSync(native));
-    assert.equal(JSON.parse(readFileSync(native, 'utf8')).status, 7);
+    const result = JSON.parse(readFileSync(native, 'utf8'));
+    assert.equal(result.error.code, 'ERR_AUTHOR_CAPTURE_PARENT_EXITED');
+    assert.equal(result.parentTracking.ownerLost, true);
+    assert.equal(result.status, null);
+    assert.equal(result.signal, 'SIGTERM');
+    assert.equal(result.outputComplete, false);
+    assert.throws(() => process.kill(result.parentTracking.childPid, 0), { code: 'ESRCH' });
     assert.equal(JSON.parse(readFileSync(join(logRoot, 'progress.json'), 'utf8')).verdict, 'running');
     assert.equal(existsSync(join(logRoot, 'receipt.json')), false, 'loss of the author cannot certify a completed gate');
     assert.match(readFileSync(join(logRoot, 'static-preflight.stderr.log'), 'utf8'), /live static stderr/);
