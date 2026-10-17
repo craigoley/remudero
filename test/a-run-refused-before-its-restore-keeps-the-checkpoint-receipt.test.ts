@@ -6,8 +6,8 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pendingWorkerBoundaryHandoffs, runBranchStateFrom, runBranchDispatchOpts } from "../src/lib/daemon.js";
-import { THROWN_RUN_VERDICT_STAGES } from "../src/lib/status.js";
+import { pendingWorkerBoundaryHandoffs, runBranchStateFrom, runBranchDispatchOpts } from "#src/lib/daemon.js";
+import { THROWN_RUN_VERDICT_STAGES } from "#src/lib/status.js";
 
 /** Every run-ending stage but run.error ends a run before its checkpoint restore can run. */
 const PRE_RESTORE = [...THROWN_RUN_VERDICT_STAGES].filter((stage) => stage !== "run.error");
