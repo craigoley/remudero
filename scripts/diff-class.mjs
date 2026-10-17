@@ -33,7 +33,7 @@ import { readFileSync, readdirSync } from "node:fs";
 // arm below a real, driven fixture (test/a-census-suite-is-unreachable-from-the-symbols-a-diff-
 // changes.test.ts) instead of an untested comment.
 import fs from "node:fs";
-import { join, normalize, relative, sep } from "node:path";
+import { dirname, join, normalize, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 // `plan-scope.ts` is the canonical predicate's dependency-free leaf. Node 22.22.3 can strip its
 // type annotations without `tsx`, so coverage-ratchet can classify before installing dependencies.
@@ -281,6 +281,15 @@ export function readsChangedPlanOrDocs(content, changedFiles) {
   });
 }
 
+function* suiteFiles(testDir, fixtures = join(testDir, "fixtures")) {
+  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
+    const abs = join(testDir, entry.name);
+    if (abs === fixtures) continue;
+    if (entry.isDirectory()) yield* suiteFiles(abs, fixtures);
+    else if (entry.isFile() && entry.name.endsWith(".test.ts")) yield abs;
+  }
+}
+
 /**
  * Enumerate readers of changed plan/docs paths, plus the census floor. Without a changed list,
  * preserve the broad set for older callers and for the CLI's previous-count comparison.
@@ -289,9 +298,7 @@ export function readsChangedPlanOrDocs(content, changedFiles) {
 export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
   const testDir = join(root, "test");
   const out = new Set(changedFiles.length > 0 ? censusSuiteFiles(changedFiles, root) : []);
-  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
-    const abs = join(testDir, entry.name);
+  for (const abs of suiteFiles(testDir)) {
     const content = readFileSync(abs, "utf8");
     if ((changedFiles.length > 0 ? readsChangedPlanOrDocs(content, changedFiles) : namesPlanOrDocsPath(content)) ||
         readsChangedProse(content, changedFiles)) {
@@ -309,9 +316,7 @@ export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
 export function planOnlySuiteFiles(root = REPO_ROOT, changedFiles = []) {
   const testDir = join(root, "test");
   const out = [];
-  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
-    const abs = join(testDir, entry.name);
+  for (const abs of suiteFiles(testDir)) {
     const content = readFileSync(abs, "utf8");
     if (readsChangedShard(content, changedFiles) || isPlanIntegritySuite(content)) {
       out.push(relative(root, abs).split(sep).join("/"));
@@ -544,13 +549,12 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
   const changed = new Set(files);
   const testDir = join(root, "test");
   const out = [];
-  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
-    const rel = relative(root, join(testDir, entry.name)).split(sep).join("/");
+  for (const abs of suiteFiles(testDir)) {
+    const rel = relative(root, abs).split(sep).join("/");
     if (changed.has(rel)) continue; // a suite the diff itself edits is already in hand
     let content;
     try {
-      content = fs.readFileSync(join(testDir, entry.name), "utf8");
+      content = fs.readFileSync(abs, "utf8");
     } catch (err) {
       // W1-T3602: `readdirSync` above is a SNAPSHOT; a concurrently-run suite (e.g.
       // test/a-ci-skip-guard-can-fire-unconditionally.test.ts's "UNSTAGED suite" probe) can write
@@ -570,7 +574,7 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
     // `["plan", "docs"].map((d) => join(REPO_ROOT, d))` went unselected for #12389 and turned main red.
     const walksAnArea =
       (enumeratesPopulation(content) && namesAreaLoosely(content, areas)) ||
-      importedWalkerWalksArea(content, testDir, root, areas);
+      importedWalkerWalksArea(content, dirname(abs), root, areas);
     const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
     if (walksAnArea || readsAChangedFile) out.push(rel);
   }

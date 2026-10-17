@@ -119,13 +119,15 @@ test("a ledger row dirties exactly the tasks it affects", (t) => {
   r.append({ step: "verdict", task_id: "W1-T3", run_id: "r3", verdict: "no_pr" });
   assert.deepEqual(board.update().rederived, ["W1-T3"]);
   later(r);
+  // W1-T9719: a cross-task row re-derives only the tasks whose derive read it; none of these reads the boots or PR 9.
   r.append({ step: "daemon.boot", head_sha: "abc" });
-  assert.equal(board.update().full, true, "a daemon boot re-derives every task");
+  const booted = board.update();
+  assert.deepEqual([booted.full, booted.rederived, booted.crossTask], [false, [], { rows: 1, rederived: 0, reused: 3 }], "a daemon boot no task read moves none");
   later(r);
   r.append({ step: "pr.opened", plan_only: true, pr_url: "https://github.com/o/r/pull/9", task_id: "PLAN" });
   const planOnly = board.update();
-  assert.equal(planOnly.full, true, "a plan_only pr.opened row re-derives every task");
-  assert.deepEqual(planOnly.rederived, ["W1-T1", "W1-T2", "W1-T3"]);
+  assert.equal(planOnly.full, false, "a plan_only pr.opened row no task asked about moves none");
+  assert.deepEqual(planOnly.rederived, []);
 });
 
 test("the no-reuse oracle catches a deliberately stale reuse", (t) => {
