@@ -9,8 +9,9 @@ import { parse as parseYaml } from "yaml";
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
-import { systemClock } from "./clock.js";
+import { clockFromMillisFn, systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
+import { createStaticCheckTiming, type StaticCheckTiming } from "./preflight-step-timing.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { shortPathWhenTooLong } from "./short-path-root.js";
@@ -335,6 +336,8 @@ export interface CiParityStepResult {
   name: string;
   ok: boolean;
   detail: string;
+  /** Diagnostic direct-command wall time, never native closure or runtime-profile assurance. */
+  staticTiming?: StaticCheckTiming;
   /** W1-T2862: bounded stdout, kept only where a fast step opts in; a truncated payload is never complete. */
   successOutput?: { text: string; truncated: boolean };
 }
@@ -3714,6 +3717,8 @@ export interface PreflightFastDeps {
   now?: () => number;
   /** Test seam — a falsifier injects a narrowed list without mutating {@link FAST_GATE_STEPS}. */
   steps?: readonly FastGateStep[];
+  /** Diagnostic monotonic clock only; never the census-pricing or re-measure clock. */
+  timingNow?: () => number;
 }
 
 export interface PreflightFastResult {
@@ -3777,9 +3782,11 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   const scriptNames = fastGateScriptNames(repoRoot, deps.packageJsonText);
   const now = deps.now ?? Date.now;
   const gateSteps = deps.steps ?? FAST_GATE_STEPS;
+  const timingClock = deps.timingNow ? clockFromMillisFn(deps.timingNow) : undefined;
+  const timings = gateSteps.map(() => createStaticCheckTiming(spawn, timingClock));
   // W1-T8920 — in a repo that is not the harness's own, core's steps it does not hold are skipped.
   const consumer = isConsumerRepo(repoRoot, deps.packageJsonText);
-  const timedCensus = (script: string) => {
+  const timedCensus = (script: string, spawn: PreflightSpawn) => {
     const startedAt = now();
     const result = withoutNodeTestContext(() =>
       shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot }),
@@ -3790,8 +3797,9 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // refused on cost here: the threshold is derived from the population, which is not complete
   // until the last entry has run.
   const censusCosts = new Map<number, number>();
-  const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) =>
-    runStep(job, () => {
+  const steps = gateSteps.map(({ job, script, runner, boundMs, retainSuccessOutput, skipWhenAbsent }, i) => {
+    const spawn = timings[i].wrap("initial");
+    return runStep(job, () => {
       if (skipWhenAbsent !== undefined && !existsSync(join(repoRoot, skipWhenAbsent))) {
         return { ok: true, detail: `SKIPPED — no ${skipWhenAbsent}/ directory in this checkout; nothing for ${job} to check here` };
       }
@@ -3819,15 +3827,15 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       if (boundMs === undefined) {
         return shellOut(spawn, `npm run --silent ${script}`, "npm", ["run", "--silent", script], { cwd: repoRoot, retainSuccessOutput });
       }
-      const { result, elapsedMs } = timedCensus(script);
+      const { result, elapsedMs } = timedCensus(script, spawn);
       censusCosts.set(i, elapsedMs);
       // The SOFT bound reports and never refuses: a census suite's growing cost is news about the tree.
       if (elapsedMs > boundMs && result.ok) {
         return { ok: true, detail: `${result.detail} — COST ${elapsedMs}ms, over the ${boundMs}ms soft bound (reported, not refused)` };
       }
       return result;
-    }),
-  );
+    });
+  });
 
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
   // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
@@ -3848,7 +3856,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       const { job, script } = gateSteps[i];
       let againMs = 0;
       const again = runStep(job, () => {
-        const r = timedCensus(script);
+        const r = timedCensus(script, timings[i].wrap("remeasure"));
         againMs = r.elapsedMs;
         return r.result;
       });
@@ -3857,7 +3865,7 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         continue;
       }
       const reference = gateSteps[referenceIndex];
-      const refAgainMs = timedCensus(reference.script).elapsedMs;
+      const refAgainMs = timedCensus(reference.script, timings[referenceIndex].wrap("reference", job)).elapsedMs;
       const refAgain = `${reference.job} re-timed back to back at ${refAgainMs}ms`;
       const confirmationThreshold = Math.ceil(
         Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, refAgainMs) * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE * FAST_GATE_CENSUS_REMEASURE_MARGIN,
@@ -3881,7 +3889,10 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
       };
     }
   }
-  return { steps, ok: steps.every((s) => s.ok) };
+  return {
+    steps: steps.map((step, i) => ({ ...step, staticTiming: timings[i].snapshot() })),
+    ok: steps.every((s) => s.ok),
+  };
 }
 
 // ── `rmd preflight --coverage` (W1-T1074) — diff-coverage, at author-time, on its OWN base ────
