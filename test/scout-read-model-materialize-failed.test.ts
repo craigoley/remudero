@@ -16,9 +16,9 @@ function state(t: TestContext): string {
 }
 
 /** The worker, not this blocked JS thread, owns the competing SQLite transaction. */
-async function hold(t: TestContext, path: string): Promise<() => Promise<void>> {
+async function hold(t: TestContext, path: string, exclusive = false): Promise<() => Promise<void>> {
   const gate = new Int32Array(new SharedArrayBuffer(4));
-  const worker = new Worker(new URL("./fixtures/read-model-contention-worker.mjs", import.meta.url), { workerData: { path, gate: gate.buffer } });
+  const worker = new Worker(new URL("./fixtures/read-model-contention-worker.mjs", import.meta.url), { workerData: { path, gate: gate.buffer, exclusive } });
   const done = new Promise<void>((resolve, reject) => {
     worker.once("error", reject);
     worker.once("exit", code => code === 0 ? resolve() : reject(new Error(`fixture writer exit ${code}`)));
@@ -62,6 +62,38 @@ test("W1-T9937 criterion 1: read-model contention identifies the failing operati
   await release();
   insert.run("restored control");
   assert.equal(db.prepare("SELECT count(*) AS n FROM secret_table").get()?.n, 2);
+});
+
+test("W1-T9937 criterion 1: a blocked connect and a blocked iterate step name their operation", async t => {
+  const stateDir = state(t);
+  const db = openReadModel({ stateDir, instance: "core", schemaVersion: 1, ddl: "CREATE TABLE secret_table(value TEXT);" });
+  let closed = false;
+  t.after(() => { if (!closed) db.close(); });
+  db.prepare("INSERT INTO secret_table VALUES (?)").run("positive control");
+  const rows = () => [...db.prepare("SELECT value FROM secret_table").iterate()].map(row => row.value);
+  assert.deepEqual(rows(), ["positive control"]);
+  db.exec("PRAGMA busy_timeout=25");
+  const bump = db.prepare("PRAGMA user_version = 7");
+  let release = await hold(t, db.path);
+  const step = failure(() => [...bump.iterate()]);
+  assert.equal(step.errcode! & 0xff, 5);
+  assert.match(step.message, /\[connection=[^/]+\/writer pid=\d+ thread=\d+ path=.+\]/);
+  assert.ok(step.message.endsWith("[operation=iterate-next]"));
+  assert.ok(!step.message.includes("user_version"));
+  await release();
+  assert.deepEqual([...bump.iterate()], []);
+  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 7);
+  db.close(); closed = true;
+  // Production's five-second deadline applies here: the fixture shortens nothing on a connect.
+  release = await hold(t, db.path, true);
+  const open = failure(() => openReadModel({ stateDir, instance: "core", schemaVersion: 1 }));
+  assert.equal(open.errcode! & 0xff, 5);
+  assert.match(open.message, /\[connection=[^/]+\/writer pid=\d+ thread=\d+ path=.+\]/);
+  assert.ok(open.message.endsWith("[operation=connect]"));
+  await release();
+  const reopened = openReadModel({ stateDir, instance: "core", schemaVersion: 1 });
+  t.after(() => reopened.close());
+  assert.deepEqual([...reopened.prepare("SELECT value FROM secret_table").iterate()].map(row => row.value), ["positive control"]);
 });
 
 test("W1-T9937 criterion 2: actual projector and view writers retain fences through contention", async t => {
