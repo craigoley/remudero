@@ -7,10 +7,10 @@ import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import * as parity from "../../../src/lib/ci-parity.js";
-import { newShardRuleSuiteViolations } from "../../../src/lib/task-linter.js";
-import { resolveTestPath } from "../../../src/lib/test-path-resolver.js";
-import type { Task } from "../../../src/lib/plan.js";
+import * as parity from "#src/lib/ci-parity.js";
+import { newShardRuleSuiteViolations } from "#src/lib/task-linter.js";
+import { resolveTestPath } from "#src/lib/test-path-resolver.js";
+import type { Task } from "#src/lib/plan.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const { censusSuiteFiles } = await import(pathToFileURL(join(root, "scripts/diff-class.mjs")).href);
