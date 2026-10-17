@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore executable gate module.
-import { censusReaderBudget, runCensusSuitesViaChild } from "../scripts/census-precheck.mjs";
+import { censusReaderBudget, main as censusMain, runCensusSuitesViaChild } from "../scripts/census-precheck.mjs";
 
 // @census-reads: none — runtime contexts belong to isolated fixture repositories.
 const POLICY = { floorMs: 1000, multiple: 4 };
 const FILE = "test/reader.test.ts";
-const PASS = "TAP version 13\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+const PASS = "TAP version 13\nok 1 - reader works\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
 const FAIL = `TAP version 13\nnot ok 1 - reader fails\n  ---\n  location: '${FILE}:1:1'\n  ...\n1..1\n# tests 1\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n`;
 const priority = { wrap: (file: string, args: string[]) => ({ file, args }) };
 
@@ -78,6 +78,41 @@ test("source-reader calibration exercises real native context and children witho
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: ["test/ghost.test.ts"], readerRuntimePolicy: POLICY }), /ENOENT/);
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, timeoutMs: 4000 }), /no timeout override/);
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE, FILE], readerRuntimePolicy: POLICY }), /one reader/);
+});
+
+test("source-reader calibration rejects a changed count or case identity even if both runs pass", (t) => {
+  const repo = fixture(t);
+  for (const changed of [PASS.replace("# tests 1", "# tests 2").replace("# pass 1", "# pass 2"), PASS.replace("reader works", "different reader")]) {
+    let calls = 0;
+    assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+      readContext: () => "same", run: () => ({ status: 0, stdout: calls++ === 0 ? PASS : changed }) }), /case inventory differs/);
+    assert.equal(calls, 2);
+  }
+});
+
+test("source-reader native context refuses a regular file disguised as the dependency donor", (t) => {
+  const repo = fixture(t); writeFileSync(join(repo.dir, "node_modules"), "not a donor"); let calls = 0;
+  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+    run: () => { calls++; return { status: 0, stdout: PASS }; } }), /not a directory donor/);
+  assert.equal(calls, 0);
+});
+
+test("source-reader snapshot dispatch reports unavailable calibration instead of dropping the policy", (t) => {
+  const repo = fixture(t), path = join(repo.dir, "snapshot.json"), messages: string[] = [];
+  writeFileSync(path, JSON.stringify({ version: 1, root: repo.dir, mergeBase: repo.git("rev-parse", "HEAD"),
+    headPaths: [FILE], basePaths: [FILE], baseBlobs: { [FILE]: "old source" }, mainBlobs: {},
+    instrumentSurface: [], instrumentExclusions: {} }));
+  const prior = process.env.RMD_CENSUS_SNAPSHOT; process.env.RMD_CENSUS_SNAPSHOT = path;
+  t.mock.method(console, "error", (...parts: unknown[]) => { messages.push(parts.join(" ")); });
+  try {
+    assert.equal(censusMain(["--root", repo.dir], {
+      admitted: () => [{ testFile: FILE, script: "", walks: ["test/"], structural: true, readerRuntimePolicy: POLICY }],
+      runSuites: () => { assert.fail("an unqualified snapshot adapter must not start a child"); },
+    }), 2);
+    assert(messages.some(line => line.includes("source-reader runtime calibration is unavailable in git-free snapshot mode")));
+  } finally {
+    if (prior === undefined) delete process.env.RMD_CENSUS_SNAPSHOT; else process.env.RMD_CENSUS_SNAPSHOT = prior;
+  }
 });
 
 test("source-reader calibration admits a healthy real nested proof beyond the unrelated four-second limit", (t) => {

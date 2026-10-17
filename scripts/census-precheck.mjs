@@ -610,7 +610,8 @@ export function censusReaderBudget(measurement, context, policy, nowMs) {
 function runCensusChild(file, args, options) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
   const result = captureStepSync(file, args, { cwd: options.cwd, env: options.env, runtimeMs: options.timeout,
-    maxBytes: options.maxBuffer, stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
+    maxBytes: options.maxBuffer, trackParent: true,
+    stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
   if (result.outputComplete) rmSync(dir, { recursive: true, force: true });
   else result.error = new Error(`${result.error?.message ?? "incomplete census capture"}; capture retained at ${dir}`);
   return result;
@@ -621,7 +622,8 @@ function censusReaderContext(root, child, options) {
   const readGit = (args) => gitOut(root, args, { env, timeout: CENSUS_SUITE_CHILD_TIME_BOUND_MS });
   const untracked = readGit(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
   const dependencies = join(root, "node_modules");
-  const dependency = existsSync(dependencies) ? statSync(dependencies) : null;
+  const dependency = lstatSync(dependencies, { throwIfNoEntry: false }) ? statSync(dependencies) : null;
+  if (dependency && !dependency.isDirectory()) throw new Error("source-reader runtime is UNKNOWN: node_modules is not a directory donor");
   const input = { root: resolve(root), head: readGit(["rev-parse", "HEAD"]).trim(),
     tracked: readGit(["ls-files", "--stage", "-z"]), diff: readGit(["diff", "--binary", "HEAD"]),
     untracked: untracked.filter((p) => p !== "node_modules" && p !== "node_modules/")
@@ -666,7 +668,9 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       return [key, matches.length === 1 ? Number(matches[0][1]) : null];
     }));
     const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
-    return { failing, tests: Number(total[1]), passed, elapsedMs: finishedMs - startedMs, finishedMs };
+    const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
+      .map((match) => `${match[1].length}:${match[2]}`);
+    return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs };
   };
   if (readerRuntimePolicy === undefined) return once().failing;
   if (files.length !== 1 || timeoutMs !== undefined) throw new Error("source-reader calibration requires one reader and no timeout override");
@@ -683,10 +687,15 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   options.timeout = censusReaderBudget(measurement, context, readerRuntimePolicy, now());
   const measured = once();
   if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during qualification");
+  if (measured.tests !== calibration.tests || JSON.stringify(measured.identities) !== JSON.stringify(calibration.identities)) {
+    throw new Error("source-reader runtime is UNKNOWN: qualification case inventory differs from calibration");
+  }
   if (!(measured.elapsedMs > 0 && Number.isFinite(measured.elapsedMs))) throw new Error("source-reader runtime is UNKNOWN: invalid native duration");
   if (measured.elapsedMs > options.timeout) throw new Error(`source-reader runtime exceeded its ${options.timeout}ms measured budget`);
   if (!measured.passed && measured.failing.length === 0) throw new Error("source-reader runtime is UNKNOWN: qualification has no complete unskipped result");
-  console.log(`census-reader-runtime: ${files[0]} calibration=${Math.ceil(calibration.elapsedMs)}ms budget=${options.timeout}ms measured=${Math.ceil(measured.elapsedMs)}ms; fresh timing only, no cached test verdict`);
+  console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: measured.tests,
+    cases: measured.identities, calibrationMs: Math.ceil(calibration.elapsedMs), budgetMs: options.timeout,
+    measuredMs: Math.ceil(measured.elapsedMs), assurance: "fresh-timing-only-no-cached-verdict" })}`);
   return measured.failing;
 }
 
@@ -1039,6 +1048,7 @@ export const PRECHECK_PARITY = {
   "test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts": { modeled: scriptRatchetViolations },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  "test/census-reader-runtime-calibration.test.ts": { modeled: runCensusSuitesViaChild },
   "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
   "test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
@@ -1352,6 +1362,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       loadMembers: () => admitted(root),
       runSuites: (files, options = {}) => {
         if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options });
+        if (options.readerRuntimePolicy !== undefined) throw new Error("source-reader runtime calibration is unavailable in git-free snapshot mode");
         const measured = runSnapshotSuites(snapshot, files, root);
         snapshotUnmeasured.push(...measured.notMeasured);
         return measured.failing;
