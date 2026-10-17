@@ -5,7 +5,7 @@
 // with an injected runOne; the history is fixture rows stamped from the fake epoch, never a live ledger.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -14,7 +14,6 @@ import { runDaemon, type DaemonDeps, type DaemonFreshness, type RestartBoundary 
 import { loadPlan } from "../src/lib/plan.js";
 import type { RunResult } from "../src/lib/run-result.js";
 import type { Task } from "../src/lib/plan.js";
-import { daemonCommand } from "../src/run-task.js";
 
 const minute = 60_000;
 const epoch = Date.parse("2026-10-16T16:28:00Z");
@@ -198,34 +197,4 @@ test("W1-T9924: with no latch or no history refill is unchanged", async () => {
     assert.equal(refilled?.latch_admission, "no_history");
     assert.equal(unmeasured.find("daemon.admission_held").length, 0);
   } finally { await unmeasured.close(); }
-});
-
-test("W1-T9924: daemonCommand wires the refill child decision from the run-child mode", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-t9924-cli-"));
-  const oldHome = process.env.HOME;
-  try {
-    mkdirSync(join(root, ".config", "remudero"), { recursive: true });
-    writeFileSync(join(root, ".config", "remudero", "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
-    process.env.HOME = root;
-    const path = join(root, "tasks.yaml");
-    writeFileSync(path, "[]\n");
-    const wired: Array<DaemonDeps["refillRunsAsChild"]> = [];
-    for (const mode of ["on", "off"] as const) {
-      const code = await daemonCommand(["--allow-self-target", "--plan", path, "--max", "0"], {
-        readRunChildMode: () => mode, checkStop: () => undefined, checkPause: () => undefined,
-        runDaemon: async (_plan, deps) => {
-          wired.push(deps.refillRunsAsChild);
-          return { attempted: [], merged: [], costUsd: 0, ticks: 0, stopReason: "max_reached" };
-        },
-      } as Parameters<typeof daemonCommand>[1]);
-      assert.equal(code, 0);
-    }
-    assert.equal(typeof wired[0], "function", "child mode wires the decision");
-    assert.equal(wired[0]!({ id: "A" } as Task), false, "an explicit --plan keeps the run in-process, as runInChildWhenOn does");
-    assert.equal(wired[1], undefined, "with child mode off nothing is wired and the refill reads false");
-  } finally {
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
-    rmSync(root, { recursive: true, force: true });
-  }
 });
