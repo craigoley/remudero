@@ -18,9 +18,10 @@ function parseLock(raw: string): Map<string, Pin> {
   const entries = new Map<string, Pin>();
   for (const line of raw.split("\n")) {
     if (line === "" || line.startsWith("#")) continue;
-    const match = /^([a-z0-9]+(?:-[a-z0-9]+)*)==([0-9][a-z0-9.]*) --hash=sha256:([a-f0-9]{64})$/.exec(line);
+    const match = /^([a-z0-9]+(?:-[a-z0-9]+)*)==([0-9][a-z0-9.]*(?:\+[a-z0-9]+(?:[.-][a-z0-9]+)*)?) --hash=sha256:([a-f0-9]{64})$/.exec(line);
     assert.ok(match, `unpinned or unsupported lock entry: ${line}`);
     const [, name, version, sha256] = match;
+    assert.ok(!version!.includes("+") || (name === "semgrep" && version === "1.181.0+remudero.1"), "only the reviewed distinct source recipe has a local version");
     assert.ok(!entries.has(name!), `duplicate package: ${name}`);
     entries.set(name!, { version: version!, sha256: sha256! });
   }
@@ -44,8 +45,8 @@ test("native Semgrep locks every build and runtime entry with an exact version a
   assert.deepEqual([...build.keys()], ["packaging", "pip", "setuptools", "wheel"]);
   assert.equal(runtime.size, 66, "complete reviewed Linux closure, not only direct dependencies");
   assert.deepEqual(runtime.get("semgrep"), {
-    version: "1.180.0",
-    sha256: "16db2e2706ab814a975eeec25debfad49abba846b7c513d88e041447152f8447",
+    version: "1.181.0+remudero.1",
+    sha256: "95b93c166f3ebaad3b407bfd4bf573499e1560b46c6500980e8d9acfc96fae52",
   });
   assert.deepEqual(runtime.get("peewee"), {
     version: "3.18.3",
@@ -62,12 +63,15 @@ test("native Semgrep locks every build and runtime entry with an exact version a
 test("native Semgrep lock dialect rejects missing hashes, includes, ranges and duplicate packages", () => {
   const good = "semgrep==1.167.0 --hash=sha256:" + "a".repeat(64) + "\n";
   assert.equal(parseLock(good).size, 1); // Positive control before negative census.
+  assert.equal(parseLock(good.replace("1.167.0", "1.181.0+remudero.1")).size, 1);
   for (const bad of [
     "", good.trimEnd(), "semgrep==1.167.0\n", good.replace("==", ">="),
     good.replace("sha256:", "md5:"), good.replace(/a{64}/, "a".repeat(63)),
     "-r other.txt\n", "--extra-index-url https://example.invalid\n",
     "semgrep @ https://example.invalid/file.whl\n", good + good,
     good.replace("semgrep", "Semgrep"), good.replace("\n", " ; python_version > '3'\n"),
+    good.replace("1.167.0", "1.181.0+"), good.replace("1.167.0", "1.181.0+unapproved.1"),
+    good.replace("semgrep==1.167.0", "other==1.181.0+remudero.1"),
   ]) assert.throws(() => parseLock(bad));
 });
 
@@ -90,28 +94,21 @@ test("native Semgrep installs into a fresh environment then verifies offline has
   assert.equal(install["continue-on-error"], undefined, "install errors must fail Scan, not disappear");
   assert.equal(install.env?.NO_SQLITE, "1");
   assert.match(run, /mktemp -d "\$\{RUNNER_TEMP\}\/semgrep-ce\.XXXXXX"/);
-  assert.match(run, /python -m venv "\$VENV"/);
-  const invocations = run.match(/"\$VENV\/bin\/python" -m pip --isolated (?:install|download)[\s\S]*?-r [^\n]+/g) ?? [];
-  assert.equal(invocations.length, 3, "bootstrap, verified download, offline install");
-  for (const command of invocations) {
-    assert.match(command, /--require-hashes/);
-    assert.match(command, /--only-binary=:all:/);
-    assert.match(command, /--no-deps/);
-    assert.doesNotMatch(command, /--(?:extra-index-url|trusted-host|no-require-hashes)/);
-  }
-  assert.ok(invocations[0]!.endsWith(buildPath));
-  assert.match(invocations[0]!, /--force-reinstall/);
-  for (const command of invocations.slice(1)) {
-    assert.match(command, /--no-binary=peewee/);
-    assert.match(command, /--no-build-isolation/);
-    assert.ok(command.endsWith(runtimePath));
-  }
-  assert.match(invocations[2]!, /--no-index --find-links "\$VENV\/artifacts" --no-cache-dir/);
-  assert.match(invocations[2]!, /--force-reinstall/);
-  const checkIndex = run.indexOf('"$VENV/bin/python" -m pip check');
+  assert.match(run, /python -I -S -B \.github\/semgrep\/source-runtime-qualification\.py/);
+  assert.match(run, /--install-root "\$ROOT" --workspace "\$GITHUB_WORKSPACE" --head "\$\(git rev-parse HEAD\)"/);
+  assert.match(run, /VENV="\$ROOT\/runtime-env"/);
+  const auditor = read(".github/semgrep/runtime-compatibility-audit.py");
+  const qualifier = read(".github/semgrep/source-runtime-qualification.py");
+  assert.match(auditor, /"--no-index", "--only-binary=:all:", "--no-deps"/);
+  assert.match(auditor, /"--require-hashes", "--find-links"/);
+  assert.match(auditor, /"pip", "check"/);
+  assert.match(qualifier, /result = audit\(root, workspace, head\)/);
+  assert.match(qualifier, /probe = stage_probe\(root, workspace, head\)/);
+  assert.match(qualifier, /proof == validate_mcp_observations\(proof.get\("observations"\)\)/);
+  const checkIndex = run.indexOf("HASH_BOUND_INSTALL_AND_MCP_CONTROLS_COMPLETE");
   const publishIndex = run.indexOf('>> "$GITHUB_PATH"');
-  assert.ok(checkIndex > run.indexOf(invocations[2]!) && publishIndex > checkIndex);
-  assert.ok(run.includes(`= "${parseLock(read(runtimePath)).get("semgrep")!.version}"`));
+  assert.ok(checkIndex > run.indexOf("--install-root") && publishIndex > checkIndex);
+  assert.ok(run.includes('= "1.181.0"'), "CLI/protocol version is distinct from the reviewed local distribution version");
   assert.doesNotMatch(run, /install-semgrep-pro|sudo|docker|uv tool|pipx|curl/);
 });
 
