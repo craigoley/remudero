@@ -89,7 +89,9 @@ test('Mac admission is freshly checked after slot waiting and before a later hea
   let reads = 0;
   assert.throws(() => guardedAuthorEntry([], {root: '/w',
     readAdmission: () => ++reads === 1 ? {state: 'admitted'} : {state: 'not-run', reasons: ['changed']},
-    runAuthor: (_argv: string[], deps: {admitHost: (stage: string) => unknown}) => deps.admitHost('static-preflight'),
+    runAuthor: (_argv: string[], deps: {admitHost: (stage: string) => unknown}) => {
+      deps.admitHost('static-preflight'); return 0;
+    },
   }), (error: unknown) => error instanceof MacAuthorCapacityRefusal && error.stage === 'static-preflight');
   assert.equal(reads, 2, 'the CLI observation must not authorize work after a wait');
 });
@@ -122,7 +124,7 @@ test('Mac capacity default seam really reads the native volume and pressure with
   const result = readMacAuthorAdmission(process.cwd());
   if (process.platform !== 'darwin') { assert.equal(result.state, 'not-applicable'); return; }
   const fs = statfsSync(process.cwd());
-  assert.ok(Number.isSafeInteger(result.workspaceFreeBytes));
+  assert.ok(typeof result.workspaceFreeBytes === 'number' && Number.isSafeInteger(result.workspaceFreeBytes));
   assert.ok(Math.abs(result.workspaceFreeBytes - fs.bavail * fs.bsize) < 1024 ** 3);
   const pressure = spawnSync('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], {encoding: 'utf8', timeout: 2000});
   assert.equal(pressure.status, 0); assert.notEqual(macPressureState(pressure.stdout), 'unknown');
