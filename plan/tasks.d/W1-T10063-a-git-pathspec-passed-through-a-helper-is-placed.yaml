@@ -1,0 +1,80 @@
+- id: W1-T10063
+  title: "RMD CENSUS-MEMBERSHIP NAMES A CENSUS WHOSE GIT PATHSPEC REACHES GIT THROUGH A HELPER — the W1-T9864 subpath-alias census (test/a-test-imports-through-the-subpath-alias.test.ts) walks test/ with `git grep` and `git diff --name-only` whose `-- test` pathspec is passed in by its caller, so source-text-readers places it as a plain text reader of package.json and two fixture paths, no added test file joins it, and on 2026-10-17 #12582, #12601, #12604 and #12600 each went red on it in CI after a pre-push census run that could not see it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which suites the source-text reader derivation places when a git pathspec arrives through a helper's argument; the census suites, the precheck and the membership report's shape are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 filing agent F17 item 1, from the hand fixes of #12582, #12601, #12604 and #12600 (16:40-18:15Z)"
+  plan_refs: [W1-T9864, W1-T9757, W1-T9806, W1-T2969, W1-T2809, W1-T10064]
+  files:
+    - src/lib/source-text-readers.ts
+    - test/a-git-pathspec-passed-through-a-helper-is-placed.test.ts
+  status: queued
+  priority: 1  # four PRs in one day paid a CI round on a census the pre-push run was blind to
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 (operator tracker 17:18Z-17:32Z, the X3/X4/X5/X6 hand fixes): #12582, #12601, #12604 and #12600
+    each went red on test/a-test-imports-through-the-subpath-alias.test.ts ("W1-T9864: a new test file carries no
+    location-relative specifier") because a new test imported `../src/...`. None of the building sessions or fix rounds
+    ran that suite before pushing.
+    READ at origin/main 70b15edf7 (symbols, not lines):
+    - src/run-task.ts `censusMembershipCommand` unions two populations: `censusSuiteMembershipFor` (src/lib/ci-parity.ts,
+      the CENSUS_MEMBERSHIP_SUITES table plus the `ls-files|readdirSync|globSync` recognizer) and
+      `discoverSourceTextReaders` (src/lib/source-text-readers.ts). scripts/census-precheck.mjs runs the census-shaped
+      readers a diff joins (W1-T9757, merged).
+    - The alias census is in neither table, and `git grep -lE "ls-files|readdirSync|globSync"` over it exits 1, so the
+      ci-parity recognizer never sees it.
+    - `discoverSourceTextReaders` does find it. Its `git grep` runs through `gitGrepFiles(flags, rest)`, which builds
+      `git(["grep", "-l", "-E", ...flags, "-e", LOCATION_RELATIVE_ERE, ...rest])`; the callers pass
+      `rest = [base, "--", "test"]` and `["--", "test"]`, and the new-file test runs
+      `git(["diff", "--name-only", "--diff-filter=A", base, "--", "test"])` and `git(["status", ..., "--", "test"])`.
+      `walksFromGitArgv` reads only an array literal that itself carries a `"grep"` or `"ls-files"` literal, so the
+      pathspec `"test"` (in the caller's array, or in a `"diff"` argv) is never read.
+    - PROBE (Mac, `node --import tsx`, discoverSourceTextReaders over the operator checkout at 70b15edf7):
+      `{"testFile":"test/a-test-imports-through-the-subpath-alias.test.ts","walks":["package.json","test/nested/a.test.ts","test/nested/b.test.ts"],"censusShaped":false}`
+      out of 754 readers. The walks come from fixture `join(...)` literals, so a diff that adds test/x.test.ts joins
+      nothing and `rmd census-membership --files` never prints it.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9806 (queued) adds an import-closure marker for two baked-closure suites that read
+    through a variable path; this suite walks a git pathspec, a different derivation. W1-T9757 (merged) made the
+    precheck run placed readers; this task makes the reader placed. W1-T9864 (merged) wrote the census. Swept
+    origin/main plan/tasks.d for census-membership, CENSUS_ENUMERATION_IDIOM, walksFromGitArgv,
+    discoverSourceTextReaders and sourceTextReaderOf, and the plan diffs of the 3 open PR heads (18:26Z): none places a
+    helper-passed pathspec.
+  design: |
+    1. src/lib/source-text-readers.ts: a suite whose text spawns git (a `"grep"`, `"ls-files"`, `"diff"` or `"status"`
+       argv literal) also reads the pathspec of any array literal in the same text that carries a `"--"` literal
+       followed by string literals: each literal after `"--"` that `toWalk` accepts is a git walk (exclusions skipped as
+       today). A `"diff"`/`"status"` argv with `"--"` is read the same way. Over-inclusion is intended, as the module
+       header says: a wider join costs a suite run, a narrower one costs a CI round.
+    2. Git walks found this way set `censusShaped: true`, exactly as `walksFromGitArgv` hits do today.
+    3. No marker is added to the alias census: the derivation, not a declaration, must place it, so the next suite
+       written in the same shape is placed too.
+    4. MEASURE in the PR body: the number of readers `discoverSourceTextReaders` returns census-shaped before and
+       after, at the PR's base, so the extra precheck cost is named.
+    5. TESTS in test/a-git-pathspec-passed-through-a-helper-is-placed.test.ts, `test(` titles verbatim as in the proofs:
+       `sourceTextReaderOf` over the real alias census text places `test/` and is census-shaped; a fixture with
+       `git(["diff", "--name-only", base, "--", "src"])` places `src/`; a fixture whose `"--"` array carries no tracked
+       root places nothing (control); `censusMembershipCommand(["--files"], { changedPaths: ["test/new.test.ts"] })`
+       prints the alias census path.
+  acceptance:
+    - claim: "the subpath-alias census is placed as a census of test/ by the source-text reader derivation"
+      proof: 'grep: test("W1-T10063: the subpath-alias census is placed as a census of test/" in test/a-git-pathspec-passed-through-a-helper-is-placed.test.ts'
+    - claim: "a pathspec after a double-dash in a helper-passed argv is read as a git walk"
+      proof: 'grep: test("W1-T10063: a pathspec passed to a git helper after a double-dash is a walk" in test/a-git-pathspec-passed-through-a-helper-is-placed.test.ts'
+    - claim: "rmd census-membership --files names the alias census for a diff that adds a test file"
+      proof: 'grep: test("W1-T10063: census-membership names the alias census for an added test file" in test/a-git-pathspec-passed-through-a-helper-is-placed.test.ts'
+  falsifier: |
+    At origin/main `sourceTextReaderOf("test/a-test-imports-through-the-subpath-alias.test.ts", <its text>, roots)` returns
+    censusShaped false and no `test/` walk, and `censusMembershipCommand(["--files"], { changedPaths: ["test/new.test.ts"] })`
+    prints no line naming it, so the first and third tests fail. Reverting step 1 gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    THE BETTER MECHANISM for the import itself is W1-T10064 (the harness rewrites a new test's relative imports before it
+    commits), not prompt text: workers never load doctrine (settingSources []), copy the `../src` shape from the ~3,000
+    neighbouring tests that still carry it until W1-T9865..W1-T9868 land, and a prompt line is advisory. This task stays
+    needed beside W1-T10064: a shape the codemod lists as unresolved still reaches the census, and every pre-push run must be
+    able to see it. EFFECT, measured after merge: CI reds on test/a-test-imports-through-the-subpath-alias.test.ts on a
+    head whose pre-push census-precheck reported clean. Healthy shape: none.

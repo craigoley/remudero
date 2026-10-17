@@ -203,10 +203,17 @@ test('author static admission holds one real slot from static preflight through 
     import { test } from 'node:test';
     import assert from 'node:assert/strict';
     import { existsSync, readFileSync } from 'node:fs';
+    import { dirname } from 'node:path';
+    import { acquireTestSlot } from ${JSON.stringify(slotModule)};
     test('affected child retains the admitted owner',()=>{
       const claim=JSON.parse(readFileSync('coverage/slot-owner.json','utf8'));
       assert.ok(existsSync(claim.path),'the same owner remains held during affected execution');
-      assert.equal(process.env.RMD_TEST_SLOT_PARENT,undefined,'native fixtures do not inherit the production admission claim');
+      assert.equal(process.env.RMD_TEST_SLOT_PARENT, JSON.stringify(claim),
+        'the covered child carries the owner marker for quiescence checks');
+      const nested=acquireTestSlot('affected-test-child',{dir:dirname(claim.path),slots:1,waitBoundMs:0,
+        load:()=>({cores:8,load1:0}),log:()=>{}});
+      assert.equal(nested.outcome,'wait_bound_exceeded',
+        'a native test child may carry the marker but cannot borrow the author slot');
     });
   `);
   f.git('add', '.'); f.git('commit', '-m', 'test: real static and affected admission');
@@ -632,7 +639,7 @@ test('author preflight leaves a running receipt and live private logs when its w
   f.git('add', '.'); f.git('commit', '-m', 'test: hold native static step');
   const parent = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
     `import {main} from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; process.exit(main([], {root:${JSON.stringify(f.root)}}));`],
-  { cwd: ROOT, stdio: 'ignore' });
+  { cwd: ROOT, stdio: 'ignore', env: { ...process.env, RMD_TEST_SLOT_DIR: join(f.root, 'coverage/test-slots') } });
   const closed = new Promise<string | null>((resolve) => parent.once('close', (_code, signal) => resolve(signal)));
   const waitFor = async (predicate: () => boolean) => {
     for (let turn = 0; turn < 1000 && !predicate(); turn++) await new Promise((resolve) => setTimeout(resolve, 10));

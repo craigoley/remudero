@@ -9,13 +9,13 @@
   risk: high  # Rule 19: one concern — a fix round whose scope amendment has merged merges main into its own worktree and dispatches the fix in the same pass; the amendment writer, its refusals and its dedupe are unchanged
   band_meaning: span
   origin: "operator session 2026-10-16 filing agent Q3 lead 2 (D4 lead a): #12289 (W1-T9541) amendment #12292 merged 11:24:40Z, branch_update_requested 11:42:59Z at head c7fc5e6, then a CI cycle before the next fix round"
-  plan_refs: [W1-T9802, W1-T6465, W1-T5534, W1-T2671, W1-T9541]
+  plan_refs: [W1-T9802, W1-T6465, W1-T5534, W1-T2671, W1-T9541, W1-T9877, W1-T10026, W1-T7719, W1-T10070]
   files:
     - src/lib/proof-amendment.ts
     - src/run-task.ts
     - test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts
   status: queued
-  priority: 2  # every merged scope amendment adds one CI cycle (about 35 min on #12289); 15 amendments were created 10-04..14
+  priority: 1  # raised 2026-10-17 (F17): on #12575 the merged amendment's file never came back at all, so the PR waited for a hand fix; before that, every merged scope amendment added one CI cycle (about 35 min on #12289)
   attempts: 0
   rationale: |
     READ at origin/main db88033a3 (2026-10-16):
@@ -35,6 +35,17 @@
     - W1-T9561's census of 10-04..14 counts 15 created scope amendments and 1 `branch_update_requested`.
     - NOT COVERED: W1-T9802 releases the round at the amendment's merge. W1-T2671's base refresh is the red-on-base
       arm, not the amendment arm. No open head changes the `pendingScope` block or the `existing?.merged` arm.
+    AMENDED 2026-10-17 by filing agent F17 (item 5), filed here instead of as a new task because it is the same arm:
+    THE WORK THAT ASKED FOR SCOPE IS LOST. #12575 (W1-T9877), core ledger 14:46Z and 17:04Z archives:
+    - 15:26:28Z fix.dispatch; 15:27:03Z fix.scope_amendment created for src/lib/rule-suites.ts (the fix worker wrote
+      the file, so `changedPaths` admitted it; W1-T10026 is the implement lane's gap that left it out at 11:46Z).
+    - The amendment (#12599) merged; 16:29:06Z fix.scope_amendment branch_update_requested paths
+      [src/lib/rule-suites.ts]; the branch update made head 7518991a5. The file existed only in the 15:26Z round's
+      worktree, so the merge brought back nothing.
+    - 16:37:38Z a fix round was prepared at 7518991a5 and then waited in memory admission (W1-T10069); no round wrote
+      the file. X2 restored src/lib/rule-suites.ts by hand (fdd483f99, 18:15Z).
+    So even with step 2's same-pass strike, the worker starts from a tree that lacks the file the amendment was for,
+    and must re-derive it from the red.
   design: |
     1. THE OUTCOME. In `requestScopeAmendment`, the `existing?.merged` arm returns a new
        `{ kind: "amendment_merged", amendmentNumber }` and no longer calls `deps.updateBranch`. The update-branch
@@ -50,6 +61,15 @@
        `branch_update_requested` with the reason, and stand down. A conflict then reaches merge-conflict mode on the
        next pass as today.
     4. No new strike accounting: the dispatched strike counts like any other. The amendment dedupe key is unchanged.
+    4a. CARRY THE ASKING ROUND'S WORK (F17 amendment). When a round's NEEDS_SCOPE opens or resumes an amendment, the
+       parent saves that round's working-tree content for exactly the requested paths (verified, under config.root
+       recovery as W1-T7719's preserve does, keyed by task, PR and amendment). In the same-pass strike of step 2, after
+       the local merge, those paths are restored into the round's worktree before the worker runs, and the worker's
+       evidence names them as restored from the round that asked for scope. The ordinary harness commit then stages
+       them (they are now declared). A missing or unverifiable save is named on the `fix.scope_amendment` row and the
+       worker's evidence names the paths the merged amendment admitted, never silence.
+       W1-T10070 needs the same save for a build that stops before its PR exists; build the save and restore once,
+       in whichever of the two lands first.
     5. Tests (new file, `test(` titles verbatim as in the proofs below). They drive `runFixRung` with fakes, and drive
        `requestScopeAmendment` directly:
        - a ledger shaped like #12289's round (`fix.scope_amendment` created at head H, its identity recorded merged)
@@ -57,6 +77,8 @@
          includes origin/main;
        - a local merge that conflicts falls back to `updateBranch` and stands down as today;
        - `requestScopeAmendment` with a merged identity returns `amendment_merged` and calls no update.
+       - #12575's shape (an amendment for src/lib/rule-suites.ts, written only by the asking round) restores the saved
+         file into the same-pass strike's worktree before the worker runs.
   acceptance:
     - claim: "a fix round whose scope amendment has merged merges main locally and dispatches the fix in the same pass"
       proof: 'grep: test("W1-T9805: a merged scope amendment dispatches the fix in the same round" in test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts'
@@ -64,7 +86,10 @@
       proof: 'grep: test("W1-T9805: a conflicting local merge falls back to the branch update" in test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts'
     - claim: "the amendment writer reports a merged amendment without updating the branch itself"
       proof: 'grep: test("W1-T9805: a merged amendment identity is reported, not branch-updated" in test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts'
+    - claim: "the file the asking round wrote is restored into the same-pass strike once its amendment merges"
+      proof: 'grep: test("W1-T9805: the file the asking round wrote is restored once its amendment merges" in test/a-merged-scope-amendment-fixes-in-the-same-round.test.ts'
   falsifier: |
     At origin/main, runFixRung over a ledger with a `fix.scope_amendment` created row at the PR head and an identity
     store reading it merged returns `stood_down` "awaiting scope amendment branch update" after one `updateBranch` call,
-    and dispatches no worker, so the first test fails.
+    and dispatches no worker, so the first test fails. The fourth fails because nothing saved src/lib/rule-suites.ts
+    when the amendment opened, so the worktree after the merge does not hold it.
