@@ -344,7 +344,7 @@ export function realServePolicyDeps(
   const failedPath = join(o.stateRoot, "state", SERVE_POLICY_FAILED_FILE);
   const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
   return {
-    servePolicyDrift: () => readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER),
+    servePolicyDrift: () => readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER, o.stateRoot),
     // serve-container.sh plans its binds for the state root `replaceServe` hands it as RMD_STATE_DIR
     serveMountPlanDrift: () => readMountPlanDrift(exec, o.installPath, o.stateRoot, SERVE_POLICY_CONTAINER),
     serveImageDrift: () => {
