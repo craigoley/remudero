@@ -34,7 +34,8 @@
        classes. It labels inherited author/native/scoped evidence with its ORIGINAL SHA,
        never upgrades it to the new head, and names new checks as pending/unknown until
        current-head receipts actually exist. Reuse the existing body read/write seams.
-       Wire this from the real ci-log/conflict/review repair paths, not a fixture-only caller.
+       Wire reconcileFixPublication from the real ci-log/conflict/review repair paths in
+       src/run-task.ts, not a fixture-only caller or dummy production text.
     2. Own ONLY an explicitly delimited machine-managed section. Preserve the canonical
        task trailer, Acceptance/claim/proof bytes, human rationale and historical receipts.
        The section explicitly warns that preceding author narrative may predate this repair;
@@ -62,6 +63,8 @@
        credential/access change, deployment, closure, scheduler activation or worker stop.
        Keep registry/admission opt-in SHADOW ONLY, public Apache core and owner/admin override.
   acceptance:
+    - claim: The maintained parent repair path invokes the new publication reconciler
+      proof: 'grep: reconcileFixPublication( in src/run-task.ts'
     - claim: Real ci-log and conflict repair publication forwards the actual immutable head manifest
       proof: 'unit test: real repair publication forwards a head-bound evidence manifest'
     - claim: Old native and scoped receipts keep their original SHA and cannot become repaired-head passes
