@@ -21,6 +21,8 @@ import {
   headCarriesForeignCommit,
   reconcileDependabotRefresh,
   type DependabotHeadCommit,
+  type DependabotActionsPort,
+  type DependabotHeadRun,
   type DependabotRefreshVerdict,
   type DepReviewRequired,
 } from "../src/lib/dep-review.js";
@@ -28,7 +30,7 @@ import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, depReviewCommand, readDepReviewRequiredChecks, type DepReviewDeps } from "../src/run-task.js";
+import { buildSweepEffects, defaultDepReviewActions, depReviewCommand, readDepReviewRequiredChecks, type DepReviewDeps } from "../src/run-task.js";
 import {
   BASE_RED_STOOD_DOWN_STEP,
   DEFAULT_SWEEP_POLICY,
@@ -434,7 +436,7 @@ test("W1-T9929: the default required-set reader unions branch protection and ci-
     { kind: "all-checks", fallback: "protection-unreadable:HTTP 403: Resource not accessible by integration" });
 });
 
-test("W1-T9913: the dep-review command recreates an armed head blocked by a stale event instead of re-posting", async (t) => {
+test("W1-T9913: the dep-review command holds an armed head blocked by a stale event instead of re-posting", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9913-cmd-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const ledgerPath = join(root, "state", "ledger.ndjson");
@@ -473,13 +475,147 @@ test("W1-T9913: the dep-review command recreates an armed head blocked by a stal
   const ledger = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.equal(await run(), 1);
   assert.equal(await run(), 1);
-  assert.deepEqual(comments, [DEPENDABOT_RECREATE_COMMAND], "the second sighting asks Dependabot to recreate");
+  // W1-T9995: Dependabot refuses recreate from rmd; with no Actions port injected there is no re-run either.
+  assert.deepEqual(comments, [], "the second sighting never asks Dependabot to recreate");
   assert.deepEqual(posts, [], "no review is re-posted on a stale-event block");
   assert.deepEqual(arms, [], "nothing is re-armed");
-  assert.equal(ledger().filter((r) => r.step === "dep-review.stale_event.recreate_requested").length, 1);
+  assert.equal(ledger().filter((r) => r.step === "dep-review.stale_event.observed").length, 1);
   assert.equal(ledger().filter((r) => r.step === "dep-review.decided").at(-1)?.decision, "arm");
   assert.deepEqual(ledger().filter((r) => r.step === "dep-review.decided").at(-1)?.advisory_red, ["Scan"]);
   mergeStateStatus = "CLEAN";
   assert.equal(await run(), 0, "a head GitHub does not block takes the ordinary arm path");
   assert.deepEqual(posts, ["success"]);
 });
+
+// ── W1-T9995 — #11968 at 676bed094 (10-17): retitled, both pre-retitle reds (2026-10-16 16:44Z) still in the rollup.
+const PR11968_HEAD = "676bed0941f224b2e03146f3cf339f7458f2eccb";
+const TITLE_LINT_OLD = 38934326485;
+const CI_OLD = 38934327039;
+const COMMITLINT_JOB = 117085868891;
+
+test("W1-T9995: the dep-review command re-runs an armed BLOCKED head's superseded red and never comments recreate", async (t) => {
+  const c = rerunCommandFixture(t, { mergeStateStatus: "BLOCKED", armed: true });
+  assert.equal(await c.run(), 1);
+  assert.deepEqual(c.events, [`POST actions/runs/${TITLE_LINT_OLD}/rerun-failed-jobs`, `POST actions/runs/${CI_OLD}/rerun-failed-jobs`]);
+  assert.equal(c.ledger("dep-review.stale_event.observed").length, 1);
+  assert.equal(await c.run(), 1);
+  assert.equal(c.events.length, 2, "the second sighting waits on the re-run it already requested");
+  c.setRun(CI_OLD, { conclusion: "failure", run_attempt: 2 });
+  assert.equal(await c.run(), 1);
+  assert.equal(c.ledger("dep-review.superseded_red.rerun_red").length, 1);
+  assert.equal(c.ledger("dep-review.stale_event.escalated").length, 1, "a red re-run escalates once");
+  assert.equal(c.opened.length, 1);
+  assert.equal(await c.run(), 1);
+  assert.equal(c.opened.length, 1);
+  assert.deepEqual(c.comments, [], `never ${DEPENDABOT_RECREATE_COMMAND}`);
+  assert.equal(c.events.length, 2, "never a second re-run, and no review post or arm");
+});
+
+test("W1-T9995: the dep-review command re-runs a superseded red before it posts and arms, BLOCKED or not", async (t) => {
+  // 10-17: #11968 was not yet armed, and the sweep read its mergeability "unknown".
+  const c = rerunCommandFixture(t, { mergeStateStatus: "UNKNOWN", armed: false });
+  assert.equal(await c.run(), 0);
+  assert.deepEqual(c.events, [`POST actions/runs/${TITLE_LINT_OLD}/rerun-failed-jobs`, `POST actions/runs/${CI_OLD}/rerun-failed-jobs`,
+    "post success", "arm"]);
+  assert.equal(c.ledger("dep-review.superseded_red.rerun_requested").length, 2);
+  assert.equal(c.ledger("dep-review.stale_event.observed").length, 0);
+  assert.equal(await c.run(), 0);
+  assert.equal(c.events.filter((e) => e.startsWith("POST")).length, 2, "once per head, across passes");
+
+  // The re-run commitlint went red: the head now holds on it, and the hold pass confirms and escalates once.
+  const h = rerunCommandFixture(t, { mergeStateStatus: "CLEAN", armed: false });
+  await h.run();
+  h.setRun(TITLE_LINT_OLD, { conclusion: "failure", run_attempt: 2 });
+  h.setRollup((rollup) => [...rollup, { name: "commitlint", conclusion: "FAILURE", startedAt: "2026-10-17T03:24:00Z", completedAt: "2026-10-17T03:24:25Z" }]);
+  assert.equal(await h.run(), 1);
+  assert.equal(h.ledger("dep-review.superseded_red.rerun_red").length, 1);
+  assert.equal(h.opened.length, 1);
+  assert.match(h.opened[0].body, /re-run: red/);
+  assert.equal(await h.run(), 1);
+  assert.equal(h.opened.length, 1, "escalated on the pass the red was seen, not on every hold");
+  h.corruptState();
+  assert.equal(await h.run(), 1);
+  assert.equal(h.ledger("dep-review.superseded_red.rerun_failed").at(-1)?.action, "confirm");
+
+  // A legacy injected `gh` with no Actions port re-runs nothing and still arms.
+  const legacy = rerunCommandFixture(t, { mergeStateStatus: "CLEAN", armed: false, port: false });
+  assert.equal(await legacy.run(), 0);
+  assert.deepEqual(legacy.events, ["post success", "arm"]);
+});
+
+test("W1-T9995: the default Actions port re-runs through a gh api POST", async () => {
+  const reads: string[][] = [];
+  const writes: string[][] = [];
+  const port = defaultDepReviewActions("craigoley", "remudero", async (args) => { reads.push(args); return { workflow_runs: [] }; },
+    async (args) => { writes.push(args); return ""; });
+  assert.deepEqual(await port.runs(PR11968_HEAD), []);
+  await port.rerun(`actions/runs/${CI_OLD}/rerun-failed-jobs`);
+  assert.deepEqual(reads, [["api", `repos/craigoley/remudero/actions/runs?head_sha=${PR11968_HEAD}&per_page=100`]]);
+  assert.deepEqual(writes, [["api", "-X", "POST", `repos/craigoley/remudero/actions/runs/${CI_OLD}/rerun-failed-jobs`]]);
+});
+
+/** depReviewCommand over #11968 at 676bed094 (10-17), retitled, with both pre-retitle reds still in the rollup. */
+function rerunCommandFixture(t: TestContext, opts: { mergeStateStatus: string; armed: boolean; port?: false }) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9995-cmd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const statePath = join(root, "state", "dep-review-holds", "craigoley", "remudero", "PR11968.json");
+  let rollup: Array<Record<string, string>> = [
+    { name: "commitlint", conclusion: "FAILURE", startedAt: "2026-10-16T16:44:39Z", completedAt: "2026-10-16T16:44:58Z" },
+    { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-10-16T17:06:23Z", completedAt: "2026-10-16T17:16:56Z" },
+    { name: "commitlint", conclusion: "SUCCESS", startedAt: "2026-10-16T22:54:34Z", completedAt: "2026-10-16T22:54:57Z" },
+    { name: "ci-gate", conclusion: "SUCCESS", startedAt: "2026-10-16T22:54:35Z", completedAt: "2026-10-16T22:55:30Z" },
+    ...(opts.armed ? [{ context: "remudero-review", state: "SUCCESS", startedAt: "2026-10-17T02:58:23Z" }] : []),
+  ];
+  const runs: DependabotHeadRun[] = [
+    { id: 38978493953, path: ".github/workflows/pr-title-lint.yml", status: "completed", conclusion: "success", run_attempt: 1 },
+    { id: 38978493967, path: ".github/workflows/ci-gate.yml", status: "completed", conclusion: "success", run_attempt: 1 },
+    { id: CI_OLD, path: ".github/workflows/ci.yml", status: "completed", conclusion: "failure", run_attempt: 1 },
+    { id: TITLE_LINT_OLD, path: ".github/workflows/pr-title-lint.yml", status: "completed", conclusion: "failure", run_attempt: 1 },
+  ];
+  const jobs: Record<number, Array<{ id: number; name: string; conclusion: string }>> = {
+    [CI_OLD]: [{ id: 117087456422, name: "ci", conclusion: "success" }, { id: 117095262265, name: "ci-gate", conclusion: "failure" }],
+    [TITLE_LINT_OLD]: [{ id: COMMITLINT_JOB, name: "commitlint", conclusion: "failure" }],
+  };
+  const events: string[] = [];
+  const comments: string[] = [];
+  const opened: Array<{ title: string; body: string }> = [];
+  const issues: IssueGateway = {
+    create(title, body) { opened.push({ title, body }); return `https://github.com/craigoley/remudero/issues/${9000 + opened.length}`; },
+    listOpen() { return []; },
+    closeWithComment() {},
+  };
+  const actions: DependabotActionsPort = {
+    runs: async () => runs.map((r) => ({ ...r })),
+    jobs: async (runId) => jobs[runId] ?? [],
+    rerun: async (endpoint) => { events.push(`POST ${endpoint}`); },
+  };
+  const deps: DepReviewDeps = {
+    config: { root, ledger: ledgerPath } as never,
+    clock: clockFromMillisFn(() => Date.parse("2026-10-17T02:58:23Z")),
+    gh: () => ({
+      number: 11968, url: "https://github.com/craigoley/remudero/pull/11968",
+      // W1-T9828 fitted it at 22:54:33Z, so the title is already the one commitlint passed.
+      title: "chore(deps): bump google/osv-scanner-action/…/osv-scanner-reusable.yml from 2.6.0 to 2.7.0",
+      body: "", headRefOid: PR11968_HEAD, headRefName: "dependabot/github_actions/google/osv-scanner-action-2.7.0",
+      author: { login: "app/dependabot" }, mergeStateStatus: opts.mergeStateStatus,
+      ...(opts.armed ? { autoMergeRequest: { enabledAt: "2026-10-17T02:58:49Z" } } : {}), statusCheckRollup: rollup,
+    }),
+    requiredChecks: async () => ({ kind: "required", names: ["ci-gate", "commitlint", "remudero-review"] }),
+    prDiff: () => "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n",
+    postStatus: (async (args) => { events.push(`post ${args.state}`); return { posted: true }; }) as DepReviewDeps["postStatus"],
+    arm: () => { events.push("arm"); return "armed"; },
+    issues,
+    prMutations: { comment: (_url, body) => { comments.push(body); }, close: () => { throw new Error("never closes"); } },
+    ...(opts.port === false ? {} : { actions }),
+  };
+  return {
+    events, comments, opened,
+    run: () => depReviewCommand("11968", ["--repo", "remudero"], deps),
+    setRun: (id: number, over: Partial<DependabotHeadRun>) => { Object.assign(runs.find((r) => r.id === id)!, { status: "completed", ...over }); },
+    setRollup: (edit: (r: typeof rollup) => typeof rollup) => { rollup = edit(rollup); },
+    corruptState: () => { const s = JSON.parse(readFileSync(statePath, "utf8")); s.supersededReruns = [{}]; writeFileSync(statePath, JSON.stringify(s)); },
+    ledger: (step: string) => readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r.step === step),
+  };
+}

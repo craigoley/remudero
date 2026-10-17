@@ -1,0 +1,105 @@
+- id: W1-T10037
+  title: "A CODEX PROBE THAT CANNOT BE ASKED DISCARDS A HEALTHY READING: since codex-cli 0.162.1 reached the fleet (#11908, 2026-10-15 03:35Z), about one Codex capacity read in four ends 'app-server timed out after 10000ms; unfinished: initialize' on the primary AND its hedge, readCodexCapacity drops the last good reading and returns unreadable, and with claude below reserve the router pays for cash (107 cash-fallback assignments on 2026-10-17 from 08:25Z, the $25 cap gone by 09:50Z) while the same Codex account read 22-33% used minutes before and after"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, what readCodexCapacity returns when the app-server could not be asked. The probe, its timeout, its hedge, model choice, the reserve, Claude reads and cash routing are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 agent P44, Craig's ruling ~14:15Z: find why Codex reads unreadable, no spend change"
+  plan_refs: [W1-T2772, W1-T2840, W1-T3435, W1-T3690, W1-T3718, W1-T3692, W1-T10024]
+  files:
+    - src/lib/worker-provider.ts
+    - test/a-codex-probe-that-cannot-be-asked-carries-a-recent-reading.test.ts
+  status: queued
+  priority: 1  # while claude's weekly window sits at 95-96% (resets 2026-10-18T05:00Z) every unreadable Codex read becomes a paid cash round, and the cash cap is already exhausted for the day
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 15:00-15:35Z, read-only, niced, streamed to the Mac: the core ledger's archives and live
+    file, `docker logs remudero-daemon`, and the shared Codex home ~/.codex (sqlite read with immutable=1).
+    - THE ONSET IS THE CLI BUMP. #11908 moved deploy/package-lock.json @openai/codex 0.160.0 -> 0.162.1 (merged
+      2026-10-15 03:24Z). Codex's own migration tables date its first run: state_5.sqlite migration 59 installed
+      03:35:43Z, thread_history_1.sqlite migration 8 at 03:52:02Z. The first worker.assignment row with codex
+      "reason":"unreadable" is 03:39:17Z. Sampled archives 10-05 through 10-15T01:17Z (29 files, ~1,970 codex
+      considerations) hold 5 unreadable; every sampled archive after holds 4-20 (10-15T06 4/63, 10-16T03 17/78,
+      10-17T09 20/90).
+    - THE FAILURE IS initialize, ON BOTH ATTEMPTS. The daemon's cash_fallback events name it:
+      "codex=app-server capacity read failed after hedge; primary: app-server timed out after 10000ms; unfinished:
+      initialize; hedge: app-server timed out after 10000ms; unfinished: initialize". Since the 06:59Z container
+      start: 253 "timed out after 10000ms" strings and 143 "recovered by hedge after 6000ms"; all but 14 name
+      initialize, the rest a post-initialize RPC. None says "deadline overran" (so not a daemon-loop stall, W1-T3690), none carries malformed stdout (not a protocol or format
+      change) and none is an RPC error (not a quota answer).
+    - THE ACCOUNT WAS HEALTHY THROUGHOUT. Readable Codex readings the same day: codex primary 10080m 21% (06:58Z),
+      22% (08:00-09:45Z), 31-33% (13:55-15:21Z). From 08:25Z: 307 assignments won by codex in the auction, 107
+      routed to cash with codex unreadable (62 economy and 23 balanced cash-fallback, 18 cash-sonnet-fallback, 4
+      cash-opus-fallback).
+    - WHY IT TURNED INTO SPEND AT 08:31Z, NOT 03:39Z. Before 08:25Z claude was eligible (weekly all-models 92-94%,
+      reserve 5% by default) and absorbed every unreadable read. At 08:25Z that window reached 95%, claude went
+      below-reserve, and from 08:31Z (first row: ci-judge, rule cash-fallback, claude below-reserve, codex
+      unreadable) the only remaining arm was cash. The $25.00 cap first refused at 09:50:29Z.
+    - THE SHARED HOME THE PROBE OPENS: state_5.sqlite 2.12 GB (12,292 threads), thread_history_1.sqlite 4.72 GB,
+      config.toml 241 KB holding 2,998 trust entries, nearly all for deleted temp paths. The exact 0.162 startup step that holds initialize is
+      NOT identified. Strings in the 0.162.1 binary name quick_check, rollout compression and a paginated rollout migration;
+      both DBs already read auto_vacuum=2, so a one-off VACUUM is ruled out. Rolling the CLI back is unsafe: both DBs
+      now carry migrations 0.160.0 does not know.
+    READ at origin/main 37ecbb721 (symbols, not lines), src/lib/worker-provider.ts:
+    - `readCodexCapacity`: on a failed exchange it runs `codexCapacityCache.delete(cacheKey)` and returns the
+      failure. The last good reading, a minute old, is discarded at the moment it is the only evidence.
+    - `readCodexRuntimeWithTimeoutHedge` already retries once (W1-T2840), so a second retry would only buy time.
+    - `providerRefusalCondition` names this case "cannot-be-asked" and says only "full" argues for paying for a
+      fallback (W1-T3718). The W1-T3692 fallback in src/lib/worker.ts still pays for both.
+    DEVIATION, STATED: W1-T2840's design said "Do not revive stale successful headroom". It was written for a "rare
+    post-initialize stall amid otherwise fast successful reads". The evidence above is a pre-initialize stall on
+    about a quarter of reads, for two days, in every process that probes. This task reverses that one clause, bounded
+    by the reading's own burn rate, not by a fixed age.
+    WHY THIS IS NOT ANOTHER TASK: W1-T2772 single-flights and backs off; W1-T2840 adds the hedge; W1-T3435 keeps the
+    hedge from serializing; W1-T3690 separates a daemon stall from a slow child; W1-T3718 names the refusal condition.
+    None returns evidence when the child cannot be asked. W1-T10024 is the cash key, not the routing. Swept
+    plan/tasks.d at 37ecbb721 for "unfinished: initialize", 0.162, app-server stall, carry-forward and last-good
+    (positive control: the sweep finds W1-T3718's own "unfinished: initialize"), and every origin head's unmerged
+    commits since 10-12 that touch worker-provider.ts or name codex capacity: none covers this.
+  design: |
+    1. PERSIST THE LAST GOOD RAW READING. Each successful app-server exchange (rateLimits plus models, never auth
+       material) is written atomically to `<config.root>/state/codex-capacity-last-good.json` with its read time and
+       the Codex bin + home it came from. A file, not the module cache, because run children are separate processes
+       and each probes on its own.
+    2. CARRY IT FORWARD ONLY WHEN THE CHILD COULD NOT BE ASKED. When the exchange fails with failureKind `timeout`
+       or `starved`, and the request is not `forceRefresh`, readCodexCapacity loads that reading (same bin + home) and
+       projects each window: `projected = usedPercent + burnRate * age`. burnRate is the window's own average since
+       it opened (`usedPercent / (now - (resetsAt - windowDurationMins))`) or the rate between two stored readings of
+       the same window, whichever is higher. A window whose resetsAt has passed is dropped, and so is one with no
+       duration. The reading is admitted only if every projected window stays below `100 - reservePercent`. The
+       bound comes from the reading itself, so there is no fixed maximum age (Craig's no-hard-thresholds rule).
+    3. THE ADMITTED READING IS SELECTED LIKE A FRESH ONE. selectCodexRuntime runs on it with the projected
+       percentages, so model choice and the reserve apply unchanged. It is marked
+       `carriedForward: { readAt, ageMs, failure }`, and `detail` names both the carry and the failure, so a decision
+       record never passes a carried reading off as a fresh one.
+    4. EVERYTHING ELSE STAYS UNREADABLE, WITH ITS REASON. That covers an RPC error, exit, spawn failure, malformed
+       stdout, pagination, a missing toolchain, `forceRefresh` attribution reads, no stored reading, a different
+       bin/home, and a projection that crosses the reserve. The failure backoff and the hedge are unchanged.
+    5. TESTS in test/a-codex-probe-that-cannot-be-asked-carries-a-recent-reading.test.ts, `test(` titles verbatim as
+       in the proofs. Use an injected spawn whose app-server never answers initialize, an injected clock and a temp
+       config root; no real codex.
+  acceptance:
+    - claim: "an initialize timeout after a recent healthy reading returns that reading carried forward, readable, with the failure named"
+      proof: 'grep: test("W1-T10037: an initialize timeout carries a recent healthy reading forward" in test/a-codex-probe-that-cannot-be-asked-carries-a-recent-reading.test.ts'
+    - claim: "a stored reading whose projected burn crosses the reserve, or whose window has reset, stays unreadable"
+      proof: 'grep: test("W1-T10037: a reading whose projected burn crosses the reserve stays unreadable" in test/a-codex-probe-that-cannot-be-asked-carries-a-recent-reading.test.ts'
+    - claim: "an RPC error, a malformed reply and a forceRefresh attribution read never carry a reading forward"
+      proof: 'grep: test("W1-T10037: an RPC error or a forced refresh never carries a reading forward" in test/a-codex-probe-that-cannot-be-asked-carries-a-recent-reading.test.ts'
+    - claim: "a reading stored by one process is carried forward by another process's probe"
+      proof: 'grep: test("W1-T10037: a reading stored by one process is carried by another" in test/a-codex-probe-that-cannot-be-asked-carries-a-recent-reading.test.ts'
+  falsifier: |
+    At origin/main the first test reddens: a fake app-server that answered once and then never answers initialize
+    yields `readable: false`, detail "app-server capacity read failed after hedge", once the 60 s cache has
+    expired. With the fix it yields readable windows at the projected percentages and `carriedForward`. Deleting
+    the projection, so the reading is carried at its stored percentages with no bound, fails the second test.
+  note: |
+    EFFECT, measured after merge from the core ledger: worker.assignment rows with rule cash-fallback and codex
+    "reason":"unreadable" against rows where codex was carried forward (`carriedForward` in the codex candidate).
+    Healthy shape: cash-fallback with codex unreadable only when no recent healthy reading exists. Separately, the
+    0.162 startup step itself is still unidentified. Isolating the probe's sqlite state (codex `-c sqlite_home=`)
+    needs a fleet measurement before anyone files it. That measurement is the operator's, because it writes into
+    the Codex home.

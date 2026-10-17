@@ -10,7 +10,7 @@
   files: [src/lib/workflow-run.ts, src/lib/open-prs-rest.ts, src/lib/sweep.ts, test/terminal-run-pinned-job-requeue.test.ts]
   origin: "fleet-lifeguard#4226-terminal-run-pinned-job-2026-09-06"
   plan_refs: ["W1-T2340", "W1-T1223", "W1-T2431"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED INCIDENT, NOT A DECLARATIVE INFERENCE. On PR #4226 head

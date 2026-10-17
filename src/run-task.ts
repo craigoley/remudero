@@ -1635,6 +1635,10 @@ import {
   reconcileDependabotStaleEvent,
   dependabotStaleEventVerdict,
   buildDepReviewStaleEventEscalation,
+  dependabotActionsPort,
+  reconcileSupersededRedReruns,
+  type DependabotActionsPort,
+  type SupersededRerunOutcome,
   reconcileDependabotTitle,
   depReviewRequiredSet,
   type DepReviewRequired,
@@ -23899,6 +23903,7 @@ export interface DepReviewDeps {
   /** W1-T9664: the daemon's landing state root. Given, a proposal is STAGED for the async landing sweep, not landed inline. */
   landingStateRoot?: string;
   requiredChecks?: (branch: string) => Promise<DepReviewRequired>; // W1-T9929: an injected `gh` without it holds on every red
+  actions?: DependabotActionsPort; // W1-T9995: an injected `gh` without it re-runs nothing
 }
 
 export async function readDepReviewRequiredChecks(
@@ -23990,6 +23995,11 @@ export function defaultDepReviewPrMutations(owner: string, repo: string): DepRev
   };
 }
 
+export function defaultDepReviewActions(owner: string, repo: string, read = (a: string[]) => ghJsonAsync(a),
+  write = (a: string[]) => ghTextAsync(a)): DependabotActionsPort {
+  return dependabotActionsPort(owner, repo, read, (path) => write(["api", "-X", "POST", path]));
+}
+
 async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepReviewDeps = {}): Promise<number> {
   const { owner, repo } = resolveReviewTarget(resolveOwnerRepo(), rest);
   const slug = `${owner}/${repo}`;
@@ -24038,6 +24048,12 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   const captureProposal = deps.captureMigrationFeedback ?? depReviewProposalCapture(deps.landingStateRoot);
   const holdStatePath = join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`);
   const dependabot = isDependabotAuthor({ login: view.author?.login ?? "" });
+  const actions = deps.actions ?? (deps.gh === undefined ? defaultDepReviewActions(owner, repo) : undefined);
+  const supersededReruns = (superseded: readonly string[]) => reconcileSupersededRedReruns({
+    statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, superseded, actions, nowMs: clock.now(), log });
+  const escalateStale = (checks: readonly string[], rerun: SupersededRerunOutcome["kind"]) => escalate(buildDepReviewStaleEventEscalation({ prUrl: view.url,
+    prNumber: view.number, title: view.title ?? "", headSha: view.headRefOid, checks, rerun }),
+  { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId });
 
   if (dependabot) {
     const sync = syncNodePinForImageBump(
@@ -24159,6 +24175,12 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     } catch (error) {
       log("dep-review.own_red.failed", { pr_number: view.number, head_sha: view.headRefOid, error: String(error) });
     }
+    try { // W1-T9995: a re-run that went red holds the head; this pass confirms it and escalates once.
+      const rerun = dependabot ? await supersededReruns([]) : undefined;
+      if (rerun?.redNow) escalateStale(rerun.checks, rerun.kind);
+    } catch (error) {
+      log("dep-review.superseded_red.rerun_failed", { pr_number: view.number, head_sha: view.headRefOid, action: "confirm", error: String(error) });
+    }
     console.log(`no remudero-review posted (holding for gates): ${view.url}`);
     return 1;
   }
@@ -24247,17 +24269,19 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
   if (result.decision === "arm") {
     const raw = view.statusCheckRollup ?? [];
+    const superseded = supersededRedsNowPassing(raw);
+    // W1-T9995: armed or not, BLOCKED or not — mergeability can read "unknown" for hours.
+    const rerun = dependabot ? await supersededReruns(superseded) : { kind: "none" as const, checks: [] };
+    if (rerun.kind !== "none") console.log(`dependabot superseded red re-run ${rerun.kind} (${rerun.checks.join(", ")}): ${view.url}`);
     const stale = dependabotStaleEventVerdict({
       mergeStateStatus: view.mergeStateStatus, autoMergeArmed: view.autoMergeRequest != null,
       reviewPosted: raw.some((c) => (c.context ?? c.name) === REVIEW_CONTEXT && String(c.state ?? c.conclusion ?? "").toUpperCase() === "SUCCESS"),
-      supersededReds: supersededRedsNowPassing(raw),
+      supersededReds: superseded,
     });
-    if (stale.kind === "stale-event") { // W1-T9913: one fresh event for a superseded red, never a re-post.
+    if (stale.kind === "stale-event") { // W1-T9913: never a re-post; W1-T9995: the re-run above, never a recreate.
       const outcome = reconcileDependabotStaleEvent({
-        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, checks: stale.checks, nowMs: clock.now(), log,
-        comment: (body) => (deps.prMutations ?? defaultDepReviewPrMutations(owner, repo)).comment(view.url, body),
-        escalate: () => escalate(buildDepReviewStaleEventEscalation({ prUrl: view.url, prNumber: view.number, title: view.title ?? "",
-          headSha: view.headRefOid, checks: stale.checks }), { issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+        statePath: holdStatePath, prNumber: view.number, headSha: view.headRefOid, checks: stale.checks, rerun, nowMs: clock.now(), log,
+        escalate: () => escalateStale(stale.checks, rerun.kind),
       });
       console.log(`dependabot stale-event block ${outcome} (${stale.checks.join(", ")}): ${view.url}`);
       return 1;
