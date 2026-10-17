@@ -19,8 +19,9 @@ Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 The installer also installs `cache-reclaim.py` and `retire-legacy-sweeper.py` in
 both layouts. `--retire-legacy-sweeper` is an explicit additional installer option,
 composable with `--shared`. It disables future launch admission only for the
-known `com.craigoley.disk-sweep` job after verifying its exact plist arguments,
-ownership and historical script hash. The plist is retained with a disabled
+known `com.craigoley.disk-sweep` job after verifying its exact plist arguments
+and executable (an explicit `Program` must equal `/bin/zsh`), ownership and
+historical script hash. The plist is retained with a disabled
 suffix. It never stops a running process, changes cron entries, or retires an
 unknown/replaced job. Ordinary code-only installation does not change schedules.
 
