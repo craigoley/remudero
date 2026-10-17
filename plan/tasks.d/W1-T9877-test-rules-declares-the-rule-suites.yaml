@@ -16,7 +16,7 @@
     - scripts/diff-class.mjs
     - test/ci/gates/test-rules-declares-the-rule-suites.test.ts
     - "src/lib/rule-suites.ts"
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

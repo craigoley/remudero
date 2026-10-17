@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: file the follow-ups from the PR #10829 (W1-T7899) fix-lane stall and escalation #10837"
   plan_refs: [W1-T7719, W1-T6362, W1-T6355, W1-T5974, W1-T5919, W1-T6434, W1-T7899]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-dead-dirty-fix-owner-at-the-current-head-is-reclaimed.test.ts, test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
