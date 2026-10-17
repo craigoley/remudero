@@ -41,7 +41,7 @@
       SWAP_STALL_MIN_SAMPLES (30); `swapInPredictsStall` counts swap-in only when the lift exceeds the noise, and the
       row's numbers.swapInBasis says which. `containerLiftOf` (W1-T8472) reuses the same windows for the container arm.
     - src/lib/host-memory-admission.ts `awaitMemoryAdmission` waits on any "shortfall" verdict, psi included;
-      W1-T10069 (#12653, built by B53, open) adds an own-tail tier and `waited_ms_by_reason` but keeps psi a HARD STOP
+      W1-T10069 (#12653, built by B53, merged 4719f9427 at ~20:47Z) adds an own-tail tier and `waited_ms_by_reason` but `ownTailRung` keeps psi a HARD STOP
       there, so where psi binds it does not shorten the wait.
     - src/lib/serve-supervisor.ts applies the same policy number to serve's own start (RMD_SERVE_ADMIT_PSI_FULL_AVG10_MAX
       via serve-policy-convergence.ts). Out of scope: serve's admission keeps the prior.
@@ -49,7 +49,7 @@
     swapStallRelationOf and swapInPredictsStall: only W1-T10069 (psi a hard stop on its tier) and W1-T8472 (the
     container arm). W1-T9982 (queued) charges a fresh daemon's boot growth; it is the case the learned bound must not
     open on: the 02:33-02:42Z collapse admitted starts minutes before host MemAvailable fell to ~1 GB. Swept the open PR
-    heads (listed in the filing PR): none learns the PSI bound.
+    heads at 20:48Z (11: #12662 #12661 #12660 #12659 #12658 #12657 #12654 #12643 #12641 #12639 #12632): none changes plan/ or either host-memory file.
   design: |
     Operator rulings honoured: no hard threshold, never raise core memory.max, the 2,048 MiB host reserve unchanged.
     REUSE the swap-in mechanism: the same store, windows, history span, minimum sample count and noise. No new
