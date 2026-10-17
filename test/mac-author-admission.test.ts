@@ -3,9 +3,20 @@ import {spawnSync} from 'node:child_process';
 import {existsSync, readFileSync, readdirSync, statfsSync} from 'node:fs';
 import {join} from 'node:path';
 import {test} from 'node:test';
-import {guardedAuthorEntry, MAC_AUTHOR_FREE_RESERVE_BYTES, MacAuthorCapacityRefusal,
-  macPressureState, readMacAuthorAdmission}
-  from '../scripts/lib/mac-author-admission.mjs';
+type Admission = {state: string; minimumFreeBytes: number; workspaceFreeBytes: number | null;
+  scratchFreeBytes: number | null; pressure: string; reasons: string[]};
+type AdmissionOptions = {platform?: string; scratch?: string; statfs?: Function; spawn?: Function};
+type AuthorEntryOptions = {root: string; readAdmission: () => {state: string};
+  runAuthor: (argv: string[], deps: {admitHost: (stage: string) => unknown}) => number;
+  reportRefusal?: () => void};
+const {guardedAuthorEntry, MAC_AUTHOR_FREE_RESERVE_BYTES, MacAuthorCapacityRefusal,
+  macPressureState, readMacAuthorAdmission} = await import(new URL('../scripts/lib/mac-author-admission.mjs', import.meta.url).href) as {
+  MAC_AUTHOR_FREE_RESERVE_BYTES: number;
+  macPressureState: (text: string) => string;
+  readMacAuthorAdmission: (root: string, options?: AdmissionOptions) => Admission;
+  MacAuthorCapacityRefusal: new (stage: string, admission: {state: string; pressure?: string}) => Error & {stage: string};
+  guardedAuthorEntry: (argv: string[], options: AuthorEntryOptions) => number;
+};
 
 const ample = () => ({bavail: 30 * 1024 ** 3, bsize: 1});
 const normal = () => ({status: 0, stdout: '1\n'});
@@ -85,7 +96,10 @@ test('Mac admission is freshly checked after slot waiting and before a later hea
 
 test('Mac author phase refusals save OVER-CAPACITY, start no refused phase, and release the slot', async (t) => {
   const {makeRuntimeFixture} = await import('./helpers/native-runtime-fixture.js');
-  const {main} = await import('../scripts/preflight-author.mjs');
+  const {main} = await import(new URL('../scripts/preflight-author.mjs', import.meta.url).href) as {
+    main: (argv: string[], options: {root: string; select: () => {fullRun: boolean; suites: string[]; reasons: string[]};
+      admitHost: (stage: string) => {stage: string; state: string}}) => number;
+  };
   const {resolveTestSlotDir} = await import('../src/lib/test-slot.js');
   for (const refusedStage of ['static-preflight', 'affected-tests']) {
     const fixture = makeRuntimeFixture(); t.after(() => fixture.cleanup());
