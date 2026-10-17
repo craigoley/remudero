@@ -181,6 +181,7 @@ test("W1-T9981: the queued-task figure never parses the whole window", async (t)
 
 test("W1-T9981: a row of a step the projection does not list never moves its queued count", async (t) => {
   const { path } = corpus(t);
+  // @source-text-subject: src/lib/status.ts — the census population IS the step literals its reducers compare.
   const source = readFileSync(fileURLToPath(new URL("../src/lib/status.ts", import.meta.url)), "utf8");
   const steps = [...new Set([...source.matchAll(/"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)"/g)].map(m => m[1]!))]
     .filter(step => !status.PROJECTION_STEP_READS.has(step));

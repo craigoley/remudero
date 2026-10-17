@@ -81,6 +81,7 @@ function noteLine(scan: WindowScan, line: string): void {
       if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("independent ledger row is not an object");
       ts = (row as Row).ts;
     } catch (error) {
+      // deliberate: the reader throws this once its pass ends, as the unfiltered parse threw on this line.
       scan.malformed ??= error;
       return;
     }
