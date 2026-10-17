@@ -26,3 +26,17 @@ the complete source/toolchain/input closure and bounded drift policy.
 Cleanup must protect dependency donors referenced by live views even when no file
 is currently open. Six-hour age alone is insufficient. Source, history, dirty or
 unpushed work, active readers/writers and unknown provenance remain protected.
+
+For an opt-in setup check before expensive work, run
+`node scripts/check-author-checkout.mjs --head <committed-sha> --upstream https://github.com/craigoley/remudero.git`.
+An optional `--bundle <path> --bundle-head <sha>` checks the actual advertised
+refs (including a HEAD-only bundle) and Git's prerequisite verification. The
+diagnostic does not fetch, import a bundle, change refs/config, install packages,
+take capacity or execute tests. Ready (exit0), blocked (exit3) and unknown (exit2)
+describe local metadata only, never fresh upstream, author assurance or execution
+authority. Normal fresh fetch, genuine admission and current-head gates remain.
+
+The shared subprocess envelope uses one process-local monotonic start, charges
+elapsed time once, floors fractional milliseconds to a valid integer and refuses
+an exhausted/zero timeout. It never converts exhaustion into Node's unbounded
+timeout0 or silently starts a new deadline for a later subprocess.
