@@ -1,0 +1,63 @@
+- id: W1-T9954
+  title: "THE NAMED-PIPE DISCOVERY CASE CANNOT HANG A TEST RUN — test/assistant-action-discovery.test.ts's mkfifo case spawnSyncs a tsx child with `timeout: 5000` and the default SIGTERM, and on 2026-10-16 that child sat for about 80 min at ~0 CPU, holding a preflight-author run and the builders' shared heavy lock; node:test's own per-test timeout cannot preempt a spawnSync that blocks the test process"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, that the fifo discovery case ends within its bound; the product's fifo refusal is unchanged
+  band_meaning: blast-radius
+  origin: 'W1-T9803 builder report (logs-8864/9803-9710-STATUS.txt); coordinator brief batch1016b item 7'
+  plan_refs: [W1-T5399]
+  files:
+    - test/assistant-action-discovery.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/9803-9710-STATUS.txt): the W1-T9803 preflight-author affected-suites run hung from about
+    20:36Z in this file's case "assistant discovery refuses a real claim named pipe without waiting for a writer",
+    holding heavy.lock until the operator ended it at about 21:55Z.
+    OBSERVED by the batch1016b filer at about 21:20-21:40Z, with pid, ppid, stat, time, comm, per-task stat and fd
+    readlink only:
+    - The leaf was a node process (comm MainThread, state S) with 7 threads: MainThread, four V8Worker,
+      SignalInspector and DelayedTaskScheduler. It had no libuv-worker threads and no child process. Its
+      MainThread had used 0.47 s of CPU in about 50 min.
+    - Its parent, the test-file process, had 4 libuv-worker threads, a WorkerThread and a live esbuild child.
+    - The leaf's first 12 distinct fd targets were anon inodes, pipes and sockets. None was a path to the claim fifo.
+    READ at origin/main 77f68d26a (symbols, not lines):
+    - The case writes a regular claim (the positive control), replaces it with `mkfifo`, then calls
+      `spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", ...],
+      { timeout: 5000 })`. The eval imports readAssistantActionDiscovery.
+    - spawnSync sends its killSignal (SIGTERM by default) once at the timeout and then waits for the child to
+      exit. It never escalates.
+    - The product (src/lib/assistant-action-discovery.ts openReadOnly) opens with O_RDONLY | O_NONBLOCK through
+      fs/promises and stats the handle before reading. A fifo with no writer therefore opens at once.
+    INFERRED, not proven: the leaf never reached the discovery's open. It had no libuv threadpool threads, which the
+    first fs/promises call starts, and held no fd to the fifo. So the "fifo opened with no writer" reading does not
+    fit this hang. The child blocked earlier, in startup or tsx's loader setup, and the one SIGTERM did not end it.
+    Whether the builder's private TMPDIR on /mnt/scratch contributed is unproven. tsx's loader connects to
+    `<tmpdir>/tsx-<uid>/<ppid>.pipe`, but that connection is async, unref'd, and ignores errors.
+    Exposure, INFERRED: 481 test files on origin/main call spawnSync, and 9 mention killSignal.
+  design: |
+    1. Bound the case so it cannot hang. Its spawnSync passes `killSignal: "SIGKILL"`. The case asserts on
+       `child.signal` and `child.error` with a message that names a timed-out child, so a hang fails in seconds.
+       If the case moves to an async spawn so a node:test `timeout` can also act, that timeout value is an OPERATOR
+       DECISION, named in the PR.
+    2. Find the cause. Run the case in a loop (for example 200 runs under `timeout -k 60`), at the default TMPDIR and
+       at a long /mnt/scratch TMPDIR. On any child that outlives its bound, record per-thread stat and wchan before
+       it is killed. Put the rate and the evidence in the PR. If the cause is in the case, fix it there. If it is in
+       tsx or node, say so and leave the bound.
+    3. The product's fifo assertion is unchanged: a fifo claim is refused as unreadable_entries with no wait.
+    Tests stay in test/assistant-action-discovery.test.ts. The new title is in the proof.
+  acceptance:
+    - claim: "a discovery child that outlives its bound ends at that bound with SIGKILL, and the case fails fast instead of waiting"
+      proof: 'grep: test("W1-T9954: a stuck named-pipe discovery child ends at its bound" in test/assistant-action-discovery.test.ts'
+    - claim: "the fifo case spawns its child with killSignal SIGKILL"
+      proof: 'grep: killSignal: "SIGKILL" in test/assistant-action-discovery.test.ts'
+  falsifier: |
+    On origin/main the file has no killSignal, so the grep proof reads 0. The new test drives the same spawn options
+    against a child whose main thread blocks for 30 s and ignores SIGTERM (a `process.on("SIGTERM")` listener, then
+    Atomics.wait). With main's options spawnSync returns only after 30 s, so the elapsed-time assertion (under 10 s)
+    fails. With SIGKILL it returns at the bound.

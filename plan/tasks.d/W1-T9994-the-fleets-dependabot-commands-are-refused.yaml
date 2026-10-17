@@ -1,0 +1,107 @@
+- id: W1-T9994
+  title: "THE FLEET'S @dependabot COMMANDS ARE REFUSED, AND THE LEDGER SAYS DELIVERED — Dependabot answers remudero-fleet[bot] 'Sorry, only users with push access can use that command', yet refresh_unanswered reads delivered:true for hours and the head is never refreshed; record the refusal, and refresh a base-red head through the guarded REST update-branch instead"
+  repo: remudero
+  depends_on: [W1-T9995]  # same files (dep-review.ts, run-task.ts); W1-T9995 clears #11968's blocking red, so it builds first and this one serializes behind it
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a Dependabot command the fleet posts is known to be refused, and the base refresh it carried goes through REST; no gate, check list, arm verdict or App permission changes
+  band_meaning: span
+  origin: "operator ruling 2026-10-16 (Craig): #11968, a Dependabot bump, merges hands-free; on 2026-10-17 this refusal is one of the two reasons it still has not"
+  plan_refs: [W1-T54, W1-T6404, W1-T9584, W1-T9818, W1-T9828, W1-T9913, W1-T9995]
+  files:
+    - src/lib/dep-review.ts
+    - src/run-task.ts
+    - test/the-fleets-dependabot-commands-are-refused.test.ts
+    - test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts
+  status: queued
+  priority: 1  # every Dependabot head the lane tries to refresh waits for a human, #11968 today, and the ledger says it is in hand
+  attempts: 0
+  rationale: |
+    READ 2026-10-17 at origin/main 1f500495c. Sources: the session's `gh pr view 11968` at about 03:15Z, one gated read of
+    workflow runs for head 676bed09 at 03:17Z, and the core ledger archives on the host, read-only.
+    - THE REFUSAL. #11968 comments: cao825 at 16:38Z posted "@dependabot rebase", and it was accepted: dependabot[bot]
+      pushed head 676bed09 at 16:44:28Z. remudero-fleet posted "@dependabot rebase" at 20:45:13Z. Dependabot answered at
+      20:45:17Z: "Sorry, only users with push access can use that command." The ledger has
+      `dep-review.refresh_requested` at 20:45:14Z (command "@dependabot rebase", cause base-red-recovered), then
+      `dep-review.refresh_unanswered` at 23:28Z, 01:13Z and 02:20Z, each `delivered: true`, aged up to 5.6 h.
+    - WHY IT SAYS DELIVERED. In src/lib/dep-review.ts, `reconcileDependabotRefresh` (and `reconcileDependabotStaleEvent`)
+      set `record.delivered = true` as soon as `args.comment(record.command)` returns. So "delivered" means "posted",
+      and nothing reads Dependabot's answer. Once a record exists for a head, every later pass returns "unanswered".
+      The lane never retries, never uses another remedy, and never asks anyone.
+    - EVERY COMMAND SITE (`git grep "@dependabot" src/`) is in src/lib/dep-review.ts:
+      - `DEPENDABOT_REBASE_COMMAND` and `DEPENDABOT_RECREATE_COMMAND`. `reconcileDependabotRefresh` posts them via
+        `dependabotRefreshCommand`, and `reconcileDependabotStaleEvent` posts recreate (W1-T9995 replaces that one).
+      - `DEPENDABOT_IGNORE_MAJOR_COMMAND`, posted by the migrate branch of `depReviewCommand` in src/run-task.ts,
+        followed by a REST close.
+      All three post through `DepReviewPrMutations.comment` (`gh pr comment`) under the daemon's identity,
+      remudero-fleet[bot].
+    - THE APP ALREADY HAS PUSH ACCESS. remudero-fleet pushes run- branches, and it retitled #11968: the 22:54Z edit
+      runs show triggering_actor remudero-fleet[bot]. So the refusal most likely turns on the commenter being a bot
+      account, not on what the App is granted. That is inferred, not verified, so granting the App more rights is
+      not shown to help.
+    - THE REST REMEDY EXISTS. `ghUpdateBranch` in src/run-task.ts (mirrored in src/lib/arm-auto-merge.ts) is the
+      guarded `PUT repos/<o>/<r>/pulls/<n>/update-branch` with an expected head. The 03:22:49Z `sweep.merge_probe` reads
+      #11968 as `behind_by: 124`, verdict clean, no conflict paths. W1-T6404 already refreshes a fleet PR's stale rollup
+      this way.
+    - UPDATE-BRANCH ON A DEPENDABOT HEAD, WEIGHED. It adds a remudero-fleet merge commit, after which Dependabot stops
+      rebasing the PR (W1-T9584's header in src/lib/dep-review.ts; #11791/#11793). `rebase` is then refused on the edited
+      head anyway. scripts/head-identity-gate.mjs `isDependencyBumpHead` already admits a
+      `Merge branch 'main' into dependabot/...` head whose diff is still declaration-only.
+    - SWEEP: plan/tasks.d on origin/main for a refusal, push access, update-branch on a Dependabot head, or a
+      command-answer read: W1-T9584, W1-T9818 (queued; escalates a hold that stops moving, in the same files),
+      W1-T9913, W1-T9828, W1-T9929. None of them reads Dependabot's answer or replaces a command with REST. The 443 open
+      heads (`git ls-remote --heads origin`, 03:2xZ) add 41 plan/tasks.d files between them, and none names this. As a
+      positive control, the same pattern matched W1-T9913's shard.
+  design: |
+    No LLM and no new fixed bound. Every effect runs once per head, on the hold-state file the refresh records already use.
+    a. RECORD THE ANSWER.
+       - Add a pure `dependabotCommandAnswer(comments, since)` to src/lib/dep-review.ts. It reads the dependabot[bot]
+         issue comments created at or after a record's `requestedAtMs`. When a reply matches Dependabot's refusal
+         wording, it returns `refused` with the reply's first line; otherwise it returns `none`. Keep the wording in one
+         exported constant, seeded with the #11968 reply.
+       - `DependabotRefreshRecord` gains `answer?: "refused"` and `answeredAtMs`.
+       - While a delivered command record at the current head has no answer, each pass reads
+         `repos/<o>/<r>/issues/<n>/comments?since=<iso>` once.
+       - A refusal ledgers `dep-review.refresh_refused` (pr_number, head_sha, command, cause, reply). A refused record
+         never logs `refresh_unanswered` again, and it no longer blocks a REST refresh at that head (step b). For
+         W1-T9818, it counts as a hold that stopped moving.
+       - The migrate branch's ignore command gets the same read and ledger. Its close is already REST. A REST
+         replacement for "ignore" is out of scope; the refusal is ledgered for the operator.
+    b. BASE REFRESH BY UPDATE-BRANCH (chosen over the command).
+       - Where `reconcileDependabotRefresh` would post rebase or recreate (cause base-red-recovered or fixed-on-main),
+         it calls the guarded `ghUpdateBranch` with the head as `expected_head_sha`.
+       - It records `via: "update-branch"` and ledgers `dep-review.refresh_requested` with `via`.
+       - The same applies to a head whose prior command record is `refused`.
+       - Why it is chosen: the cost is that Dependabot stops rebasing the PR. But Dependabot already refuses every
+         command from this identity, so the fleet cannot drive it either way, and Dependabot still supersedes the PR
+         when a newer version ships.
+       - After the update, the new head re-earns its review (depReviewed is keyed `pr@head`), W1-T9828 retitles it if
+         needed, and head-identity-gate admits the merge head.
+       - A head that is not behind main, conflicts, or is refused (`ghUpdateBranch` ok=false) goes to (c).
+    c. ESCALATE ONLY WHEN NO REST REMEDY APPLIES: the update-branch was refused or does not apply, or a refused command
+       has no REST counterpart (ignore). Use the existing `buildDepReviewEscalation` and the `escalate()` dedup, and
+       quote the refusal reply.
+    d. AN OPERATOR DECISION, NOT PART OF THIS DESIGN: giving the commands an identity Dependabot accepts, such as a
+       collaborator user's token. This task leaves the App's grant unchanged, and its push access already exists.
+    e. UNCHANGED: ci-gate's REQUIRED/ADVISORY lists, pr-title-lint.yml, commitlint.config.mjs, `decideDepReview`, the
+       sweep's dedup, W1-T9995's superseded-red re-run, and every arm, migrate and refuse effect other than the command posts
+       above.
+    f. TESTS: pure tests go in the new file, which must not import src/run-task.ts. Command-level tests update
+       test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts, since this task replaces its rebase/recreate
+       expectations. The proofs name the `test(` titles verbatim.
+  acceptance:
+    - claim: "a Dependabot reply refusing a fleet command is recorded as refused, ledgered dep-review.refresh_refused, and never reported unanswered again"
+      proof: 'grep: test("W1-T9994: a refused Dependabot command is recorded as refused, not delivered and unanswered" in test/the-fleets-dependabot-commands-are-refused.test.ts'
+    - claim: "a refused command record no longer pins the head: the same head is refreshed through REST on the next pass"
+      proof: 'grep: test("W1-T9994: a head whose command was refused is refreshed through REST on the next pass" in test/the-fleets-dependabot-commands-are-refused.test.ts'
+    - claim: "a base-red refresh of a Dependabot head goes through the expected-head update-branch, once per head, and comments no command"
+      proof: 'grep: test("W1-T9994: a base-red Dependabot refresh uses the guarded update-branch, not a command" in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts'
+    - claim: "an update-branch that is refused or does not apply escalates once, quoting any refusal reply"
+      proof: 'grep: test("W1-T9994: a refused update-branch escalates once with the refusal quoted" in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts'
+  falsifier: |
+    At origin/main, `dependabotCommandAnswer` does not exist, so the new file fails to import. On the #11968 fixture, a
+    delivered "@dependabot rebase" record at head 676bed09 plus a dependabot[bot] comment "Sorry, only users with push
+    access can use that command.", `reconcileDependabotRefresh` returns "unanswered" and ledgers `refresh_unanswered`
+    with `delivered: true`. On a base-red hold, it comments "@dependabot rebase" and calls no update-branch.

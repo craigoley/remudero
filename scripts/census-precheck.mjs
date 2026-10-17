@@ -654,6 +654,11 @@ function node24RuntimeTrigger({ changed, readHead, readBase }) {
 
 const HOST_CAPABILITY_RE = /chmod|process\.platform|getuid|hostname|\/usr\/bin\//;
 const TEST_TS_SCOPE_RE = /^test\/.+\.ts$/;
+function changesTestText({ changed, readHead, readBase }, pattern) {
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  return changed.filter((path) => TEST_TS_SCOPE_RE.test(path)).some((path) =>
+    pattern.test(readHead(path) ?? "") || pattern.test(readBase(path) ?? ""));
+}
 const PRICE_RE = /\b(?:pr_url|cost_usd)\b/;
 const PRICED_WRITE_RE = /\blog\w*\(\s*(?:(["'])[A-Za-z0-9_.:-]+\1|[A-Z][A-Z0-9_]*)\s*,|\bstep:\s*(?:(["'])[A-Za-z0-9_.:-]+\2|[A-Z][A-Z0-9_]*\b)/g;
 
@@ -804,7 +809,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", gitFree: true, script: "census:every-priced-ledger-step",
     trigger: (input) => input.changed.includes("src/lib/config-gardener.ts") || addsMatch(input, CLOCK_SCOPE_RE, pricedWrites),
     remedy: "register CONFIG_GARDEN_LEDGER_STEPS in src/lib/config-gardener.ts or a reasoned exemption in test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts" },
-  { testFile: "test/host-capability-fixtures.test.ts", gitFree: true, script: "census:host-capability-fixtures",
+  { testFile: "test/host-capability-fixtures.test.ts", script: "census:host-capability-fixtures",
     trigger: (input) => addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => HOST_CAPABILITY_RE.test(line))),
     remedy: "own the fixture's host condition or declare its reason in test/host-capability-fixtures.test.ts" },
   { testFile: "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts", script: "census:no-nested-preflight",
@@ -831,12 +836,32 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  // W1-T9872: these test/ censuses now join listRuleSuites through their recursive Git enumeration.
+  // Read both sides: removing a package scope or sweep lock can break a census without adding a token.
+  { testFile: "test/architecture-fitness.test.ts", structural: true,
+    trigger: (input) => input.changed.some((p) => ["test/architecture-fitness.test.ts", ".dependency-cruiser.cjs"].includes(p)) ||
+      changesTestText(input, /return\s+(?:await\s+)?page\.|\b(?:tmpdir|writeFileSync|writeFile|put)\s*\(|await\s+import\s*\(/),
+    remedy: "keep test module copies in an ESM scope under the project root and await page calls before teardown" },
+  { testFile: "test/orphan-sweep-names-the-third-party.test.ts",
+    trigger: (input) => input.changed.some((p) => ["test/orphan-sweep-names-the-third-party.test.ts", "src/lib/worker-containment.ts"].includes(p)) ||
+      changesTestText(input, /withRealSweepLock|\[RUN_ID_ENV\]/),
+    remedy: "hold withRealSweepLock in every fixture that sends an ended-run stray into a real sweep" },
+  { testFile: "test/the-mutant-loader-resolves-every-relative-import.test.ts",
+    trigger: (input) => input.changed.some((p) => ["test/the-mutant-loader-resolves-every-relative-import.test.ts", "test/helpers/mutant-module.ts", "scripts/satisfied-task-census.mjs"].includes(p)) ||
+      changesTestText(input, /\.replace\s*\(/),
+    remedy: "rewrite copied module imports through rewriteRelativeSpecifiers / writeMutantModule" },
   { testFile: "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs",
       "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
     ].includes(p)),
     remedy: "load src/lib/gate-gardener.ts through tsImport (ESM), never tsx/cjs/api" },
+  // W1-T9860: the basename-uniqueness check, asked when its rule (the resolver) or the check itself changes. A new
+  // test that takes a held basename is refused by the same suite in CI's rule-checks.
+  { testFile: "test/every-test-basename-is-unique.test.ts",
+    trigger: ({ changed }) => changed.some((p) =>
+      ["src/lib/test-path-resolver.ts", "test/every-test-basename-is-unique.test.ts"].includes(p)),
+    remedy: "rename one test of each pair: resolveTestPath (src/lib/test-path-resolver.ts) finds a moved test by its unique basename" },
 ];
 
 /**
@@ -937,7 +962,6 @@ export const PRECHECK_EXTRA_CI_CENSUSES = {
   "test/spend-is-counted-once-at-its-producer.test.ts": "SPEND_STEP_ROLES — #8988 #9041",
   "test/ledger-rotation.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
   "test/a-union-read-of-an-unretained-step-is-refused.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
-  "test/host-capability-fixtures.test.ts": "host-capability-fixtures — #8994",
   "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts": "CONFIG_GARDEN_LEDGER_STEPS — #9179 #9181",
 };
 

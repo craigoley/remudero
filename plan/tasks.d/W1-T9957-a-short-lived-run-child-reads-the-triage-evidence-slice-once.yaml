@@ -1,0 +1,67 @@
+- id: W1-T9957
+  title: "A SHORT-LIVED RUN CHILD READS THE TRIAGE EVIDENCE SLICE WITHOUT RE-READING THE CORPUS — every CLI process that escalates builds its own run-task.escalation-triage-evidence reader through main()'s lazy configureEscalationTriage, and its first refresh re-reads every rotation's digest (and any rotation it cannot match) from disk; console's run children did this at about 0.75 MB/s of root-disk reads, and W1-T9710's seeding helps only a long-lived process"
+  repo: remudero
+  depends_on: [W1-T9710]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, where a short-lived process gets the triage evidence slice from; the rows it answers are unchanged
+  band_meaning: span
+  origin: 'root-disk I/O investigation 2026-10-16 (logs-8864/rootio-*); coordinator brief batch1016b item 9'
+  plan_refs: [W1-T9710, W1-T9406, W1-T9390, W1-T9764, W1-T100, W1-T9748]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/rootio-analysis-1.txt, 2026-10-16 ~16:37-16:41Z, a 240 s window, /proc io and fd samples,
+    81 ticks):
+    - The console cgroup read 0.75 MB/s, 16.2 reads/s, from the root disk (259:1).
+    - Two processes born in the window read the most (read_bytes, all devices): pid 753196, a node MainThread with an
+      esbuild child (a tsx-started run child), read 362.4 MB; pid 784908 read 150.1 MB.
+    - The console's root-disk open-file samples were rotated ledger .gz files plus digests under
+      state/cache/rotation-digests/run-task%2Eescalation-triage-evidence/ (and one inbox-replay-band-meaning digest).
+    READ at origin/main 77f68d26a (symbols, not lines):
+    - src/run-task.ts main() calls configureEscalationTriage with a lazy factory. The first escalation in any CLI
+      process builds buildEscalationTriageRuntime, which builds its own
+      `createEscalationTriageHistoryReader({ slice: ESCALATION_TRIAGE_EVIDENCE_SLICE })`.
+    - Its refresh (src/lib/sweep.ts) stats every rotation and loads each one the process has not seen through
+      createLedgerRotationMemo with the durable digest. In a fresh process that is every rotation, so each child
+      reads every digest file, plus the .gz of any rotation whose digest is missing or stale.
+    - The daemon builds its reader once per start (buildSweepHook), so it pays this once per restart. A run child
+      pays it on every escalation.
+    - W1-T9710 (queued) seeds the synchronous union pass from the off-loop load inside one process. It does not
+      reach a child process.
+    INFERRED: the console's run-children reads come mainly from this per-process reload; the samples cannot split
+    them by reader.
+    lint-plan names W1-T100 (blocked_ci routing) and W1-T9748 (tracing declared files to the staging step) as
+    sharing src/lib/sweep.ts and src/run-task.ts. Neither touches the triage evidence reader. The overlap is two
+    large files, not one surface.
+  design: |
+    1. One shared, consolidated slice per holder. After a refresh, a long-lived reader (the daemon's) writes one
+       slice snapshot beside the per-rotation digests: the reduced rows of every loaded rotation and a manifest of
+       each rotation's name, size and mtime, under the holder and reducer version. The write is atomic.
+    2. A short-lived reader (a fresh buildEscalationTriageRuntime in a CLI process) first loads that snapshot. Where
+       its manifest matches the current rotations, it uses those rows and reads only rotations missing from it, plus
+       the live file. A missing, damaged or stale snapshot falls back to today's per-rotation load. refuseIncomplete
+       holds: an unread rotation still yields no rows.
+    3. Measure. The escalation.triaged row (or the triage runtime's existing row) carries evidence_bytes_read,
+       evidence_rotations_read and evidence_snapshot_hit, so the fleet sees a child stop re-reading the corpus.
+    4. ALTERNATIVE, named and not taken: the daemon serves the slice over its existing client. That couples a run
+       child to a live daemon. An OPERATOR DECISION.
+    No new constant. Build after W1-T9710, which reshapes the same reader.
+    Tests go in test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts, titled verbatim as in the
+    proofs. Use real gzipped rotations, a counting fs seam, and two readers standing in for the daemon and a child.
+  acceptance:
+    - claim: "a fresh evidence reader whose rotations match the shared snapshot reads no rotation and no per-rotation digest"
+      proof: 'grep: test("W1-T9957: a fresh triage evidence reader answers from the shared slice snapshot" in test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts'
+    - claim: "a stale or damaged snapshot falls back to the per-rotation load and the same rows"
+      proof: 'grep: test("W1-T9957: a stale triage slice snapshot falls back to the per-rotation load" in test/a-short-lived-run-child-reads-the-triage-evidence-slice-once.test.ts'
+  falsifier: |
+    On origin/main, a second createEscalationTriageHistoryReader over the same state dir (standing in for a fresh run
+    child) reads every rotation's digest file again, so the counting fs sees one digest read per rotation and the
+    first test fails. The second passes before and after; it guards against a snapshot that hides a changed rotation.

@@ -8,8 +8,8 @@
  * WHAT MOVES A TASK (the dirty-set rules, each one closing a gap the legacy memo in board.ts has):
  * - a fact row naming it in `task_id` OR `task` (the legacy stamp keys on `task_id ?? task` only,
  *   while `buildLedgerIndex` files the row under both);
- * - a cross-task row (`daemon.boot`, a `plan_only` `pr.opened`): every task, because
- *   `environmentChangedSince`, `lifetimeDispatchTally` and `isPlanOnlyFilingPr` read them whole-ledger;
+ * - a cross-task row (`daemon.boot`, a `plan_only` `pr.opened`): each task whose reads of it (`environmentChangedSince`,
+ *   `isPlanOnlyFilingPr`) it moves, as recorded and persisted (W1-T9719, {@link recordingCrossReads}); no record: all.
  * - its plan entry, its durable credit record, the credit overrides, the code;
  * - what it read from GitHub (W1-T6016): when the snapshot moves, each task's own GitHub reads are replayed against
  *   the new gateway, and only a task whose answers moved re-derives (see {@link githubDigest});
@@ -30,6 +30,8 @@
  * in full once and then extended from the rows the ingest reads anyway, so a build reads no step body it read before.
  * A row of a cached step deleted under it (an index-only count) or a store behind it drops the cache, and the oracle
  * audits it against a full read every pass; its `read_model.board_oracle` row carries what it read and reused.
+ * W1-T9718: a pass audits one slice of {@link BOARD_ORACLE_SLICES} in turn ({@link boardOracleSliceOf}), every task healed
+ * within {@link BOARD_ORACLE_RECURRENCE_MS}, and every non-plan projection; the rest are held. Both persist with the lease.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -61,7 +63,7 @@ import {
 import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 
 /** Bumped when this module's stamp or stored shape changes: every persisted projection then re-derives. */
-export const BOARD_PROJECTION_VERSION = 2;
+export const BOARD_PROJECTION_VERSION = 3;
 export const BOARD_CLOCK_REDERIVE_MS = 30_000;
 export const BOARD_ORACLE_INTERVAL_MS = 10 * 60_000;
 export const BOARD_DERIVE_DEBOUNCE_MS = 500;
@@ -73,6 +75,10 @@ export const BOARD_INTERN_MAX_CHARS = 96;
 export const BOARD_INGEST_CHUNK_MS = 250;
 /** A drift found again this soon after a self-heal is a projection bug, not a blip: it escalates (as #8075's oracle). */
 export const BOARD_ORACLE_RECURRENCE_MS = 24 * 60 * 60_000;
+/** OPERATOR DECISION (W1-T9718), pending: the oracle's slices. A drift is found within N passes, not one, and a pass
+ *  reads ~1/N of a full re-derive; 1 audits every task every pass, the behaviour before it. */
+export const BOARD_ORACLE_SLICES = 1;
+const ORACLE_SLICE_META = "board.oracle_slice";
 /** Steps some task's derivation reads across the whole ledger, whatever task they name. */
 export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot"]);
 /** Fact steps no reader on the projection path (status.ts, board.ts, status-board.ts) names: 60% of the
@@ -92,7 +98,9 @@ export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(
   stamp TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS board_oracle_run(at_ms INTEGER NOT NULL, outcome TEXT NOT NULL, mismatches INTEGER NOT NULL,
   healed INTEGER NOT NULL, issue_url TEXT);
-  CREATE TABLE IF NOT EXISTS task_github_read(task_id TEXT PRIMARY KEY, digest TEXT NOT NULL, keys TEXT NOT NULL) WITHOUT ROWID;`;
+  CREATE TABLE IF NOT EXISTS task_github_read(task_id TEXT PRIMARY KEY, digest TEXT NOT NULL, keys TEXT NOT NULL) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS task_cross_read(task_id TEXT PRIMARY KEY, keys TEXT NOT NULL) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS board_oracle_heal(task_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL) WITHOUT ROWID;`;
 
 /** W1-T9604: what the step cache read and reused since the last `read_model.board_oracle` row, which carries it. */
 export interface BoardStepReads {
@@ -162,6 +170,11 @@ function differingFields(a: StatusProjection | undefined, b: StatusProjection | 
 
 function sha1(text: string): string {
   return createHash("sha1").update(text).digest("hex").slice(0, 16);
+}
+
+/** W1-T9718: the oracle slice of `of` that `taskId` belongs to, fixed by the id alone, so a rotation covers every task. */
+export function boardOracleSliceOf(taskId: string, of: number): number {
+  return of <= 1 ? 0 : Number.parseInt(sha1(taskId).slice(0, 8), 16) % of;
 }
 
 /** The default GitHub generation: the open PRs' identity and heads, and whether the read failed. */
@@ -342,6 +355,42 @@ export function githubDigest(view: GithubView, taskId: string, task: Task | unde
   return sha1(JSON.stringify([view.global, view.slice("open", taskId), view.slice("merged", taskId), siblingAnswer(view, task, projection), answers]));
 }
 
+/** W1-T9719: a read's key: a cross-task step's rows, one PR asked of the filing set, or the whole set (every filing). */
+const CROSS_STEP = "step:";
+const CROSS_FILING = "filing:";
+const CROSS_FILING_ANY = "filing:*";
+
+/** W1-T9719: `index`, recording into `into()` each ask of a {@link BOARD_CROSS_TASK_STEPS} step and of the plan-only
+ *  filing set; its answers and `rows` are the index's own, so `projectPlan` takes it as its ledger's index. */
+function recordingCrossReads(index: LedgerIndex, into: () => Set<string> | undefined): LedgerIndex {
+  let filing: ReadonlySet<string> | undefined;
+  return {
+    rows: index.rows,
+    byTask: index.byTask,
+    byStep: {
+      get: (step) => {
+        if (BOARD_CROSS_TASK_STEPS.has(step)) into()?.add(`${CROSS_STEP}${step}`);
+        return index.byStep.get(step);
+      },
+    },
+    get planOnlyFilingPrUrls() {
+      filing ??= new Proxy(index.planOnlyFilingPrUrls, {
+        get(target, prop) {
+          if (prop === "has") return (url: string): boolean => (into()?.add(`${CROSS_FILING}${url}`), target.has(url));
+          into()?.add(CROSS_FILING_ANY);
+          const value: unknown = Reflect.get(target, prop, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      return filing;
+    },
+    get planOnlyReviewedHeads() {
+      return index.planOnlyReviewedHeads;
+    },
+    latestTsMs: index.latestTsMs,
+  };
+}
+
 export interface BoardProjectionOptions {
   db: ReadModelDb;
   /** Persistence needs the writer lease; without one the projection lives in memory only. */
@@ -380,6 +429,8 @@ export interface BoardProjectionOptions {
   deriveFromRows?: boolean;
   /** Each ingest's fresh fact rows, in the order read: a feed that takes each row once (the now view's recent feed). */
   onIngest?: (rows: ReadonlyArray<Row>) => void;
+  /** W1-T9718: the slices one oracle rotation audits in turn; {@link BOARD_ORACLE_SLICES} when omitted. */
+  oracleSlices?: number;
 }
 
 /**
@@ -420,6 +471,8 @@ export interface BoardOracleResult {
   escalationReasons: string[];
   /** The issue URL, null when nothing escalated, the escalation failed, or no path was supplied. */
   issueUrl: string | null;
+  /** W1-T9718: which plan tasks this pass audited, sorted: its slice's, and those healed within the recurrence window. */
+  slice: { index: number; of: number; audited: string[]; alwaysAudited: string[] };
 }
 
 export interface BoardUpdate {
@@ -435,6 +488,14 @@ export interface BoardUpdate {
   full: boolean;
   elapsedMs: number;
   oracle?: BoardOracleResult;
+  crossTask?: BoardCrossTask;
+}
+
+/** W1-T9719: cross-task rows since the last derive, and the plan tasks they moved and left reused. */
+export interface BoardCrossTask {
+  rows: number;
+  rederived: number;
+  reused: number;
 }
 
 export interface BoardProjection {
@@ -716,6 +777,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     upsertReads: db.prepare(`INSERT INTO task_github_read(task_id, digest, keys) VALUES(?, ?, ?)
       ON CONFLICT(task_id) DO UPDATE SET digest = excluded.digest, keys = excluded.keys`),
     removeReads: db.prepare("DELETE FROM task_github_read WHERE task_id = ?"),
+    upsertCross: db.prepare(`INSERT INTO task_cross_read(task_id, keys) VALUES(?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET keys = excluded.keys`),
+    removeCross: db.prepare("DELETE FROM task_cross_read WHERE task_id = ?"),
+    upsertHeal: db.prepare("INSERT INTO board_oracle_heal(task_id, at_ms) VALUES(?, ?) ON CONFLICT(task_id) DO UPDATE SET at_ms = excluded.at_ms"),
+    removeHeal: db.prepare("DELETE FROM board_oracle_heal WHERE task_id = ?"),
     latest: db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
     taskFacts: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
       UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
@@ -764,6 +830,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let bulkNewestFactMs: Map<string, number> | undefined = new Map();
   let crossCount = 0;
   let crossSeq = 0;
+  /** W1-T9719: per cross-task step its rows' count and newest seq; the plan-only filings' likewise, and their PRs. */
+  const crossSteps = new Map<string, { count: number; seq: number }>();
+  let filingCount = 0;
+  let filingSeq = 0;
+  const filingUrls = new Set<string>();
+  let crossRowsPending = 0;
+  let crossTotals: BoardCrossTask = { rows: 0, rederived: 0, reused: 0 };
   const taskCount = new Map<string, number>();
   const taskSeq = new Map<string, number>();
   const lastRunStartMs = new Map<string, number>();
@@ -814,6 +887,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   for (const r of db.prepare("SELECT task_id, digest, keys FROM task_github_read").all()) {
     githubReads.set(String(r.task_id), { digest: String(r.digest), keys: JSON.parse(String(r.keys)) as string[] });
   }
+  const crossReads = new Map<string, readonly string[]>();
+  for (const r of db.prepare("SELECT task_id, keys FROM task_cross_read").all()) crossReads.set(String(r.task_id), JSON.parse(String(r.keys)) as string[]);
   /** Tasks whose GitHub answers moved since their derive, kept until a derive takes them. */
   const githubStale = new Set<string>();
   let githubView: GithubView | undefined;
@@ -1098,15 +1173,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         if (bulk) outOfOrder ||= tsMs < rowTsMs[rows.length - 1]!;
         place(row, tsMs, body.length, bulk);
       }
-      const dirt = boardDirtForRow(row, rules);
-      if (dirt.all) {
-        crossCount++;
-        crossSeq = seq;
-      } else {
-        for (const id of dirt.tasks) {
-          taskCount.set(id, (taskCount.get(id) ?? 0) + 1);
-          taskSeq.set(id, seq);
-        }
+      if (boardDirtForRow(row, rules).all) noteCrossRow(row, seq);
+      const named = boardDirtForRow(row, { alias: rules.alias, crossTask: false });
+      for (const id of named.all ? [] : named.tasks) {
+        taskCount.set(id, (taskCount.get(id) ?? 0) + 1);
+        taskSeq.set(id, seq);
       }
       if (row.step === "run.start" && typeof row.task_id === "string") {
         lastRunStartMs.set(row.task_id, Math.max(lastRunStartMs.get(row.task_id) ?? 0, tsMs));
@@ -1147,6 +1218,38 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   }
 
   const parse = (body: unknown): Row => withoutUnreadFields(JSON.parse(String(body)) as Row);
+
+  function noteCrossRow(row: Row, seq: number): void {
+    crossCount++;
+    crossSeq = seq;
+    if (lastDeriveAt !== undefined) crossRowsPending++;
+    const step = String(row.step);
+    if (BOARD_CROSS_TASK_STEPS.has(step)) {
+      const held = crossSteps.get(step);
+      crossSteps.set(step, { count: (held?.count ?? 0) + 1, seq });
+      return;
+    }
+    filingCount++;
+    filingSeq = seq;
+    if (typeof row.pr_url === "string") filingUrls.add(row.pr_url);
+  }
+
+  function crossAnswer(key: string): string {
+    if (key.startsWith(CROSS_STEP)) {
+      const held = crossSteps.get(key.slice(CROSS_STEP.length));
+      return `${held?.count ?? 0}:${held?.seq ?? 0}`;
+    }
+    if (key === CROSS_FILING_ANY) return `${filingCount}:${filingSeq}`;
+    return filingUrls.has(key.slice(CROSS_FILING.length)) ? "1" : "0";
+  }
+
+  /** W1-T9719: `id`'s recorded cross-task answers now, its stamp's last part; with no record every cross-task row moves it. */
+  function crossDigestOf(id: string): string {
+    if (!rules.crossTask) return "-";
+    const keys = crossReads.get(id);
+    if (keys === undefined) return `u${crossCount}:${crossSeq}`;
+    return keys.length === 0 ? "-" : sha1(keys.map(crossAnswer).join("\n"));
+  }
 
   /** `step`'s rows up to `upTo`, read in full from the fact store. */
   function readStep(step: string, upTo: number): StepBucket {
@@ -1298,9 +1401,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
    *
    * W1-T9604: `cached` (every index but the oracle's) takes its step buckets and plan-only sets from the projection's
    * step cache, which is read in full once and then extended by the rows the ingest reads; uncached, the index reads
-   * them in full, as before, so the oracle derives from a read the cache never touched.
+   * them in full, as before, so the oracle derives from a read the cache never touched. `tally` counts what it reads.
    */
-  function storeIndex(bound: ReadonlyArray<Row>, cached = true): LedgerIndex {
+  function storeIndex(bound: ReadonlyArray<Row>, cached = true, tally?: { rows: number; bytes: number }): LedgerIndex {
     const upTo = lastSeq;
     if (cached) {
       stepReads.indexes++;
@@ -1313,10 +1416,23 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const runSql = taskRunStatements();
     let filing: Set<string> | undefined;
     let reviewed: Map<string, Set<string>> | undefined;
+    const fullRead = (rowCount: number, bytes: number): void => {
+      if (tally) [tally.rows, tally.bytes] = [tally.rows + rowCount, tally.bytes + bytes];
+    };
+    const counted = (body: unknown): string => {
+      const text = String(body);
+      fullRead(1, text.length);
+      return text;
+    };
+    const fullStep = (step: string): readonly Row[] => {
+      const own = readStep(step, upTo);
+      fullRead(own.rows.length, own.bytes);
+      return own.rows;
+    };
     const taskBucket = (id: string): Row[] => {
       const facts: Array<{ row: Row; key: [number, number, number] }> = [];
       const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
-      for (const r of source) facts.push({ row: parse(r.body), key: [Number(r.ts_ms), 0, Number(r.seq)] });
+      for (const r of source) facts.push({ row: parse(counted(r.body)), key: [Number(r.ts_ms), 0, Number(r.seq)] });
       if (!aliasReady) {
         if (!aliasSeqs) {
           // A store whose writer has not yet backfilled `fact_alias`: one scan of the fact bodies, held for this index only.
@@ -1349,6 +1465,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     };
     const planOnly = (): void => {
       const sets = cached ? cachedPlanOnly(upTo) : readPlanOnly(upTo);
+      if (!cached) fullRead(sets.rows, sets.bytes);
       [filing, reviewed] = [sets.filing, sets.reviewed];
     };
     return {
@@ -1358,7 +1475,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         get: (step) => {
           let bucket = steps.get(step);
           if (!bucket) {
-            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : cached ? cachedStep(step, upTo) : readStep(step, upTo).rows;
+            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : cached ? cachedStep(step, upTo) : fullStep(step);
             steps.set(step, bucket);
           }
           return bucket;
@@ -1385,16 +1502,20 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   /** One `projectPlan` pass and, per task it derived, the GitHub reads that derive made (W1-T6016): `projectPlan` asks
    *  `reuseProjection` of each task just before deriving it, so the log a refusal opens takes that task's reads. */
   function project(plan: Plan, credit: CreditStore, overrides: string, reuse?: (task: Task) => StatusProjection | undefined, index?: LedgerIndex): {
-    projections: Map<string, StatusProjection>; reads: Map<string, GithubReadLog>;
+    projections: Map<string, StatusProjection>; reads: Map<string, GithubReadLog>; cross: Map<string, Set<string>>;
   } {
     const reads = new Map<string, GithubReadLog>();
+    const cross = new Map<string, Set<string>>();
     let deriving: GithubReadLog | undefined;
+    let crossDeriving: Set<string> | undefined;
     const deriveOrReuse = (task: Task): StatusProjection | undefined => {
       deriving = undefined;
+      crossDeriving = undefined;
       const kept = reuse?.(task);
       if (kept !== undefined) return kept;
       deriving = { keys: [], answers: [] };
       reads.set(task.id, deriving);
+      cross.set(task.id, (crossDeriving = new Set()));
       return undefined;
     };
     const deps: DeriveDeps = {
@@ -1407,10 +1528,19 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       writeCreditStore: () => {},
       readCreditOverrideFile: () => overrides,
       skipUncreditedBuildWarning: true,
-      ...(fromRows ? {} : { ledgerIndex: index ?? storeIndex(rows) }),
+      ...(fromRows ? {} : { ledgerIndex: recordingCrossReads(index ?? storeIndex(rows), () => crossDeriving) }),
       reuseProjection: deriveOrReuse,
     };
-    return { projections: projectPlan(plan, deps), reads };
+    return { projections: projectPlan(plan, deps), reads, cross };
+  }
+
+  /** W1-T9719: keeps each of `ids`' recorded reads; a derive from rows in memory records none, so it keeps no record. */
+  function keepCrossReads(cross: ReadonlyMap<string, ReadonlySet<string>>, ids: ReadonlySet<string>): void {
+    for (const id of ids) {
+      const keys = cross.get(id);
+      if (keys === undefined || fromRows) crossReads.delete(id);
+      else crossReads.set(id, [...keys].sort());
+    }
   }
 
   /** Takes the GitHub reads of each task in `ids` the pass derived as its own, digested under `view`, the gateway the
@@ -1443,10 +1573,14 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         const reads = githubReads.get(id);
         if (reads) sql.upsertReads.run(id, reads.digest, JSON.stringify(reads.keys));
         else sql.removeReads.run(id);
+        const crossKeys = crossReads.get(id);
+        if (crossKeys) sql.upsertCross.run(id, JSON.stringify(crossKeys));
+        else sql.removeCross.run(id);
       }
       for (const id of removed) {
         sql.remove.run(id);
         sql.removeReads.run(id);
+        sql.removeCross.run(id);
       }
       sql.latest.run(LATEST_TS_META, String(latestTsMs));
     });
@@ -1470,14 +1604,18 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const overrides = readOverrides();
     lastCredit = { credit, overrides };
     // W1-T6016: no GitHub generation here: what each task read from GitHub is its own dirt (`githubDirt`).
-    const global = sha1(JSON.stringify([BOARD_PROJECTION_VERSION, opts.codeVersion ?? "", crossCount, crossSeq, sha1(overrides)]));
+    const global = sha1(JSON.stringify([BOARD_PROJECTION_VERSION, opts.codeVersion ?? "", sha1(overrides)]));
     const stampOf = (id: string, task?: Task): string =>
-      `${global}|${task ? hashTask(task) : "-"}|${taskCount.get(id) ?? 0}:${taskSeq.get(id) ?? 0}:${taskActivitySeq.get(id) ?? 0}:${taskWorkerSeq.get(id) ?? 0}|${credit[id] ? sha1(JSON.stringify(credit[id])) : "-"}`;
+      `${global}|${task ? hashTask(task) : "-"}|${taskCount.get(id) ?? 0}:${taskSeq.get(id) ?? 0}:${taskActivitySeq.get(id) ?? 0}:${taskWorkerSeq.get(id) ?? 0}|${credit[id] ? sha1(JSON.stringify(credit[id])) : "-"}|${crossDigestOf(id)}`;
     return { plan, credit, overrides, stampOf };
   }
 
   // Heals the oracle recorded, newest last: persisted with the lease, so a recurrence is seen across a restart.
   const heals: number[] = db.prepare("SELECT at_ms FROM board_oracle_run WHERE healed > 0 ORDER BY at_ms").all().map((r) => Number(r.at_ms));
+  const healedAt = new Map(db.prepare("SELECT task_id, at_ms FROM board_oracle_heal").all().map((r) => [String(r.task_id), Number(r.at_ms)] as const));
+  const slices = Number.isFinite(opts.oracleSlices) && opts.oracleSlices! >= 1 ? Math.floor(opts.oracleSlices!) : BOARD_ORACLE_SLICES;
+  const storedCursor = Number(db.meta(ORACLE_SLICE_META));
+  let sliceCursor = Number.isSafeInteger(storedCursor) && storedCursor >= 0 ? storedCursor : 0;
 
   function diffAgainstHeld(fresh: ReadonlyMap<string, StatusProjection>): BoardOracleResult["mismatches"] {
     const mismatches: BoardOracleResult["mismatches"] = [];
@@ -1510,10 +1648,23 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string): BoardOracleResult {
     const now = clock.now();
     const view = currentGithubView();
+    const index = sliceCursor % slices;
+    const expired = [...healedAt].filter(([, at]) => at < now - BOARD_ORACLE_RECURRENCE_MS).map(([id]) => id);
+    for (const id of expired) healedAt.delete(id);
+    const always = [...healedAt.keys()].filter((id) => plan.byId.has(id)).sort();
+    const alwaysSet = new Set(always);
+    const outside = slices === 1 ? undefined : (task: Task): StatusProjection | undefined =>
+      (boardOracleSliceOf(task.id, slices) === index || alwaysSet.has(task.id) ? undefined : held.get(task.id)?.projection);
+    const read = { projections: 0, rows: 0, bytes: 0 };
     // W1-T9604: the oracle derives from full reads the step cache never touched, and audits the cache against them.
-    const uncached = (): LedgerIndex | undefined => (fromRows ? undefined : storeIndex(rows, false));
+    const uncached = (): LedgerIndex | undefined => (fromRows ? undefined : storeIndex(rows, false, read));
+    const derive = (ledgerIndex?: LedgerIndex): ReturnType<typeof project> => {
+      read.projections++;
+      return project(plan, credit, overrides, outside, ledgerIndex ?? uncached());
+    };
     const first = uncached();
-    let pass = project(plan, credit, overrides, undefined, first);
+    let pass = derive(first);
+    const audited = [...pass.reads.keys()].filter((id) => plan.byId.has(id)).sort();
     let fresh = pass.projections;
     let mismatches = diffAgainstHeld(fresh);
     let outcome: BoardOracleOutcome = "agree";
@@ -1521,12 +1672,14 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     let healedCount = 0;
     const audit = first ? auditStepCache(first) : undefined;
     if (mismatches.length > 0) {
-      pass = project(plan, credit, overrides, undefined, uncached());
+      pass = derive();
       fresh = pass.projections;
       mismatches = diffAgainstHeld(fresh);
       outcome = mismatches.length > 0 ? "healed" : "transient";
     }
+    const healedNow: string[] = [];
     if (outcome === "healed") {
+      keepCrossReads(pass.cross, new Set(mismatches.map((m) => m.taskId).filter((id) => fresh.has(id))));
       const healed: Array<[string, Held]> = [];
       for (const m of mismatches) {
         const want = fresh.get(m.taskId);
@@ -1536,10 +1689,14 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       for (const [id, h] of healed) held.set(id, h);
       for (const id of removed) held.delete(id);
       keepReads(plan, view, pass.reads, new Set(healed.map(([id]) => id)));
-      for (const id of removed) githubReads.delete(id);
+      for (const id of removed) {
+        githubReads.delete(id);
+        crossReads.delete(id);
+      }
       persist(healed, removed);
       healedCount = mismatches.length;
-      const survived = diffAgainstHeld(project(plan, credit, overrides, undefined, uncached()).projections);
+      for (const [id] of healed) if (plan.byId.has(id)) healedNow.push(id);
+      const survived = diffAgainstHeld(derive().projections);
       if (survived.length > 0) reasons.push(`${survived.length} task(s) still differ after the heal (${survived.slice(0, 5).map((m) => m.taskId).join(", ")})`);
       const prior = heals.filter((at) => at >= now - BOARD_ORACLE_RECURRENCE_MS);
       if (prior.length > 0) reasons.push(`the board drifted again within 24 h of an earlier self-heal (${prior.length} heal(s) in the window)`);
@@ -1547,20 +1704,32 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     if (reasons.length > 0) outcome = "escalated";
     lastOracleAt = now;
-    const result: BoardOracleResult = { compared: fresh.size, mismatches, outcome, escalationReasons: reasons, issueUrl: null };
+    sliceCursor++;
+    for (const id of healedNow) healedAt.set(id, now);
+    const compared = pass.reads.size + [...fresh.keys()].filter((id) => !plan.byId.has(id)).length;
+    const slice = { index, of: slices, audited, alwaysAudited: always };
+    const result: BoardOracleResult = { compared, mismatches, outcome, escalationReasons: reasons, issueUrl: null, slice };
     if (reasons.length > 0 && opts.escalation) result.issueUrl = tryEscalate(escalationFor(result), opts.escalation);
-    if (lease && outcome !== "agree") {
+    if (lease && (outcome !== "agree" || slices > 1 || expired.length > 0)) {
       withWriteTransaction(db, lease, () => {
-        db.prepare("INSERT INTO board_oracle_run(at_ms, outcome, mismatches, healed, issue_url) VALUES(?, ?, ?, ?, ?)")
-          .run(now, outcome, mismatches.length, healedCount, result.issueUrl);
+        if (outcome !== "agree") {
+          db.prepare("INSERT INTO board_oracle_run(at_ms, outcome, mismatches, healed, issue_url) VALUES(?, ?, ?, ?, ?)")
+            .run(now, outcome, mismatches.length, healedCount, result.issueUrl);
+        }
+        for (const id of healedNow) sql.upsertHeal.run(id, now);
+        for (const id of expired) sql.removeHeal.run(id);
+        if (slices > 1) sql.latest.run(ORACLE_SLICE_META, String(sliceCursor));
       });
     }
     // W1-T9604: what the step cache read and reused since the last oracle row, and its audit: the saving, measured.
     const stepCacheRow = fromRows ? {} : { step_cache: { ...stepReads, held: heldStepCache(), ...(audit ? { audit } : {}) } };
     stepReads = noStepReads();
+    const crossTask = crossTotals;
+    crossTotals = { rows: 0, rederived: 0, reused: 0 };
     log("read_model.board_oracle", {
       outcome, compared: result.compared, mismatches: mismatches.length, sample: mismatches.slice(0, 5),
-      ...(reasons.length > 0 ? { reasons } : {}), ...(result.issueUrl ? { issue_url: result.issueUrl } : {}), ...stepCacheRow,
+      ...(reasons.length > 0 ? { reasons } : {}), ...(result.issueUrl ? { issue_url: result.issueUrl } : {}), ...stepCacheRow, cross_task: crossTask,
+      slice: { index, of: slices, audited: audited.length, always_audited: always.length }, read,
     });
     return result;
   }
@@ -1593,6 +1762,14 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (rules.ledgerClock && latestTsMs > derivedLatestTsMs) {
         for (const [id, startMs] of lastRunStartMs) if (startMs + DEFAULT_LIVENESS_BOUND_MS > derivedLatestTsMs) ledgerClockDue.add(id);
       }
+      const crossRows = crossRowsPending;
+      let crossMoved = 0;
+      if (crossRows > 0) {
+        for (const task of plan.tasks) {
+          const stamp = held.get(task.id)?.stamp;
+          if (stamp !== undefined && stamp.slice(stamp.lastIndexOf("|") + 1) !== crossDigestOf(task.id)) crossMoved++;
+        }
+      }
       const rederived: string[] = [];
       const reuse = (task: Task): StatusProjection | undefined => {
         const h = held.get(task.id);
@@ -1602,12 +1779,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         rederived.push(task.id);
         return undefined;
       };
-      const { projections: next, reads } = project(plan, credit, overrides, reuse);
+      const { projections: next, reads, cross } = project(plan, credit, overrides, reuse);
       const changed: Array<[string, Held]> = [];
       const planIds = new Set(plan.tasks.map((t) => t.id));
+      const fresh = new Set(rederived);
+      // W1-T9719: a re-derived task's stamp carries this derive's cross-task reads.
+      keepCrossReads(cross, fresh);
       for (const [id, projection] of next) {
-        const h = { stamp: stamps.get(id) ?? stampOf(id), projection };
-        if (!planIds.has(id) || rederived.includes(id)) changed.push([id, h]);
+        const h = { stamp: fresh.has(id) ? stampOf(id, plan.byId.get(id)) : (stamps.get(id) ?? stampOf(id)), projection };
+        if (!planIds.has(id) || fresh.has(id)) changed.push([id, h]);
         held.set(id, h);
       }
       const removed = [...held.keys()].filter((id) => !next.has(id));
@@ -1615,18 +1795,24 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         held.delete(id);
         githubReads.delete(id);
         githubStale.delete(id);
+        crossReads.delete(id);
       }
       keepReads(plan, view, reads, new Set(rederived));
       derivedLatestTsMs = latestTsMs;
       persist(changed, removed);
       pending = false;
       lastDeriveAt = now;
+      crossRowsPending = 0;
       if (clockDue) lastClockAt = now;
       lastOracleAt ??= now;
       const result: BoardUpdate = {
         derived: true, caughtUp, deferred: false, newRows, rederived: rederived.sort(), reused: plan.tasks.length - rederived.length,
         full: rederived.length === plan.tasks.length, elapsedMs: 0,
       };
+      if (crossRows > 0) {
+        result.crossTask = { rows: crossRows, rederived: crossMoved, reused: plan.tasks.length - crossMoved };
+        crossTotals = { rows: crossTotals.rows + crossRows, rederived: crossTotals.rederived + crossMoved, reused: crossTotals.reused + plan.tasks.length - crossMoved };
+      }
       if (oracleDue) result.oracle = oracleWith(plan, credit, overrides, stampOf);
       result.elapsedMs = clock.now() - startedAt;
       return result;

@@ -12,7 +12,7 @@
   origin: "2026-10-13 operator-approved follow-up; issue #7708"
   plan_refs: ["W1-T4742","W1-T4853","W1-T5339"]
   files: ["src/lib/inbox-freshness.ts","src/lib/nav-badge-view.ts","src/run-task.ts","src/lib/verify-human-judge.ts","src/lib/inbox-why-me.ts","src/lib/inbox-view.ts","src/lib/inbox-responder.ts","src/lib/panel-graph.ts","src/lib/instance-inbox-contract.ts","src/lib/fleet-lane.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/an-operator-can-correct-why-an-inbox-ask-needs-them.test.ts","test/a-verify-human-shard-is-judged.test.ts","test/helpers/why-me-world.ts","scripts/generate-api-client.mjs","test/api-client-drift-check.test.ts","test/every-served-route-is-in-the-contract.test.ts"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The source-qualified census already emits whyMe and sourceFacts, but issue #7708 still needs a reversible operator correction. The operator approved fleet-can-handle and still-need-me feedback as a distinct task, preserving security and approval authority.

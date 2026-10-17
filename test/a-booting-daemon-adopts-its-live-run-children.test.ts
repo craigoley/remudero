@@ -525,3 +525,33 @@ test("daemonCommand's real orphan sweep protects an adopted run without an infli
     f.cleanup();
   }
 });
+
+test("W1-T9924: daemonCommand wires the refill child decision from the run-child mode", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t9924-cli-"));
+  const oldHome = process.env.HOME;
+  try {
+    mkdirSync(join(root, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(root, ".config", "remudero", "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
+    process.env.HOME = root;
+    const path = join(root, "tasks.yaml");
+    writeFileSync(path, "[]\n");
+    const wired: Array<((task: { id: string }) => boolean) | undefined> = [];
+    for (const mode of ["on", "off"] as const) {
+      const code = await daemonCommand(["--allow-self-target", "--plan", path, "--max", "0"], {
+        readRunChildMode: () => mode, checkStop: () => undefined, checkPause: () => undefined,
+        runDaemon: async (_plan, deps) => {
+          wired.push(deps.refillRunsAsChild as ((task: { id: string }) => boolean) | undefined);
+          return { attempted: [], merged: [], costUsd: 0, ticks: 0, stopReason: "max_reached" };
+        },
+      } as Parameters<typeof daemonCommand>[1]);
+      assert.equal(code, 0);
+    }
+    assert.equal(typeof wired[0], "function", "child mode wires the decision");
+    assert.equal(wired[0]!({ id: "A" }), false, "an explicit --plan keeps the run in-process, as runInChildWhenOn does");
+    assert.equal(wired[1], undefined, "with child mode off nothing is wired and the refill reads false");
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

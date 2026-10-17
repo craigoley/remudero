@@ -126,6 +126,9 @@ export interface QuietBoundHistoryCost {
   history_rotation_bytes_unseen: number;
   history_rotation_bytes_reused: number;
   history_loop_read_bytes: number;
+  /** W1-T9710: lines JSON-parsed on the loop, and rotations the union took from the off-loop load, not its digest. */
+  history_loop_parsed_lines: number;
+  history_seeded_rotations: number;
 }
 
 export type QuietBoundHistory = (stateDir: string) => Promise<{ rows: ReadonlyArray<Record<string, unknown>>; cost: QuietBoundHistoryCost }>;
@@ -134,7 +137,9 @@ export type QuietBoundHistory = (stateDir: string) => Promise<{ rows: ReadonlyAr
 export type QuietHistoryReaderFactory = (io: {
   fs: LedgerGrepFsDeps;
   slice: { holder: string; steps: readonly string[]; project: typeof projectQuietHistoryRow; version: string };
-}) => (stateDir: string) => Promise<{ ok: boolean; rows: ReadonlyArray<Record<string, unknown>> }>;
+}) => ((stateDir: string) => Promise<{ ok: boolean; rows: ReadonlyArray<Record<string, unknown>> }>) & {
+  lastPass?: () => { parsedLines: number; seededRotations: number };
+};
 
 /** W1-T9527: the bound's history, one slice reader per state dir for the process's life, one pass at a time. OBSERVED
  * 2026-10-14: the whole-union read it replaces froze core 1,447 s and 965 s. */
@@ -185,9 +190,11 @@ export function createQuietBoundHistory(io: { holder: string; createReader: Quie
       pass = undefined;
     }
     const seen = new Map<string, string>();
+    const loop = dir.reader.lastPass?.();
     const cost: QuietBoundHistoryCost = {
       history_ok: read.ok, history_rows: read.rows.length, history_rotations: 0, history_rotations_unseen: 0,
       history_rotation_bytes_unseen: 0, history_rotation_bytes_reused: 0, history_loop_read_bytes: current.loopBytes,
+      history_loop_parsed_lines: loop?.parsedLines ?? 0, history_seeded_rotations: loop?.seededRotations ?? 0,
     };
     // As the reader does: a rotation whose size or mtime this process has not read is loaded, any other is reused.
     for (const entry of ledgerRotationEntries(current.names ?? [], stateDir)) {

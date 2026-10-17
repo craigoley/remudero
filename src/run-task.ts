@@ -15,7 +15,8 @@ import { judgeFixProgress,
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
-import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, freezeReadGeneration, revisionedProducer,
+  revisionedRead, type ReadGeneration, type RevisionedRequest } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { globSync, renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
@@ -1189,6 +1190,9 @@ import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-com
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { githubRepoSlugOfCheckout } from "./lib/opportunity-intake.js";
 import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
+import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, withSelectedRegistryContext, withSelectedRegistryContextSync,
+  type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
+
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -1234,7 +1238,8 @@ import {
   recordCiLearningAttempt,
   recordCiLearningCadenceFire,
   recordMeasurementCadenceFire,
-  readWipeTestAblationEvidence,
+  createWipeTestEvidenceReader,
+  wipeTestSlotDraw,
   recordWipeTestCadenceFire,
   scheduleWipeTestAblation,
   renderVerbCensusDigestLine,
@@ -1288,6 +1293,7 @@ import {
   loadPlan,
   loadPlanQuarantiningDuplicates,
   mergePlanBlobsQuarantiningDuplicates,
+  PlanBlobCache,
   type QuarantinedTask,
   selectTask,
   visibleCriteria,
@@ -1638,6 +1644,8 @@ import {
   dependabotStaleEventVerdict,
   buildDepReviewStaleEventEscalation,
   reconcileDependabotTitle,
+  depReviewRequiredSet,
+  type DepReviewRequired,
   overHeaderLimit,
   DEPENDABOT_OWN_RED_SIGNALS,
   DEPENDABOT_REFRESH_CAUSES,
@@ -2010,6 +2018,11 @@ export type FreshTreeReviewSeams = {
   prepareWorktree?: (repoDir: string, worktreePath: string) => boolean;
   /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
   worktreeRoot: string;
+}
+
+/** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
+function selectedRegistryIntentForConfig(config: Config) {
+  return captureSelectedRegistryIntent({ settings: config.selectedRegistryMode, input: { envPath: process.env.RMD_INSTANCE_REGISTRY } });
 }
 
 /** Parse only the facts a restart must prove before it reuses W1-T3723's stable reviewer path.
@@ -4769,6 +4782,13 @@ export function syncPlanFromOrigin(
   return syncedPlanFromBlobs(relPath, blob, readOriginShardsAtRef(repoDir, dirname(relPath)), staleDispatch, opts.quarantine);
 }
 
+function originPlanBlobs(relPath: string, blob: string, shards: Array<{ relPath: string; text: string }>): Array<{ label: string; text: string }> {
+  return [
+    { label: `origin/main:${relPath}`, text: blob },
+    ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
+  ];
+}
+
 /** The merge both plan syncs end in: the monolith and its shards, labelled by the origin/main path they came from. */
 function syncedPlanFromBlobs(
   relPath: string,
@@ -4777,10 +4797,7 @@ function syncedPlanFromBlobs(
   staleDispatch: boolean,
   quarantine: ((quarantined: QuarantinedTask[]) => void) | undefined,
 ): SyncedPlan {
-  const blobs = [
-    { label: `origin/main:${relPath}`, text: blob },
-    ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
-  ];
+  const blobs = originPlanBlobs(relPath, blob, shards);
   if (!quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
   // W1-T4421: the core daemon's boot degrades on a duplicate id instead of exiting.
   const { plan, quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs);
@@ -4828,11 +4845,13 @@ export function planSyncGitRunnerAsync(
  * {@link syncPlanFromOrigin} through awaited, bounded git, for the daemon's dispatch lanes: the same fetch, the same
  * `origin/main` blob, the same shard read and merge. A call killed at its bound refuses as a {@link GitFetchError}
  * naming the timeout (`allowStale` still proceeds past a fetch that failed that way, as it does past any other).
+ * W1-T9763: with `revisions`, the plan is the store's one instance of the revision origin/main names after the fetch.
  */
 export async function syncPlanFromOriginAsync(
   repoDir: string,
   relPath: string,
-  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void; runGit?: GitRunnerAsync } = {},
+  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void; runGit?: GitRunnerAsync;
+    revisions?: PlanRevisionStore } = {},
 ): Promise<SyncedPlan> {
   const runGit = opts.runGit ?? planSyncGitRunnerAsync(repoDir);
   let staleDispatch = false;
@@ -4842,6 +4861,13 @@ export async function syncPlanFromOriginAsync(
     if (!opts.allowStale) throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
     staleDispatch = true;
   }
+  if (opts.revisions) {
+    const revision = await readPlanRevisionAsync(repoDir, relPath, runGit);
+    const read = await planAtRevisionAsync(opts.revisions, revision, runGit);
+    if (!opts.quarantine) return { plan: await strictPlanOf(read, revision, runGit), staleDispatch };
+    opts.quarantine(read.quarantined);
+    return { plan: read.plan, staleDispatch };
+  }
   let blob: string;
   try {
     blob = await runGit(["show", `origin/main:${relPath}`]);
@@ -4850,6 +4876,141 @@ export async function syncPlanFromOriginAsync(
   }
   const shards = await readOriginShardsAtRefAsync(repoDir, dirname(relPath), runGit);
   return syncedPlanFromBlobs(relPath, blob, shards, staleDispatch, opts.quarantine);
+}
+
+/** W1-T9763: `key` is `<tasks.yaml blob>:<tasks.d tree>`; `commit` is where a reader without it reads it again. */
+export interface PlanRevision {
+  key: string;
+  commit: string;
+  repoDir: string;
+  relPath: string;
+}
+
+type RevisionLoad = { plan: Plan; quarantined: QuarantinedTask[] };
+
+/** One parsed {@link Plan} per {@link PlanRevision}; `adopt` reuses each unchanged blob's tasks. */
+export interface PlanRevisionStore {
+  get(key: string): RevisionLoad | undefined;
+  adopt(revision: PlanRevision, blobs: Array<{ label: string; text: string }>): RevisionLoad;
+  revisionOf(plan: Plan): PlanRevision | undefined;
+  counts(): { parsed: number; reused: number; held: number; retained: number };
+}
+
+/** A plan is frozen, so a reader that mutates it throws instead of changing every reader's plan, and held weakly, so
+ *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests. */
+export function createPlanRevisionStore(opts: { retainLatest?: boolean } = {}): PlanRevisionStore {
+  const blobCache = new PlanBlobCache();
+  const held = new Map<string, WeakRef<Plan>>();
+  const meta = new WeakMap<Plan, { revision: PlanRevision; quarantined: QuarantinedTask[] }>();
+  const released = new FinalizationRegistry<string>((key) => {
+    if (held.get(key)?.deref() === undefined) held.delete(key);
+  });
+  let latest: Plan | undefined;
+  let parsed = 0;
+  let reused = 0;
+  const lookup = (key: string): RevisionLoad | undefined => {
+    const plan = held.get(key)?.deref();
+    const known = plan && meta.get(plan);
+    return plan && known ? { plan, quarantined: known.quarantined } : undefined;
+  };
+  const hit = (key: string): RevisionLoad | undefined => {
+    const load = lookup(key);
+    if (load) reused++;
+    return load;
+  };
+  return {
+    get: hit,
+    adopt: (revision, blobs) => {
+      const already = hit(revision.key);
+      if (already) return already;
+      const read = mergePlanBlobsQuarantiningDuplicates(blobs, blobCache);
+      parsed++;
+      freezeReadGeneration(read.plan);
+      held.set(revision.key, new WeakRef(read.plan));
+      meta.set(read.plan, { revision, quarantined: read.quarantined });
+      released.register(read.plan, revision.key);
+      if (opts.retainLatest) latest = read.plan;
+      return { plan: read.plan, quarantined: read.quarantined };
+    },
+    revisionOf: (plan) => meta.get(plan)?.revision,
+    counts: () => ({ parsed, reused, held: held.size, retained: latest ? 1 : 0 }),
+  };
+}
+
+export async function readPlanRevisionAsync(repoDir: string, relPath: string, runGit: GitRunnerAsync,
+  ref = "origin/main"): Promise<PlanRevision> {
+  const shardDir = join(dirname(relPath), "tasks.d");
+  let commit: string;
+  let listing: string;
+  try {
+    commit = (await runGit(["rev-parse", "--verify", `${ref}^{commit}`])).trim();
+    listing = await runGit(["ls-tree", commit, "--", relPath, shardDir]);
+  } catch (err) {
+    throw new GitFetchError(`git cannot name the plan revision at ${ref} in ${repoDir}: ${String(err)}`);
+  }
+  const objects = new Map<string, string>();
+  for (const line of listing.split("\n")) {
+    const [head, path] = line.split("\t");
+    const sha = head?.split(" ")[2];
+    if (path && sha) objects.set(path, sha);
+  }
+  const monolith = objects.get(relPath);
+  if (!monolith) throw new GitFetchError(`git show ${commit}:${relPath} failed in ${repoDir}: no plan at that commit`);
+  return { key: `${monolith}:${objects.get(shardDir) ?? "-"}`, commit, repoDir, relPath };
+}
+
+async function planBlobsAtRevision(revision: PlanRevision, runGit: GitRunnerAsync): Promise<Array<{ label: string; text: string }>> {
+  let blob: string;
+  try {
+    blob = await runGit(["show", `${revision.commit}:${revision.relPath}`]);
+  } catch (err) {
+    throw new GitFetchError(`git show ${revision.commit}:${revision.relPath} failed in ${revision.repoDir}: ${String(err)}`);
+  }
+  const shards = await readOriginShardsAtRefAsync(revision.repoDir, dirname(revision.relPath), runGit, revision.commit);
+  return originPlanBlobs(revision.relPath, blob, shards);
+}
+
+export async function planAtRevisionAsync(store: PlanRevisionStore, revision: PlanRevision,
+  runGit: GitRunnerAsync = planSyncGitRunnerAsync(revision.repoDir)): Promise<RevisionLoad> {
+  return store.get(revision.key) ?? store.adopt(revision, await planBlobsAtRevision(revision, runGit));
+}
+
+async function strictPlanOf(read: RevisionLoad, revision: PlanRevision, runGit: GitRunnerAsync): Promise<Plan> {
+  if (read.quarantined.length === 0) return read.plan;
+  return mergePlanBlobs(await planBlobsAtRevision(revision, runGit));
+}
+
+/** W1-T9763: the daemon's boot sync, lane sync (the coalescer's), reload and tick read share ONE store, so one
+ *  revision is one instance for all of them. */
+export function daemonPlanReaders(planPath: string, quarantine: (quarantined: QuarantinedTask[]) => void,
+  runGit?: GitRunnerAsync): {
+  revisions: PlanRevisionStore;
+  boot: (opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
+  sync: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
+  reload: () => Promise<Plan>;
+  tickRead: (read: (input: TickReadRequest) => Promise<ReadGeneration<TickReadFacts>>) =>
+    (input: TickReadInput) => Promise<ReadGeneration<TickReadFacts>>;
+  inlineTickRead: (options: TickReadOptions, io: Parameters<typeof createTickReadProducer>[1]) => (input: TickReadRequest) => Promise<TickReadFacts>;
+} {
+  const revisions = createPlanRevisionStore();
+  const repoDir = dirname(dirname(planPath));
+  const sync = (dir: string, relPath: string, opts: { allowStale?: boolean }) =>
+    syncPlanFromOriginAsync(dir, relPath, { ...opts, quarantine, revisions, ...(runGit ? { runGit } : {}) });
+  return {
+    revisions, sync,
+    boot: (opts) => sync(repoDir, relative(repoDir, planPath), opts),
+    reload: () => reloadPlanRevisionAsync(revisions, planPath, runGit),
+    tickRead: (read) => revisionedRead(read, revisions.revisionOf),
+    inlineTickRead: (options, io) => tickReadProducer(options, io, revisions),
+  };
+}
+
+export async function reloadPlanRevisionAsync(store: PlanRevisionStore, planPath: string,
+  runGit?: GitRunnerAsync): Promise<Plan> {
+  const repoDir = dirname(dirname(planPath));
+  const git = runGit ?? planSyncGitRunnerAsync(repoDir);
+  const revision = await readPlanRevisionAsync(repoDir, relative(repoDir, planPath), git);
+  return strictPlanOf(await planAtRevisionAsync(store, revision, git), revision, git);
 }
 
 /** Injectable git invoker for {@link materializeOriginShards} — the real default shells out;
@@ -24005,6 +24166,13 @@ export interface DepReviewDeps {
   root?: string;
   /** W1-T9664: the daemon's landing state root. Given, a proposal is STAGED for the async landing sweep, not landed inline. */
   landingStateRoot?: string;
+  requiredChecks?: (branch: string) => Promise<DepReviewRequired>; // W1-T9929: an injected `gh` without it holds on every red
+}
+
+export async function readDepReviewRequiredChecks(
+  owner: string, repo: string, branch: string, root: string, readText: (args: string[]) => Promise<string> = ghTextAsync,
+): Promise<DepReviewRequired> {
+  return depReviewRequiredSet(await readRequiredStatusCheckContextsAsync(owner, repo, branch, readText), readCiGateRequiredChecks(root));
 }
 
 /** W1-T9664: the real proposal capture. Staged, a record the queue refused throws, so the caller keeps the bot PR open. */
@@ -24101,7 +24269,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     "--repo",
     slug,
     "--json",
-    "number,url,title,body,headRefOid,headRefName,author,statusCheckRollup,commits,mergeStateStatus,autoMergeRequest",
+    "number,url,title,body,headRefOid,headRefName,baseRefName,author,statusCheckRollup,commits,mergeStateStatus,autoMergeRequest",
   ])) as {
     number: number;
     url: string;
@@ -24109,6 +24277,7 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     body: string;
     headRefOid: string;
     headRefName?: string;
+    baseRefName?: string;
     author?: { login?: string };
     statusCheckRollup?: RollupEntry[];
     commits?: DependabotHeadCommit[];
@@ -24164,12 +24333,15 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
   }
 
   let selectedChecks = dedupeRollupByLatestAttempt(view.statusCheckRollup ?? []);
+  const readRequired = deps.requiredChecks ?? (deps.gh === undefined ? (b: string) => readDepReviewRequiredChecks(owner, repo, b, proposalRoot) : undefined);
+  const required: DepReviewRequired = readRequired ? await readRequired(view.baseRefName ?? "main") : { kind: "all-checks", fallback: "required-reader-not-injected" };
   const input = {
     author: { login: view.author?.login ?? "" },
     title: view.title ?? "",
     body: view.body ?? "",
     diff,
     checks: selectedChecks,
+    required,
   };
   let result = decideDepReview(input);
   if (readChecks !== undefined && (result.decision === "arm" || result.decision === "hold")) {
@@ -24182,11 +24354,12 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     }
   }
   if (result.decision === "arm") {
-    const selectedState = checksStateFromRollup(selectedChecks, undefined);
+    const selectedState = checksStateFromRollup(selectedChecks, required.kind === "required" ? required.names : undefined);
     if (selectedState !== "green") result = { ...result, decision: "hold",
       reason: `selected check evidence is ${selectedState}; no success or arm without current green evidence` };
   }
-  log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
+  log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid, advisory_red: result.advisoryRed ?? [],
+    judged_against: required.kind, ...(required.kind === "all-checks" ? { required_fallback: required.fallback } : {}) });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
 
   try {
@@ -24366,7 +24539,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       repo,
       sha: view.headRefOid,
       state: "success",
-      description: `remudero-review: PASS — ${result.pinOnly ? "pin-only action SHA refresh" : `${result.semverLevel} dependency bump`}, confined + gates green`,
+      description: `remudero-review: PASS — ${result.pinOnly ? "pin-only action SHA refresh" : `${result.semverLevel} dependency bump`}, confined + gates green${
+        result.advisoryRed?.length ? `; advisory red: ${result.advisoryRed.join(", ")}` : ""}`,
       taskId,
       evidence: "no_evidence",
       ledgerPath,
@@ -33437,7 +33611,9 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
   now?: () => Date;
   policy?: Policy;
   learningsIndex?: () => LearningsIndex | null;
-  ledgerUnion?: typeof resolveLedgerUnion;
+  /** The evidence read; production builds one {@link createWipeTestEvidenceReader} per hooks build, so its
+   *  incremental union lives as long as the daemon. */
+  readEvidence?: ReturnType<typeof createWipeTestEvidenceReader>;
   runTaskFn?: typeof runTask;
   execFileSyncFn?: typeof execFileSync;
   targetArgs?: string[];
@@ -33449,9 +33625,13 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
-  const ledgerUnion = deps.ledgerUnion ?? resolveLedgerUnion;
+  const readEvidence = deps.readEvidence ?? createWipeTestEvidenceReader();
   const learningsIndexFor =
     deps.learningsIndex ?? (() => loadLearningsIndex(join(projectLearningsHome(repoRoot), "index.json")));
+  // The slot's skip, reused while the slot, its draw, the policy and the evidence all hold: the draw is fixed
+  // per slot, so re-deriving it (index load, subject generation, the marker re-read) on every pulse of an
+  // unablated slot reaches the same skip. A slot that fires is never reused; it records its fire instead.
+  let slotSkip: { key: string; reason: string } | undefined;
   const check =
     deps.check ??
     (() => {
@@ -33461,13 +33641,19 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       const paced = wipeTestCadenceCheck({ root: config.root, policy, now });
       if (!paced.fire) return paced;
 
-      const prior = readWipeTestAblationEvidence(join(config.root, "state"), ledgerUnion);
-      if (!prior.ok) return { fire: false, reason: prior.reason };
+      const { evidence: prior, cost } = readEvidence(join(config.root, "state"));
+      const evidence = { ...cost, reused: false };
+      if (!prior.ok) return { fire: false, reason: prior.reason, evidence };
+
+      const draw = deps.draw?.() ?? wipeTestSlotDraw(now, policy.minIntervalMinutes);
+      const slot = Math.floor(now.getTime() / (Math.max(1, policy.minIntervalMinutes) * 60_000));
+      const slotKey = JSON.stringify([config.root, slot, draw, policy, prior.pairs, prior.claimedUse]);
+      if (slotSkip?.key === slotKey) return { fire: false, reason: slotSkip.reason, evidence: { ...cost, reused: true } };
 
       const index = learningsIndexFor();
-      if (!index) return { fire: false, reason: "wipe-test cadence learnings index unavailable" };
+      if (!index) return { fire: false, reason: "wipe-test cadence learnings index unavailable", evidence };
       const shards = Object.keys(index.files).sort();
-      if (shards.length === 0) return { fire: false, reason: "wipe-test cadence learnings index has no shards" };
+      if (shards.length === 0) return { fire: false, reason: "wipe-test cadence learnings index has no shards", evidence };
 
       const seq = prior.pairs.length + 1;
       const shard = shards[(seq - 1) % shards.length]!;
@@ -33475,7 +33661,7 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       try {
         subject = generateSandboxTask(index, [shard], seq);
       } catch (e) {
-        return { fire: false, reason: String((e as Error)?.message ?? e) };
+        return { fire: false, reason: String((e as Error)?.message ?? e), evidence };
       }
       const scheduled = scheduleWipeTestAblation({
         root: config.root,
@@ -33484,15 +33670,20 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
         candidate: { id: subject.id, risk: WIPE_TEST_SANDBOX_SUBJECT_RISK },
         pairs: prior.pairs,
         claimedUse: prior.claimedUse,
-        draw: deps.draw?.(),
+        draw,
       });
-      if (!scheduled.fire) return scheduled;
+      if (!scheduled.fire) {
+        slotSkip = { key: slotKey, reason: scheduled.reason };
+        return { fire: false, reason: scheduled.reason, evidence };
+      }
+      slotSkip = undefined;
       return {
         fire: true,
         reason: scheduled.reason,
         seq,
         subject,
         factor: scheduled.factor,
+        evidence,
       };
     });
   const run =
@@ -37627,8 +37818,9 @@ export function resolveReloadPlan(
   target: { isSelf: boolean; planPath: string },
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  selfDeps: Parameters<typeof planReloader>[3] = {},
 ): (() => Promise<Plan | null>) | undefined {
-  return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
+  return target.isSelf ? planReloader(target, allowStale, log, selfDeps) : dedicatedTargetPlanReloader(target, log);
 }
 
 /**
@@ -39254,6 +39446,15 @@ export function createTickReadProducer(options: TickReadOptions, io: {
 }
 
 type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
+type TickReadInput = Parameters<ReturnType<typeof createTickReadProducer>>[0];
+export type TickReadRequest = TickReadInput | RevisionedRequest<TickReadInput, PlanRevision>;
+
+/** W1-T9763: a revision resolves through `plans`, this side's own store, and the facts carry no plan back. */
+export function tickReadProducer(options: TickReadOptions, io: Parameters<typeof createTickReadProducer>[1],
+  plans: PlanRevisionStore): (input: TickReadRequest) => Promise<TickReadFacts> {
+  return revisionedProducer(createTickReadProducer(options, io),
+    async (revision: PlanRevision) => (await planAtRevisionAsync(plans, revision)).plan);
+}
 
 export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
   tickRead?: Pick<TickReadFacts, "closedPrs">): PrTerminalReconcileSummary {
@@ -39687,7 +39888,8 @@ export async function daemonCommand(
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
-  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs };
+  const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
+  const gardenContext: GardenBuildContext ={ config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
@@ -39711,11 +39913,12 @@ export async function daemonCommand(
   } else if (target.isSelf && !flagValue(rest, "--plan")) {
     // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
     // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
-    const synced = syncPlanOrRefuse(target.planPath, {
+    const synced = await syncPlanOrRefuseAsync(target.planPath, {
       allowStale,
       log,
       say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
       quarantine: reportPlanQuarantine,
+      planSnapshot: planReaders.boot,
     });
     if ("error" in synced) return 1;
     plan = synced.plan;
@@ -39753,14 +39956,9 @@ export async function daemonCommand(
   // gateway still refetches every poll — warming changes a fetch's SHAPE, never whether one
   // happens (`buildInboxDraftHook`'s doc makes the identical argument, with measurements).
   const laneGithubFor = memoiseGatewayByRepo((o, r) => (deps.githubFactory ? deps.githubFactory(o, r) : gatewayFor(o, r)));
-  // W1-T2513 — ONE COALESCER FOR THIS WHOLE DAEMON PROCESS (never per tick, never per lane),
-  // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
-  // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
-  // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  // W1-T9647: every plan this daemon holds — boot, active, the tick read's and each lane's sync — is one copy on the
-  // `daemon.memory` row; a reload sharing task objects with the plan before it is counted once.
+  // W1-T9647/W1-T9763: the plans held are counted on `daemon.memory`; one revision is one instance there.
   const daemonPlanCopies = createPlanCopyBook({ refs: () => [plan, activePlanRef.current, tickReadGeneration?.facts.plan] });
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(quarantiningPlanSyncAsync(reportPlanQuarantine), daemonPlanCopies.observe));
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(planReaders.sync, daemonPlanCopies.observe));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
@@ -40316,12 +40514,12 @@ export async function daemonCommand(
     mint: deps.gitCredentialMint,
   });
   const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
-  let inlineProducer: ReturnType<typeof createTickReadProducer> | undefined;
+  let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
   const readPlane = deps.githubFactory ? undefined : startReadPlane({
     workerUrl: new URL(import.meta.url), workerInput: readOptions, log,
-    inline: (input: Parameters<ReturnType<typeof createTickReadProducer>>[0]) =>
-      (inlineProducer ??= createTickReadProducer(readOptions, { log }))(input),
+    inline: (input: TickReadRequest) => (inlineProducer ??= planReaders.inlineTickRead(readOptions, { log }))(input),
   });
+  const readTick = readPlane && planReaders.tickRead(readPlane.read);
   const loopTelemetry = startReadPlaneTelemetry();
   // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
   const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
@@ -40360,8 +40558,8 @@ export async function daemonCommand(
       plan,
       {
         refreshMerged,
-        refreshMergedAsync: readPlane ? buildDaemonReadRefresher({
-          read: readPlane.read, plan: () => activePlanRef.current, previous: () => lastProj,
+        refreshMergedAsync: readTick ? buildDaemonReadRefresher({
+          read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
           invalidate: () => { tickReadGeneration = undefined; },
           publish: (snapshot) => {
             tickReadGeneration = snapshot;
@@ -40497,7 +40695,11 @@ export async function daemonCommand(
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
-        ...(childMode ? { adoptRunChildren: () => adoptedChildren } : {}),
+        // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
+        ...(childMode ? {
+          adoptRunChildren: () => adoptedChildren,
+          refillRunsAsChild: () => runChildModeIsOn(childPolicy, childModeTracker.evidence).on && !flagValue(rest, "--plan"),
+        } : {}),
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
           // W1-T9087: each dispatch asks the mode; under `auto` that is the evidence's current answer, ledgered when it changes.
@@ -40529,9 +40731,7 @@ export async function daemonCommand(
             // synchronous full-repo walk before its first yield, serialising lane starts (78 s apart).
             // See `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
             githubFor: laneGithubFor,
-            // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
-            // fetch + ONE plan parse instead of paying for it per lane. Inert when
-            // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
+            // W1-T2513/W1-T9763: the coalescer above, over the daemon's plan store; inert under `skipGitSync`.
             planSnapshot: tapPlanSnapshot(admittedPlan, planSyncCoalescer.sync),
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
@@ -40653,7 +40853,8 @@ export async function daemonCommand(
         // `!target.isSelf && !--plan`) exactly, so the reload source can never diverge from the
         // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
         // callsite stays a single reachable line regardless of which arm a given caller exercises.
-        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log),
+        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log,
+          { load: planReaders.reload }),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".
@@ -40826,7 +41027,7 @@ export async function daemonCommand(
           ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
             config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
-          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
+          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readTick,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
             () => tickReadGeneration),
           target.isSelf ? { root: repoRoot, inboxRoot: config.root, feedbackLand: {} } : undefined,
@@ -42320,6 +42521,9 @@ export async function serveCommand(
   const supervised = supervisedRole(process.env);
   const channel = supervised && (deps.generation ?? processChannel());
   const server = await buildReadyServeServer({
+    selectedRegistryObservation: config.selectedRegistryMode?.mode === "shadow" ? {
+      settings: { ...config.selectedRegistryMode }, input: { envPath: process.env.RMD_INSTANCE_REGISTRY }, record: log,
+    } : undefined,
     ...(channel ? { generation: { requestHandoff: (detail) => channel.send({ ...detail, type: GENERATION_MESSAGES.handoffRequest }) } } : {}),
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     board: boardDeps,
@@ -48721,6 +48925,7 @@ export function buildSweepHook(
     let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
+    let thisPassReviewInputViews: NonNullable<SweepCycleOutcome["reviewInputViews"]> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
       const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
@@ -48733,6 +48938,8 @@ export function buildSweepHook(
         }));
       // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
       thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
+      thisPassReviewInputViews = openPrs.map(({ prNumber, prUrl, headSha, reviewInputDigest, reviewState, taskId }) =>
+        ({ prNumber, prUrl, headSha, reviewInputDigest, reviewState, taskId }));
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
@@ -48876,10 +49083,11 @@ export function buildSweepHook(
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
     await draftHook(tickRead);
-    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0
+    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0 || thisPassReviewInputViews.length > 0
       ? {
           ...(reviewerCodeStale ? { reviewerCodeStale } : {}),
           planOnlyRunBranchReceipts: thisPassPlanOnlyRunBranchReceipts,
+          reviewInputViews: thisPassReviewInputViews,
         }
       : undefined;
   };
@@ -51490,6 +51698,7 @@ export function buildInboxDraftSpawnArgs(args: {
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats;
 }): SpawnWorkerArgs {
+  const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
   return {
     cwd: args.cwd,
     permissionMode: "bypassPermissions",
@@ -51506,19 +51715,19 @@ export function buildInboxDraftSpawnArgs(args: {
     prompt: args.prompt,
     tools: INBOX_DRAFT_WORKER_TOOLS,
     onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
-    ...(args.draftRoutingLog && args.proposalId ? { draftRouting: {
+    ...(registryRecord && args.proposalId ? { draftRouting: {
       lane: "inbox-draft",
       proposalId: args.proposalId,
-      log: args.draftRoutingLog,
+      log: registryRecord,
       readStats: args.draftRoutingReadStats,
-      evaluate: (worker: WorkerResult) => {
+      evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
         return { contractFailed: parsed === null,
           clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,
             args.proposalId!, parsed.stampLine, undefined, facts.moduleExists, facts.readGrepProofFile,
             facts.pathIsDirectory, facts.pathExistsAtBase).length === 0) };
-      },
+      }),
     } } : {}),
   };
 }
@@ -51619,6 +51828,7 @@ export async function draftProposalBatch(
   rawSpawn: typeof spawnWorker = spawnWorker,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
+  const registryIntent = selectedRegistryIntentForConfig(config);
 
   // W1-T2559: the inbox-draft rung ships no code and supervises no worker, so G-17's Tier
   // Invariant — which exists to keep a supervisor strictly above what it reviews — does not bind
@@ -51645,7 +51855,7 @@ export async function draftProposalBatch(
 
   try {
     const planText = stringifyYaml(loadPlan(join(worktreePath, "plan", "tasks.yaml")).tasks);
-    return await runDraftRung(
+    return await withSelectedRegistryContext(selectedRegistryObserverFromIntent(registryIntent, log), () => runDraftRung(
       toDraft,
       planText,
       {
@@ -51682,7 +51892,7 @@ export async function draftProposalBatch(
         log,
       },
       runId,
-    );
+    ));
   } finally {
     worktreeRemove(repoDir, worktreePath);
     removeRunLock(worktreePath);
@@ -53514,6 +53724,7 @@ export async function approveCommand(
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const { owner, repo } = resolveOwnerRepo();
+  const registryIntent = selectedRegistryIntentForConfig(config);
 
   const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config);
   if (!proposal || !classification) {
@@ -53936,7 +54147,8 @@ export async function approveCommand(
         payload: { proposalId, fragmentYaml: "", stampLine: "" },
       };
     } else {
-      result = approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus });
+      result = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
+        approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus }));
     }
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
@@ -54093,6 +54305,7 @@ async function approveBatchCommand(
 ): Promise<number> {
   const proposalIds = rest;
   const config = deps.config ?? loadConfig();
+  const registryIntent = selectedRegistryIntentForConfig(config);
   const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
@@ -54231,7 +54444,7 @@ async function approveBatchCommand(
 
   let result: BatchApproveResult;
   try {
-    result = approveBatch(
+    result = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () => approveBatch(
       found.map((f) => f.classification),
       // Unused by the real gateway above — it reads/folds MASTER-PLAN.md itself, inside the
       // worktree it just created off a FRESH `git fetch` (worktreeAdd), which is the only base
@@ -54240,7 +54453,7 @@ async function approveBatchCommand(
       "",
       gateway,
       { ledgerPath, runId, duplicateCorpus: filedShardSlugCorpus(repoRoot) },
-    );
+    ));
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlocks.forEach((b) => b.releaseAll());
@@ -57880,7 +58093,8 @@ export function serviceFreshnessGate(
  * service-posture `emit` closure just above already keeps, never a reason a command that would
  * otherwise have worked now doesn't.
  */
-function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOverride?: string): void {
+function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOverride?: string): SelectedRegistryObserver | undefined {
+  let observer: SelectedRegistryObserver | undefined;
   try {
     // Do not create either HOME config or an override's state/ directory before deploy-run validates
     // the path. The supervisor's explicit-root path is intentionally not logged at this seam.
@@ -57889,6 +58103,9 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
     // A missing pause/resume root must reach target validation still missing. Invocation
     // telemetry must not recreate it and turn an unavailable state mount into a local target.
     if ((cmd === "pause" || cmd === "resume") && !existsSync(config.root)) return;
+    const ledgerPath = ledgerPathFor(config);
+    observer = selectedRegistryObserverFromIntent(selectedRegistryIntentForConfig(config), (step, fields) =>
+      appendLedger(ledgerPath, { run_id: "CLI", task_id: "CLI", step, ...fields }));
     appendLedger(ledgerPathFor(config), {
       run_id: `CLI-${Date.now()}`,
       task_id: "CLI",
@@ -57899,6 +58116,7 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
   } catch {
     // Telemetry-only — see this function's own doc.
   }
+  return observer;
 }
 
 /** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
@@ -58084,13 +58302,16 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
  *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
 export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
   const config = loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const observer = selectedRegistryObserverFromIntent(selectedRegistryIntentForConfig(config), (step, fields) =>
+    appendLedger(ledgerPath, { run_id: "BENCHMARK-AA", task_id: "BENCHMARK-AA", step, ...fields }));
   return { config, repo: githubRepoSlugOfCheckout(repoRoot),
     runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),
     loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
     dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
       spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
       clockBoundMs: workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon }),
-    defaultInstanceRoots: () => registryInstanceRoots(stateDir) };
+    defaultInstanceRoots: () => registryInstanceRoots(stateDir, undefined, undefined, observer) };
 }
 
 /**
@@ -58462,7 +58683,7 @@ export async function main(
   // W1-T477 signal (i): see logCliInvocation's own doc — first, unconditional, one row per
   // process regardless of which dispatch arm below (if any) ends up matching `cmd`.
   const invocationStateRoot = cmd === "deploy-run" && rest.includes("--state-root") ? flagValue(rest, "--state-root") ?? "" : undefined;
-  logCliInvocation(cmd, rest, invocationStateRoot);
+  const registryObserver = logCliInvocation(cmd, rest, invocationStateRoot);
   if (cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(USAGE);
     process.exit(0);
@@ -58607,14 +58828,15 @@ export async function main(
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
   await flushThenExit(
-    deps.dispatch ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE),
+    await withSelectedRegistryContext(registryObserver, async () => deps.dispatch
+      ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE)),
   );
 }
 
 // W1-T4075: a read-plane worker thread loads this module as its entry and installs the producer.
 // Kept OUTSIDE the process-boundary region below, which exempts exit glue only.
 const readWorkerOptions = readPlaneWorkerInput<TickReadOptions>();
-if (readWorkerOptions) runReadPlaneWorker(createTickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }));
+if (readWorkerOptions) runReadPlaneWorker(tickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }, createPlanRevisionStore({ retainLatest: true })));
 
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
 // `exitCodeFor()`, while this wrapper only prints and exits the current process.

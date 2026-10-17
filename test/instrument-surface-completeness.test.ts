@@ -130,6 +130,37 @@ test("CI shard admission is declared as an instrument, not hidden by an exclusio
   assert.equal(verdict.entangled, true);
 });
 
+test("Semgrep source-build trust policy is an exact declared instrument with product entanglement", () => {
+  const path = ".github/semgrep/source-build-policy.json";
+  assert.ok(deriveInstrumentCandidates(liveTree(REPO_ROOT)).includes(path), "the real workflow must derive this policy");
+  assert.equal(INSTRUMENT_SURFACE_EXCLUSIONS[path], undefined);
+  const matching = INSTRUMENT_SURFACE.filter((pattern) => new RegExp(pattern).test(path));
+  assert.deepEqual(matching, ["^\\.github/semgrep/source-build-policy\\.json$"]);
+  assert.deepEqual(findUnexplainedGaps([path], DECLARED_RE, INSTRUMENT_SURFACE_EXCLUSIONS), []);
+  const withoutPolicy = new RegExp(INSTRUMENT_SURFACE.filter((pattern) => !matching.includes(pattern)).join("|"));
+  assert.deepEqual(findUnexplainedGaps([path], withoutPolicy, INSTRUMENT_SURFACE_EXCLUSIONS), [path]);
+  for (const other of [path + ".bak", ".github/semgrep/other-policy.json", "prefix/" + path]) {
+    assert.equal(DECLARED_RE.test(other), false, "registration must not widen beyond the exact security policy");
+  }
+  assert.deepEqual(detectInstrumentEntanglement([path]), { entangled: false, instrumentPaths: [path], srcPaths: [] });
+  const product = "src/lib/dispatch-overlap.ts";
+  const diff = `diff --git a/${path} b/${path}
+--- a/${path}
++++ b/${path}
+@@ -1 +1 @@
+-{"runtimeQualified":false}
++{"runtimeQualified":true}
+diff --git a/${product} b/${product}
+--- a/${product}
++++ b/${product}
+@@ -1 +1 @@
+-export const fixtureDecision = false;
++export const fixtureDecision = true;`;
+  assert.deepEqual(detectInstrumentEntanglement([path, product], diff), {
+    entangled: true, instrumentPaths: [path], srcPaths: [product],
+  });
+});
+
 // ── AN INSTRUMENT PATH UNDER `src/` MUST BE EXPRESSIBLE ──────────────────────────────────────
 //
 // `isProductPath` is unconditionally `src/` and not `test/`, so before the subtraction in

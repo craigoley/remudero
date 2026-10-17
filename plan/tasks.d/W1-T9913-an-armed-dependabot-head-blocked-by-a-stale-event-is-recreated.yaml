@@ -16,7 +16,7 @@
     - src/run-task.ts
     - test/an-armed-dependabot-head-blocked-by-a-stale-event-is-recreated.test.ts
     - test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts
-  status: queued
+  status: merged
   priority: 1  # every Dependabot PR whose title or body changed after its checks ran, #11968 today, waits for a human
   attempts: 0
   rationale: |

@@ -90,6 +90,7 @@
   "src/lib/analytics-route.ts": 278,
   "src/lib/arm-auto-merge.ts": 500,
   "src/lib/autonomy.ts": 90,
+  "src/lib/board-projection.ts": 500,
   "src/lib/board-review.ts": 244,
   "src/lib/board.ts": 500,
   "src/lib/branch-reaper.ts": 288,
@@ -103,7 +104,7 @@
   "src/lib/containment.ts": 750,
   "src/lib/correct.ts": 29,
   "src/lib/daemon-health.ts": 192,
-  "src/lib/daemon.ts": 2000,
+  "src/lib/daemon.ts": 2250,
   "src/lib/deployer.ts": 1000,
   "src/lib/digest.ts": 329,
   "src/lib/dispatch-claim.ts": 130,
@@ -238,6 +239,6 @@
   "src/lib/worker.ts": 2000,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 18253,
+  "src/run-task.ts": 18500,
   "src/spike.ts": 18
 }
