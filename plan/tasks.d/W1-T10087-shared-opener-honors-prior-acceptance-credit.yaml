@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 8.00
-  risk: medium
+  risk: high  # One shared-opener concern spanning the sync and async production paths.
   band_meaning: span
   origin: "operator-approved follow-through 2026-10-17; #12258 and actual shared-opener controls"
   files:
