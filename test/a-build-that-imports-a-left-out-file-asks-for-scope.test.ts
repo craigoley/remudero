@@ -13,7 +13,7 @@ import { runTask } from "#src/run-task.js";
 import type { ScopeAmendmentOutcome, ScopeAmendmentRequest } from "#src/lib/proof-amendment.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import type { WorkerResult } from "#src/lib/worker.js";
+import type { WorkerResult, spawnWorker } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const TASK_ID = "W1-T990226";
@@ -96,7 +96,7 @@ async function dispatch(f: ReturnType<typeof fixture>, files: Record<string, str
     planPath: f.planPath,
     config: { claudeBin: "/bin/true", root: f.root, installRoot: process.cwd(), workerProviders: { harnessCommitsImplement: true } },
     github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
-    spawn: writingSpawn(files) as unknown as Parameters<typeof runTask>[1]["spawn"],
+    spawn: writingSpawn(files) as unknown as typeof spawnWorker,
     containmentExec: async (token) => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
     isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
     otherOpenPrReader: async () => [],
