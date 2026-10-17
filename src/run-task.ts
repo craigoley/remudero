@@ -246,7 +246,10 @@ import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, re
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import {
+  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleases,
+  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
+} from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
@@ -1106,6 +1109,7 @@ import {
   requestProofAmendment,
   requestScopeAmendment,
   type ScopeAmendmentOutcome,
+  type ScopeAmendmentRequest,
   type ProofAmendmentOutcome,
   type ProofAmendmentRecord,
   type ProofAmendmentWritePorts,
@@ -1311,6 +1315,7 @@ import {
   readBlobsAtRef,
   mergePlanBlobs,
   loadPlanAtRefAsync,
+  TaskAdmissionError,
 } from "./lib/plan.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
@@ -2560,6 +2565,7 @@ export function buildSweepEffects(
   | "close"
   | "dispatchFix"
   | "escalate"
+  | "fixOwnerReclaimableAtHold"
   | "readLiveState"
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
@@ -17180,6 +17186,8 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   otherOpenPrReader?: OpenPrJsonReader;
   prCreateExec?: Parameters<typeof runGhPrCreate>[4];
   prOpenProofRunner?: AsyncOpenPullRequestProofRunner;
+  /** W1-T10026: test seam for a build's left-out-import scope request; production asks `requestScopeAmendment`. */
+  implementScopeAmendment?: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -21068,6 +21076,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // `diff-coverage` refused, and rightly: the branch deciding whether a run produces a pull
     // request must be exercised, not reasoned about from outside.
     const harnessCommitRefusalState: { reason?: string } = {};
+    let harnessCommitted: { sha: string; undeclared: readonly string[] } | undefined;
+    const onHarnessCommit = (sha: string, undeclared: readonly string[] = []) => { harnessCommitted = { sha, undeclared }; };
     commitCount = harnessCommitForShellLessWorker({
       harnessOwnsGit,
       commitCount,
@@ -21079,6 +21089,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       log,
       say,
       onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
+      onCommit: onHarnessCommit,
     });
 
     // W1-T4052: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR, NOT DISCARDED. `resumeForMissingCommitLine`
@@ -21097,6 +21108,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       assignmentId: impl.selectionAssignmentId,
       log,
       say,
+      onCommit: onHarnessCommit,
       resume: commitLineResume(spawn, account, {
         cwd: worktreePath,
         permissionMode: "bypassPermissions",
@@ -21118,6 +21130,34 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     harnessCommitRefusalState.reason = commitLineRecovery.refusalReason;
     const harnessCommitRefusalReason = harnessCommitRefusalState.reason;
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && commitCount === 0;
+
+    // W1-T10026: a commit whose own files import a path it left out never opens bare; it asks for that scope.
+    const scopeNeeded = await askScopeForLeftOutImports({
+      taskId, branch, commit: harnessCommitted, log, git: (args) => hostWorktreeGit(worktreePath, args),
+      amend: opts.implementScopeAmendment ?? ((request) => requestScopeAmendment(request, buildProofAmendmentWritePorts({
+        taskId, worktreePath: repoDir, config, owner, repo: task.repo, prNumber: request.prNumber, ledgerLinesNow: [], log,
+        gitOps: buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
+      }))),
+    });
+    if (scopeNeeded) {
+      harvestFollowupsFromReport(fullText(impl), { label: "implement", runId, log, say });
+      reclaimRunWorktree(repoDir, worktreePath, "implement.scope_needed", log);
+      const { amendment } = scopeNeeded;
+      log("verdict", {
+        verdict: "no_pr",
+        reason: "scope_needed",
+        paths: scopeNeeded.companions.map((c) => c.path),
+        head_sha: harnessCommitted?.sha,
+        amendment_outcome: amendment.kind,
+        ...(amendment.kind === "refused" ? { amendment_reason: amendment.reason, amendment_detail: amendment.detail } : {}),
+        ...("amendmentUrl" in amendment ? { amendment_url: amendment.amendmentUrl } : {}),
+        cost_usd: costUsd,
+        ...terminalVerdictFields(impl),
+      });
+      say(`verdict: no_pr — committed files import left-out ${scopeNeeded.companions.map((c) => c.path).join(", ")}; ` +
+        `scope amendment ${amendment.kind}${amendment.kind === "refused" ? ` (${amendment.reason})` : ""}`);
+      return { taskId, runId, merged: false, costUsd, verdict: "no_pr" };
+    }
 
     if (!prUrl && commitCount === 0) {
       // W1-T412: HARVEST BEFORE THIS BLOCK'S RETURNS, because every path out of it returns and
@@ -38988,6 +39028,10 @@ export interface RunInChildInput {
   options: RunChildSpecOptions;
   planSync: (options: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T10000: the daemon is told while the run waits for its child's admission. */
+  onPending?: (pending: RunChildPending) => void;
+  /** W1-T10000: asked before the run stays in-process; `false` ends the lane with a {@link TaskAdmissionError}. */
+  mayRunInProcess?: (reason: string) => boolean;
 }
 
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
@@ -38996,23 +39040,35 @@ export async function runInChildWhenOn(
   seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
 ): Promise<RunChildHandle | undefined> {
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
-  const fallback = (reason: string): undefined => {
-    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+  const inProcess = (reason: string): undefined => {
+    if (input.mayRunInProcess?.(reason) === false) {
+      throw new TaskAdmissionError(`restart latched: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
+    }
     return undefined;
   };
+  const fallback = (reason: string): undefined => {
+    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+    return inProcess(reason);
+  };
   if (mode.unreadable !== undefined) return fallback(`sweep.runChild.mode unreadable: ${mode.unreadable}`);
-  if (!mode.on) return undefined;
+  if (!mode.on) return inProcess("sweep.runChild.mode is not on");
   if (input.options.skipGitSync) return fallback("an explicit --plan is read literally; the run stays in-process");
   const start = seams.spawn ?? ((spawnInput, spawnPorts) => spawnRunChild(spawnInput, spawnPorts));
   const launched = await start({
     taskId: input.taskId, stateRoot: join(input.config.root, "state"), repoDir: input.repoDir, root: input.config.root,
     log: input.log, options: input.options,
     plan: async () => input.planSync({ allowStale: input.allowStale }),
+    ...(input.onPending ? { onPending: input.onPending } : {}),
   }, {
     abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), systemClock.now()).yieldCost.ms },
     ...seams.ports,
   });
-  return launched.started ? launched : undefined;
+  if (launched.started) return launched;
+  // W1-T10000: an abandoned wait took no claim and wrote no spec; the next daemon dispatches it, never this one in-process.
+  if (launched.abandoned) {
+    throw new TaskAdmissionError(`task ${input.taskId}'s run child was abandoned after ${launched.waitedMs} ms waiting for memory admission`);
+  }
+  return inProcess(launched.reason);
 }
 
 export async function daemonCommand(
@@ -40109,6 +40165,7 @@ export async function daemonCommand(
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+            onPending: runOptions?.onChildPending, mayRunInProcess: runOptions?.mayRunInProcess,
           }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
             runOptions?.onChild?.(inChild);
@@ -42532,7 +42589,8 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
   if (snapshot.treeState === "untracked_dirty") {
     return snapshot.remoteState === "exact" && snapshot.historyState !== "unknown" &&
-      snapshot.localSha && snapshot.remoteSha && snapshot.localSha !== snapshot.remoteSha &&
+      // W1-T7998: at the PR's current head too; the dead, idle owner held #10829 and #12582 forever.
+      snapshot.localSha && snapshot.remoteSha &&
       snapshot.claimState === "clear" && snapshot.processState === "clear" &&
       snapshot.ageMs !== null && Number.isFinite(snapshot.ageMs) &&
       snapshot.idleBoundMs != null && Number.isFinite(snapshot.idleBoundMs) && snapshot.idleBoundMs > 0 &&
@@ -43678,7 +43736,8 @@ export function harnessCommitForShellLessWorker(
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
      *  with the undeclared paths it refused to stage (W1-T4207; empty when none were computed). */
     onRefusal?: (reason: string, undeclared?: readonly string[], conflictMarkerFiles?: readonly string[]) => void;
-    onCommit?: (sha: string) => void;
+    /** W1-T10026: also receives the changed paths the commit left out. */
+    onCommit?: (sha: string, undeclared?: readonly string[]) => void;
   },
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
@@ -43725,7 +43784,7 @@ export function harnessCommitForShellLessWorker(
     input.onRefusal?.(refusalReason, committed.undeclared, committed.conflictMarkerFiles);
     return input.commitCount;
   }
-  if (committed.sha) input.onCommit?.(committed.sha);
+  if (committed.sha) input.onCommit?.(committed.sha, committed.undeclared);
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
 }
@@ -43790,6 +43849,7 @@ export async function resumeForMissingCommitLine(
     assignmentId?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
+    onCommit?: Parameters<typeof harnessCommitForShellLessWorker>[0]["onCommit"];
     /** Resume the worker's OWN session once with the ask-for-the-line prompt. A required
      *  collaborator the implement lane wires, like `log`/`say` — not an optional seam. */
     resume: () => Promise<{
@@ -43852,10 +43912,73 @@ export async function resumeForMissingCommitLine(
       log: input.log,
       say: input.say,
       onRefusal: createHarnessCommitRefusalRecorder(refusalState),
+      onCommit: input.onCommit,
     },
     deps,
   );
   return { commitCount, refusalReason: refusalState.reason, report: combinedReport, resumed: true };
+}
+
+/** W1-T10026: a path the harness commit left out that the commit's own files import, and which files import it. */
+export interface RequiredCompanion {
+  path: string;
+  importers: string[];
+}
+
+/**
+ * W1-T10026: THE LEFT-OUT PATHS THE COMMITTED TREE CANNOT LOAD WITHOUT. Each code file the harness commit holds is read
+ * at `sha`, and its static relative specifiers resolve through the affected-suites resolver (`.js` read as `.ts`) over
+ * the committed tree plus the left-out set. A left-out path one of them imports is required; nothing else is.
+ */
+export function requiredCompanions(
+  sha: string,
+  leftOut: readonly string[],
+  git: (args: string[]) => string,
+): RequiredCompanion[] {
+  if (leftOut.length === 0) return [];
+  const paths = (args: string[]) => git(args).split("\0").filter(Boolean);
+  const committed = paths(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--diff-filter=d", sha])
+    .filter((path) => /\.(?:ts|mts|mjs|js|cjs)$/.test(path));
+  const files = new Map(committed.map((path) => [path, git(["show", `${sha}:${path}`])]));
+  const { directImports } = buildAffectedSuitesGraph(files, [...paths(["ls-tree", "-r", "--name-only", "-z", sha]), ...leftOut]);
+  const left = new Set(leftOut);
+  const importers = new Map<string, string[]>();
+  for (const [file, deps] of directImports) {
+    for (const dep of deps) if (left.has(dep)) importers.set(dep, [...(importers.get(dep) ?? []), file]);
+  }
+  return [...importers].sort(([a], [b]) => a.localeCompare(b)).map(([path, by]) => ({ path, importers: by.sort() }));
+}
+
+/**
+ * W1-T10026: A BUILD WHOSE COMMITTED FILES IMPORT A LEFT-OUT FILE ASKS FOR SCOPE. #12575 opened with three committed
+ * files importing a module the harness commit dropped, so every check died ERR_MODULE_NOT_FOUND. With no required
+ * companion this returns undefined and the run goes on as before; with one it ledgers `implement.scope_needed` and
+ * asks the scope-amendment workflow for exactly those paths, which the worker did change.
+ */
+export async function askScopeForLeftOutImports(input: {
+  taskId: string;
+  branch: string;
+  commit: { sha: string; undeclared: readonly string[] } | undefined;
+  git: (args: string[]) => string;
+  amend: (request: ScopeAmendmentRequest) => ScopeAmendmentOutcome | Promise<ScopeAmendmentOutcome>;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): Promise<{ companions: RequiredCompanion[]; amendment: ScopeAmendmentOutcome } | undefined> {
+  if (!input.commit) return undefined;
+  const { sha, undeclared } = input.commit;
+  const companions = requiredCompanions(sha, undeclared, input.git);
+  if (companions.length === 0) return undefined;
+  const paths = companions.map((c) => c.path);
+  const importers = Object.fromEntries(companions.map((c) => [c.path, c.importers]));
+  input.log("implement.scope_needed", { task_id: input.taskId, paths, importers, head_sha: sha });
+  let amendment: ScopeAmendmentOutcome;
+  try {
+    amendment = await input.amend({ taskId: input.taskId, prNumber: 0, prUrl: "", headSha: sha, headRef: input.branch,
+      paths, changedPaths: [...undeclared] });
+  } catch (error) {
+    amendment = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
+  }
+  input.log("implement.scope_amendment", { ...amendment, outcome: amendment.kind, task_id: input.taskId, paths, head_sha: sha });
+  return { companions, amendment };
 }
 
 /** W1-T4052: the ONLY thing the missing-line resume asks the worker's own session for. */
@@ -49721,6 +49844,15 @@ export function productionMachineFilingJudgePorts(opts: {
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
     operatorReleases: () => readOperatorReleases(opts.stateDir),
+    // W1-T9043: a ledgered release, `rmd release`, or an `rmd note` on a parked escalation is a ruling that stops its withdrawal.
+    operatorRulings: () => {
+      // ledger-read-intent: live — `dispatch.breaker_released` is in the retention set, and `rmd approve` is durable in operator-releases.json.
+      const ledgered = operatorRulingTimes(readLedgerLines(join(opts.stateDir, LEDGER_FILENAME)) as unknown as Record<string, unknown>[]);
+      return (taskId) => {
+        const times = [ledgered.get(taskId), loadOperatorNotesForTask(opts.repoRoot, taskId).at(-1)?.ts].filter((t): t is string => t !== undefined);
+        return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
+      };
+    },
     openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
@@ -49892,7 +50024,10 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, 
     // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
     // W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
     // a ruling already executed and credited (`pr:`, `done`, ledger merge credit) is settled, never judged again.
-    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || task.author_class === "machine" || !isRulingShaped(task)) continue;
+    // W1-T9043: a machine record the judge ESCALATED to a person is admitted too, so it rides the 14/30/60-day
+    // age-band re-asks a person already reads; an unjudged machine record stays the machine-filing judge's alone.
+    const heldForAPerson = task.author_class === "machine" ? parkedEscalation(task) : isRulingShaped(task);
+    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || !heldForAPerson) continue;
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,
@@ -54607,7 +54742,7 @@ import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
-  type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
+  type AdoptedRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
 import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";

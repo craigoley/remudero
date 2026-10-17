@@ -250,7 +250,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS) => {
+  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS, heartbeat = undefined) => {
     const runtimeLimitMs = deadline === undefined ? phaseMaxMs :
       Math.min(phaseMaxMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
@@ -259,8 +259,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
     if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment },
-      ...logs, resultPath, runtimeMs: runtimeLimitMs });
+    // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
+    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
+      ...logs, resultPath, runtimeMs: runtimeLimitMs, ...(heartbeat ? { heartbeat } : {}) });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };
   const git = (args) => {
@@ -451,7 +452,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
             '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, slot.childEnvironment);
+          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, slot.childEnvironment,
+            AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
           const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
           report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
           // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
@@ -460,7 +462,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           let lintOk = true;
           if (staticOk && receipt.selection === 'plan-only') {
             const lint = runStep('lint-plan-fast', ['--import', 'tsx', join(root, 'scripts/lint-plan-offline.mjs'),
-              '--base', 'origin/main', '--merge-base'], process.execPath, slot.childEnvironment);
+              '--base', 'origin/main', '--merge-base'], process.execPath, slot.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
             lintOk = lint.status === 0 && !lint.signal && !lint.error;
             report('lint-plan-fast', lint, lintOk);
           }
@@ -517,7 +519,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const judged = prepareJudgedRun();
             const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
               '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), executionWorkers));
-            const tests = runStep(testsName, child.args, child.file, judged.env);
+            const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
             const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
             const testsOk = completeTestResult(tests) && judge.verdict.complete;
             report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,

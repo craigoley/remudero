@@ -1,25 +1,56 @@
 - id: W1-T9937
-  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — read_model.materialize_failed landed 151 ledger rows across the trailing window and no task cites it"
+  title: "Read-model contention identifies its failing operation before a cause-directed repair"
   repo: remudero
   depends_on: []
   type: implement
   verify: human
-  risk: low
+  risk: high
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
-  author_class: machine
+  author_class: operator
   origin: "scout:read_model.materialize_failed"
   files:
+    - src/lib/read-model-db.ts
     - test/scout-read-model-materialize-failed.test.ts
+    - test/fixtures/read-model-contention-worker.mjs
   acceptance:
-    - claim: "read_model.materialize_failed stops recurring: its cause is fixed rather than its rows hidden"
-      proof: "grep: test(\"W1-T9937: read_model.materialize_failed no longer recurs\" in test/scout-read-model-materialize-failed.test.ts"
-  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+    - claim: "Real SQLite contention identifies finite failing operations without copying SQL or bind values; actual projector and materializer commits, contention recovery, lease fences and unclassified failure outcomes remain discriminating controls"
+      proof: "unit test: test/scout-read-model-materialize-failed.test.ts"
+  note: "Operator-directed scope amendment on 2026-10-17 after bounded investigation. This first deliverable is attribution and a discriminating real-path fixture, not proof that the recurring class has stopped. The original scout origin and historical risk ruling remain recorded; this operator-directed amendment owns the current scope and verify: human keeps it parked. No dispatch release, host change, restart or live profiling is included."
   rationale: |
     The ledger step read_model.materialize_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 19 in the older half, 132 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
-    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+    The original recurrence counts do not establish one cause. The current emitter is
+    createReadModelTicker.accept in src/lib/read-model-worker.ts; its persist path and the
+    ledger projector both use withWriteTransaction in read-model-db.ts. Observed core
+    materializer and projector errors name different failing connections to the same file.
+    A private two-thread adapter fixture reproduced a busy timeout with repeated sub-timeout
+    holds; a live BEGIN-entry sequence correlated with a projector failure, but no blocking
+    SQL return/completion or common root cause was established. The source handoff and a
+    later fresh read do not establish a repair. This amendment replaces the declaration-only
+    grep proof with executed tests and names the bounded first implementation surface.
+  design: |
+    Add a finite operation classification to the existing SQLite lock-error identity at the
+    maintained adapter boundary. Preserve the original Error object, result code, message,
+    failing connection role and thread identity; classify transaction admission, commit,
+    rollback and statement access without copying SQL text, bind values or unbounded labels.
+    The identified connection is the one that failed, never a claim about the blocking owner.
+    Exercise real default adapters and the real projector/materializer persistence paths in
+    separate worker threads over private state. Establish uncontended successful commits,
+    controlled contention failures, recovery after the fixture writer ends, and lease-loss
+    refusal. Any shorter busy deadline belongs only to the fixture; production keeps its
+    existing five-second busy timeout, lease TTL, fence, transaction boundaries and freshness
+    budgets. No retries, transaction serialization policy, diagnostics suppression, new
+    background observation or default runtime mode is introduced in this diagnostic task.
+    Only a later cause-directed change with an actual-path failing/restored control may claim
+    that the recurrence is repaired; keep distinct causes separate if the observations diverge.
+  falsifier: |
+    Remove the operation attribution while retaining the same real contention workload: the
+    operation assertion must fail. Restore it and require the same verified tests to pass.
+    A fake throw, a missing/filtered-out test, a declaration grep, a green uncongested write
+    alone, or a changed production timeout is not this falsifier. Preserve raw error codes,
+    both connection identities, actual file coverage and the exact tested commit.
   risk_ruling:
     verdict: "high"
     action: escalate

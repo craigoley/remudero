@@ -96,7 +96,8 @@ export type GardenPassOutcome = number | null | { kind: "deferred"; reason: "mem
 /** W1-T9761: the garden's own pass cadence (the median gap between its completed passes, or its scheduled interval with
  *  fewer than two gaps), and whether this is its first ask in this process, when a restart's wait is seeded. */
 export interface GardenDeferral { cadenceMs: number; cadenceBasis: "measured" | "scheduled"; firstAsk: boolean }
-/** Runs ONE pass, preserving pre-spawn admission deferral separately from its process exit. */
+/** Runs ONE pass. The optional admitted notification means a successfully spawned child,
+ * not ownership of a pool slot or a memory grant; injected process producers must signal it explicitly. */
 export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void; readonly deferral?: GardenDeferral }) => Promise<GardenPassOutcome>;
 
 /** The run id a garden's admission rows and deferral streak carry. */
@@ -137,7 +138,6 @@ export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number
       Promise.resolve()
         .then(() => {
           if (next.signal.stopped) return null;
-          next.signal.admitted?.();
           return spawnPass(next.name, next.args, next.signal);
         })
         .then(next.resolve, next.reject)
@@ -337,17 +337,20 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     lastStartMs = startedMs;
     const passId = randomUUID();
     let admittedMs: number | undefined;
+    let settled = false;
     observe(event("queued", { passId, nextDueAt: null }));
     const passSignal = {
       passId,
       deferral: deferral(),
       get stopped() { return signal.stopped; },
       admitted: () => {
+        if (settled || admittedMs !== undefined) return;
         admittedMs = clock.now();
         observe(event("running", { passId, nextDueAt: null, queueMs: Math.max(0, admittedMs - startedMs) }));
       },
     };
     const settle = (outcome: GardenPassOutcome, error?: string): void => {
+      settled = true;
       const deferred = typeof outcome === "object" && outcome !== null;
       const exit = deferred ? null : outcome;
       running = false;
@@ -562,6 +565,10 @@ export function childGardenPassSpawn(
       if (admission.kind === "admitted") admission.endAged?.();
       reservation?.releaseOccupancy();
     };
+    if (signal.stopped) {
+      release();
+      return null;
+    }
     return new Promise<number | null>((resolve, reject) => {
       // The cap follows the inherited flags: V8 takes the last `--max-old-space-size` it is given.
       const nodeArgv = gardenChildNodeArgv(name, args, heapLimitMb, { execArgv, entry }, opts.execArgv === undefined && opts.entry === undefined, log);
@@ -571,6 +578,7 @@ export function childGardenPassSpawn(
           [GARDENER_ORIGIN_ENV]: gardenerOriginEnv(name, signal.passId) },
         stdio: ["ignore", "ignore", "pipe"],
       });
+      child.once("spawn", () => signal.admitted?.());
       let stderr = "";
       let heapExhaustedSeen = false;
       child.stderr?.on("data", (chunk: Buffer | string) => {

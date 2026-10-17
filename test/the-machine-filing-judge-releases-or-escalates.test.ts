@@ -40,6 +40,7 @@ import {
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Proposal } from "../src/lib/inbox.js";
 import { rotateLedger } from "../src/lib/ledger.js";
+import { appendOperatorNote } from "../src/lib/operator-notes.js";
 import { loadPlan, loadPlanFromYaml, RELEASE_LEDGER_STEP, releasedTaskIds, type Plan } from "../src/lib/plan.js";
 import type { RiskJudgeInput, RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import { SELECTOR_SHADOW_MISS_TEST_PATH, selectorShadowMissTask } from "../src/lib/selector-shadow-gardener.js";
@@ -753,4 +754,30 @@ test("a cheap released machine task does not jump ahead of operator priority-1 w
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("W1-T9043: the production ruling reader takes the newest of a ledgered release and an operator note", (t) => {
+  const repoRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}unanswered-rulings-`));
+  t.after(() => rmSync(repoRoot, { recursive: true, force: true }));
+  const stateDir = join(repoRoot, "state");
+  mkdirSync(stateDir);
+  const iso = (days: number) => new Date(CLOCK.now() - days * 86_400_000).toISOString();
+  const row = (step: string, task_id: string, ts: string) => JSON.stringify({ ts, step, task_id }) + "\n";
+  writeFileSync(join(stateDir, "ledger.ndjson"), [
+    row("ratify.approved", "W1-T9300", iso(20)),
+    row("dispatch.breaker_released", "W1-T9301", iso(25)),
+    row("review.posted", "W1-T9303", iso(1)),
+  ].join(""));
+  for (const [taskId, days] of [["W1-T9300", 22], ["W1-T9301", 3], ["W1-T9302", 9], ["W1-T9302", 4]] as const) {
+    assert.ok(appendOperatorNote(repoRoot, { ts: iso(days), taskId, author: "operator", note: `ruled on ${taskId}` }));
+  }
+  const p = productionMachineFilingJudgePorts({
+    repoRoot, stateDir, worktreesRoot: join(repoRoot, "wt"), owner: "acme", repo: "remudero",
+    log: () => {}, clock: CLOCK, mainFailures: () => [],
+  });
+  const ruledAt = p.operatorRulings!();
+  assert.equal(ruledAt("W1-T9300"), iso(20), "a ledgered release newer than the note wins");
+  assert.equal(ruledAt("W1-T9301"), iso(3), "a note newer than the ledgered release wins");
+  assert.equal(ruledAt("W1-T9302"), iso(4), "with no ledgered ruling, the newest note is the ruling");
+  assert.equal(ruledAt("W1-T9303"), undefined, "a review is not an operator ruling");
 });

@@ -154,3 +154,169 @@ test('author step capture writes live output and survives loss of its waiting pa
     if (parent.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL');
   }
 });
+
+const PARENT_ENV = 'RMD_AUTHOR_CAPTURE_PARENT_PID';
+
+test('author step capture parent tracking is opt-in or inherited only from its immediate parent', () => {
+  const previous = process.env[PARENT_ENV];
+  try {
+    for (const entry of [
+      { marker: undefined, option: undefined, tracked: false },
+      { marker: 'foreign-owner', option: undefined, tracked: false },
+      { marker: String(process.pid), option: undefined, tracked: false },
+      { marker: String(process.ppid), option: undefined, tracked: true },
+      { marker: String(process.ppid), option: false, tracked: false },
+      { marker: undefined, option: true, tracked: true },
+    ]) {
+      if (entry.marker === undefined) delete process.env[PARENT_ENV];
+      else process.env[PARENT_ENV] = entry.marker;
+      const f = fixture(); let calls = 0;
+      const result = mod.captureStepSync(process.execPath, ['-e', ''], { ...f, cwd: ROOT,
+        // An injected child environment must not activate inheritance in this caller.
+        env: { ...process.env, [PARENT_ENV]: String(process.ppid) }, trackParent: entry.option,
+        spawnCapture(_file: string, _args: string[], options: { input: string; detached?: boolean; stdio?: string[] }) {
+          calls++;
+          const config = JSON.parse(options.input);
+          assert.equal(config.trackParent, entry.tracked);
+          assert.equal(config.parentPid, entry.tracked ? process.pid : null);
+          assert.equal(options.detached, entry.tracked ? true : undefined);
+          assert.deepEqual(options.stdio, entry.tracked ? ['pipe', 'inherit', 'inherit'] : undefined);
+          writeFileSync(f.resultPath, JSON.stringify({ version: 1, status: 0, signal: null, outputComplete: true }));
+          return { status: 0, signal: null };
+        } });
+      assert.equal(calls, 1); assert.equal(result.error, undefined); assert.equal(result.status, 0);
+    }
+    assert.throws(() => mod.captureStepSync(process.execPath, [], { trackParent: 'true' }), /boolean/);
+  } finally {
+    if (previous === undefined) delete process.env[PARENT_ENV]; else process.env[PARENT_ENV] = previous;
+  }
+});
+
+test('parent-tracked capture preserves transport and receipt failures rather than certifying completion', () => {
+  for (const kind of ['error', 'signal', 'exit', 'json']) {
+    const f = fixture();
+    const result = mod.captureStepSync(process.execPath, [], { ...f, cwd: ROOT, trackParent: true,
+      spawnCapture() {
+        if (kind === 'json') writeFileSync(f.resultPath, '{');
+        return { status: kind === 'exit' ? 3 : kind === 'json' ? 0 : null,
+          signal: kind === 'signal' ? 'SIGKILL' : null,
+          ...(kind === 'error' ? { error: Object.assign(new Error('owned transport refused'), { code: 'EACCES' }) } : {}) };
+      } });
+    assert.equal(result.outputComplete, false);
+    assert.ok(result.error);
+    if (kind === 'error') assert.equal((result.error as NodeJS.ErrnoException).code, 'EACCES');
+    if (kind === 'signal' || kind === 'exit') assert.equal((result.error as NodeJS.ErrnoException).code, 'ERR_AUTHOR_CAPTURE_TRANSPORT');
+  }
+});
+
+test('parent-tracked capture binds its real owner and marks only its owned native child', () => {
+  const f = fixture();
+  const code = `require('node:assert/strict').equal(process.env[${JSON.stringify(PARENT_ENV)}],String(process.ppid)); console.log('owned parent marker'); process.exitCode=7;`;
+  const result = mod.captureStepSync(process.execPath, ['-e', code], { ...f, cwd: ROOT, trackParent: true });
+  assert.equal(result.error, undefined); assert.equal(result.status, 7); assert.equal(result.outputComplete, true);
+  assert.match(result.stdout, /owned parent marker/);
+  const native = JSON.parse(readFileSync(f.resultPath, 'utf8'));
+  assert.equal(native.parentTracking.ownerPid, process.pid);
+  assert.equal(native.parentTracking.ownerLost, false);
+  assert.ok(native.parentTracking.helperPid > 0 && native.parentTracking.childPid > 0);
+});
+
+type OwnedReady = { ownerPid: number; helperPid: number; childPid: number; descendantPid: number };
+async function boundedWait(predicate: () => boolean, message: string, boundMs = 5000) {
+  const deadline = Date.now() + boundMs;
+  while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(predicate(), message);
+}
+function pidClosed(pid: number) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, 'readback requires an observed positive PID');
+  try { process.kill(pid, 0); return false; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true; throw error; }
+}
+function resistantReader(readyPath: string) {
+  const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{});
+    const [ready,owner,helper]=process.argv.slice(1);
+    fs.writeFileSync(ready+'.next',JSON.stringify({ownerPid:Number(owner),helperPid:Number(helper),childPid:process.ppid,descendantPid:process.pid}));
+    fs.renameSync(ready+'.next',ready); setTimeout(()=>process.exit(91),10000); setInterval(()=>{},100);`;
+  return `process.on('SIGTERM',()=>{});
+    require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)},${JSON.stringify(readyPath)},process.argv[1],String(process.ppid)],{stdio:'inherit'});
+    setTimeout(()=>process.exit(91),10000); setInterval(()=>{},100);`;
+}
+function readReady(path: string): OwnedReady {
+  const ready = JSON.parse(readFileSync(path, 'utf8')) as OwnedReady;
+  assert.equal(new Set(Object.values(ready)).size, 4);
+  for (const pid of Object.values(ready)) assert.ok(Number.isSafeInteger(pid) && pid > 0);
+  return ready;
+}
+async function readyPidsClosed(path: string, boundMs = 5000) {
+  if (!existsSync(path)) return;
+  const ready = readReady(path);
+  await boundedWait(() => Object.values(ready).every(pidClosed), 'owned helper, owner, reader and descendant must all be absent', boundMs);
+}
+
+test('parent-tracked helper survives owner KILL until its resistant reader and descendant are closed', async () => {
+  const f = fixture(), readyPath = join(f.root, 'ready.json');
+  const code = `import {captureStepSync} from ${JSON.stringify(pathToFileURL(SCRIPT).href)};
+    captureStepSync(process.execPath,['-e',${JSON.stringify(resistantReader(readyPath))},String(process.pid)],${JSON.stringify({ ...f, cwd: ROOT, runtimeMs: 15000, trackParent: true })});`;
+  const owner = spawn(process.execPath, ['--input-type=module', '-e', code], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.ok(owner.stdout && owner.stderr);
+  owner.stdout.resume(); owner.stderr.resume(); let closed = false;
+  owner.once('close', () => { closed = true; });
+  try {
+    await boundedWait(() => existsSync(readyPath), 'both resistant processes must be ready before owner cancellation');
+    const ready = readReady(readyPath); assert.equal(ready.ownerPid, owner.pid);
+    assert.equal(owner.kill('SIGKILL'), true);
+    await boundedWait(() => closed, 'inherited pipes must close after owned cancellation', 7000);
+    assert.equal(owner.signalCode, 'SIGKILL');
+    // This must already exist at owner.close, not arrive on a later polling retry.
+    const native = JSON.parse(readFileSync(f.resultPath, 'utf8'));
+    assert.ok(native.error, 'owner loss must be recorded as a refusal');
+    assert.equal(native.error.code, 'ERR_AUTHOR_CAPTURE_PARENT_EXITED');
+    assert.equal(native.signal, 'SIGKILL'); assert.equal(native.status, null); assert.equal(native.outputComplete, false);
+    assert.deepEqual(native.parentTracking, { ownerPid: owner.pid, helperPid: ready.helperPid, childPid: ready.childPid, ownerLost: true });
+    assert.ok(native.finishedAt);
+    await readyPidsClosed(readyPath);
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill('SIGKILL');
+    // Fixtures self-expire on failure; never signal a PID obtained from an arbitrary receipt.
+    await boundedWait(() => closed, 'owned transport did not close during bounded cleanup', 17000);
+    await readyPidsClosed(readyPath, 12000);
+  }
+});
+
+test('nested parent-tracked capture closes inherited pipes only after outer timeout and inner group KILL', async () => {
+  const outer = fixture(), inner = fixture(), readyPath = join(inner.root, 'ready.json');
+  const returned = join(outer.root, 'returned.json');
+  const ownerCode = `import {captureStepSync} from ${JSON.stringify(pathToFileURL(SCRIPT).href)};
+    captureStepSync(process.execPath,['-e',${JSON.stringify(resistantReader(readyPath))},String(process.pid)],${JSON.stringify({ ...inner, cwd: ROOT, runtimeMs: 15000 })});`;
+  const driverCode = `import {captureStepSync} from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; import {writeFileSync} from 'node:fs';
+    const result=captureStepSync(process.execPath,['--input-type=module','-e',${JSON.stringify(ownerCode)}],${JSON.stringify({ ...outer, cwd: ROOT, runtimeMs: 4000, trackParent: true })});
+    writeFileSync(${JSON.stringify(returned)},JSON.stringify(result));`;
+  const driver = spawn(process.execPath, ['--input-type=module', '-e', driverCode], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.ok(driver.stdout && driver.stderr);
+  driver.stdout.resume(); driver.stderr.resume(); let closed = false;
+  driver.once('close', () => { closed = true; });
+  try {
+    await boundedWait(() => existsSync(readyPath), 'nested reader and descendant must be ready before the 4s outer timeout', 3000);
+    const ready = readReady(readyPath);
+    await boundedWait(() => closed, 'nested outer capture must finish after inner cancellation', 8000);
+    assert.equal(driver.exitCode, 0);
+    const result = JSON.parse(readFileSync(returned, 'utf8'));
+    const outerNative = JSON.parse(readFileSync(outer.resultPath, 'utf8'));
+    const innerNative = JSON.parse(readFileSync(inner.resultPath, 'utf8'));
+    assert.equal(result.outputComplete, false);
+    assert.equal(outerNative.error.code, 'ERR_AUTHOR_STEP_TIMEOUT');
+    assert.equal(outerNative.parentTracking.ownerPid, driver.pid);
+    assert.equal(outerNative.parentTracking.childPid, ready.ownerPid);
+    assert.ok(innerNative.error, 'nested owner loss must be recorded before the outer terminal');
+    assert.equal(innerNative.error.code, 'ERR_AUTHOR_CAPTURE_PARENT_EXITED');
+    assert.equal(innerNative.signal, 'SIGKILL'); assert.equal(innerNative.status, null); assert.equal(innerNative.outputComplete, false);
+    assert.deepEqual(innerNative.parentTracking, { ownerPid: ready.ownerPid, helperPid: ready.helperPid, childPid: ready.childPid, ownerLost: true });
+    assert.ok(Date.parse(innerNative.finishedAt) <= Date.parse(outerNative.finishedAt), 'outer receipt cannot precede nested terminal receipt');
+    await readyPidsClosed(readyPath);
+    await boundedWait(() => pidClosed(outerNative.parentTracking.helperPid), 'outer helper must also be absent');
+  } finally {
+    if (driver.exitCode === null && driver.signalCode === null) driver.kill('SIGKILL');
+    await boundedWait(() => closed, 'nested transport did not close during bounded cleanup', 17000);
+    await readyPidsClosed(readyPath, 12000);
+  }
+});

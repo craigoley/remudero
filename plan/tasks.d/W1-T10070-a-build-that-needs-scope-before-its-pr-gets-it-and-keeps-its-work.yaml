@@ -1,0 +1,82 @@
+- id: W1-T10070
+  title: "A BUILD THAT NEEDS SCOPE BEFORE ITS PR EXISTS GETS ITS SHARD AMENDED AND IS RE-DISPATCHED WITH ITS WORK — W1-T10026's build (#12629) stops a run whose committed files import a left-out file and asks `requestScopeAmendment` for it, but that writer amends only for an OPEN implementation PR: it is called with prNumber 0 and refuses `invalid-pr`, so every such run in production ends `no_pr` / `scope_needed`, and the run's worktree is then reclaimed, so the left-out file's content is lost as well"
+  repo: remudero
+  depends_on: [W1-T10026]  # W1-T10026 (#12629, open at filing) adds the scope_needed stop this task completes; both edit src/run-task.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, a scope amendment for a build that has no PR yet, and the build's work kept until it is re-dispatched; the post-PR amendment (W1-T9805), the scope fence and which companions are required (W1-T10026) are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 coordinator note to filing agent F17 (item 5 follow-up): builder B48's #12629 for W1-T10026"
+  plan_refs: [W1-T10026, W1-T9805, W1-T5534, W1-T6465, W1-T7959, W1-T7719, W1-T8008, W1-T9877]
+  files:
+    - src/lib/proof-amendment.ts
+    - src/run-task.ts
+    - test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts
+  status: queued
+  priority: 1  # without it, W1-T10026's stop turns a bare PR into a run that can never open one
+  attempts: 0
+  rationale: |
+    READ on #12629's head 3b640c999 (run-W1-T10026-1792261012968, open at filing) and origin/main bbb986464 (symbols,
+    not lines):
+    - src/run-task.ts `askScopeForLeftOutImports` (new in #12629) logs `implement.scope_needed` and calls
+      `requestScopeAmendment({ taskId, prNumber: 0, prUrl: "", headSha, headRef: branch, paths, changedPaths })`.
+    - src/lib/proof-amendment.ts `requestScopeAmendment` begins
+      `if (!Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) return refuse("invalid-pr", "no implementation PR number")`,
+      and the rest of it is keyed on the PR: the identity key `scope:<task>:<pr>:<digest>`, the branch
+      `scope-amendment/<task>-<pr>`, `worktreePathFor(task, pr)`, the title "extend <task>'s files for #<pr>", and the
+      `existing?.merged` arm that updates the PR's branch.
+    - `runTaskBody` (in #12629), on a scope_needed result: `reclaimRunWorktree(repoDir, worktreePath,
+      "implement.scope_needed", log)`, then the verdict row `no_pr` reason `scope_needed` with `amendment_outcome`.
+      The left-out companions were never committed (the harness commit staged declared paths only), so reclaiming
+      the worktree deletes the only copy, as on any no_pr.
+    - So in production the stop W1-T10026 adds always reads `amendment_outcome: refused`, `amendment_reason:
+      invalid-pr`; the task re-dispatches with the same `files:`, the worker makes the same choice, and the run stops
+      again.
+    THE SAME GAP AFTER A PR OPENS is W1-T9805's step 4a (amended by F17 in the same filing): on #12575 the merged
+    amendment could only update the branch, so it could not supply src/lib/rule-suites.ts, which existed only in the
+    asking round's worktree. Both need the asking run's content kept until the amendment lands; build the save and
+    restore once (whichever of the two lands first) and let the other reuse it.
+    WHY THIS IS NOT ANOTHER TASK: W1-T10026 (open #12629) detects the companion and stops; W1-T5534/W1-T6465 (merged)
+    are the fix round's amendment for an open PR; W1-T9805 (queued) acts on a merged amendment for an open PR;
+    W1-T8008 (merged) keeps undeclared work in a restart checkpoint, not across a no_pr. Swept origin/main
+    plan/tasks.d for requestScopeAmendment, invalid-pr, scope_needed and "before a PR", and the open PR heads'
+    plan diffs (18:26Z, plus #12629's head): none amends before a PR exists.
+  design: |
+    1. A PRE-PR SCOPE AMENDMENT. src/lib/proof-amendment.ts gains a request shape for a build with no PR, keyed on
+       the task, the run branch and the paths' digest (never a PR number): branch `scope-amendment/<task>-build-<digest>`,
+       title "extend <task>'s files for its build", the same path checks, the same W1-T7959 lint, the same shard edit.
+       The amendment appends the companions AND the committed files that import them (`importers`) when either is
+       outside `files:`. `requestScopeAmendment`'s PR path is unchanged.
+    2. KEEP THE WORK. Before `reclaimRunWorktree`, the run saves its harness commit and the companions' content,
+       verified, under config.root recovery (as W1-T7719's preserve does), keyed by task and amendment, and the
+       `implement.scope_needed` row names where.
+    3. RE-DISPATCH WITH IT. When the task is next dispatched and its shard now declares the companions (the
+       amendment merged), the run seeds its fresh worktree from the saved commit plus the companions before the
+       worker starts, and tells the worker so in its prompt; the ordinary harness commit then includes them and the
+       PR opens. A save that is missing or does not verify is named on the run's first row, and the build runs as a
+       fresh build.
+    4. Until the amendment merges, the task is not re-dispatched into the same stop: dispatch reads the open
+       pre-PR amendment as a wait, as an open fix-lane amendment already is (`scopeAmendmentsPending`).
+    5. TESTS in test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts, `test(` titles verbatim as in the
+       proofs, with fakes for push, PR open and the amendment PR: #12575's shape (three committed files importing a
+       left-out src/lib/rule-suites.ts) opens a pre-PR amendment naming the companion and its importers and saves the
+       companion before the worktree is reclaimed; a later dispatch with the amended shard seeds the saved file and
+       opens the PR; a save that does not verify runs a fresh build and says so (control).
+  acceptance:
+    - claim: "a build that stops on scope_needed opens a shard amendment without an implementation PR"
+      proof: 'grep: test("W1-T10070: a build with no PR opens a shard amendment for its companions" in test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts'
+    - claim: "the left-out companion is saved before the run's worktree is reclaimed and seeded into the re-dispatched build"
+      proof: 'grep: test("W1-T10070: the saved companion seeds the re-dispatched build" in test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts'
+    - claim: "a save that does not verify runs a fresh build and names it"
+      proof: 'grep: test("W1-T10070: an unverifiable save runs a fresh build and names it" in test/a-build-that-needs-scope-before-its-pr-gets-it.test.ts'
+  falsifier: |
+    On #12629's head the #12575 shape calls requestScopeAmendment with prNumber 0, gets refused invalid-pr, and the
+    reclaimed worktree leaves no copy of src/lib/rule-suites.ts, so the first and second tests fail. Deleting the fix
+    gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: whether a pre-PR amendment may also add the importers (step 1), which widens
+    `files:` beyond the worker's left-out paths. EFFECT, measured after merge from the core ledger: verdict rows
+    `no_pr` reason `scope_needed` with amendment_reason invalid-pr. Healthy shape: none; each scope_needed run is
+    followed by an amendment and, after it merges, a pr.opened for the task.
