@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const script = resolve("deploy/mac/cache-reclaim.py");
 function fixture(noise = false) {
@@ -212,7 +212,7 @@ ns['DirectoryProgress'].save=churn_and_save
 });
 
 test("cache scan progress cleans only its own failed save stage and never accumulates crash stages", () => {
-  for (const fault of ["write", "fsync", "replace", "unlink", "race", "abandoned"]) {
+  for (const fault of ["write", "fsync", "dir-fsync", "replace", "unlink", "race", "abandoned"]) {
     const f = fixture();
     try {
       f.run(); const inventory = readFileSync(join(f.stateDir, "inventory.json"));
@@ -221,6 +221,9 @@ test("cache scan progress cleans only its own failed save stage and never accumu
 def failed_save(self):
     original_fsync,original_replace,original_fdopen,original_unlink=ns['os'].fsync,ns['os'].replace,ns['os'].fdopen,ns['os'].unlink
     def fail(*a,**kw): raise OSError('owned-save-failure')
+    def dir_fsync(fd):
+        if ns['stat'].S_ISDIR(ns['os'].fstat(fd).st_mode): raise OSError('owned-directory-fsync-failure')
+        original_fsync(fd)
     def raced_replace(*a,**kw):
         ns['os'].unlink('inventory.tmp',dir_fd=self.fd)
         fd=ns['os'].open('inventory.tmp',ns['os'].O_CREAT|ns['os'].O_WRONLY|ns['os'].O_EXCL,0o600,dir_fd=self.fd)
@@ -234,6 +237,7 @@ def failed_save(self):
     try:
         if os.environ['SAVE_FAULT']=='write': ns['os'].fdopen=FailedWriter
         if os.environ['SAVE_FAULT']=='fsync': ns['os'].fsync=fail
+        if os.environ['SAVE_FAULT']=='dir-fsync': ns['os'].fsync=dir_fsync
         if os.environ['SAVE_FAULT']=='replace': ns['os'].replace=fail
         if os.environ['SAVE_FAULT']=='unlink': ns['os'].replace=fail;ns['os'].unlink=fail
         if os.environ['SAVE_FAULT']=='race': ns['os'].replace=raced_replace
@@ -247,7 +251,8 @@ ns['DirectoryProgress'].save=failed_save
         assert.ok(r.decisions.some((v: any) => v.action === "keep" && /owned-|stage-present/.test(v.reason ?? "")), JSON.stringify(r));
         assert.deepEqual(readFileSync(join(f.stateDir, "inventory.json")), inventory);
         assert.deepEqual(readdirSync(f.stateDir).sort(), ["unlink", "race", "abandoned"].includes(fault) ? ["inventory.json", "inventory.tmp", "key"] : ["inventory.json", "key"]);
-        if (fault === "unlink" && n === 0) assert.equal(r.inspection.progress.saveStageRetained, true);
+        if (fault === "unlink" && n === 0) assert.equal(r.inspection.progress.saveStageCleanupUnverified, true);
+        if (fault === "dir-fsync") assert.equal(r.inspection.progress.saveStageAbsent, true);
       }
       if (fault === "race") assert.equal(readFileSync(join(f.stateDir, "inventory.tmp"), "utf8"), "preserve replaced stage");
       if (fault === "abandoned") assert.equal(readFileSync(join(f.stateDir, "inventory.tmp"), "utf8"), "retain unknown crash-left stage\n");

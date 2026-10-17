@@ -371,9 +371,12 @@ class DirectoryProgress:
             try:
                 if identity(os.stat(stage, dir_fd=self.fd, follow_symlinks=False)) == identity(os.fstat(fd)):
                     os.unlink(stage, dir_fd=self.fd)
+            except FileNotFoundError:
+                # Rename may have succeeded before the directory fsync failed.
+                self.stats["saveStageAbsent"] = True
             except OSError:
                 # One fixed stage remains bounded and the next save holds it.
-                self.stats["saveStageRetained"] = True
+                self.stats["saveStageCleanupUnverified"] = True
             raise
         finally:
             os.close(fd)
