@@ -21,7 +21,35 @@ import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
 
 /** What a thread's parent says the thread holds, by holder (`board:<instance>`): entries and bytes kept. */
-export type ThreadHolds = Record<string, { entries: number; bytes: number }>;
+export type ThreadHolds = Record<string, { entries: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
+
+/** An attribution is a different observation from the later heap sample. */
+export interface ThreadHoldsSnapshot { holds: ThreadHolds; observedAt?: number }
+type ThreadHoldsReader = (threadId: number) => ThreadHolds | ThreadHoldsSnapshot | undefined;
+
+/** Keeps counters only, never the measured value. Payload estimates are not exclusive V8 retained sizes. */
+export function createViewHoldBook() {
+  const holds: ThreadHolds = {};
+  return {
+    account(name: string, value: unknown, entries: number, unit = "entries"): void {
+      try {
+        const text = JSON.stringify(value, (_key, item: unknown) => item instanceof Map ? [...item] : item instanceof Set ? [...item] : item);
+        if (text === undefined) throw new Error("payload has no JSON representation");
+        holds[name] = { entries, bytes: Buffer.byteLength(text), unit, bytes_basis: "serialized-payload-estimate-not-exclusive-v8" };
+      } catch {
+        holds[name] = { entries, unsized: "retained payload cannot be serialized safely", unit };
+      }
+    },
+    known(name: string, entries: number, bytes: number, unit = "rows"): void {
+      holds[name] = { entries, bytes, unit, bytes_basis: "insertion-accounted-payload-not-exclusive-v8" };
+    },
+    unsized(name: string, entries: number, reason: string, unit = "entries"): void {
+      holds[name] = { entries, unsized: reason, unit };
+    },
+    forget(name: string): void { delete holds[name]; },
+    read: (): ThreadHolds => ({ ...holds }),
+  };
+}
 
 /**
  * One thread of a reading. `bytes` is its committed heap plus external memory; `used_bytes` its used heap
@@ -33,6 +61,12 @@ export interface WorkerHeapPart {
   bytes: number;
   used_bytes?: number;
   holds?: ThreadHolds;
+  holds_age_ms?: number;
+  holds_age_reason?: string;
+  /** Arithmetic residual of used heap and named payload estimates, NOT an exclusive heap census. */
+  unattributed_used_bytes?: number;
+  unattributed_used_reason?: string;
+  unattributed_used_basis?: string;
 }
 
 /** One `worker-heap:<kind>` line in the `serve.memory` row, with a part per thread; `error` names a thread left unsized. */
@@ -234,7 +268,7 @@ export function answerThreadHeaps(
   port: { postMessage(value: unknown): void },
   msg: unknown,
   book: Pick<ReturnType<typeof trackWorkerThreads>, "live"> = workerThreads(),
-  holds?: (threadId: number) => ThreadHolds | undefined,
+  holds?: ThreadHoldsReader,
 ): boolean {
   const request = msg as { type?: unknown; id?: number; timeoutMs?: number } | undefined;
   if (request?.type !== THREAD_HEAPS_REQUEST) return false;
@@ -265,7 +299,7 @@ async function nestedHeaps({ kind, thread }: TrackedWorker, timeoutMs: number): 
 export async function readWorkerHeaps(
   workers: readonly TrackedWorker[],
   timeoutMs = WORKER_HEAP_TIMEOUT_MS,
-  holds?: (threadId: number) => ThreadHolds | undefined,
+  holds?: ThreadHoldsReader,
 ): Promise<WorkerHeapReading[]> {
   const [heaps, nested] = await Promise.all([
     Promise.all(workers.map(async ({ kind, thread }) => ({ kind, threadId: thread.threadId, ...(await threadHeap(thread, timeoutMs)) }))),
@@ -274,10 +308,27 @@ export async function readWorkerHeaps(
   const own = heaps.map((heap): WorkerHeapReading => {
     const bytes = "bytes" in heap ? heap.bytes : 0;
     const used = "used_bytes" in heap && heap.used_bytes !== undefined ? { used_bytes: heap.used_bytes } : {};
-    const held = holds?.(heap.threadId);
+    const observation = holds?.(heap.threadId);
+    const snapshot = observation && Object.hasOwn(observation, "holds") && Object.hasOwn(observation, "observedAt")
+      && ((observation as ThreadHoldsSnapshot).observedAt === undefined || typeof (observation as ThreadHoldsSnapshot).observedAt === "number")
+      ? observation as ThreadHoldsSnapshot : undefined;
+    const held = snapshot?.holds ?? observation as ThreadHolds | undefined;
+    const attribution: Partial<WorkerHeapPart> = {};
+    if (held) {
+      attribution.holds = held;
+      const age = snapshot?.observedAt === undefined ? undefined : Date.now() - snapshot.observedAt;
+      if (age !== undefined && Number.isFinite(age) && age >= 0) attribution.holds_age_ms = age;
+      else attribution.holds_age_reason = "holder report time unavailable or ahead of sample clock";
+      if ("used_bytes" in heap && heap.used_bytes !== undefined) {
+        const named = Object.values(held).reduce((sum, hold) => sum + (typeof hold.bytes === "number" && Number.isFinite(hold.bytes) && hold.bytes >= 0 ? hold.bytes : 0), 0);
+        attribution.unattributed_used_bytes = heap.used_bytes - named;
+        attribution.unattributed_used_basis = "used-heap-less-named-payload-estimates-not-exclusive-v8";
+        if (Object.values(held).some(hold => hold.bytes === undefined)) attribution.unattributed_used_reason = "partial attribution: named unsized holders remain; payload estimates may overlap";
+      } else attribution.unattributed_used_reason = "used heap unavailable; residual not measured";
+    }
     return {
       name: `${WORKER_HEAP_PREFIX}${heap.kind}`, kind: "worker-heap", entries: 1, bytes, ...used,
-      parts: { [`thread-${heap.threadId}`]: { entries: 1, bytes, ...used, ...(held ? { holds: held } : {}) } }, ...("error" in heap ? { error: heap.error } : {}),
+      parts: { [`thread-${heap.threadId}`]: { entries: 1, bytes, ...used, ...attribution } }, ...("error" in heap ? { error: heap.error } : {}),
     };
   });
   const readings = new Map<string, WorkerHeapReading & { parts: Record<string, WorkerHeapPart> }>();
