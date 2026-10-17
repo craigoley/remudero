@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T4401 — SECURITY SCANS RUN IN FULL ON EVERY PR/PUSH WHATEVER CHANGED ─────────────────
 //
@@ -30,7 +30,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // register its awaited check-run. W1-T4401 also hardens that scanner by keeping both checkouts
 // below source/ and result artifacts in a sibling results/ directory outside untrusted PR paths.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const WORKFLOWS_DIR = join(ROOT, ".github", "workflows");
 
 function loadRaw(file: string): string {

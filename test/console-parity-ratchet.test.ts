@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { COMMANDS } from "../src/run-task.js";
 import { declaredConsoleRoutes, type DeclaredRoute } from "./helpers/declared-routes.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T2926 — 48 of 65 COMMANDS verbs were CLI-only and nothing measured the gap (audit
 // recon-2026-09-05 §6, move 5). This suite falsifies scripts/console-parity-ratchet.mjs: every
@@ -17,7 +18,7 @@ import { declaredConsoleRoutes, type DeclaredRoute } from "./helpers/declared-ro
 // `scripts/**` sits outside tsconfig's `include`, so this reaches the script through a runtime
 // import — the convention test/the-contract-covers-its-own-console.test.ts documents.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const mod = (await import(pathToFileURL(join(ROOT, "scripts", "console-parity-ratchet.mjs")).href)) as {
   BASELINE_PATH: string;
   ROUTE_MATCH: Record<string, string>;

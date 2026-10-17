@@ -4,13 +4,14 @@ import { mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
 import { pidIsAlive, pidNamespaceId, setupDirOwnerTag } from "./setup/no-live-remote.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const SETUP = new URL("./setup/tmp-hygiene.ts", import.meta.url).href;
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const HOME_PREFIX = "rmd-test-home-";
 
 test("test/a-worker-thread-mints-no-test-home.test.ts: a terminated file worker keeps HOME and leaves no test home", { timeout: 60_000 }, async () => {

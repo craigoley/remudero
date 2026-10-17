@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { buildSweepEffects } from "../src/lib/sweep.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
@@ -13,8 +12,9 @@ import { mergeDirectViaRestAsync, realArmDeps, realArmDepsAsync, type ArmDeps } 
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { registryFileIO } from "../src/lib/instance-registry-selection.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const OBSERVED = "instance_mode.shadow_observed";
 type Settings = { mode: "shadow"; instanceName: string; registryPath?: string; timeoutMs?: number };
 const registry = (mode: string | undefined, privateValue = "/private/selected-mode-sentinel") => [

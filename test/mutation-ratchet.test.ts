@@ -5,6 +5,7 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { importsModule } from "./helpers/import-sweep.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T96: mutation-testing ratchet gate (MASTER-PLAN §5 TIER 2, quality gate 2/4) ──
 //
@@ -269,7 +270,7 @@ test("mutation-ratchet CLI --changed-files (NO --relevant-paths, i.e. production
 //      unbootstrapped nightly baseline section all BLOCK loudly, never a silent pass
 //  (3) test files are never a mutation target in either scope
 
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const STRYKER_CONFIG = join(REPO_ROOT, "stryker.conf.json");
 const PROD_NIGHTLY_SCOPE_CONFIG = join(REPO_ROOT, "scripts", "mutation-nightly-scope.json");
 const PROD_BASELINE = join(REPO_ROOT, "scripts", "mutation-baseline.json");

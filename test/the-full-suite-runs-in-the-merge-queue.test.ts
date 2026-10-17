@@ -20,14 +20,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const bashVersion = spawnSync("bash", ["--version"], { encoding: "utf8" }).stdout ?? "";
 const BASH_3_MAPFILE_SHIM = /^GNU bash, version 3\./.test(bashVersion)

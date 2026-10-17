@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T206: the ledger is the provenance spine AND the dispatch breaker's backing store —
 // these three tests are the proof the review round named for that task's remaining unmet
@@ -15,7 +16,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 // a single write(2) must still land as one readable line (or fail observably).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const APPEND_WORKER = join(__dirname, "fixtures", "ledger-atomic", "append-worker.ts");
 
 function tmpLedgerDir(): string {

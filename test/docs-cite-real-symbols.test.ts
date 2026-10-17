@@ -4,9 +4,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 export interface SymbolCitation {
   path: string;

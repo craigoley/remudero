@@ -26,6 +26,7 @@ import {
   type VerifyHumanVerdict,
 } from "../src/lib/verify-human-judge.js";
 import { releaseAutomatedShard, type MachineReleaseProvenance } from "../src/lib/verify-human-release.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const SHARD: ShardUnderJudgement = {
   id: "W1-T9101",
@@ -370,7 +371,7 @@ test("PRODUCTION WIRING, REAL JUDGE CONSTRUCTION: this repo's mounts resolve and
   const { fileURLToPath } = await import("node:url");
   const { RMD_TMP_PREFIX } = await import("../src/lib/tmp.js");
   const { productionVerifyHumanRelease } = await import("../src/run-task.js");
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}vh-release-real-`));
   let spawned = 0;
   try {

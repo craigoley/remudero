@@ -16,19 +16,19 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { MIN_RULE_SUITE_COUNT, listRuleSuites } from "../src/lib/ci-parity.js";
 import { gitRepo } from "./helpers/git-repo.js";
 // A NAMESPACE import, so a tree without these exports fails each test below rather than the load.
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const { PRECHECK_EXTRA_CI_CENSUSES, PRECHECK_PARITY, ciCensusPopulation, precheckParityVerdict } = precheck;
 const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 
 type Verdict = { unasked: string[]; stale: string[]; grown: string[] };
 type ParityEntry = { modeled?: unknown; run?: unknown };

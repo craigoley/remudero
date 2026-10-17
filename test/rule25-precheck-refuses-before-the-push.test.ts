@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T3072 — the local check must reproduce the reviewer's verdict, not offer a second opinion.
  */
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "rule25-precheck.mjs");
 
 type Verdict = { ok: boolean; reason?: string; instrumentPaths: string[]; srcPaths: string[] };

@@ -15,8 +15,9 @@ import {
   runDeployCycle,
   type DeployDeps,
 } from "../src/lib/deployer.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-29T18:40:00.000Z");
 const HEAD = "c".repeat(40);
 /** The baked change no push event ever built. */

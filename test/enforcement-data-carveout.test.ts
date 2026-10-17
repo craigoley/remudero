@@ -3,7 +3,6 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   ENFORCEMENT_DATA,
@@ -12,6 +11,7 @@ import {
   enforcementDataInDiff,
   judgeReview,
 } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T427 — THE PLAN-ONLY CARVE-OUT SPANNED THE ENFORCEMENT DATA IT EXEMPTS. `isInPlanScope` is
@@ -31,7 +31,7 @@ import {
  * let the derivation itself decide a verdict.
  */
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function git(args: string[]): string {
   return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });

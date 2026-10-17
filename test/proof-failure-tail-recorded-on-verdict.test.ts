@@ -4,9 +4,7 @@
  * passing proof carries none.
  */
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   execWhitelistedProof,
@@ -17,8 +15,9 @@ import {
   recordFailureTail,
   type ProofSpawner,
 } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const PROOF = "unit test: test/proof-failure-tail-recorded-on-verdict.test.ts";
 const DIFF = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const a = 1;\n";
 const TAP = "TAP version 13\nnot ok 1 - writes the file\n  ---\n  error: 'EACCES'\n  ...\n1..1\n# fail 1\n";

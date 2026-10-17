@@ -21,10 +21,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { installFixtureDuGuard } from "./helpers/fixture-du.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const REAL_SCRIPT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
 
 /**

@@ -10,12 +10,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { SHARE_ENV, Worker } from "node:worker_threads";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SETUP = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
 
 /** Every env entry the setup could write: GIT_CONFIG_*, the tokens, the scratch switch, the prompt flag. */

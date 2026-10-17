@@ -4,9 +4,10 @@ import { loadMounts, mountsPath } from "../src/lib/mounts.js";
 import { resolveClaudeModelHealth } from "../src/lib/claude-model-health.js";
 import { ROUTING_EXPERIMENTS, routingExperimentFor } from "../src/lib/routing-experiments.js";
 import { openWeightDeploymentReady, selectOpenWeightModel } from "../src/lib/worker-provider.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const MODEL = "claude-haiku-5-5";
-const table = loadMounts(mountsPath(new URL("..", import.meta.url).pathname)).capabilities!;
+const table = loadMounts(mountsPath(findRepoRoot())).capabilities!;
 
 test("Haiku 5.5 leads Claude economy with a same-capability legacy fallback and preserves cheap cash ordering", () => {
   assert.equal(table.claude[MODEL], "economy");

@@ -17,12 +17,11 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { execWhitelistedProof, parseWhitelistedProof, type ProofSpawner } from "../src/lib/review.js";
 import { loadDefaultPolicy } from "../src/lib/policy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const PROOF = "unit test: test/a-proof-timeout-is-not-a-failed-proof.test.ts";
 
 /** The EXACT error shape a real `execFileSync` timeout produces against `node --test` — see the

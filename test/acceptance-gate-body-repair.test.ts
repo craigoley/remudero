@@ -23,9 +23,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { runFixRung, acceptanceGateBodyRepair } from "./helpers/run-task-test.js";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
@@ -36,7 +36,7 @@ import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
 const { evaluateGate } = (await import(GATE_URL)) as {
   evaluateGate: (input: { body: string; authorLogin?: string }) => { ok: boolean; defect?: string; message: string };
@@ -583,6 +583,7 @@ test("runFixRung (acceptance 8, fail-open): a body write that throws mid-repair 
 
 import { recoverableCriteria } from "../src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const emDashBody = (n: number) =>
   ["## Acceptance", ""]

@@ -6,8 +6,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { INSTALLED_CLAUDE_AGENT_SDK_VERSION } from "../src/lib/settings.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const PACKAGE_JSON_PATH = join(REPO_ROOT, "package.json");
 const DEPCRUISE_CONFIG_PATH = join(REPO_ROOT, ".dependency-cruiser.cjs");
 const SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";

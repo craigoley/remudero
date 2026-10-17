@@ -4,9 +4,9 @@ import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 
 /**

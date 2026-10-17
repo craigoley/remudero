@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
@@ -14,10 +12,11 @@ import {
 } from "../src/lib/github-event-wake.js";
 import { createService } from "../src/lib/service.js";
 import { loadPolicy, policyPath, PolicyError, validatePolicy } from "../src/lib/policy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const SECRET = "contract-secret";
 const REPOSITORY = "craigoley/remudero";
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function policyRaw(): Record<string, unknown> {
   return parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, unknown>;

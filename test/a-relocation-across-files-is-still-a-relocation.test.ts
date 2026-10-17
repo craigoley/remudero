@@ -17,15 +17,16 @@
 // which is what makes widening the search as safe as the same-file case already shipped.
 
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 type Relocation = { counterpartFile: string; counterpartLine: number; runLength: number };
 
 // `scripts/**` sits outside tsconfig's include, so a static .mjs import is TS7016. Load the real
 // module through a dynamic URL import, matching the other direct script-module tests.
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const mod = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "diff-coverage.mjs")).href)) as {
   MIN_RELOCATION_RUN: number;
   computeRelocatedLines: (

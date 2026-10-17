@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T439 — the 2026-08-11 DECISIONS.md entry (PR #1599, merged 9f208c16) ratified that core
@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
  * licence (design clause (vi), explicitly out of scope here).
  */
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function git(args: string[]): string {
   return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });

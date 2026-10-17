@@ -7,8 +7,9 @@ import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { resolveConsoleSha } from "../src/lib/serve.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "serve-container.sh");
 
 /** A dry-run reaches launch assembly but must never create the dedicated checkout. */

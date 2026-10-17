@@ -10,9 +10,8 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { gitRepo } from "./helpers/git-repo.js";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import {
@@ -28,8 +27,9 @@ import {
 } from "../src/lib/affected-suites.js";
 import { affectedSuitesStep } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** A small tree: b imports a, a suite imports b, a census suite READS a by path, one is unrelated,
  *  and a suite spawns a script it names by path rather than importing it. */

@@ -3,15 +3,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { checkCommitMessage } from "../src/lib/commit-message.js";
 import { applyPlanProposalCommit, planCommitMessage } from "../src/lib/plan-architect.js";
 import { loadMounts, mountsPath } from "../src/lib/mounts.js";
 import { planCommand } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = fileURLToPath(new URL("../", import.meta.url));
+const root = findRepoRoot();
 const gitEnv = {
   ...process.env,
   GIT_AUTHOR_NAME: "test",

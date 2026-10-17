@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
-import { join } from "node:path";
 import { test } from "node:test";
 import {
   loadMounts,
@@ -16,8 +14,9 @@ import {
   type ProviderCapacity,
 } from "../src/lib/worker-provider.js";
 import type { CodexModelInfo } from "../src/lib/worker-provider.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /**
  * A capability ladder deliberately shaped so a substring-matching implementation would get it

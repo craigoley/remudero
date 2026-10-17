@@ -19,11 +19,11 @@ import assert from "node:assert/strict";
 import { copyFileSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
 /** W1-T6120: the hook runs its checks from its OWN code root, so a fixture runs it as the tree's own hook. */
 function ownHook(tree: string): string {

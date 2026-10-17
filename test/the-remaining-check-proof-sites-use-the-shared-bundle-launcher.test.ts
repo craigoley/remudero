@@ -7,14 +7,15 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { defaultProofRunner, checkProofLaunchArgv } from "../src/lib/pr-open.js";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // run-task's two sites are the REAL callers under test, but this suite must not become one more direct
 // importer of src/run-task.ts: scripts/affected-reach-baseline.json (W1-T5702) is a shrink-only ceiling on

@@ -13,9 +13,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { buildOpenPrViews } from "./helpers/run-task-test.js";
 // Namespace imports, so each test (not the file's load) fails on a tree without these exports.
@@ -30,8 +29,9 @@ import {
   type CriterionVerdict,
   type ProofSpawner,
 } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const PROOF = "unit test: test/a-reviewer-only-proof-failure-reaches-the-fix-worker.test.ts";
 const DIFF = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const a = 1;\n";
 

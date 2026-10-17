@@ -13,6 +13,7 @@ import { serveCommand } from "../src/run-task.js";
 import { fakeGitHub, type FakeGitHub } from "./helpers/fake-github.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const gatewayShim = ghShim([{ when: "api ", stdout: "[]" }], { kind: "board-projection-gh" });
@@ -290,7 +291,7 @@ test("W1-T5004: real serve boot answers while projection is cold", async (t) => 
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
-    claudeBin: "/bin/true", root, installRoot: join(import.meta.dirname, ".."), serve: { host: "127.0.0.1", port },
+    claudeBin: "/bin/true", root, installRoot: findRepoRoot(), serve: { host: "127.0.0.1", port },
   }));
   const oldHome = process.env.HOME;
   process.env.HOME = home;

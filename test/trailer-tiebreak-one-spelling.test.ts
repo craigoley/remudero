@@ -10,12 +10,13 @@ import {
   resolvePlanCriteriaAtHead,
 } from "../src/lib/review.js";
 import { reviewTaskIdFromBody } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` sits outside tsconfig's `include` (see tsconfig.json), so a static specifier is a
 // TS7016 — reached via dynamic import instead, same as test/a-worker-branch-must-be-shaped-for-
 // dispatch.test.ts and test/credit-surface-gate.test.ts already do for these same two scripts.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const { trailerTaskIds } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "worker-branch-shape.mjs")).href)) as {
   trailerTaskIds: (commitMessages: string | undefined) => string[];
 };

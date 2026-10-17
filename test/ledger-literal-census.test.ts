@@ -2,12 +2,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { LEDGER_FILENAME } from "../src/lib/ledger-path.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const ALLOWED = new Set(["src/lib/ledger-path.ts", "src/lib/ledger-union.ts"]);
 
 function ledgerFilenameLiteralViolations(root = REPO_ROOT): string[] {

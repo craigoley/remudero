@@ -8,8 +8,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadGateProbes } from "../src/lib/gate-gardener.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = findRepoRoot();
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
 
 test("W1-T4583: no CI step, gardener probe or gate-posture row runs the retired contract-coverage census", async () => {

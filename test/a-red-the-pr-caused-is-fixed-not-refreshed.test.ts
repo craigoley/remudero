@@ -3,7 +3,6 @@ import test, { type TestContext } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -22,6 +21,7 @@ import { buildBaseReproductionProbe, buildImportClosureRead, mainTipViaGit, prio
 import { runFixRung } from "./helpers/run-task-test.js";
 import { DEFAULT_SWEEP_POLICY, isCiHarnessPath, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T8396 — OBSERVED 2026-10-12 on #11017 (W1-T8008): the PR's own src change broke an untouched test.
 // The fix rung's fileless arm merged main in (04:31:59Z); then the head was still red on the same check,
@@ -118,7 +118,7 @@ function stalledRows(extra: Row[] = []): Row[] {
 
 // ── the fix rung's own harness, as test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts builds it ──
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function review(state: "success" | "failure", headSha = HEAD): ReviewVerdict & { headSha: string; reviewerOutcome: string } {
   return {

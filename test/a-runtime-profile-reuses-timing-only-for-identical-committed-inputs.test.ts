@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = findRepoRoot();
 const runtime = await import(pathToFileURL(join(ROOT, "scripts/lib/native-author-runtime.mjs")).href);
 const { calibrateAuthorRuntime } = await import(pathToFileURL(join(ROOT, "scripts/calibrate-author-runtime.mjs")).href);
 

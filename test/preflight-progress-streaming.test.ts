@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn as spawnAsync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { runCiParity } from "../src/lib/ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /**
  * PROGRESS TELEMETRY FOR `rmd preflight --ci-parity`.

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const AUTHOR_GATE = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
 const PROOF_GATE = pathToFileURL(join(REPO_ROOT, "scripts", "proof-discrimination-gate.mjs")).href;
 

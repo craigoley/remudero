@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const SCRIPT = join(ROOT, "scripts", "clock-signature-ratchet.mjs");
 const clockRatchet = (await import(pathToFileURL(SCRIPT).href)) as {
   main: (

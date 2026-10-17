@@ -16,8 +16,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 
 // Namespace imports, not named ones: this file must LOAD on the base tree (where the new exports do
@@ -27,8 +27,9 @@ import * as tmpHygiene from "./setup/tmp-hygiene.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SETUP = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
 const { GH_CONFIG_DIR_PREFIX, reapDeadOwnerDirs } = noLiveRemote;
 const { GH_REFUSE_DIR_PREFIX } = tmpHygiene;

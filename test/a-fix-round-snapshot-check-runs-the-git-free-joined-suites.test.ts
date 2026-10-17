@@ -3,12 +3,12 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 // @ts-ignore executable census module has no declaration file.
 import { gitFreeCensusSuites, makeGitAbsentBin, PRECHECK_PATH_TRIGGERED_SUITES, PRECHECK_TRIGGERED_SUITES } from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const CITATION = "test/citation-anchor-census.test.ts";
 const SCRIPT = "scripts/citation-anchor-census.mjs";

@@ -16,13 +16,12 @@
 // `architect`/`judge` already get. `architectModel` itself, and its one-argument
 // `rmd plan` call shape, are UNTOUCHED.
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
-import { join } from "node:path";
 import { test } from "node:test";
 import { architectModel, synthesisEffort, synthesisModel, type Config } from "../src/lib/config.js";
 import { loadMounts, mountsPath, MountsError, TierInvariantError, validateMounts, SYNTHESIS_ROLES } from "../src/lib/mounts.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const SHIPPED = mountsPath(REPO_ROOT);
 
 function config(over: Partial<Config> = {}): Config {

@@ -140,7 +140,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { loadPlanIndex, renderPlanIndex } from "../src/lib/plan-index.js";
 import { changedTaskIds } from "../src/lib/task-linter.js";
 
-const FIXTURE_INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const FIXTURE_INSTALL_ROOT = findRepoRoot();
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 
 /** An injected {@link PrHeadGateway} fixture — no `gh` exec, a fixed answer per PR url. */
@@ -707,7 +707,7 @@ test("W1-T191: runTask's DECISION_REQUEST branch never calls recordDecision for 
 // dirty operator checkout, uncommitted) are preserved in the repository, not assumed away. ──
 
 test("W1-T191 acceptance 4: the three rescued decision records are present after the fix — the 2026-07-20/21 resolutions in the committed DECISIONS.md", () => {
-  const decisionsMd = readFileSync(join(new URL("..", import.meta.url).pathname, "DECISIONS.md"), "utf8");
+  const decisionsMd = readFileSync(join(findRepoRoot(), "DECISIONS.md"), "utf8");
   assert.match(decisionsMd, /## 2026-07-20T20:36:14\.454Z — W1-T156 \(W1-T156-1784579460422\)/);
   assert.match(decisionsMd, /## 2026-07-20T22:31:09\.231Z — W1-T128 \(W1-T128-1784586484416\)/);
   assert.match(decisionsMd, /## 2026-07-21T01:18:25\.612Z — W1-T136 \(W1-T136-1784596357757\)/);
@@ -741,7 +741,7 @@ test("renderReconPrompt: an EMPTY index block (missing source) never crashes —
 });
 
 test("renderReconPrompt: a read-time plan index renders a prompt orders of magnitude smaller than MASTER-PLAN.md itself — the index is injected, the plan body is not", () => {
-  const repoRoot = join(new URL("..", import.meta.url).pathname);
+  const repoRoot = findRepoRoot();
   const masterPlan = readFileSync(join(repoRoot, "MASTER-PLAN.md"), "utf8");
   const index = loadPlanIndex(join(repoRoot, "MASTER-PLAN.md"));
   assert.ok(index, "the index must derive from MASTER-PLAN.md even when no JSON artifact exists");
@@ -1385,7 +1385,7 @@ test("BEHAVIORAL (W1-T7B): two real implement strikes dispatch a DIAGNOSE worker
 
     // Operator ruling 2026-09-22: the Sonnet/Luna tier does the work; only the LAST attempt, after
     // that tier has failed twice, steps up to the committed `step_up:` mount (Opus, or Sol 6).
-    const stepUp = loadMounts(mountsPath(join(import.meta.dirname, ".."))).step_up;
+    const stepUp = loadMounts(mountsPath(findRepoRoot())).step_up;
     assert.ok(stepUp, "the committed table declares a step_up mount");
     assert.notEqual(spawnCalls[1]?.model, stepUp.model, "the 1st attempt rides the implement mount");
     assert.notEqual(spawnCalls[2]?.model, stepUp.model, "the 2nd attempt rides the implement mount");
@@ -7891,7 +7891,7 @@ if (args[0] === "label" && args[1] === "create") {
 // real repo — only the local `plan/feedback/<id>.yaml` write (feedback.ts's durable half)
 // is observable here, exactly what `readFeedbackEntry` below confirms.
 test("buildSweepEffects.captureRepairFeedback: the DEFAULT wiring (no override) runs the real existsSync dedup + real captureFeedback against repoRoot (W1-T905)", () => {
-  const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+  const REPO_ROOT = findRepoRoot();
   const id = `fb-repair-w1t905-coverage-${Date.now()}`;
   const entryPath = feedbackEntryPath(REPO_ROOT, id);
   assert.ok(!existsSync(entryPath), "sanity: this fresh, timestamped id must not already exist in this checkout");
@@ -8341,6 +8341,7 @@ test("buildSweepLightHook: an internal failure (malformed gh output) is caught +
 
 // ── W1-T255: serviceFreshnessGate — assess + ledger, NEVER refuse/exit/re-exec ───────────────
 import type { ServiceFreshness } from "../src/lib/self-sync.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function readSteps(ledgerPath: string): string[] {
   if (!existsSync(ledgerPath)) return [];

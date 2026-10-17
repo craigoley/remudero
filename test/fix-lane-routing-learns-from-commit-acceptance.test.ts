@@ -29,11 +29,12 @@ import {
   type WorkerSelectionAssignment,
 } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T5535: the fix lane's auction learns from whether an arm's fix rounds COMMIT. Measured over
 // 2026-09-26..10-03, codex/gpt-6.1-sol was refused on 23 of 37 rounds and claude-opus-5-5 on 1 of 8.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 const DAY = 24 * 3_600_000;
 

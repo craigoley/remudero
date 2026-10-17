@@ -8,10 +8,11 @@ import { test } from "node:test";
 import { regenerateOrientation } from "../src/lib/orientation.js";
 import { buildGather } from "../src/lib/retro.js";
 import type { Task } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // commitlint (W1-T136 class) — same subprocess pattern as test/commit-message.test.ts.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
 function lint(message: string) {

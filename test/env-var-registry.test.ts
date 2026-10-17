@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { ENV_REGISTRY } from "../src/lib/config-schema.js";
 import { isRegisteredHarnessEnvName, registeredHarnessEnvVars } from "../src/lib/env.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const ENV_LITERAL = /(["'`])(RMD_[A-Z0-9_]+|REMUDERO_[A-Z0-9_]+)\1/g;
 const ENV_DOT_ACCESS = /(?<![\w$])(?:[$A-Z_a-z][$\w]*)?[eE][nN][vV]\s*(?:\?\.|\.)\s*(RMD_[A-Z0-9_]+|REMUDERO_[A-Z0-9_]+)(?![\w$])/g;
 

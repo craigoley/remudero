@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   cappedReason,
   execWhitelistedProof,
@@ -13,6 +12,7 @@ import {
 } from "../src/lib/review.js";
 import { loadDefaultPolicy } from "../src/lib/policy.js";
 import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2740 ─────────────────────────────────────────────────────────────────
 //
@@ -37,7 +37,7 @@ import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
 // its absence. This task reuses that same signal for the pure-path branch rather than guessing
 // from `status`, `signal`, elapsed wall time, or platform-specific timeout metadata.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** A {@link ProofSpawner} standing in for `execFileSync` throwing on a clean nonzero exit, with
  * `stdout` attached exactly as node's real `ErrnoException` carries it — the shape

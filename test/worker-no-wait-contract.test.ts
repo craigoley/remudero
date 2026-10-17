@@ -30,15 +30,15 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
 import { classifyNoPrShape, noPrVerdict } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The house fixture shape, mirroring `test/no-pr-verdict-report-excerpt.test.ts`'s own `result()`
  *  — a REAL `WorkerResult`, not a cast, so the row builder's own reads (`billingMode`, the token

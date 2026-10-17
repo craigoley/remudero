@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const root = findRepoRoot();
 const tier = (await import(pathToFileURL(join(root, "scripts/test-tier-manifest.mjs")).href)) as {
   listTestFiles: (root: string) => string[];
   loadManifest: (path: string) => { thresholdMs: number; files: Record<string, number> };

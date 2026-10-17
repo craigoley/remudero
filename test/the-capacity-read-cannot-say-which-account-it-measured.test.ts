@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { claudeCapacityFromUsage, providerWindowConsumption, type ProviderCapacity } from "../src/lib/worker-provider.js";
 import { readClaudeAccountLabel, readClaudeAccountLabelDetailed } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "account-usage", "claude-json.json");
 
 /**

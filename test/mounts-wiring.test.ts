@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { loadMounts, mountsPath, MountsError, resolveMount } from "../src/lib/mounts.js";
 import { loadPlan, TASK_RISKS } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** An offline GitHub gateway: the merged-status projection runs with zero network round-trips
  *  (and zero dependence on whatever real state craigoley/remudero happens to carry for a
@@ -20,7 +21,7 @@ const OFFLINE_GITHUB: GitHub = {
 };
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 
 // ── The DEFECT is gone / the FIX is present (the W1-T6 root cause) ──────────
 

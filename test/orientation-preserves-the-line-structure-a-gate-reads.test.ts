@@ -26,12 +26,12 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { buildGather, extractStandingRules, renderOrientation } from "../src/lib/retro.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const read = (rel: string): string => readFileSync(join(REPO_ROOT, rel), "utf8");
 
 // ── THE GATE'S OWN PREDICATE, MIRRORED ───────────────────────────────────────────────────────

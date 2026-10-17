@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T3673 — one of three fleet state roots sat on the 29 GiB OS disk that filled and panicked
@@ -22,7 +22,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  * bind mount reports its SOURCE device, which is why a path under $HOME can still pass).
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
 
 const OS_DISK = "/dev/root";

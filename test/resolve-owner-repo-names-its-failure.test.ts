@@ -15,8 +15,9 @@ import { test } from "node:test";
 import { OWNER_REPO_REMEDY, OwnerRepoUnresolvableError, asOwnerRepoUnresolvable, resolveOwnerRepoAt } from "../src/lib/owner-repo.js";
 import { repoRoot, resolveOwnerRepo } from "../src/lib/repo-location.js";
 import { reviewCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = join(import.meta.dirname, "..");
+const REPO = findRepoRoot();
 
 function scratch(): string {
   return mkdtempSync(join(tmpdir(), "rmd-owner-repo-"));

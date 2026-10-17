@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { COMMANDS, SUMMARY_CHAR_CAP, USAGE, commandHelp, commandSpec, commandSyntax } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T2480: the help registry used to carry a syntax field and a description field wearing ONE
 // string (`usage`) -- `commandSyntax` recovered the syntax half at read time with
@@ -16,7 +17,7 @@ import { COMMANDS, SUMMARY_CHAR_CAP, USAGE, commandHelp, commandSpec, commandSyn
 // `commandHelp` and docs/cli-reference.md.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── Criterion 1: the top-level help prints one short summary per command, not full prose ──────
 

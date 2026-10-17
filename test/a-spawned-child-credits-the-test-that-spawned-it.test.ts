@@ -15,9 +15,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 // Namespace imports, so the file LOADS where these exports do not exist yet and each test fails on
 // its own assertion there, rather than the whole file failing to link.
@@ -26,8 +25,9 @@ import type { ImpactArmContext, ImpactMap } from "../src/lib/test-impact-map.js"
 import * as hygiene from "./setup/tmp-hygiene.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import * as ratchet from "../scripts/coverage-merge-ratchet.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TSX = import.meta.resolve("tsx");
 const SETUP = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 const MERGER = join(REPO_ROOT, "scripts", "coverage-merge-ratchet.mjs");

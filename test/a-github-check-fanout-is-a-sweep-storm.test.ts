@@ -11,9 +11,8 @@ import { EventEmitter } from "node:events";
 import type { FSWatcher } from "node:fs";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   consumeSweepWakeMarker,
   readSweepWakeMarker,
@@ -25,9 +24,10 @@ import {
 } from "../src/lib/github-event-wake.js";
 import { loadPolicy } from "../src/lib/policy.js";
 import { daemonCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const REPOSITORY = "craigoley/remudero";
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 class ManualTimers implements SweepWakeTimerDeps {
   nowMs = 0;

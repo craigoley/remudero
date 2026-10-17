@@ -8,7 +8,6 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { runDaemon } from "../src/lib/daemon.js";
 import {
   consumeSweepWakeMarker,
@@ -28,10 +27,11 @@ import {
 import { createService, readBoundedRawBody, type Route } from "../src/lib/service.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { daemonCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const SECRET = "test-webhook-secret";
 const REPOSITORY = "craigoley/remudero";
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function signature(body: string): string {
   return `sha256=${createHmac("sha256", SECRET).update(body, "utf8").digest("hex")}`;

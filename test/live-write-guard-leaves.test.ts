@@ -10,6 +10,7 @@ import { ghPrCreateFillCommand, lastCommitSubject } from "../src/run-task.js";
 import { ghIssueGateway } from "../src/lib/escalate.js";
 import { defaultGitCapture, defaultPushExec, gitPushRunBranch } from "../src/lib/git-push.js";
 import { LiveWriteBlockedError, withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
 const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
@@ -18,7 +19,7 @@ const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
 // shape test/commit-message.test.ts already uses — never a hand-rolled regex approximating
 // commitlint.config.mjs's rules.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 function lintHeader(header: string) {
   return spawnSync(process.execPath, [join(REPO_ROOT, "node_modules", ".bin", "commitlint"), "--config", COMMITLINT_CONFIG], {

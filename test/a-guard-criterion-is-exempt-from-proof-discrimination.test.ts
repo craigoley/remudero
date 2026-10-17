@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T4419 — A REGRESSION GUARD IS EXEMPT FROM PROOF DISCRIMINATION, BUT STILL RUNS IN REVIEW ──
 //
@@ -22,7 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // `scripts/proof-discrimination-gate.mjs`, imported directly — the same seam
 // test/a-criterion-credited-to-a-prior-merge-is-not-a-stale-proof.test.ts uses for `satisfied_by`.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const SCRIPT = join(ROOT, "scripts", "proof-discrimination-gate.mjs");
 
 type Criterion = { claim?: string; proof?: string; satisfied_by?: string; kind?: string };

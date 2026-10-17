@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS, detectInstrumentEntanglement, judgeReview } from "../src/lib/review.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { deriveInstrumentCandidates, findUnexplainedGaps, harvestTokens, liveTree } from "../scripts/lib/instrument-surface-census.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T402: "INSTRUMENT_SURFACE was hand-enumerated against one day's tree and missed the rule
 // files of five REQUIRED jobs ... and the only thing asking anyone to re-check membership is a
@@ -15,7 +15,7 @@ import { deriveInstrumentCandidates, findUnexplainedGaps, harvestTokens, liveTre
 // blank one) does not count — that would rebuild the exact silent gap this alarm exists to close.
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 const DECLARED_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
 

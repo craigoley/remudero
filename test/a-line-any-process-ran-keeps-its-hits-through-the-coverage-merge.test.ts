@@ -3,10 +3,10 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T9481 — A LINE ANY SINGLE PROCESS RAN KEEPS ITS HITS THROUGH THE COVERAGE MERGE.
@@ -20,7 +20,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  * `node --import tsx` with a require() and once under plain node; no V8 JSON is hand-written.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const MERGER = join(REPO_ROOT, "scripts", "coverage-merge-ratchet.mjs");
 const PROBE = "w1-t9481-probe.mjs";
 

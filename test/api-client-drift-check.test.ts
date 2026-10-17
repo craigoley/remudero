@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 // @ts-expect-error The maintained generator is an executable .mjs script without declarations.
 import { renderApiClient } from "../scripts/generate-api-client.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W3-T1b: packages/api-client GENERATOR + stale-client drift check (MASTER-PLAN §7A) ─────────
 //
@@ -25,7 +26,7 @@ import { renderApiClient } from "../scripts/generate-api-client.mjs";
 // convention for scripts/generate-plan-index.mjs.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-api-client.mjs");
 
 const MINIMAL_SPEC = `

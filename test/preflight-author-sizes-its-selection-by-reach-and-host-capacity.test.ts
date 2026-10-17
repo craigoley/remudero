@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const author = (await import(pathToFileURL(join(ROOT, "scripts/preflight-author.mjs")).href)) as {
   main: (argv: string[], deps: { root: string; select?: (changed: string[], range: string) => unknown; host?: () => unknown }) => number;
   authorSelection: (root: string, changed: string[], range: string) => {

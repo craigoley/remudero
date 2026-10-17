@@ -3,15 +3,15 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** This repo's own root — used by the base_unknown test below, which needs a real `unit test:`
  *  proof (a `grep:`-only fixture dir cannot resolve one) rather than the throwaway single-file
  *  `headFixture` most tests in this suite use, and by the real-worktree fixtures (R-11), whose
  *  committed `node_modules` symlink points at this repo's own install so `--import tsx` resolves. */
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── W1-T912: `rmd check-proof` answered a different question than the reviewer asks ─────────────
 //

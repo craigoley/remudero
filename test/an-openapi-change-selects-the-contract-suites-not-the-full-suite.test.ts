@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { READ_MAP_FORMAT, readAffectedSuitesInput, selectAffectedSuites, type ReadMapInput } from "../src/lib/affected-suites.js";
 import { IMPACT_MAP_STALENESS_BOUND } from "../src/lib/test-impact-map.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const contracts = ["openapi/daemon.yaml", "packages/api-client/src/schema.d.ts"];
 const proof = "test/an-openapi-change-selects-the-contract-suites-not-the-full-suite.test.ts";
@@ -120,7 +120,7 @@ test(`${proof}: source data tables naming a contract do not create reader edges,
 });
 
 test(`${proof}: the real contract readers do not pull unrelated cli suites into the author gate`, () => {
-  const root = fileURLToPath(new URL("..", import.meta.url));
+  const root = findRepoRoot();
   for (const path of contracts) {
     const input = readAffectedSuitesInput(root, [path], { symbolSuites: [] });
     assert.ok(input.files.has("test/api-client-drift-check.test.ts"), "the input sees the real suites");

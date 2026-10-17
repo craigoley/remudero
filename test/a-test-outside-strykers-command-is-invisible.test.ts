@@ -28,9 +28,10 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "mutation-ratchet.mjs");
 const FIXTURES = join(__dirname, "fixtures", "mutation-ratchet");
 const BASELINE = join(FIXTURES, "baseline.json");

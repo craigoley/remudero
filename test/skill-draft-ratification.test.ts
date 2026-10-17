@@ -11,7 +11,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -36,8 +35,9 @@ import {
 import { stageSkillDraft, workerAllowlistFromSettings, describeWorkerSkillReachability, type SkillDraft } from "../src/lib/skill-workshop.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { approveCommand, skillFileApproveCommitMessage, skillFileApprovePrBody } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 const SKILL: SkillFilePayload = {
   name: "implement-clean-single-strike",

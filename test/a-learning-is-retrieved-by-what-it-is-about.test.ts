@@ -26,9 +26,10 @@ import { selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { loadShardEntries, writeSymbolsInText } from "../scripts/learnings-derive-symbols.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "learnings-derive-symbols.mjs");
 
 function entry(overrides: Partial<LearningEntry> = {}): LearningEntry {

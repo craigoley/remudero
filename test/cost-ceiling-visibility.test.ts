@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   loadPolicy,
@@ -11,6 +9,7 @@ import {
   type Policy,
 } from "../src/lib/policy.js";
 import { checkCostGovernor, logCostGovernorDeferral, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T408 acceptance 2 ─────────────────────────────────────────────────────────────────────
 // "the effective ceiling and the instance it belongs to are visible before it trips, not only
@@ -26,7 +25,7 @@ import { checkCostGovernor, logCostGovernorDeferral, DEFAULT_SWEEP_POLICY } from
 // constructing a ledger, and by exercising the healthy (deferred: false) governor path
 // alongside it to show the ledger route stays silent while the new route does not.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED: Policy = loadPolicy(policyPath(REPO_ROOT));
 
 test("W1-T408 acceptance 2 — a configured share's effective ceiling AND its instance label are both visible from a single pure call, no ledger involved", () => {

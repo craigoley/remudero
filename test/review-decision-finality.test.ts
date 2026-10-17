@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { appendLedger } from "../src/lib/ledger.js";
 import {
@@ -21,6 +20,7 @@ import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const PR = "https://github.com/o/r/pull/7";
 const TASK = "W1-T2722";
@@ -334,7 +334,7 @@ test("W1-T2722: production claims before spawn, replays before post/comment, and
 test("W1-T2722: a conflicting computed success is held at failure and the fix rung escalates once without resolving or arming", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-decision-fix-rung-"));
   const ledgerPath = join(dir, "ledger.ndjson");
-  const worktreePath = fileURLToPath(new URL("..", import.meta.url));
+  const worktreePath = findRepoRoot();
   const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const opened: Array<{ title: string; body: string }> = [];
   let spawnCalls = 0;
@@ -449,7 +449,7 @@ test("W1-T2722 (FALSIFIER): the SAME fixture without the conflict disposition ne
   // the DISPOSITION is what fires it — every assertion there would also pass on a rung that
   // escalated unconditionally. This varies that one field and nothing else.
   const dir = mkdtempSync(join(tmpdir(), "rmd-decision-fix-rung-control-"));
-  const worktreePath = fileURLToPath(new URL("..", import.meta.url));
+  const worktreePath = findRepoRoot();
   const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const opened: Array<{ title: string; body: string }> = [];
   const mount: Mount = { model: "sonnet", effort: "medium", maxTurns: 100, contextBudget: 120000 };

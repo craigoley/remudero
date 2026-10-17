@@ -13,9 +13,10 @@ import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── §5C Layer A pre-dispatch guard is WIRED into the run path (W1-T20c) ───────
 

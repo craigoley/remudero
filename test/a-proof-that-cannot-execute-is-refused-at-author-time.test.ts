@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acceptanceAuthorTimeCheck, wrappedGrepPattern } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T2544 — two consecutive retro cycles, six hours apart, failed with entirely correct CONTENT
@@ -26,7 +27,7 @@ const BODY = (proofs: string[]) =>
   ["Some prose.", "", "Acceptance:", ...proofs.map((p, i) => `- claim ${i + 1} | ${p}`), ""].join("\n");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs");
 
 function runGateForBody(body: string) {

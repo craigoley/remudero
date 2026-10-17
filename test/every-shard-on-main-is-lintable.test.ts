@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { loadPlan } from "../src/lib/plan.js";
 import { lintPlan } from "../src/lib/task-linter.js";
 import { CENSUS_POPULATION } from "../src/lib/ci-parity.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TASKS_PATH = join(REPO_ROOT, "plan", "tasks.yaml");
 
 const FULL_PLAN_LINT_WALL_CLOCK_MEASUREMENT =

@@ -16,12 +16,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, join } from "node:path";
 import { HOST_PARITY_BASELINE, diffHostParity, resolveHostPole } from "../src/lib/host-parity.js";
 import { HOST_CAUSED_SUITE_REDS } from "../src/lib/ci-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── resolveHostPole, every branch, both directions ───────────────────────────────────────────
 

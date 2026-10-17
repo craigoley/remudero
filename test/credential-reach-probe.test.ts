@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   containmentProbeScript,
@@ -20,8 +19,9 @@ import {
 import { buildWorkerEnv } from "../src/lib/env.js";
 import { validateWorkerSettingsFile } from "../src/lib/settings.js";
 import { WORKER_HOME_SYMLINKS } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "credential-reach-baseline.json");
 const SETTINGS_PATH = join(REPO_ROOT, "settings", "worker.json");
 

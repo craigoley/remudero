@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T31: Conventional Commits gate (MASTER-PLAN §6A) ─────────────────────
 //
@@ -15,7 +16,7 @@ import { dirname, join } from "node:path";
 // itself rejects/accepts the right messages independent of any particular PR's history.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
 function lint(message: string) {

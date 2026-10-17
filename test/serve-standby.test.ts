@@ -13,8 +13,9 @@ import { test } from "node:test";
 import { serveCommand } from "../src/run-task.js";
 import type { GenerationMessage } from "../src/lib/serve-generation.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const BOARD_BRANCH_LISTS = { listMergedHeadBranches: () => [], listOpenHeadBranches: () => [] };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 

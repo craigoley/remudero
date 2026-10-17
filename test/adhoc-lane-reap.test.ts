@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import type { Config } from "../src/lib/config.js";
 import type { WorktreeReapSummary } from "../src/lib/worker.js";
 import {
@@ -16,6 +15,7 @@ import {
   unmanagedWorktreeLanes,
 } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * test/adhoc-lane-reap.test.ts — W1-T2847, the REAP half.
@@ -36,7 +36,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  * one on a live branch — a correct implementation reclaims ZERO today. The value is the bound.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // Production reaper calls spawn git without an injected env, so isolate their inherited config too.
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";

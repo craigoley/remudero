@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { DECISION_RELEVANT_LEDGER_STEPS, MAX_RETAINED_LINES_PER_STEP } from "../src/lib/ledger.js";
@@ -14,6 +13,7 @@ import {
   type SweepDeps,
 } from "./helpers/sweep-test.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3359: the repeat-disposition bound could not reach its own threshold ─────────────────────
 //
@@ -45,7 +45,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 // of row order" — and the fold guessed anyway. Reading it makes ONE surviving row carry the true
 // count, which removes the 200/N ceiling entirely — no retention change is needed or made.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The REAL fold, driven directly — never a mirror. An earlier draft of this suite MIRRORED it
  *  (the function was module-private then) and the mirror made every behavioural mutation of the

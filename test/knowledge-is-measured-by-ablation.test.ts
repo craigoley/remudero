@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { loadPolicy, policyPath } from "../src/lib/policy.js";
@@ -17,8 +16,9 @@ import {
 import { renderDigest, summarize } from "../src/lib/digest.js";
 import type { WipeTestFactor, WipeTestPair } from "../src/lib/wipe-test.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const DAY = new Date("2026-09-24T00:00:00Z");
 
 function tmpRoot(): string {

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs, { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { compactRotations, rotateLedger } from "../src/lib/ledger.js";
@@ -25,8 +25,9 @@ import {
 } from "../src/lib/ledger-projector.js";
 import { acquireLease, ReadModelError, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const LIVE = "ledger.ndjson";
 

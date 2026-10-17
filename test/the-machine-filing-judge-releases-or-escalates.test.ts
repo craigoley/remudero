@@ -10,9 +10,8 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { dispatchOrder, runnableCandidates } from "../src/lib/drain.js";
@@ -48,9 +47,10 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { approveCommand, daemonCommand, parkedVerifyHumanShards, productionMachineFilingJudgePorts } from "../src/run-task.js";
 import { releaseAutomatedShard } from "../src/lib/verify-human-release.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const CLOCK = fixedClock(1790700000000);
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function machineShard(id: string, over: { title?: string; files?: string[]; origin?: string } = {}): string {
   const files = over.files ?? ["docs/ci-friction-remedies.md"];

@@ -22,6 +22,7 @@ import {
 } from "./helpers/sweep-test.js";
 import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { readLedgerLines } from "../src/lib/status.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T261: ci-gate RE-AGGREGATES on member-check completion ───────────────────────────────
 //
@@ -55,7 +56,7 @@ import { readLedgerLines } from "../src/lib/status.js";
 // under test is unchanged by the magnitude.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 
 type CheckRun = {

@@ -4,8 +4,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONSOLE_SHA_UNKNOWN } from "../src/lib/serve.js";
 import { DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const ENTRYPOINT = () => readFileSync(join(REPO_ROOT, "deploy", "entrypoint.sh"), "utf8");
 const SERVE_SRC = () => readFileSync(join(REPO_ROOT, "src", "lib", "serve.ts"), "utf8");
 

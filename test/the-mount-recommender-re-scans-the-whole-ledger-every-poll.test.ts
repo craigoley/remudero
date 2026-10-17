@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   MOUNT_RECOMMENDER_CADENCE_POLICY,
@@ -12,8 +11,9 @@ import { fixedClock } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import type { MountHeadroomCell } from "../src/lib/mount-recommender.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));

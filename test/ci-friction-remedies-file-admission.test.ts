@@ -7,15 +7,15 @@
  */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
 import { lintTask, sizingViolation } from "../src/lib/task-linter.js";
 import { loadPlanFromYaml, machineFilingAdmissionViolations } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function admit(yaml: string, pathExists = (p: string) => existsSync(join(REPO_ROOT, p))): string[] {
   const plan = loadPlanFromYaml(yaml, "ci-friction-fixture");

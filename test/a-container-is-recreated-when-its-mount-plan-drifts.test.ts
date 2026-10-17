@@ -27,8 +27,9 @@ import {
   type TriggerInputs,
 } from "../src/lib/deployer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const LIB = join(REPO_ROOT, "deploy", "scratch-mounts.sh");
 const NOW = Date.parse("2026-10-06T18:00:00.000Z");
 const HEAD = "c".repeat(40);

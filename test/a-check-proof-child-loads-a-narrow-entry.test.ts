@@ -4,11 +4,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { stripComments } from "../src/lib/test-impact-map.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = fileURLToPath(new URL("../", import.meta.url));
+const root = findRepoRoot();
 const entry = resolve(root, "src/check-proof-main.ts");
 
 // @source-text-subject: the static import graph is the task's isolation contract.

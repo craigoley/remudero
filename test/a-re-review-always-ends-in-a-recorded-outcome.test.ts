@@ -10,8 +10,9 @@ import { gitRepo } from "./helpers/git-repo.js";
 import type { Config } from "../src/lib/config.js";
 import { postReviewStatusGuarded } from "../src/lib/review.js";
 import { reviewAttemptsForInput, reviewCommand, type ReviewRunResult } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CONTROLLER_HEAD = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 /** Seeds the managed checkout `<root>/repos/portal` from the shared git fixture (test/helpers). */

@@ -26,8 +26,9 @@ import { resolveTestSlotDir, TEST_RUN_NICENESS } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const LIB = join(REPO_ROOT, "deploy", "scratch-mounts.sh");
 const SLOT_DEST = "/home/node/rmd-scratch/test-slots";
 

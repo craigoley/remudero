@@ -13,13 +13,14 @@ import {
   type DeployDeps,
   type TriggerInputs,
 } from "../src/lib/deployer.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // Operator ruling 2026-09-22: restarts that big changes need should happen automatically. Mounted
 // source already goes live through the daemon's own freshness restart; the human gate was holding
 // back only IMAGE drift — measured the same day, a Claude CLI upgrade (#6625) built and published
 // at 19:31Z and sat unrunning behind "no operator marker (human-gated; run rmd deploy)".
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-22T21:30:00.000Z");
 const NEWEST = "a0548a6bd3a461b6598bb9e8580b1c92152a97ca";
 

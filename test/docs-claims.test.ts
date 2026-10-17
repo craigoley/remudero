@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { COMMANDS } from "../src/run-task.js";
 import { resolveDoctrineForReader } from "../src/lib/learnings.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T213: the docs-claims checks (MASTER-PLAN §12A, plan/claims.yaml) ────────────────────
 //
@@ -29,7 +30,7 @@ import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 // without this task needing to be redone.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** README.md must not claim the repo is still the WS-0 spike, or that run-task.ts "becomes" real. */
 export function checkWsStageClaim(readmeText: string): { ok: boolean; reason?: string } {

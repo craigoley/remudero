@@ -3,7 +3,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   decideMeasurementCadence,
@@ -20,6 +19,7 @@ import { daemonCommand, buildMeasurementCadenceDaemonHooks, buildSuccessorAlertH
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
 import type { RuleSignature } from "../src/lib/rule-efficacy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** W1-T4271 made the shipped ci.stalled rule ACTIVITY-shaped, so it can no longer reach REPEATING. These
  *  cases measure the cadence's own arithmetic over a recurrence, so they grade the same rows against a
@@ -41,7 +41,7 @@ const STALL_VIOLATION_RULES: readonly RuleSignature[] = [{
 // nothing, never files a task, and refuses rather than fakes a healthy zero over nothing
 // measured — the five acceptance criteria on W1-T1259's own shard, in that order.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

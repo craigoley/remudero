@@ -7,7 +7,6 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -16,9 +15,10 @@ import type { CriterionVerdict, ReviewVerdict } from "../src/lib/review.js";
 import { addedLinesFromPatch, prAddedLinesFromPullFiles } from "../src/lib/sweep.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { decideRedBaseRefresh, redBaseRefreshFactsFromRest, runFixRung } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const HOT = "src/lib/affected-suites.ts";
 
 function coverageRed(...lines: string[]) {

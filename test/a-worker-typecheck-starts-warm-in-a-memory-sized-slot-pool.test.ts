@@ -11,9 +11,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 import { typecheckStep, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { acquireTestSlot, readMemoryHeadroom } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -21,8 +20,9 @@ import { refreshCanonicalSeed, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYT
 import { NPM_TYPECHECK_SLOT_LABEL, runTypecheck, WORKTREE_BUILDINFO_NAME } from "../src/lib/typecheck-run.js";
 import { worktreeAdd } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TSCONFIG = JSON.stringify({ compilerOptions: { types: [], noEmit: true, strict: true }, include: ["*.ts"] });
 const SOURCES: Record<string, string> = {
   "tsconfig.json": TSCONFIG,

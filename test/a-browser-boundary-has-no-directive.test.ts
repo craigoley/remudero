@@ -12,13 +12,14 @@
 // vocabulary had one word for at least two kinds of irreducible I/O.
 
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` sits outside tsconfig's `include`, so this reaches the real module through a runtime
 // import rather than a typed one — the same route the sibling diff-coverage suites use.
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const mod = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "diff-coverage.mjs")).href)) as {
   computeBoundaryRanges: (text: string) => {
     ranges: Array<{ start: number; end: number; reason: string; directiveLine: number; kind?: string }>;

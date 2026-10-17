@@ -19,9 +19,10 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const DOC_PATH = join(REPO_ROOT, "docs", "operator-message-standard.md");
 const doc = readFileSync(DOC_PATH, "utf8");
 const statusBoardSrc = readFileSync(join(REPO_ROOT, "src", "lib", "status-board.ts"), "utf8");

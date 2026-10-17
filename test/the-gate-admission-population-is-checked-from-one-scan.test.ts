@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import {
@@ -18,6 +17,7 @@ import {
   censusRunawayThresholdMs,
   runPreflightFast,
 } from "../src/lib/ci-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T6087: THE GATE'S ADMISSION POPULATION IS CHECKED FROM ONE SCAN ──────────────────────────
 //
@@ -33,7 +33,7 @@ import {
 // exactly ONE place — test/fast-gate-admits-the-census-class.test.ts — which the last group of
 // tests below enforces over the whole test/ directory.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const THIS_FILE = "test/the-gate-admission-population-is-checked-from-one-scan.test.ts";
 const THE_ONE_REAL_RUN = "test/fast-gate-admits-the-census-class.test.ts";
 const CARVEOUT = "test/enforcement-data-carveout.test.ts";

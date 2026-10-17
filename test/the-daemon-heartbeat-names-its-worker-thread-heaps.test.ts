@@ -20,15 +20,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { workerHeapReadings, type HeapStatistics, type WorkerHeapEntry, type WorkerHeapFields } from "../src/lib/daemon-memory-telemetry.js";
 import { readWorkerHeaps, type TrackedWorker, type WorkerThread } from "../src/lib/worker-heaps.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A whole getHeapStatistics() answer whose every figure derives from `mb`, so each field is checkable. */

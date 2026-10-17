@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W3-T1c: a consumer whose CI goes red on a breaking surface change (MASTER-PLAN §7A) ─────
 //
@@ -28,7 +29,7 @@ import { test } from "node:test";
 // test/strict-probe.test.ts.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const TSC_BIN = join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
 const CONSUMER_SRC = join(REPO_ROOT, "packages", "daemon-client-smoke", "src", "index.ts");
 const API_CLIENT_PACKAGE_JSON = join(REPO_ROOT, "packages", "api-client", "package.json");

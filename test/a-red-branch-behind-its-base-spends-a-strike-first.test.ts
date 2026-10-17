@@ -8,7 +8,6 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -23,9 +22,10 @@ import {
   redBaseRefreshFactsFromRest,
   runFixRung,
 } from "./helpers/run-task-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function criterion(met: boolean): CriterionVerdict {
   return { claim: "the repair works", proof: "unit test", met, reason: met ? "" : "not yet", proof_exec: "not_executable" };

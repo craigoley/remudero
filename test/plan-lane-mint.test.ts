@@ -9,6 +9,7 @@ import { PLAN_MAX_NEW_TASKS, planCommand } from "../src/run-task.js";
 import { planArchitectPrompt, unreservedFiledIds } from "../src/lib/plan-architect.js";
 import { reserveTaskIdBlock, taskIdReservationsDir, taskIdReservationPath } from "../src/lib/task-id-reservation.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────────────
 // `rmd plan` files tasks but minted NOTHING: `planArchitectPrompt` took no id, so its worker
@@ -29,7 +30,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
 // releases. A run that dies mid-flight is exactly the case claim 2 is about.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t",

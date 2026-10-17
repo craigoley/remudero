@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   scanClockSignatures as scanClockSignaturesFromRoot,
   scanClockSignaturesFromText,
   // @ts-ignore the executable .mjs module is exercised directly by the ratchet and has no declaration file.
 } from "../scripts/clock-signature-ratchet.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2897: THE CLOCK-SIGNATURE CENSUS — HOLDS THE DRIFT THE SWEEP ONLY COUNTS ────────────────
 //
@@ -31,7 +31,7 @@ import {
 // SCOPE: `src/` only, matching the audit's own `-- src` restriction — `test/`, `scripts/`,
 // `apps/*/src`, and `packages/*/src` are not walked here.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "clock-signature-baseline.json");
 
 export interface ClockSignatureRow {

@@ -6,9 +6,8 @@ import { createHmac } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import {
@@ -21,10 +20,11 @@ import {
 } from "../src/lib/github-event-wake.js";
 import { createService, type Route } from "../src/lib/service.js";
 import { loadPolicy, policyPath, PolicyError, validatePolicy } from "../src/lib/policy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const SECRET = "test-webhook-secret";
 const REPOSITORY = "craigoley/remudero";
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function signature(body: string): string {
   return `sha256=${createHmac("sha256", SECRET).update(body, "utf8").digest("hex")}`;

@@ -5,14 +5,14 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error — native script ESM is outside this project's tsconfig source roots.
 import { assessReadMapCorpus, collectReadMapCorpus, corpusDigest, prepareReadMapCorpus, readCorpusBytes, readMapSummary, validateCorpusManifest } from "../scripts/lib/read-map-corpus.mjs";
 // @ts-expect-error — native CLI ESM is outside this project's tsconfig source roots.
 import { main } from "../scripts/read-map-corpus.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const ROOT = findRepoRoot();
 const TSX = import.meta.resolve("tsx");
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const counts = { tests: 1, passed: 1, failed: 0, cancelled: 0, skipped: 0, todo: 0 };

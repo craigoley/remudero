@@ -10,7 +10,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { GATE_GARDEN_CLASSES, gateGardenSpec, loadGateProbes } from "../src/lib/gate-gardener.js";
@@ -24,8 +23,9 @@ import {
   type PrState,
 } from "../src/lib/gardener.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 const probes = loadGateProbes(ROOT);
 const HELD_AT = Date.parse("2026-10-04T02:31:00Z");
 const DAY = 86_400_000;

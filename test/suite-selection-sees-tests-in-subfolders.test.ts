@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { selectAffectedSuites } from "../src/lib/affected-suites.js";
 import { resolveTestPath } from "../src/lib/test-path-resolver.js";
 import { withTempDir } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const { planReadingSuiteFiles, planOnlySuiteFiles, censusSuiteFiles } = await import(
   new URL("../scripts/diff-class.mjs", import.meta.url).href
@@ -16,7 +16,7 @@ const { planReadingSuiteFiles, planOnlySuiteFiles, censusSuiteFiles } = await im
   planOnlySuiteFiles: (root: string, changed?: string[]) => string[];
   censusSuiteFiles: (changed: string[], root: string) => string[];
 };
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 
 function write(root: string, path: string, content: string): void {
   mkdirSync(dirname(join(root, path)), { recursive: true });

@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { loadManagedRepos, managedReposPath, ManagedReposError } from "../src/lib/managed-repos.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "rmd-managed-repos-"));

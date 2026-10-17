@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { readMergeCreditedTaskIds } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runCreditBackfill } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T6275 — THE SWEEP'S LEDGER-HISTORY READS RUN OFF THE DAEMON LOOP. readFleetState read the whole ledger union with
@@ -35,7 +36,7 @@ test("W1-T6275: the fleet-state history read is asynchronous", async () => {
     let turned = false;
     let turnedAtFirstRead: boolean | undefined;
     const effects = buildSweepEffects({
-      owner: "acme", repo: "widgets", repoRoot: join(import.meta.dirname, ".."),
+      owner: "acme", repo: "widgets", repoRoot: findRepoRoot(),
       config: { root } as never, ledgerPath, runId: "t6275", plan: { tasks: [], byId: new Map() } as never,
       policy: DEFAULT_SWEEP_POLICY, log: () => {},
       readJsonImpl: async () => { turnedAtFirstRead ??= turned; return []; },

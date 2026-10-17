@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T2324 (Q3, open-vs-open half) — the ERROR AND DEGRADATION ARMS of the open-PR collision
 // check, driven through the module's own exported functions IN PROCESS.
@@ -16,7 +17,7 @@ import { test } from "node:test";
 // unparsable remote url, a detached HEAD, a `gh` that cannot run, a response that is not JSON,
 // a response that is not an array. Each gets its own test rather than one "malformed input"
 // case, which would pass while the rest stayed dead.
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const mod = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 function scratchRepo(remoteUrl?: string): string {

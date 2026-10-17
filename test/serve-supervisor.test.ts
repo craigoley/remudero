@@ -33,8 +33,9 @@ import type { GenerationMessage } from "../src/lib/serve-generation.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { systemClock } from "../src/lib/clock.js";
 import { loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const tick = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const MIB = 1024 * 1024;
 /** W1-T8311: the shipped host budget thresholds, and a host reading with room to spare. */

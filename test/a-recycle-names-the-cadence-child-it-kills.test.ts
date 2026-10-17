@@ -4,13 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 import { runDaemon } from "../src/lib/daemon.js";
 import { measurementCadenceChildMain, measurementCadenceChildRunner, type MeasurementCadenceChildState, type MeasurementCadenceRunResult } from "../src/lib/measurement-cadence.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { drainDetachedSweepActions } from "../src/lib/sweep.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 const RUN = "MEASUREMENT-CADENCE-CHILD-1791617178934";
 const DEAD: MeasurementCadenceChildState = { runId: RUN, pid: 42, attempt: 1, startedAt: "2026-10-10T07:26:18Z", status: "running" };
 const MARKER = { runId: RUN, pid: 42, container: "remudero", at: "2026-10-10T09:55:20Z", by: "deploy/recycle-container.sh" };

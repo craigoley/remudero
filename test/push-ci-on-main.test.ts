@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { baseCausedCheckName, classifyRedCause, type CiFailure, type OpenPrView } from "../src/lib/sweep.js";
 import { PUSH_UNSAFE_TOKENS } from "./helpers/push-safety.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1033: nothing ran the suite against `main` ──────────────────────────────────────────
 //
@@ -27,7 +28,7 @@ import { PUSH_UNSAFE_TOKENS } from "./helpers/push-safety.js";
 // is what this suite actually reads — same convention as test/workflow-job-timeouts.test.ts and
 // test/workflow-playwright-install.test.ts.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const CI_GATE_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1263: STATE-CITATION gate ───────────────────────────────────────────────────────────
 //
@@ -43,7 +44,7 @@ import { test } from "node:test";
 // checker would (correctly) flag against itself.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "state-citation-check.mjs");
 
 /** Never write a literal `state/<name>.md` substring into this file's own source -- see the file

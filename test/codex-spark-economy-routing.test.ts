@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { loadMounts, mountsPath } from "../src/lib/mounts.js";
 import { selectCodexModel, type CodexModelInfo } from "../src/lib/worker-provider.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const MOUNTS = loadMounts(mountsPath(REPO_ROOT));
 const CAPABILITIES = MOUNTS.capabilities!;
 const CONFIG = {

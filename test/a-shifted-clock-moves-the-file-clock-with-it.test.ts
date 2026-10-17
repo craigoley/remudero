@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T6035 — scripts/clock-shift.mjs moves the FILE clock with the process clock. Since W1-T5407 the
 // ledger flags a row stamped more than 10 minutes past its file's fstat mtime, so a preload that moved
@@ -13,7 +14,7 @@ import { test } from "node:test";
 // EVERY ASSERTION RUNS IN A REAL CHILD PROCESS WITH THE REAL PRELOAD, as test/clock-shift-probe.test.ts
 // does: a re-implemented copy would prove nothing about the file `--import` actually loads.
 
-const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO = findRepoRoot();
 const PRELOAD = join(REPO, "scripts", "clock-shift.mjs");
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;

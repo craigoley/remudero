@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const SHARD_DIR = join(REPO_ROOT, "plan", "tasks.d");
 const MONOLITH = join(REPO_ROOT, "plan", "tasks.yaml");
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "self-path-proof-baseline.json");

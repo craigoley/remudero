@@ -17,8 +17,9 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { SHARE_ENV, Worker } from "node:worker_threads";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SETUP = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
 const TRANSPORT = pathToFileURL(join(REPO_ROOT, "src", "lib", "github-transport.ts")).href;
 

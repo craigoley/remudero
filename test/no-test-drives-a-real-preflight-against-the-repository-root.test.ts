@@ -17,9 +17,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SELF = "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts";
 
 /** `file → exact call text` pairs allowed to omit the seam, each with the reason it never runs a

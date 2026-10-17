@@ -13,6 +13,7 @@ import {
   type WorkflowDoc,
 } from "../src/lib/ci-control-plane.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── R-51 (docs/audits/recon-2026-09-05.md): "every deterministic PR check can block a merge" ──
 //
@@ -41,7 +42,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // down choice rather than an unnoticed gap.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const deriveCandidates = derivePrCheckCandidates;
 const findGaps = findPrCheckRegistryGaps;
 const loadCiGateLists = () => loadSharedCiGateLists(REPO_ROOT);

@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T503: CLAUDE.md SIZE AS A CI RATCHET (MASTER-PLAN §8A) ────────────────────────────────────
 //
@@ -26,7 +27,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // convention for its sibling script.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "claude-md-budget-ratchet.mjs");
 const FIXTURES = join(__dirname, "fixtures", "claude-md-budget-ratchet");
 const SAMPLE = join(FIXTURES, "sample.md");

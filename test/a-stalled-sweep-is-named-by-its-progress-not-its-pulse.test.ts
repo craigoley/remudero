@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { fileURLToPath } from "node:url";
 import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
@@ -14,6 +13,7 @@ import {
 } from "../src/lib/progress-watchdog.js";
 import { progressWatchdogCommand } from "../src/run-task.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 const MIN = 60_000;
@@ -154,7 +154,7 @@ test("rmd progress-watchdog reads the ledger and prints the verdict as JSON with
     ].map((r) => JSON.stringify(r));
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "ledger.ndjson"), lines.join("\n") + "\n");
-    const entry = join(fileURLToPath(new URL("..", import.meta.url)), "src", "run-task.ts");
+    const entry = join(findRepoRoot(), "src", "run-task.ts");
     // This invocation only reads the fixture ledger. Keep its documented read-only guard local
     // to the child: the test must not fetch or replace the author's checkout, or poison siblings.
     const parentGuard = process.env.RMD_SELF_SYNC_DONE;

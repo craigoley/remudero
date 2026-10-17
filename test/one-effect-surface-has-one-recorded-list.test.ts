@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
@@ -15,6 +14,7 @@ import {
   type BuildSweepEffectsDeps,
 } from "../src/lib/sweep.js";
 import { buildSweepEffects as buildEntrypointSweepEffects } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * test/one-effect-surface-has-one-recorded-list.test.ts — W1-T3654.
@@ -35,7 +35,7 @@ import { buildSweepEffects as buildEntrypointSweepEffects } from "../src/run-tas
  *   4. re-introducing a second hand-copied list is refused, not merely undetected.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const ENTRYPOINT_SUITE = "test/build-sweep-effects-takes-one-deps-object.test.ts";
 const LIB_SUITE = "test/sweep-orchestration-lives-in-lib.test.ts";
 

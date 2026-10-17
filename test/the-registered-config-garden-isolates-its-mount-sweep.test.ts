@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { buildRegisteredGarden, type GardenBuildContext } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function fixture(t: { after(fn: () => void): void }, fail: boolean | "heap") {
   const root = mkdtempSync(join(tmpdir(), "rmd-config-mount-boundary-"));
@@ -61,7 +62,7 @@ test("a registered config mount-worker read failure is explicit and does not abo
 
 test("a registered config mount-worker heap exhaustion leaves the garden process alive", async (t) => {
   const f = fixture(t, "heap");
-  const repo = resolve(import.meta.dirname, "..");
+  const repo = findRepoRoot();
   const entry = join(f.root, "garden-child.mjs");
   const context = { ...f.ctx, log: undefined, raiseDuplicate: undefined };
   writeFileSync(entry, `

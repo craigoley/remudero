@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // hooks/pre-commit, pre-push and commit-msg only run where core.hooksPath=hooks. The fleet sets it
 // per worktree; a Claude Code web session's clone never had it, so #6955, #6962 and #6986 each met
 // a local gate for the first time in CI. .claude/hooks/session-start.sh closes that gap for web
 // sessions only, and never overrides a value someone already set.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, ".claude", "hooks", "session-start.sh");
 
 function runHook(dir: string, remote: string | undefined): void {

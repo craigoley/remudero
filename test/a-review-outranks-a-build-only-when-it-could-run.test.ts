@@ -46,8 +46,9 @@ import { memoryCapacityEscalation, publishLightPassReviewDemand, type OpenPrView
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-10-10T12:00:00.000Z");
 const MIN = 60_000;
 const MIB = 1024 * 1024;

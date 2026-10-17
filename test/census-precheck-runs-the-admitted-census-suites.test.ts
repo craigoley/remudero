@@ -16,7 +16,6 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { CENSUS_ADMITTED_MEMBERS } from "../src/lib/ci-parity.js";
 import { censusPushRefusal } from "../src/run-task.js";
@@ -26,8 +25,9 @@ import { gitRepo } from "./helpers/git-repo.js";
 // A NAMESPACE import, so a tree without these exports fails each test below rather than the load.
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 
 type Member = { testFile: string; script: string; walks: string[] };
 type Found = { violations: string[]; unmeasured: string | null };

@@ -10,10 +10,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
 
 import {
   buildReadMap,
@@ -36,8 +35,9 @@ import {
   repoRelative,
   suiteOfEntry,
 } from "./setup/read-map.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TSX = import.meta.resolve("tsx");
 const PRELOAD = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 const ROOT = "/repo";

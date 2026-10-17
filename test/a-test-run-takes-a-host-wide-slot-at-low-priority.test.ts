@@ -13,13 +13,13 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import * as ciParity from "../src/lib/ci-parity.js";
 import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 const testSlotModule = () => import("../src/lib/test-slot.js");
 

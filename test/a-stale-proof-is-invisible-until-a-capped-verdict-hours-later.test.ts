@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const SCRIPT = join(ROOT, "scripts", "proof-discrimination-gate.mjs");
 const gate = (await import(pathToFileURL(SCRIPT).href)) as {
   resolveMergeBase: (baseSha: string, headSha: string, options?: { root?: string; git?: (args: string[], root: string) => { status: number | null; stdout?: string; stderr?: string } }) => { ok: boolean; mergeBase?: string; message?: string };

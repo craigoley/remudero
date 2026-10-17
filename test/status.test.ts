@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { nextRunnable, type MergedSet } from "../src/lib/drain.js";
@@ -30,6 +29,7 @@ import {
   type SupersessionCommit,
   type SupersessionSearch,
 } from "../src/lib/status.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** A minimal task; fields not under test get sensible defaults. */
 function task(over: Partial<Task> = {}): Task {
@@ -2876,7 +2876,7 @@ test("W1-T485: the git-log search parses trailers, and a throwing exec yields nu
 // asserting only what cannot drift -- that a symbol certain to exist resolves to at least one
 // commit, and that an unresolvable ref yields `null` rather than an empty list.
 test("W1-T485: the DEFAULT exec really shells out to git, and a bad ref degrades to null not []", () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const real = buildGitLogSupersessionSearch({ ref: "HEAD", cwd: repoRoot });
   const hits = real("export function projectPlan", "src/lib/status.ts");
   assert.notEqual(hits, null, "a readable ref must not report a failed read");

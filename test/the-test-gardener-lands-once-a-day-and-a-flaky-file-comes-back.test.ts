@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
 import { FLAKE_INCIDENT_POLICY } from "../src/lib/flake-incident-gardener.js";
@@ -11,12 +10,13 @@ import {
   testGardenInventory, testManifestProposalHistoryPath,
 } from "../src/lib/test-gardener.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const NOW = Date.UTC(2026, 9, 13, 12);
 const DAY = 24 * 3_600_000;
 const FAST = "scripts/test-tier-manifest.json";
 const COVERAGE = "scripts/test-tier-coverage-manifest.json";
-const probe = await loadTestManifestProbe(fileURLToPath(new URL("..", import.meta.url)));
+const probe = await loadTestManifestProbe(findRepoRoot());
 
 function fixture(t: TestContext, files: Record<string, number>) {
   const repo = gitRepo({ kind: "daily-test-garden" });

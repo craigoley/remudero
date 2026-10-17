@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadLearningsIndex, type LearningsIndex } from "../src/lib/learnings.js";
 import { generateSandboxTask } from "../src/lib/wipe-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T1253 — the wipe-test harness's design says signal comes only from an AGGREGATE over
 // many SEEDED pairs, but nothing seeded: `generateSandboxTask` is the subject GENERATOR
@@ -12,7 +13,7 @@ import { generateSandboxTask } from "../src/lib/wipe-test.js";
 // not a hand-picked fixture — so a claim like "reaches the smallest shard" is proven
 // against the real smallest shard, not a stand-in.
 
-const REPO_ROOT = join(new URL("..", import.meta.url).pathname);
+const REPO_ROOT = findRepoRoot();
 
 function realIndex(): LearningsIndex {
   const index = loadLearningsIndex(join(REPO_ROOT, "learnings", "index.json"));

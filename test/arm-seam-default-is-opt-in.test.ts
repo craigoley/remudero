@@ -3,7 +3,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   ArmSeamRequiredError,
   armAutoMerge,
@@ -16,6 +15,7 @@ import {
   type ArmDeps,
 } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2346's census (test/operator-gated-default-reachability.test.ts) named the population:
 // `armAutoMerge`/`armAutoMergeDetailed`/`armAutoMergeAtOpen`/`disarmAutoMerge` each default a
@@ -31,7 +31,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 // so `isTestRunner()` is true throughout — exactly the condition the guard exists to police.
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 // W1-T2887: the arm cluster (armAutoMergeDetailed/armAutoMergeAtOpen/disarmAutoMerge/
 // requireExplicitArmSeam among them) moved to src/lib/arm-auto-merge.ts; run-task.ts now only
 // imports and re-exports these names, so the one structural check below (which scans for each

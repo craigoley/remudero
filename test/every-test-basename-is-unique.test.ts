@@ -8,11 +8,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { duplicateTestBasenames, isBasenameEligibleTestPath } from "../src/lib/test-path-resolver.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 
 /** The git population: every `.test.ts` under test/ at any depth, tracked or not yet added (never ignored), fixtures
  *  excluded. A new test is part of the population before its first commit, as the directory walk sees it. */

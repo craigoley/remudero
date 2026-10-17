@@ -27,8 +27,9 @@ import {
   serveHandoffOpen,
 } from "../src/lib/serve-policy-convergence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 const MIB = 1024 * 1024;
 const TICK = { imageDriftOnly: true };

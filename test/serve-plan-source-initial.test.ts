@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { serveCommand } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T5639: a REAL `rmd serve` assembly whose initial plan read fails. The board's own projection thread reads the
 // same plan path and may publish a healthy board, while serve itself holds only a placeholder plan. Every plan-derived
@@ -29,7 +30,7 @@ test("real initial plan failure is unavailable across the serve readers, never a
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
-    claudeBin: "/bin/true", root, installRoot: join(import.meta.dirname, ".."), serve: { host: "127.0.0.1", port },
+    claudeBin: "/bin/true", root, installRoot: findRepoRoot(), serve: { host: "127.0.0.1", port },
   }));
   const oldHome = process.env.HOME;
   process.env.HOME = home;

@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2612: NOTHING STOPS THE NEXT FROZEN CAP FIGURE ────────────────────────────────────────
 //
@@ -42,7 +43,7 @@ import { dirname, join } from "node:path";
 // verdict MOVES -- a hard-coded 44000 baked into the matcher could not do that.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const LIVE_BASELINE_PATH = join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json");
 
 /** Read `capBytes` out of a claude-md-budget-baseline.json-SHAPED file at the moment this is

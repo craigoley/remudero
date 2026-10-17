@@ -31,9 +31,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const TEST_WITH_RETRY_SCRIPT = join(REPO_ROOT, "scripts", "test-with-retry.mjs");
 

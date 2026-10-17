@@ -23,9 +23,10 @@ import { test } from "node:test";
 import { triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t",

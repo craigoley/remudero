@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { makeTempDir } from '../src/lib/tmp.js';
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = findRepoRoot();
 type ModuleVerdict = { verdict: string; stage?: string; message?: string };
 const gate = await import(pathToFileURL(join(root, 'scripts/diff-coverage.mjs')).href) as {
   changedSourceFiles: (diff: string) => string[];

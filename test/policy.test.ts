@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -47,8 +46,9 @@ import { DEFAULT_RETRO_MERGES_THRESHOLD, DEFAULT_RETRO_DAYS_THRESHOLD } from "..
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED = policyPath(REPO_ROOT);
 
 /** A minimal, valid `plan/tasks.yaml` body — just enough for `loadPlan` to accept it;

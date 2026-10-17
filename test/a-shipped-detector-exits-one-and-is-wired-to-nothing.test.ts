@@ -7,6 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2732: A SHIPPED DETECTOR EXITS 1 AND IS WIRED TO NOTHING ─────────────────────────────
 //
@@ -23,7 +24,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // runtime import rather than a typed one. A dynamic specifier is not statically resolved, so this
 // loads the REAL module with no shadow copy to drift from it.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "coverage-session-blanking-check.mjs");
 const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "coverage-session-blanking.yml");

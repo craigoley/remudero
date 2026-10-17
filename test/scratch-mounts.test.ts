@@ -12,8 +12,9 @@ import { test } from "node:test";
 import { workerHomeDir, type Config } from "../src/lib/config.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { perRunWorkerHomeDir, sweepStaleWorkerHomes } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const LIB = join(REPO_ROOT, "deploy", "scratch-mounts.sh");
 
 interface Host {

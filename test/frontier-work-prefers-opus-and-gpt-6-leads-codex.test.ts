@@ -17,12 +17,13 @@ import {
   type WorkerSelectionAssignment,
 } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // 2026-09-22 model change: Opus 5 -> Opus 5.5, GPT-5.6 Luna -> GPT-6 Luna, Terra phased out, and
 // Sol 6 "only if absolutely necessary". Measured before this change: 84 of 127 Opus-requested runs
 // went to Codex gpt-5.6-sol, because the auction split frontier work by headroom alone.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-22T19:00:00.000Z");
 
 function mounts() {

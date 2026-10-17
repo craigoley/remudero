@@ -12,8 +12,9 @@ import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-has
 import { runServeSupervisor, serveArgsOf } from "../src/lib/serve-supervisor-main.js";
 import { SERVE_HANDOFF_SPACING_BASE_MS, type ServeSupervisor, type ServeSupervisorOptions } from "../src/lib/serve-supervisor.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "serve-container.sh");
 
 test("the supervisor entry passes serve its own arguments and makes the cold checkout's install fresh", async () => {

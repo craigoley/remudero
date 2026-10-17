@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T211: "every security scanner is advisory" — the OSV scan must actually gate ─────────
 //
@@ -21,7 +22,7 @@ import { parse as parseYaml } from "yaml";
 // of the three claims below drifts back out of the actual config — not just out of a comment.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
 
 async function loadWorkflow(file: string) {

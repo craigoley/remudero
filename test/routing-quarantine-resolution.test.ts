@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const { dailyRoutingReview } = await import(pathToFileURL(join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs")).href);
 const asOf = "2026-10-08T12:00:00.000Z";
@@ -142,7 +143,7 @@ test("the real daily CLI reads its default private resolution file and preserves
     writeFileSync(file, JSON.stringify(manifest([entry()])), { mode: 0o600 });
     const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
     const command = ["--import", "tsx", script, "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir];
-    const positive = spawnSync(process.execPath, command, { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    const positive = spawnSync(process.execPath, command, { cwd: findRepoRoot(), encoding: "utf8" });
     assert.equal(positive.status, 0, positive.stderr);
     const saved = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
     assert.equal(saved.sources[0].reports[0].sourceQuality.state, "observed");
@@ -174,7 +175,7 @@ syncBuiltinESMExports();process.on('exit',()=>{if(!swapped)process.exitCode=99;}
     const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
     const child = spawnSync(process.execPath, ["--import", "tsx", "--import", preload, script,
       "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir],
-    { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    { cwd: findRepoRoot(), encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr);
     const saved = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
     assert.equal(saved.sources[0].routingResolvedFutureRows, 1, "the opened original supplies the resolution");
@@ -196,7 +197,7 @@ syncBuiltinESMExports();process.on('exit',()=>{if(!grown)process.exitCode=99;});
     const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
     const child = spawnSync(process.execPath, ["--import", "tsx", "--import", preload, script,
       "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir],
-    { cwd: join(import.meta.dirname, ".."), encoding: "utf8" });
+    { cwd: findRepoRoot(), encoding: "utf8" });
     assert.notEqual(child.status, 0);
     assert.match(child.stderr, /exceed the private input byte bound/);
   } finally { f.close(); }
@@ -210,7 +211,7 @@ test("the private resolution reader refuses directories, oversized files and non
     const script = join(import.meta.dirname, "../scripts/private-routing-daily-review.mjs");
     const command = ["--import", "tsx", script, "--source", `core=${f.sources[0]!.stateDir}`, "--out-dir", f.outDir];
     const run = () => spawnSync(process.execPath, command,
-      { cwd: join(import.meta.dirname, ".."), encoding: "utf8", timeout: 10_000 });
+      { cwd: findRepoRoot(), encoding: "utf8", timeout: 10_000 });
     mkdirSync(file);
     assert.notEqual(run().status, 0);
     rmSync(file, { recursive: true });

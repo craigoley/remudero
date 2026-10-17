@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2514: the nightly ratchet was SKIPPED on every night it was needed ─────────────────────
 //
@@ -54,7 +55,7 @@ import { parse as parseYaml } from "yaml";
 // the ratchet script's refusal polarity.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "mutation-nightly.yml");
 const SCRIPT = join(REPO_ROOT, "scripts", "mutation-ratchet.mjs");
 const FIXTURES = join(__dirname, "fixtures", "mutation-ratchet");

@@ -19,8 +19,9 @@ import { parseAcceptanceBlock, priorReviewVerdictFromLedger, reviewContractDiges
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, reviewReuseVerdict } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildOpenPrViews, buildOpenPrViewsAsync, UNTASKED_REVIEW_BUDGET_USD, resolveReviewTaskId, reviewAttemptsForInput, reviewCommand, runReview } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const HEAD_SHA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 const OTHER_HEAD = "9307000000000000000000000000000000000000";
 const BRANCH = "run-unfiled-1791201175994";

@@ -21,13 +21,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import * as repoLocation from "../src/lib/repo-location.js";
 import * as cliArgs from "../src/lib/cli-args.js";
 import { resolveRepoRoot as reExportedResolveRepoRoot, unknownArgError as reExportedUnknownArgError } from "../src/run-task.js";
 import { findImportReferences, importsModule } from "./helpers/import-sweep.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 const runTaskSrc = readFileSync(join(repoRoot, "src", "run-task.ts"), "utf8");
 const libDir = join(repoRoot, "src", "lib");
 const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");

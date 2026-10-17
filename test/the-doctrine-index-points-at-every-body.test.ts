@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join, relative, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -16,6 +15,7 @@ import {
 } from "../src/lib/learnings.js";
 import { buildRuleHeadlinesPart, followRuleBodyPointer } from "../src/run-task.js";
 import { computeMeaningHash, verifyDoctrineReword } from "../src/lib/doctrine-lifecycle.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3323: CLAUDE.md is an INDEX and doctrine/ holds the evidence ─────────────────────────────
 //
@@ -44,7 +44,7 @@ import { computeMeaningHash, verifyDoctrineReword } from "../src/lib/doctrine-li
 // the other option and is refused on this repo's own evidence: `actions/checkout` fetches shallow,
 // so a fixture shelling git plumbing passes on every dev machine and fails on CI.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CLAUDE_MD = join(REPO_ROOT, "CLAUDE.md");
 const MANIFEST = join(REPO_ROOT, "test", "fixtures", "doctrine-pre-migration-W1-T3323.json");
 const DOCTRINE_DIR = join(REPO_ROOT, "doctrine");

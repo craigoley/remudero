@@ -12,13 +12,14 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { GARDEN_BRANCH_RE } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const { isMainModule } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "lib", "argv.mjs")).href)) as {
   isMainModule: (moduleUrl: string, argv1?: string) => boolean;
 };

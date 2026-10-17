@@ -6,13 +6,14 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { nativeGhAndJq } from "./helpers/native-gh-and-jq.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = fileURLToPath(new URL("../", import.meta.url));
+const root = findRepoRoot();
 const cli = join(root, "scripts/test-tier-manifest.mjs");
 type Choice = { version: number; runId: string; sourceSha: string; source: "snapshot" | "committed"; artifactId?: string; digest: string };
 type Selection = { shard: number; digest: string; files: string[] };

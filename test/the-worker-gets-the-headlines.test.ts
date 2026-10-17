@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
@@ -15,8 +14,9 @@ import {
   WIPE_TEST_FACTORS,
 } from "../src/lib/wipe-test.js";
 import type { Task } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 /**
  * test/the-worker-gets-the-headlines.test.ts — W1-T2761.

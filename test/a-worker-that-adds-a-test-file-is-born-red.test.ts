@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test, type TestContext } from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const HOOK = readFileSync(join(REPO_ROOT, "hooks", "pre-push"), "utf8");
 const TIER_SCRIPT = readFileSync(join(REPO_ROOT, "scripts", "test-tier-manifest.mjs"), "utf8");
 const POOL_SCRIPT = readFileSync(join(REPO_ROOT, "scripts", "pure-test-pool.mjs"), "utf8");

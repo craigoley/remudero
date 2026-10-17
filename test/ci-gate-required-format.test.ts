@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T107: "ci-gate REQUIRED array — one entry per line" ──────────────────────────────────
 //
@@ -22,7 +23,7 @@ import { parse as parseYaml } from "yaml";
 //      class the format avoids (not just a comment that happens to exist).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 
 // The REQUIRED array exactly as it read before this PR (single-line JSON literal) — the

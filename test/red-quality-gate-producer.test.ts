@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { readCiGateRequiredChecks } from "../src/lib/ci-gate-required.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type SweepDeps } from "./helpers/sweep-test.js";
 import { buildOpenPrViews } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -53,7 +54,7 @@ test("the checked-out ci-gate REQUIRED contract parses a JSON string and malform
   assert.deepEqual(readCiGateRequiredChecks("/checkout", () => "jobs: ["), []);
   assert.deepEqual(readCiGateRequiredChecks("/checkout", () => "jobs: { ci-gate: { env: { REQUIRED: [ci] } } }"), []);
   assert.ok(
-    readCiGateRequiredChecks(join(import.meta.dirname, "..")).includes("coverage-ratchet"),
+    readCiGateRequiredChecks(findRepoRoot()).includes("coverage-ratchet"),
     "the production reader parses this checkout's actual folded REQUIRED value",
   );
 });

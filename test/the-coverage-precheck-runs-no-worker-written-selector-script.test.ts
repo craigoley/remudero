@@ -10,17 +10,18 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import * as affected from "../src/lib/affected-suites.js";
 import * as runTask from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { usePassThroughProofSandbox } from "./helpers/pass-through-proof-sandbox.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T6156 runs the coverage runner in the proof sandbox; a pass-through stands in for bwrap off Linux.
 usePassThroughProofSandbox();
 
-const HARNESS = join(dirname(fileURLToPath(import.meta.url)), "..");
+const HARNESS = findRepoRoot();
 const SECRETS = {
   GH_TOKEN: "ghs_fixture_gh_token",
   GITHUB_TOKEN: "ghs_fixture_github_token",

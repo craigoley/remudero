@@ -2,16 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname, join as joinPath } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join as joinPath } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // @source-text-subject — this suite tests a census whose subject is source-code text.
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a STATIC import of the .mjs is a TS7016 and
 // fails typecheck — the same reason test/a-source-file-cannot-outgrow-its-baseline.test.ts reaches
 // its script this way. A dynamic specifier is not statically resolved, so this loads the REAL
 // module with no shadow copy that could drift from it.
-const REPO_ROOT = joinPath(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = joinPath(REPO_ROOT, "scripts", "expiring-fixture-census.mjs");
 const {
   AGED_FIELDS,

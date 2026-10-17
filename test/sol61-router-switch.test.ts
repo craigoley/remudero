@@ -9,9 +9,10 @@ import { ROUTING_EXPERIMENTS, routingExperimentFor } from "../src/lib/routing-ex
 import { openWeightAllowancePath, openWeightCommittedUsd, openWeightReservationUsd, openWeightUsageUsd,
   selectOpenWeightModel, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
 import { workerSelectionAssignment } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const MODEL = "gpt-6.1-sol";
-const root = join(import.meta.dirname, "..");
+const root = findRepoRoot();
 const table = loadMounts(mountsPath(root)).capabilities!;
 const env = { RMD_OPENWEIGHT_API_KEY: "test-only-key" };
 const selection = { model: MODEL, effort: "high" };

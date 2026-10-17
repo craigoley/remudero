@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolveDoctrineForReader } from "../src/lib/learnings.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2457 — TWO RULE NAMESPACES SHARE THE WORD "RULE" AND ONE INTEGER RANGE ───────────────────
 //
@@ -26,7 +27,7 @@ import { dirname, join } from "node:path";
 // are added on either side of the boundary it protects.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const MASTER_PLAN_PATH = join(REPO_ROOT, "MASTER-PLAN.md");
 const CLAUDE_MD_PATH = join(REPO_ROOT, "CLAUDE.md");
 const PLAN_TASKS_DIR = join(REPO_ROOT, "plan", "tasks.d");

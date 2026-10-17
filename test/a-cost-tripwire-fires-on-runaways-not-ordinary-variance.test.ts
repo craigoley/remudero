@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
   CostAnomalyPolicyError,
@@ -11,8 +10,9 @@ import {
   parseCostAnomalyPolicy,
 } from "../src/lib/cost-anomaly.js";
 import type { RunSummary } from "../src/lib/retro.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const POLICY_PATH = join(REPO_ROOT, "plan", "policy.yaml");
 const PLACEHOLDER_MULTIPLIER = 3;
 const EXPECTED_MULTIPLIER = 8;

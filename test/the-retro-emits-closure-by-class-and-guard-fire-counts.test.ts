@@ -10,7 +10,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
@@ -38,8 +37,9 @@ import {
 import { retroCommand } from "../src/run-task.js";
 import { offlineGithub } from "./setup/offline-github.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function ts(day: number): string {
   return `2026-09-${String(day).padStart(2, "0")}T00:00:00.000Z`;

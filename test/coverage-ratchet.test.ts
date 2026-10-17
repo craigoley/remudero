@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T25: coverage ratchet gate (MASTER-PLAN §5 TIER 2, quality gate 1/4) ──
 //
@@ -20,7 +21,7 @@ import { dirname, join } from "node:path";
 // clean under `tsc --noEmit`.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(__dirname, "..", "scripts", "coverage-ratchet.mjs");
 const FIXTURES = join(__dirname, "fixtures", "coverage-ratchet");
 const BASELINE = join(FIXTURES, "baseline.json");

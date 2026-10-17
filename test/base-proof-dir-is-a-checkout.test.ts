@@ -40,14 +40,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { buildBaseProofDir, type BaseProofDir } from "../src/lib/check-proof.js";
 import { execWhitelistedProof, judgeCriterion, parseWhitelistedProof, preexistingProofHits } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Identity from `-c` flags, never ambient config (CLAUDE.md, "A fixture shelling git PLUMBING …"). */
 function git(dir: string, ...args: string[]): string {

@@ -3,9 +3,10 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { makeTempDir } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T9565 — THE FIXTURE CENSUS LOADS THE GATE GARDENER AS ESM.
@@ -22,7 +23,7 @@ import { makeTempDir } from "../src/lib/tmp.js";
  * child's NODE_V8_COVERAGE never reaches a shard's lcov.
  */
 
-const REPO = fileURLToPath(new URL("..", import.meta.url));
+const REPO = findRepoRoot();
 const CENSUS = join(REPO, "scripts", "expiring-fixture-census.mjs");
 
 /** Runs the census `main` in a child under coverage with one fixture 0.5 days from crossing and an injected

@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gatherRuns, type LedgerRecord } from "../src/lib/retro.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = resolve(import.meta.dirname, "..");
+const REPO = findRepoRoot();
 const SCRIPT = join(REPO, "scripts/mount-headroom-sweep.mjs");
 interface Report {
   corpus: { rawRowsWithRunId: number; newestTs?: string; formsOpened: string[] };

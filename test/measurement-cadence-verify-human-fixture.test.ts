@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { buildMeasurementCadenceDaemonHooks } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = findRepoRoot();
 
 test("W1-T4757 criterion 1: the daemon hook can isolate human verification without replacing its producer", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-verify-human-fixture-"));

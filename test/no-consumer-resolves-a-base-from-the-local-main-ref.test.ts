@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2630: NO CONSUMER RESOLVES A BASE FROM THE LOCAL `main` REF ─────────────────────────
 //
@@ -52,7 +53,7 @@ import { dirname, join } from "node:path";
 // asserts the sibling still fails.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The only six git subcommands that ever supply a diff BASE. Checkout, branch, clone, fetch,
  *  push, etc. are deliberately absent — see the header comment's "position, never the word". */

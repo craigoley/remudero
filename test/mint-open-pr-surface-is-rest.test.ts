@@ -32,6 +32,7 @@ import { nextTaskIdCommand, openPrMintTexts } from "../src/run-task.js";
 import { openPrsRestArgs, type GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { type RemoteRefReserver, type RemoteReserveOutcome } from "../src/lib/task-id-reservation.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4473: every default-plan mint below reads THIS fixture's plan, never the checkout's — a
 // checkout whose plan is behind origin's would otherwise degrade the mint and flip its exit code.
@@ -42,7 +43,7 @@ mintRepo.git("add", "plan/tasks.yaml");
 mintRepo.git("commit", "--quiet", "-m", "fixture plan");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "task-id-existence-check.mjs");
 
 // ── shared plumbing, mirrored from test/next-task-id-reserve.test.ts ───────────────────────────

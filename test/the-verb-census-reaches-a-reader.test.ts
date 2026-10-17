@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import fsDefault, { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   renderVerbCensusDigestLine,
@@ -13,6 +12,7 @@ import {
 import { resolveLedgerUnion } from "../src/lib/ledger-grep.js";
 import { buildDigestCadenceDaemonHooks } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2485 — THE VERB CENSUS GETS A SCHEDULER. `lib/emissions.ts` (`rmd emissions`) already
 // answers "which CLI verb has written no ledger line", and W1-T2479 fixed its own corpus so the
@@ -22,7 +22,7 @@ import type { Config } from "../src/lib/config.js";
 // the digest test that deliberately exercises the REAL daemon producer wiring. The sibling
 // test/verb-census-fixture-isolation.test.ts exercises the measurement-cadence producer.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function tmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

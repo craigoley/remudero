@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   loadPolicy,
@@ -15,6 +14,7 @@ import {
   type Policy,
 } from "../src/lib/policy.js";
 import { dailyCostCeilingReloader, resolveRepoRoot } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T408 acceptance 3 ─────────────────────────────────────────────────────────────────────
 // "an instance with no explicit share behaves exactly as it does today, so a single-instance
@@ -27,7 +27,7 @@ import { dailyCostCeilingReloader, resolveRepoRoot } from "../src/run-task.js";
 // EXACTLY what `resolveDailyCostCeiling` already returned — same fields, same values, no new
 // keys appearing — and the real, wired `dailyCostCeilingReloader` is unaffected too.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED: Policy = loadPolicy(policyPath(REPO_ROOT));
 
 function overrideRoot(): string {

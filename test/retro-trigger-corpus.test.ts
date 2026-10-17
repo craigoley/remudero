@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { retroTriggerCheck } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { ownBranchOf, runlessMergesSince, saveMarker, type GitLogCommit, type ShippedGithub } from "../src/lib/retro.js";
 import { loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2288 — the retro TRIGGER's iteration domain ───────────────────────────────────────────
 //
@@ -60,7 +60,7 @@ function commit(date: string, message: string): GitLogCommit {
 
 // A full, VALID `Policy` (spreads the real shipped policy) with just the `retro` row
 // overridden — the same fixture shape test/retro-trigger-check.test.ts's `policyFixture` uses.
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED_POLICY: Policy = loadPolicy(policyPath(REPO_ROOT));
 function policyFixture(retro: { mergesThreshold: number; daysThreshold: number }): Policy {
   return { ...SHIPPED_POLICY, values: { ...SHIPPED_POLICY.values, retro } };

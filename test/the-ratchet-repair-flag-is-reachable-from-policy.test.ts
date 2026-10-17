@@ -16,8 +16,9 @@ import {
   type SweepDeps,
   type SweepPolicy,
 } from "./helpers/sweep-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(new URL("..", import.meta.url).pathname);
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-10T00:00:00.000Z");
 
 function ledgerPath(): string {

@@ -20,9 +20,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { finishJudgedRun } from "./helpers/judged-pool-run.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "test-tier-manifest.mjs");
 
 // scripts/test-tier-manifest.mjs sits outside tsconfig's `include` (a plain .mjs file), so — same

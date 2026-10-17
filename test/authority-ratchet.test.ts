@@ -32,11 +32,11 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { AUTHORITY_TABLE, authorityTableModules } from "../src/lib/authority.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 // This ratchet's own two production modules are excluded: authority.ts's `AUTHORITY_TABLE`
 // literal itself contains the strings this detector scans for (as data, in row `action`/`note`

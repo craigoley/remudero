@@ -12,6 +12,7 @@ import {
   type LedgerLine,
 } from "../src/lib/digest.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, buildEntryWeightIndex, type LearningEntry } from "../src/lib/learnings.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T941: THE KNOWLEDGE BUDGET IS A DERIVED CAP, NOT A PICKED NUMBER ─────────────────────
 //
@@ -25,7 +26,7 @@ import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, buildEntryWeightIndex, type LearningEnt
 // a measurement.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "knowledge-budget-baseline.json");
 
 function loadBaseline(): { capChars: number } {

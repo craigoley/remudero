@@ -8,11 +8,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { loadTestManifestProbe, rawObservationWindow, testGardenInventory } from "../src/lib/test-gardener.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 
 type Outlier = { observedMs: number; medianMs: number; bandLog: number; boundLog: number };
 type Ledger = { thresholdMs: number; files: Record<string, number>; history?: Record<string, number[]>; outliers?: Record<string, Outlier> };

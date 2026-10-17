@@ -4,12 +4,13 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { certainHeadRefusals } from "../src/lib/review.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T5026. #8156 (W1-T4914) named its test "... recorded as clean with no conflicting paths" while the proof was
@@ -19,7 +20,7 @@ import { gitRepo } from "./helpers/git-repo.js";
  * stays report-only.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const { proofResolveVerdict } = (await import(pathToFileURL(join(REPO_ROOT, "scripts/proof-resolve-precheck.mjs")).href)) as {
   proofResolveVerdict: (input: {
     diff: string;

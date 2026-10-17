@@ -19,14 +19,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { gitRepo } from "./helpers/git-repo.js";
 import { validateWorkerSettingsFile } from "../src/lib/settings.js";
 import { verifyHumanSweepCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 test("the file a judge spawn names VALIDATES as worker settings, and the one it used to name does not", () => {
   // The positive control and the defect, side by side. `.claude/settings.json` is the

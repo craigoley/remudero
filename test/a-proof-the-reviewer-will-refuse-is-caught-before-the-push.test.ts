@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { certainHeadRefusals } from "../src/lib/review.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * 2026-09-29 — the worker half of "reviewer-unmet", the CI-friction gardener's costliest cause. MEASURED 2026-09-15..29:
@@ -17,7 +18,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  * functions answer that offline, so the pre-push hook asks them before the push.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const { proofResolveVerdict } = (await import(pathToFileURL(join(REPO_ROOT, "scripts/proof-resolve-precheck.mjs")).href)) as {
   proofResolveVerdict: (input: {
     diff: string;

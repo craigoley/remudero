@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error -- executable .mjs script has no declaration file.
 import { gitOrThrow } from "../scripts/lib/git.mjs";
 // @ts-expect-error -- executable .mjs script has no declaration file.
 import { main as checkBranchShape } from "../scripts/worker-branch-shape.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 let sequence = 0;
 
 function fixture(t: TestContext) {

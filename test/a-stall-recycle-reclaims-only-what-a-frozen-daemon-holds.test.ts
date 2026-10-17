@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { STALL_RECYCLE_AFTER_MS } from "../src/lib/progress-watchdog.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T6597. OBSERVED 2026-10-08: the core daemon (in-container pid 110, container 2ca2ffc969af)
@@ -24,7 +24,7 @@ import { STALL_RECYCLE_AFTER_MS } from "../src/lib/progress-watchdog.js";
  * the bound is waited for and refused; (iii) a recycle with no STALLED verdict behaves as before.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 
 const DAEMON_HOST = "2ca2ffc969af";

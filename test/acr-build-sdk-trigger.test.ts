@@ -18,8 +18,9 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SDK_KEY = "node_modules/@anthropic-ai/claude-agent-sdk";
 
 interface GuardStep {

@@ -9,9 +9,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
   derivePrCheckCandidates,
@@ -23,8 +22,9 @@ import {
 import { checkJobId } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const OWNER = "owner";
 const REPO = "repo";
 const SHA = "abc123";

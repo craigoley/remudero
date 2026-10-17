@@ -22,15 +22,15 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
 import { runnableCandidates } from "../src/lib/drain.js";
 import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const NOW_MS = Date.parse("2026-08-26T00:00:00.000Z");
 
 /** The shipped plan, read through the loader rather than a raw YAML parse — the same object every

@@ -8,9 +8,9 @@ import { spawn as nodeSpawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import type { EngineChildLaunch } from "../src/lib/child-entry-argv.js";
 import { readPeakSamples, resetLearnedEstimateCacheForTests, type TreePeakSampler } from "../src/lib/host-memory-learning.js";
@@ -25,8 +25,9 @@ import {
 import { PolicyError, RUN_CHILD_MODES, loadRunChildMode, parseRunChildMode, runChildEffectiveMode } from "../src/lib/policy.js";
 import { runChildMain } from "../src/run-child-main.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 // Required, as src/lib/child-entry-argv.ts requires it, so this process holds ONE instance of the script.
 const BUILD = createRequire(import.meta.url)(join(REPO_ROOT, "scripts", "build-child-entries.mjs")) as {
   buildChildEntries(opts: { root: string; entries: { name: string; source: string }[]; workers: string[] }): Promise<unknown>;

@@ -33,6 +33,7 @@ import {
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, selectLearnings, type LearningEntry } from "../src/lib/learnings.js";
 import { findExportDefinition, isExportReachable } from "../src/lib/reachability.js";
 import { citationStampPassFor, parseGitLogCitationCommits, runCitationStampPass } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function entry(id: string, overrides: Partial<LearningEntry> = {}): LearningEntry {
   return {
@@ -119,7 +120,7 @@ const FOLLOWUP_LEDGER_WITH_EVIDENCE = [
 // referenced them, which isExportReachable deliberately does not count).
 
 test("stampCitations/mineLedgerCitations/mineGitLogCitations/aggregateCitationEvidence are all reachable from real production code, not just their own test", () => {
-  const repoRoot = join(import.meta.dirname, "..");
+  const repoRoot = findRepoRoot();
   for (const name of ["stampCitations", "mineLedgerCitations", "mineGitLogCitations", "aggregateCitationEvidence"]) {
     const file = findExportDefinition(name, repoRoot);
     assert.equal(file, "src/lib/retro.ts", `${name}: definition not found where expected`);

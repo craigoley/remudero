@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import {
@@ -11,6 +10,7 @@ import {
   type LearningEntry,
 } from "../src/lib/learnings.js";
 import { testPinnedLearnings } from "../src/lib/knowledge-gardener.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T2507 — THE PER-SESSION CONTEXT TAX IS PAID ON RULES THE WORKER CANNOT ACT ON.
 //
@@ -21,7 +21,7 @@ import { testPinnedLearnings } from "../src/lib/knowledge-gardener.js";
 // closed that gap actually landed and actually reach the reader they were written for — never
 // merely that CLAUDE.md got smaller.
 
-const REPO_ROOT = join(fileURLToPath(new URL("../", import.meta.url)));
+const REPO_ROOT = join(findRepoRoot());
 const CLAUDE_MD = readFileSync(join(REPO_ROOT, "CLAUDE.md"), "utf8");
 const OPERATOR_GUIDE = readFileSync(join(REPO_ROOT, "docs", "operator-guide.md"), "utf8");
 

@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
 import { buildPanelSkillsRoutes, buildSkillsRoute, type PanelSkillsDeps } from "../src/lib/panel-skills.js";
 import { skillsDir } from "../src/lib/skill.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W3-T8: panel skill actions — each registry skill is a panel button wired to the registry ──
 // (MASTER-PLAN §5B/§7)
@@ -168,7 +168,7 @@ test("GET /v1/skills: a malformed shard fails the WHOLE load, surfaced as a 500 
 });
 
 test("GET /v1/skills: the SHIPPED .remudero/skills/ registry resolves through this route exactly like `rmd skill list`", async () => {
-  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const repoRoot = findRepoRoot();
   await withService(depsFor(repoRoot), async (base) => {
     const res = await get(base, "/v1/skills", READ_TOKEN);
     assert.equal(res.status, 200);

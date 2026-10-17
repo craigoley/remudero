@@ -35,6 +35,7 @@ import {
 import type { SummarizeDeps } from "../src/lib/feedback.js";
 import { validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
 import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalate-")), "ledger.ndjson");
@@ -428,7 +429,7 @@ async function withGrillFailHarness(
   const savedPath = process.env.PATH;
   const savedBranch = process.env.RMD_SHIM_BRANCH;
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const REPO_ROOT = join(__dirname, "..");
+  const REPO_ROOT = findRepoRoot();
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(

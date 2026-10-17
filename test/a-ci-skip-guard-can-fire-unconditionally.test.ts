@@ -12,11 +12,11 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 // @ts-expect-error — this executable .mjs intentionally has no declaration output; the complete
 // seam consumed by this TypeScript suite is declared immediately below rather than left as any.
 import * as workflowGuard from "../scripts/workflow-guard-mutation-ratchet.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 interface SkipGuard {
   key: string;
@@ -50,7 +50,7 @@ const { enumerateSkipGuards, mutateGuardLine, ciReadingSuites, classifyGuard, re
   OWN_SUITE: string;
 };
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
 const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "workflow-guard-mutation-baseline.json"), "utf8")) as {
   guards: Record<string, { reason: string }>;

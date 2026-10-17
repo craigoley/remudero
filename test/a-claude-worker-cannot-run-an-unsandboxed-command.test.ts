@@ -13,7 +13,6 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   validateWorkerSettings,
   validateWorkerSettingsFile,
@@ -26,8 +25,9 @@ import {
   spawnWorker,
   type SpawnWorkerArgs,
 } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TEMPLATE = join(REPO_ROOT, "settings", "worker.json");
 
 type Sandbox = Record<string, unknown>;

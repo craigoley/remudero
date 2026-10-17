@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { COMMANDS } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T48: the docs/cli-reference.md generator + drift gate ────────────────────────────────
 //
@@ -23,7 +24,7 @@ import { COMMANDS } from "../src/run-task.js";
 // `npm run cli-reference` / `cli-reference:check` invoke it via the `tsx` bin.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-cli-reference.mjs");
 
 function runCheck(out: string) {

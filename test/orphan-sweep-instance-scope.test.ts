@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   RUN_ID_ENV,
@@ -11,8 +10,9 @@ import {
   workerInstallationScope,
   workerMarkerEnv,
 } from "../src/lib/worker-containment.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = findRepoRoot();
 
 test("W1-T2693: one pure function derives a stable opaque scope and distinct configured roots do not collide", () => {
   const rootA = "/var/lib/remudero/install-a";

@@ -14,6 +14,7 @@ import {
   readHostPressure,
   type DaemonHealthSnapshot,
 } from "../src/lib/daemon-health.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4102 — MEASURED 2026-09-23: one worker's four parallel coverage suites swapped
 // remudero-serve out and every console tab timed out. The fix is the containers' cgroups: serve's
@@ -21,7 +22,7 @@ import {
 // memory ceiling that leaves serve's reserve free. These tests run the real launchers against a
 // fake `docker` that records its argv, and a fake /proc/meminfo.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const BASH = ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"].find(existsSync) ?? "bash";
 const HOST_MIB = 15988;
 

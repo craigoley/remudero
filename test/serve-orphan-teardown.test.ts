@@ -47,8 +47,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {

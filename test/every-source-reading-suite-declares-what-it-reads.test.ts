@@ -1,15 +1,15 @@
 // @source-text-subject: test/ — this census's subject is what every suite reads as text; its fixtures are read-call strings.
 // @census-reads: test/ — the declaration replaces what the fixture strings below appear to read.
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   discoverSourceTextReaders,
   isUnplacedSourceReader,
   readerJoins,
   sourceTextReaderOf,
 } from "../src/lib/source-text-readers.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * A census that reads source text joins every diff that edits that text, whatever its enumeration
@@ -21,7 +21,7 @@ import {
  * `readFileSync`; neither was even listed as unmodelled.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const ROOTS = new Set(["src", "test", "scripts", "deploy", "README.md", ".github"]);
 
 test("every source-reading suite is placed by what it reads or declares it", () => {

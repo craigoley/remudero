@@ -36,7 +36,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { DEFAULT_FIX_SPAWN_WALL_CLOCK_BOUND_MS, installPolicyPath, loadPolicy } from "../src/lib/policy.js";
@@ -47,8 +46,9 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function fakeWorkerResult(over: Partial<WorkerResult> = {}): WorkerResult {
   return {

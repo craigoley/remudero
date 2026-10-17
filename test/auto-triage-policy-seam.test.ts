@@ -24,15 +24,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { autoTriageCheck, buildAutoTriageDaemonHooks } from "../src/run-task.js";
 import { loadPolicy, policyPath, validatePolicy, PolicyError, type Policy } from "../src/lib/policy.js";
 import { decideAutoTriage } from "../src/lib/auto-triage.js";
 import type { Config } from "../src/lib/config.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED: Policy = loadPolicy(policyPath(REPO_ROOT));
 
 /** W1-T475: the cadence-curve fields are GONE from the policy, so this fixture carries only the

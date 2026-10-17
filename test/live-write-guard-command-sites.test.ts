@@ -18,6 +18,7 @@ import { ghPrMergeSquash, type WorkerResult } from "../src/lib/worker.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** ghPrMergeSquash requires the closing-reference guard; these tests are about the merge call itself. */
 const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
@@ -35,7 +36,7 @@ const CLEAN_GUARD = () => ({ state: "clean" as const, defused: [] });
 // repo — the pushes land in the throwaway origin.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t",

@@ -13,6 +13,7 @@ import { planFilesIdentity } from "../src/lib/thread-plan.js";
 import { serveCommand } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T5639: after an initial assembly failure the DEFAULT board worker recovers on its own. Plan-view must adopt the
 // generation that worker read, rather than stay bound to the failed placeholder beside a healthy board.
@@ -53,7 +54,7 @@ test("real default worker and Plan-view agree on the adopted generation after an
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({
-    claudeBin: "/bin/true", root, installRoot: join(import.meta.dirname, ".."), serve: { host: "127.0.0.1", port },
+    claudeBin: "/bin/true", root, installRoot: findRepoRoot(), serve: { host: "127.0.0.1", port },
   }));
   const oldHome = process.env.HOME;
   process.env.HOME = home;

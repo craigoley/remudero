@@ -2,16 +2,17 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` is outside tsconfig's `include`; load the REAL modules through a dynamic specifier
 // so these assertions run against the files the workflow executes (the idiom of
 // test/clock-sweep.test.ts and test/needs-human-issue.test.ts).
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const scriptUrl = (name: string): string => pathToFileURL(join(REPO_ROOT, "scripts", name)).href;
 
 type Entry = { suite: string; fuse: number | null; detail: string };

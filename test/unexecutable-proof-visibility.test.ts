@@ -4,8 +4,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   applyVerdictStability,
@@ -22,6 +21,7 @@ import {
   type ProofExecutor,
   type ReviewVerdict,
 } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T305 ──────────────────────────────────────────────────────────────────
 //
@@ -381,7 +381,7 @@ test("W1-T1020: the ledger reconstruction carries the partial flag", () => {
 // re-entry occurs.
 
 test("W1-T1020: reverting the reason change fails the partial reason test", () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const realSrcPath = join(repoRoot, "src", "lib", "review.ts");
   const targetTestFile = "test/unexecutable-proof-visibility.test.ts";
   const positiveTestName = "W1-T1020: a partial verdict arms with a reason that names the partial shape";

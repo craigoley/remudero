@@ -14,7 +14,6 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import * as landing from "../src/lib/feedback-landing.js";
@@ -31,6 +30,7 @@ import type { AddressInfo } from "node:net";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error -- test executes the untyped executable module directly.
 import { classifyUnreadableOpenPrSurface } from "../scripts/task-id-existence-check.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // Namespace imports, so this file LOADS at a base that lacks these symbols and each test fails there by name — the
 // proof then discriminates instead of reading "discrimination unknown" off a module-load error.
@@ -39,7 +39,7 @@ const { PlanPrPreflightRefusedError, TASK_ID_UNREADABLE_RE, planPrPreflight, pla
 type PlanPrPreflightChecks = emitter.PlanPrPreflightChecks;
 type PlanPrPreflightResult = emitter.PlanPrPreflightResult;
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 type LogRow = { step: string; extra?: Record<string, unknown> };
 

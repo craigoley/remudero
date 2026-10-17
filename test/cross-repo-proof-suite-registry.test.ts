@@ -18,8 +18,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   execWhitelistedProof,
   explainUnitTestProofRefusal,
@@ -32,8 +31,9 @@ import {
   type ProofSpawner,
   type SuiteRegistryTarget,
 } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TMP_HYGIENE_IMPORT = "./test/setup/tmp-hygiene.ts";
 
 const REMUDERO: SuiteRegistryTarget = { owner: "craigoley", repo: "remudero" };

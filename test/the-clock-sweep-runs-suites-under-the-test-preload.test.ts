@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // scripts/** sits outside tsconfig's include, so the real module is loaded by a runtime import, as
 // test/clock-sweep.test.ts does.
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const mod = (await import(pathToFileURL(join(ROOT, "scripts", "clock-sweep.mjs")).href)) as {
   SUITE_PRELOAD: string;
   runSuite: (

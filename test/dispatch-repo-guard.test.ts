@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { normalizeRepoName, taskTargetsRepo, runnableCandidates, tallyDispatchFilters } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import type { DispatchFilterReason } from "../src/lib/drain.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── W1-T988: THE DISPATCHER NEVER READ WHICH REPO A TASK BELONGS TO ─────────────────────────
 //

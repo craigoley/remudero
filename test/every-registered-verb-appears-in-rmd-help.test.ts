@@ -6,14 +6,14 @@
 // host: `rmd --help` printed no `decline` or `restore` line although both verbs worked.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { PROPOSAL_VERDICT_SYNTAX } from "../src/lib/inbox-verdict-command.js";
 import { COMMANDS } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = findRepoRoot();
 
 test("every registered verb appears in the help rmd --help prints", () => {
   const res = spawnSync(process.execPath, [join(repoRoot, "scripts", "rmd-help.mjs")], { encoding: "utf8" });

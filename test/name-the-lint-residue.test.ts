@@ -15,14 +15,14 @@
  */
 import assert from "node:assert";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { lintPlanCommand } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The `%s%x00%b%x01` wire shape `defaultMergeEvidenceLog` produces. */
 function dumpOf(...entries: Array<[subject: string, body?: string]>): string {

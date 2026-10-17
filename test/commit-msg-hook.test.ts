@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { worktreeAdd } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T137: STOP a worker committing a malformed message in its OWN worktree ──
 //
@@ -34,7 +35,7 @@ import { worktreeAdd } from "../src/lib/worker.js";
 // suite here proves the actual production wiring -- not a mock of it.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const HAS_COMMITLINT = existsSync(join(REPO_ROOT, "node_modules", ".bin", "commitlint"));
 
 /** A real, throwaway BARE "origin" seeded with THIS repo's own hooks/commit-msg and

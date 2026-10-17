@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const CYCLE = "test/cycle-ratchet.test.ts";
 const SIZE = "test/source-size-baseline-is-enforced.test.ts";
@@ -106,7 +106,7 @@ test("W1-T5693: each structural suite runs in its own child, so one that cannot 
 });
 
 test("W1-T5693: the structural suites expose executable scripts and have left the CI-only baseline", () => {
-  const root = fileURLToPath(new URL("..", import.meta.url));
+  const root = findRepoRoot();
   const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
   const ciOnly: string[] = JSON.parse(readFileSync(join(root, precheck.PRECHECK_PARITY_BASELINE), "utf8")).ciOnly;
   for (const testFile of [CYCLE, SIZE, CITATION]) {
@@ -131,7 +131,7 @@ test("W1-T5702: a test that gains a src/run-task.ts import, or the reach ratchet
   for (const path of ["src/lib/affected-suites.ts", "scripts/affected-reach-baseline.json"]) {
     assert.deepEqual(evaluate([path], { [path]: "" }, { [path]: "" }).runs, [[REACH]], path);
   }
-  const root = fileURLToPath(new URL("..", import.meta.url));
+  const root = findRepoRoot();
   const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
   assert.deepEqual(precheck.PRECHECK_PARITY[REACH], { run: "census:affected-reach" });
   assert.ok(scripts["census:affected-reach"].endsWith(REACH));

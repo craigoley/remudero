@@ -18,16 +18,15 @@
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { runCiParity } from "../src/lib/ci-parity.js";
 import { narrowNameFilteredArgs, parseWhitelistedProof } from "../src/lib/review.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HYGIENE = "./test/setup/tmp-hygiene.ts";
 
 /** The pair must be ADJACENT (`--import` immediately followed by the hygiene path) and must

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── ci-gate: A READ THAT FAILED IS NOT A READ THAT SAID NO ──────────────────────────────────
 //
@@ -35,7 +36,7 @@ import { parse as parseYaml } from "yaml";
 // mechanism under test is unchanged by the magnitude.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 
 type CheckRun = {

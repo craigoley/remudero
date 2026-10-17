@@ -4,9 +4,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 

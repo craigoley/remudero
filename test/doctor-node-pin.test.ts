@@ -26,9 +26,10 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildDoctorReport, judgeNodeVersionPin, readNvmrcVersion } from "../src/lib/doctor.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── criterion 1/2 — judgeNodeVersionPin against an injected .nvmrc reader ─────────────────────
 

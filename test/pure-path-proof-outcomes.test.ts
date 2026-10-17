@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   cappedReason,
   execWhitelistedProof,
@@ -11,6 +9,7 @@ import {
   type ProofSpawner,
   type WhitelistedProof,
 } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1077 ─────────────────────────────────────────────────────────────────
 //
@@ -28,7 +27,7 @@ import {
 // `isFileWrapperResultName` predicate `nameFilteredOutcome` already used for the OTHER
 // (name-filtered) branch, now reused (not reimplemented) for this one.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** A {@link ProofSpawner} standing in for `execFileSync` throwing on a clean nonzero exit, with
  * `stdout` attached exactly as node's real `ErrnoException` carries it — the shape

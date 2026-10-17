@@ -6,6 +6,7 @@ import { lintTask, proofNameResolutionViolations } from "../src/lib/task-linter.
 import { resolveNameFilteredCandidates } from "../src/lib/review.js";
 import type { NameFilterResolution } from "../src/lib/review.js";
 import type { Task } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T492: proofNameResolutionViolations (W1-T488) is CALLED unconditionally by lintTask, but
 // its resolver is an injected dependency (opts.resolveNameFilteredCandidates) with a
@@ -17,7 +18,7 @@ import type { Task } from "../src/lib/plan.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 const taskLinterSrc = readFileSync(fileURLToPath(new URL("../src/lib/task-linter.ts", import.meta.url)), "utf8");
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function task(over: Partial<Task> & { id: string }): Task {
   return {

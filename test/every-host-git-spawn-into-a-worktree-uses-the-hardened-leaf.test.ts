@@ -23,12 +23,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import { maskLiterals, stripComments } from "../src/lib/test-impact-map.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { CWD_OPTION_GIT_SPAWN as SHARED_CWD_OPTION_GIT_SPAWN, NOT_A_SPAWN, POSITIONAL_C } from "../scripts/lib/git-spawn-shapes.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = fileURLToPath(new URL("..", import.meta.url));
+const REPO = findRepoRoot();
 
 /** A `-C` argv element naming a worker worktree by any of the names host code gives one. */
 const WORKTREE_TARGET = /"-C",\s*(?:wt|worktreePath|[A-Za-z_$][\w$]*\.worktreePath|worktreeRoot|batchWorktree|ownerPath)\b/g;

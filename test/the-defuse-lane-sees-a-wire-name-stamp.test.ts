@@ -14,13 +14,14 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import * as gardener from "../src/lib/gate-gardener.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 // scripts/** sits outside tsconfig's include, so the .mjs is loaded by URL, as its own suite does.
 const census = (await import(pathToFileURL(join(ROOT, "scripts/expiring-fixture-census.mjs")).href)) as {
   AGED_FIELDS: ReadonlyArray<{ field: string; source: string; evidence: string[] }>;

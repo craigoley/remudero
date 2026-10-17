@@ -10,8 +10,9 @@ import { test } from "node:test";
 
 import { reexecExitCode, superviseReexecChild } from "../src/lib/self-sync.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SELF_SYNC_IMPORT = pathToFileURL(join(REPO_ROOT, "src", "lib", "self-sync.ts")).href;
 type ReexecParentProcess = ChildProcessByStdio<null, Readable, Readable>;
 

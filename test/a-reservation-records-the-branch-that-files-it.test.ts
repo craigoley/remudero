@@ -11,6 +11,7 @@ import {
   taskIdReservationRef,
   type RemoteRefReserver,
 } from "../src/lib/task-id-reservation.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3640: FIX THE MINTER, NOT THE GATE ──────────────────────────────────────────────────────
 //
@@ -35,7 +36,7 @@ import {
 // here rather than only in production.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 function scratch(): string {

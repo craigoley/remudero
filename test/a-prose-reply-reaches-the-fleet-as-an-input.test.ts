@@ -16,6 +16,7 @@ import {
 import { readFeedbackEntry, listFeedback, FEEDBACK_STATUSES, isValidFeedbackOrigin } from "../src/lib/feedback.js";
 import { appendThreadMessage, deriveThreadId, readThread, type ThreadIdentity } from "../src/lib/inbox-thread.js";
 import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2496: forty console routes shipped and not one let a human answer an escalation in
 // prose. `/v1/escalation/mark-handled` dismisses (no words); `/v1/questions/answer` answers a
@@ -257,7 +258,7 @@ test("POST /v1/escalation/reply is write-scoped, tier low -- exactly what the ot
 // merely on the one path the tests above happened to exercise.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");

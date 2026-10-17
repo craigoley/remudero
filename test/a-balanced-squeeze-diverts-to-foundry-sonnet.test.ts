@@ -21,11 +21,12 @@ import {
   type WorkerSelectionAssignment,
 } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4785: a balanced task squeezed off BOTH subscriptions runs on Foundry Sonnet 5.5 through the
 // Opus emergency's /anthropic adapter and shared Claude cap, with the Luna ladder kept as fallback.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-29T12:00:00.000Z");
 const ISO = "2026-09-29T12:00:00.000Z";
 const FOUNDRY_ENV = {

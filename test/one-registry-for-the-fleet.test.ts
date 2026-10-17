@@ -13,9 +13,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import * as registryGrammar from "../src/lib/instance-registry.js";
 import {
@@ -29,8 +28,9 @@ import {
 import { buildRegistryRoute, type RegistryRouteInput } from "../src/lib/serve.js";
 import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO } from "../src/lib/instance-registry-selection.js";
 import type { Route } from "../src/lib/service.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-23T12:00:00.000Z");
 
 /** One instance row in the shell readers' grammar, carrying the private fields the route must hide. */

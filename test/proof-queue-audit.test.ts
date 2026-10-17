@@ -21,8 +21,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import type { Task } from "../src/lib/plan.js";
@@ -33,8 +32,9 @@ import {
   type ProofQueueAuditOpts,
 } from "../src/lib/proof-queue-audit.js";
 import { creditedProofVisibility, grepPatternMatches, proofQueueAuditCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── (i) pure classifier — fixture tasks, injected predicates, no I/O ────────────────────────
 

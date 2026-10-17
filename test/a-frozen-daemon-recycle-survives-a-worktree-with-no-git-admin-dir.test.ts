@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T9410. OBSERVED 2026-10-14 on host remudero: the watchdog's STALLED recycle proved the core
@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
  * that control fails loudly instead of letting the suite pass without reaching the abort path.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 
 const DAEMON_HOST = "2ca2ffc969af";

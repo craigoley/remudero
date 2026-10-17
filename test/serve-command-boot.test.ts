@@ -26,8 +26,9 @@ import { serveLogPaths } from "../src/lib/launchd.js";
 import type { Mounts } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 async function freePort(): Promise<number> {
   const probe = createServer();

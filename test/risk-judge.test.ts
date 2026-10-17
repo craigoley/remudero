@@ -21,6 +21,7 @@ import {
   type RiskJudgeOrchestratorDeps,
   type RiskJudgeVerdict,
 } from "../src/lib/risk-judge.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function baseInput(overrides: Partial<RiskJudgeInput> = {}): RiskJudgeInput {
   return {
@@ -376,7 +377,7 @@ test("acceptance 5: resolveRiskJudgeMount also works against the SHIPPED .remude
   const { loadMounts, mountsPath } = await import("../src/lib/mounts.js");
   const { fileURLToPath } = await import("node:url");
   const { join } = await import("node:path");
-  const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const shipped = loadMounts(mountsPath(repoRoot));
   const mount = resolveRiskJudgeMount(shipped);
   // The shipped table's cheapest configured tier is haiku (mounts.yaml's own `tiers` ordering).

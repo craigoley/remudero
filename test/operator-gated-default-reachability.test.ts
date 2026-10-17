@@ -9,9 +9,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { callSiteKey, enclosingTestTitle, numberCallSites } from "./helpers/test-call-site-key.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2346: "the live-write guard fences four gh/git WRITE verbs and nothing else, so a unit
 // test that reaches `armIfVerdictPermits`' production default still performs a live REST head
@@ -44,7 +44,7 @@ import { callSiteKey, enclosingTestTitle, numberCallSites } from "./helpers/test
 // call is made — pinned directly by the last test in this file.
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 // ── PART 0: text-scanning primitives, each small enough to reason about directly ───────────────
 

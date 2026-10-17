@@ -4,7 +4,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { parseInstanceRegistry } from "../src/lib/instance-registry.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -24,8 +23,9 @@ import {
   runTask,
   shadowLiveWouldHaveDone,
 } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const SELECTED_INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const SELECTED_INSTALL_ROOT = findRepoRoot();
 
 const registry = (mode?: string) => [
   "instances:",

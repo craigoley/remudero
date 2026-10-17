@@ -16,11 +16,12 @@ import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { finishJudgedRun, isJudgedRun } from "./helpers/judged-pool-run.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 type Verdict = {
   status: number;

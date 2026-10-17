@@ -6,8 +6,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { INBOX_DRAFT_DISALLOWED_TOOLS, runDraftRung, DAEMON_DRAFT_BATCH_CAP } from "../src/lib/inbox.js";
 import type { Proposal } from "../src/lib/inbox.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── W1-T2591: THE DRAFT CAP IS A BATCH SIZE, NOT A CONCURRENCY LIMIT ────────────────────────
 //

@@ -3,11 +3,11 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
 import { retroTriggerCheck } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2288: `retroShippedGithubGateway`'s OWN `mergedCommits` THUNK ────────────────────────
 //
@@ -31,7 +31,7 @@ import { retroTriggerCheck } from "../src/run-task.js";
 // probe healthily, `unavailable()` returns undefined, and `mergedCommits` runs the REAL `git log`
 // against the REAL checkout. Nothing about the git read is stubbed — that is the line under test.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** A `gh` that answers `probeGithubThrottle`'s `rate_limit --jq .rate.remaining` healthily and
  *  nothing else — the narrowest stub that gets past the gate. */

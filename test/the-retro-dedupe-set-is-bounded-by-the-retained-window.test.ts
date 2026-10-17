@@ -15,6 +15,7 @@ import { gzipSync } from "node:zlib";
 
 import { readRetroLedgerNdjson } from "../src/lib/retro.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function stateDir(kind: string): { root: string; state: string } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}`));
@@ -188,7 +189,7 @@ test("771 rotations complete under a 128 MiB old-space ceiling and a bounded you
     const child = spawnSync(
       process.execPath,
       ["--max-old-space-size=128", "--max-semi-space-size=8", "--import", "tsx", "--input-type=module", "-e", childSource],
-      { cwd: join(dirname(fileURLToPath(import.meta.url)), ".."), env, encoding: "utf8", timeout: 20_000 },
+      { cwd: findRepoRoot(), env, encoding: "utf8", timeout: 20_000 },
     );
 
     assert.equal(child.signal, null, child.stderr);

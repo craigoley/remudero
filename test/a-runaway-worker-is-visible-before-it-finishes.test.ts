@@ -18,7 +18,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { readLedgerLines } from "../src/lib/status.js";
 import { loadMounts, mountsPath, resolveMount } from "../src/lib/mounts.js";
@@ -30,8 +29,9 @@ import {
   WORKER_RUNAWAY_TURNS_LEDGER_STEP,
 } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `rmd-${prefix}-`));

@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { writeMutantModule } from "./helpers/mutant-module.js";
 import { TRIAGE_PROOF_NEEDLE, mutateTriageProofSource } from "./helpers/triage-proof-needle.js";
 import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
 import { feedbackEntryRepoPath } from "../src/lib/feedback.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2587: A HAND-ROLLED MUTATION TEST COLLIDES WITH THE REAL HARNESS ───────────────────────
 //
@@ -37,7 +37,7 @@ import { feedbackEntryRepoPath } from "../src/lib/feedback.js";
 // this task fixes — see the assertion below that pins that down, so this test cannot pass
 // vacuously against a mimic that happens not to exercise the regression.
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = findRepoRoot();
 const triageTsPath = join(repoRoot, "src", "lib", "triage.ts");
 
 /** The statement-shaped needle the OLD, now-removed check searched for. */

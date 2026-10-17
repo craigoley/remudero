@@ -15,13 +15,13 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import { evaluateCensusPrecheck, main } from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 type Tree = Record<string, string>;
 

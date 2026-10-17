@@ -3,7 +3,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   loadSkill,
   loadSkillRegistry,
@@ -16,8 +15,9 @@ import {
 } from "../src/lib/skill.js";
 import { groundClarifyRequest } from "../src/lib/panel-skill-run.js";
 import type { Task } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 
 /** A minimal, VALID skill body used as the base for negative-case mutations. */
 function goodRaw() {

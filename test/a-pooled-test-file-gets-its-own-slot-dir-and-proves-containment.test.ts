@@ -4,9 +4,10 @@ import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = fileURLToPath(new URL("../", import.meta.url));
+const root = findRepoRoot();
 const sourceUrl = (path: string): string => JSON.stringify(pathToFileURL(join(root, path)).href);
 const setup = join(root, "test/setup/tmp-hygiene.ts");
 

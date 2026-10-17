@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { resolveMergedRuleId } from "../src/lib/knowledge-gardener.js";
 import { slugifyRuleId } from "../src/lib/doctrine-lifecycle.js";
@@ -10,6 +9,7 @@ import { doctrineCitationFactsAt } from "../src/lib/doctrine-citation-facts.js";
 import { citedDoctrinePaths, plannedDoctrinePages, unresolvedDoctrineCitations } from "../src/lib/doctrine-citations.js";
 import { parseRuleBodyPointer, parseRuleHeadlines, type RuleHeadline } from "../src/lib/learnings.js";
 import { loadPlan } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── 2026-10-11: AN INDEX LINE CAN RETIRE WITHOUT ITS FROZEN RULE BEING LOST ─────────────────────
 //
@@ -24,7 +24,7 @@ import { loadPlan } from "../src/lib/plan.js";
 //   (3) a superseded rule never ships beside its successor — the merge, not a "SUPERSEDES" prefix,
 //       is how a successor replaces a frozen line.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const MANIFEST = join(REPO_ROOT, "test", "fixtures", "doctrine-pre-migration-W1-T3323.json");
 
 interface FrozenRow {

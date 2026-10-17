@@ -28,9 +28,10 @@ import { fileURLToPath } from "node:url";
 import { defaultPreflightSpawn } from "../src/lib/commit-message.js";
 import { main } from "../src/run-task.js";
 import { checkCliFreshness, SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 class ProcessExitCalled extends Error {
   constructor(public code: number | undefined) {

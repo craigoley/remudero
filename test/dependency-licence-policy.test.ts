@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // A `.mjs` file carries no declaration file, so a static `import … from "./helpers/check-
 // dependency-licences.mjs"` is a TS7016 under tsconfig's `strict` — the same reason
@@ -57,7 +58,7 @@ const {
 // required, unconditional, non-continue-on-error check invoking that script.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
 
 async function loadWorkflow(file: string) {

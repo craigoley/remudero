@@ -5,8 +5,9 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 const NEEDLE = "dirty_proof_marker_W1_T5808";
 type Deps = NonNullable<Parameters<typeof checkProofCommand>[1]>;
 

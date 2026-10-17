@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HELPER = "test/helpers/wall-clock-bound.js";
 const THIS_FILE = "test/a-wall-clock-bound-declares-itself.test.ts";
 const HELPER_IMPORT = "helpers/wall-clock-bound.js";

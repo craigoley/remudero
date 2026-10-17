@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
 
 // @ts-expect-error — the executable script has no declaration output.
 import * as workflowGuard from "../scripts/workflow-guard-mutation-ratchet.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 interface Guard { line: number; text: string }
 interface Scratch { root: string; cleanup(): void }
@@ -23,7 +24,7 @@ const { main, enumerateSkipGuards, mutateGuardLine, createScratchCopy, scratchPr
 const PROOF = "test/a-ci-yml-mutant-never-touches-the-working-tree.test.ts";
 const WORKFLOW = ".github/workflows/ci.yml";
 const ORIGINAL = 'jobs:\n  j:\n    steps:\n      - run: |\n          if [ "$A" = "1" ]; then\n            exit 0\n          fi\n          [ "$B" = "1" ] || {\n            exit 0\n          }\n';
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function fixture() {
   const repo = gitRepo({ kind: "workflow-mutant" });

@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "diff-class.mjs");
 
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {

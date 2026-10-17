@@ -13,13 +13,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const { judgeRule15 } = (await import(
   pathToFileURL(join(REPO_ROOT, "scripts/rule15-precheck.mjs")).href
 )) as { judgeRule15: (diff: string, files: string[]) => { ok: boolean; planPaths?: string[]; otherPaths?: string[]; reason?: string } };

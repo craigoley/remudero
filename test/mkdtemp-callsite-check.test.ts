@@ -13,12 +13,13 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` sits outside tsconfig's `include`, so a static import of the .mjs is TS7016 --
 // same pattern as test/tracked-source-write-guard.test.ts, which loads its script through a
 // dynamic specifier so the REAL module runs with no shadow copy to drift from it.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "mkdtemp-callsite-check.mjs");
 type ScanSummary = {
   refused: Array<{ file: string; line: number; arg: string; classification: string }>;

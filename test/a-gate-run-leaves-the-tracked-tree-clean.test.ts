@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { FAST_GATE_STEPS } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const RATCHET = join(REPO_ROOT, "scripts", "source-size-ratchet.mjs");
 const GATE_CHECKOUT = isolatedCheckout(REPO_ROOT);
 symlinkSync(join(REPO_ROOT, "node_modules"), join(GATE_CHECKOUT.root, "node_modules"));

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { gitRepo } from './helpers/git-repo.js';
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 const { main, OVER_CAPACITY_EXIT } = await import(new URL('../scripts/preflight-author.mjs', import.meta.url).href) as {
   main: (args: string[], options: { root: string;
     select: () => { fullRun: boolean; suites: string[]; reasons: string[] };
@@ -16,7 +16,7 @@ const { AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } =
     authorWorkflowContractInputs: (files: string[]) => string[];
   };
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = findRepoRoot();
 const PROBE = '.github/workflows/new-directory-member.yml';
 const validWorkflow = `on: {pull_request: {}}
 jobs:

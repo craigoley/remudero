@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import * as workerThreads from "node:worker_threads";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { CHILD_ENTRY_SPAWNED_STEP } from "../src/lib/child-entry-argv.js";
 import { FIXTURE_CONFIG_PATH_SEGMENTS } from "../src/lib/config.js";
 import { GARDEN_CHILD_HEAP_LIMIT_MB, REGISTERED_GARDEN_NAMES, gardenChildNodeArgv } from "../src/lib/garden-registry.js";
@@ -25,8 +25,9 @@ import { preflightCommand, runRegisteredGardenPass, type GardenBuildContext } fr
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "build-child-entries.mjs");
 const NAME = "run-task";
 const SOURCE = "src/run-task.ts";

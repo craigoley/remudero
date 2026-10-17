@@ -3,7 +3,6 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   DECLARED_CLI_PIN_PACKAGE,
   parseClaudeVersionOutput,
@@ -15,6 +14,7 @@ import type { Config } from "../src/lib/config.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker } from "../src/lib/worker.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * `checkBinaryPin` (src/lib/env.ts, W1-T236) SHIPPED WITH NO PRODUCTION CALLER — src/lib/
@@ -34,7 +34,7 @@ import type { ProbeExecResult } from "../src/lib/containment.js";
  * where a failed read becomes zero workers and therefore "idle"); it is not repeated here.
  */
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const REAL_MANIFEST = readFileSync(join(REPO_ROOT, "deploy", "package.json"), "utf8");
 const manifest = (pin: unknown) => JSON.stringify({ dependencies: { [DECLARED_CLI_PIN_PACKAGE]: pin } });
 

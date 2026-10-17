@@ -3,11 +3,11 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 // @ts-expect-error The production coverage merger is an executable .mjs module outside tsconfig.
 import { mergeShardLineHits } from "../scripts/coverage-merge-ratchet.mjs";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * `SF:src/lib/<define:import.meta>` IS A COMMONJS COMPILE OF THE REAL src GRAPH, AND ITS REFUSAL SAYS SO.
@@ -21,7 +21,7 @@ import { makeTempDir } from "../src/lib/tmp.js";
  * FIXTURES ONLY: every file this suite writes is under its own temp dir.
  */
 
-const REPO = fileURLToPath(new URL("..", import.meta.url));
+const REPO = findRepoRoot();
 
 /** The `source-map-cache` sources of every report a `node --import tsx` run of `probe.ts` in `dir` wrote. */
 function probeSources(dir: string): string[] {

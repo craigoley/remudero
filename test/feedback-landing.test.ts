@@ -22,6 +22,7 @@ import { checkCliFreshness } from "../src/lib/self-sync.js";
 import { missingFeedbackMessage } from "../src/lib/triage.js";
 import { makeLandingReviewRequest, triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── Why every landFeedback()/captureFeedback({land}) call below is wrapped ──────────────
 // This whole suite exercises the durable-inbox commit bridge, which commits and PUSHES for
@@ -40,7 +41,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 
 // commitlint (W1-T136 class) — same subprocess pattern as test/orientation.test.ts.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
 function lint(message: string) {

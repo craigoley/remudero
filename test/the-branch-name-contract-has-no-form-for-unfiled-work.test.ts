@@ -43,9 +43,10 @@ import {
   RUN_BRANCH_UNFILED_FORM,
   RUN_BRANCH_UNFILED_RE,
 } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "head-identity-gate.mjs");
 
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static

@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3320 — THE DOCTRINE BUDGET ROUTES A RULE IT CANNOT HOLD ───────────────────────────────
 //
@@ -181,7 +182,7 @@ test("W1-T3320: a run NEVER writes outside --feedback-dir — a gate that writes
         "--baseline", baseline,
         "--feedback-dir", inbox,
       ],
-      { encoding: "utf8", cwd: new URL("..", import.meta.url).pathname },
+      { encoding: "utf8", cwd: findRepoRoot() },
     );
     // It ROUTED: over the cap, inside the debt ceiling, so the run does not fail.
     assert.equal(run.status, 0, `expected a routed run to land: ${run.stderr}`);
@@ -222,7 +223,7 @@ test("W1-T3320: when the follow-up cannot be filed the CLI REFUSES — the one r
         "--baseline", baseline,
         "--feedback-dir", join(blocker, "inbox"),
       ],
-      { encoding: "utf8", cwd: new URL("..", import.meta.url).pathname },
+      { encoding: "utf8", cwd: findRepoRoot() },
     );
     assert.notEqual(run.status, 0, `an unfilable follow-up must refuse: ${run.stdout}${run.stderr}`);
     assert.match(run.stderr, /the fold follow-up could not be filed/);

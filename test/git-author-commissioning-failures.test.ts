@@ -12,12 +12,12 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const RECYCLER = join(REPO_ROOT, "deploy", "recycle-container.sh");
 const ENTRYPOINT = join(REPO_ROOT, "deploy", "entrypoint.sh");
 const STATE_MOUNT = "/home/node/Remudero";

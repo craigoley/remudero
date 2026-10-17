@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // scripts/cycle-ratchet.mjs is a plain .mjs file outside tsconfig's `include`, so it is driven
 // HERE AS A SUBPROCESS rather than imported — the same shape test/coverage-ratchet.test.ts and
@@ -16,7 +16,7 @@ import { parse as parseYaml } from "yaml";
 // tracked file is observed by every other worker in the same concurrent run (W1-T2291), and this
 // suite must not add a member to that family while proving a gate about the tree's own shape.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "cycle-ratchet.mjs");
 const BASELINE = join(REPO_ROOT, "scripts", "cycle-baseline.json");
 

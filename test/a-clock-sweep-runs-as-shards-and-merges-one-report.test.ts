@@ -2,16 +2,17 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { derivePrCheckCandidates, loadCiGateLists, type WorkflowDoc } from "../src/lib/ci-control-plane.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T5102 — the clock sweep runs as a matrix of shards and one merge job classifies their union.
 // `scripts/**` is outside tsconfig's `include`, so the modules load through dynamic specifiers
 // (the same reason test/clock-sweep.test.ts does).
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const scriptUrl = (name: string) => pathToFileURL(join(REPO_ROOT, "scripts", name)).href;
 
 type RunResult = { failed: boolean; output?: string };

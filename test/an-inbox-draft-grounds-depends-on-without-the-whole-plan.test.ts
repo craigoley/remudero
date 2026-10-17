@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
@@ -11,8 +10,9 @@ import {
   PLAN_PROJECTION_FIELDS,
 } from "../src/lib/inbox.js";
 import { OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_MAX_COMPLETION_TOKENS } from "../src/lib/worker-provider.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const PLAN_PATH = join(REPO_ROOT, "plan", "tasks.yaml");
 
 /** The real plan, never a fixture: the whole finding is about THIS file's size. */

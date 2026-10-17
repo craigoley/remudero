@@ -2,15 +2,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import * as selector from "../src/lib/affected-suites.js";
 // @ts-ignore executable census module has no declaration file.
 import { censusSnapshotPaths, readCensusSnapshot } from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const SNAPSHOT = readCensusSnapshot();
-const ROOT = SNAPSHOT?.root ?? fileURLToPath(new URL("../", import.meta.url));
+const ROOT = SNAPSHOT?.root ?? findRepoRoot();
 const BASELINE = `${ROOT}/scripts/affected-reach-baseline.json`;
 const SUITE = /^test\/.*\.test\.ts$/;
 const CODE = /\.(?:ts|mts|mjs|js|cjs)$/;

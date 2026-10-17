@@ -3,8 +3,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadLearningsCorpus, renderLearningsContext, selectLearnings } from "../src/lib/learnings.js";
 import { loadPlan } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 const corpus = loadLearningsCorpus(fileURLToPath(new URL("../learnings/", import.meta.url)));
 const plan = loadPlan(fileURLToPath(new URL("../plan/tasks.yaml", import.meta.url)));
 

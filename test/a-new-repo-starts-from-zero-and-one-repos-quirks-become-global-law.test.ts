@@ -20,7 +20,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   computePooledPrior,
@@ -29,8 +28,9 @@ import {
   pooledPriorFor,
   type PoolableEvidence,
 } from "../src/lib/routing-prior.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── Claim 1: reached from the recommender, not only from this test ────────────────────────────
 

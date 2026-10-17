@@ -8,11 +8,10 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Run a trivial script through the REAL setup import, with the variable set or not. */
 function runWithSetup(env: Record<string, string | undefined>): { status: number; out: string } {

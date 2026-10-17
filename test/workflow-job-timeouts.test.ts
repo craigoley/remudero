@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1009: every ci.yml job must bound its own runtime ───────────────────────────────────
 //
@@ -23,7 +24,7 @@ import { parse as parseYaml } from "yaml";
 // four acceptance criteria directly against the real files on disk — never a copy-pasted
 // fixture of either workflow, so a later edit to either file is what this suite actually reads.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const CI_GATE_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 

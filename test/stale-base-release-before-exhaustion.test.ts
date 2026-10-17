@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_SWEEP_POLICY,
@@ -10,6 +9,7 @@ import {
   type OpenPrView,
   type RedBaseRefreshFacts,
 } from "./helpers/sweep-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const NOW = Date.parse("2026-09-03T12:00:00Z");
 const MAIN_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -181,7 +181,7 @@ test("W1-T2789: the live recheck refuses closed, moved-head, and indeterminate t
 });
 
 test("W1-T2789: Serve has no stale-base GitHub reader or queue-maintenance write", () => {
-  const root = fileURLToPath(new URL("..", import.meta.url));
+  const root = findRepoRoot();
   const serve = readFileSync(`${root}/src/lib/serve.ts`, "utf8");
   assert.doesNotMatch(serve, /readRedBaseRefreshFacts|red_base_refresh|updateBranch/);
 });

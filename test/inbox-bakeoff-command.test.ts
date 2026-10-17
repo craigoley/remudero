@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { BAKEOFF_CANDIDATES } from "../src/lib/inbox-bakeoff.js";
 import type { Proposal } from "../src/lib/inbox.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
 import { inboxBakeoffCommand } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = findRepoRoot();
 
 test("inbox-bakeoff command runs its orchestration through injected, non-spending worker seams", async () => {
   const origin = gitRepo({ bare: true, kind: "inbox-bakeoff-origin" });

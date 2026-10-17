@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { runTaskBody, type RunTaskContext } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 const offlineGithub: GitHub = {
   prByRef: () => null,

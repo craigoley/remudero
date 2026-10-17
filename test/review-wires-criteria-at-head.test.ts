@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { reviewCommand } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2462: reviewCommand actually CALLS resolvePlanCriteriaAtHead ────────────────────────────
 //
@@ -23,7 +23,7 @@ import type { Config } from "../src/lib/config.js";
 // This file proves the SWAP at reviewCommand's own call site, against all six of the task's
 // acceptance claims (see plan/tasks.d/W1-T2462-*.yaml).
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const RUN_TASK_TS = join(REPO_ROOT, "src", "run-task.ts");
 
 /** A minimal well-formed task entry — mirrors

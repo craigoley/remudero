@@ -12,8 +12,9 @@ import { join } from "node:path";
 import { createServeDrain, EXIT_WATCHDOG_SCRIPT, exitWithin } from "../src/lib/serve-drain.js";
 import { createService, type SseRoute, type SseSend } from "../src/lib/service.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const TOKENS = { read: "read-token", write: "write-token" };
 
 async function listening(server: Server): Promise<number> {

@@ -30,8 +30,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   FIXTURE_COPY_CENSUS_FILENAME,
@@ -40,8 +39,9 @@ import {
   fixtureCopyViolations,
   // @ts-ignore the executable .mjs module has no declaration file.
 } from "../scripts/fixture-copy-census.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const BASELINE_PATH = join(REPO_ROOT, "scripts", "fixture-copy-baseline.json");
 
 /** The counter and its signatures live in scripts/fixture-copy-census.mjs, so hooks/pre-push can

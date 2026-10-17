@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1206: "the by-name exclusion list that was supposed to keep effect-reaching suites out of
 // that sweep subtracts nothing from its actual candidate population" (RECON
@@ -51,7 +52,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // is active). The last test below exercises that directly.
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const TEST_DIR = join(REPO_ROOT, "test");
 
 // `scripts/**` sits outside tsconfig's `include` (see tsconfig.json), so a static

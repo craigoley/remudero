@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { frontierPeerWorkerRow, loadMounts, MountsError, mountsPath } from "../src/lib/mounts.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // Operator ruling 2026-09-22: "Sol and Opus are okay to use whenever Luna or Sonnet can't do the
 // work, but I would prefer that we try Luna and Sonnet for most tasks." The routes stay on the
 // Sonnet/Luna tier; the step_up row is the one place a worker attempt reaches Opus or Sol.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 test("every worker route stays at or below the sonnet ceiling while step_up rides opus", () => {
   const table = loadMounts(mountsPath(REPO_ROOT));

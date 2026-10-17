@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T143 (DAEMON OBSERVABILITY). Two independent things were broken: (1) the daemon's
 // operator narration went through console.log/console.error, whose writes to a non-TTY fd
@@ -19,7 +20,7 @@ import type { Config } from "../src/lib/config.js";
 // already durable but undocumented folklore. These tests prove both fixes.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const WRITE_THEN_HOLD = join(__dirname, "fixtures", "daemon-observability", "write-then-hold.ts");
 
 function tmpDir(prefix: string): string {

@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   parseRuleHeadlines,
   renderHeadlineOnlyIndex,
   resolveDoctrineForReader,
 } from "../src/lib/learnings.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CLAUDE_MD = join(REPO_ROOT, "CLAUDE.md");
 const BASELINE = join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json");
 

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { GATED_RUNGS, loadDefaultPolicy, loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
@@ -26,8 +25,9 @@ import {
 import type { Config } from "../src/lib/config.js";
 import type { CloneReapSummary } from "../src/lib/clone-reaper.js";
 import type { WorktreeReapSummary } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /**
  * test/ratification-pin.test.ts — W1-T2694, LAW 5's SIGNATURE.

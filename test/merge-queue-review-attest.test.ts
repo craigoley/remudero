@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { withTempDir } from "../src/lib/tmp.js";
 // @ts-expect-error — plain .mjs script with no type declarations
 import { attest, groupPullNumbers, main, prFromQueueRef, prFromSquashSubject } from "../scripts/merge-queue-review-attest.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // The merge queue evaluates branch protection's required `remudero-review` context on its own group
 // commit, which the orchestrator never reviews. merge-queue-review-attest.yml reports it there, and
@@ -14,7 +14,7 @@ import { attest, groupPullNumbers, main, prFromQueueRef, prFromSquashSubject } f
 // The workflow is a REVIEW BYPASS if it ever runs (or is skipped) on a PR head, so its triggers are
 // pinned here against the real file on disk.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOWS = join(REPO_ROOT, ".github", "workflows");
 const ATTEST_FILE = "merge-queue-review-attest.yml";
 

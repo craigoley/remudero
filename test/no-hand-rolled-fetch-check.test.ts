@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W3-T1c: no-hand-rolled-fetch grep gate (MASTER-PLAN §7A) ────────────────────────────────
 //
@@ -18,7 +19,7 @@ import { test } from "node:test";
 // subprocess (this script is a plain .mjs file outside tsconfig's `include`).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "no-hand-rolled-fetch-check.mjs");
 
 function run(...args: string[]) {

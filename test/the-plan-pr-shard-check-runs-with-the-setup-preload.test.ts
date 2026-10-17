@@ -4,12 +4,12 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { getPriority } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { planPrPreflight, planPrPreflightAsync } from "../src/lib/plan-pr-emitter.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 const SETUP_URL = new URL("./setup/tmp-hygiene.ts", import.meta.url).href;
 const PROOF_NAME = "test/the-plan-pr-shard-check-runs-with-the-setup-preload.test.ts";
 

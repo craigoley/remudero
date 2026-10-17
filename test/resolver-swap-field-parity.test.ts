@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { judgeReview, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
 import { openTaskIdsFromPlan } from "../src/run-task.js";
 import type { Plan } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2623 — THE AT-HEAD RESOLVER SWAP WAS NOT FIELD-FOR-FIELD ────────────────────────────────
 //
@@ -21,7 +21,7 @@ import type { Plan } from "../src/lib/plan.js";
 // of — a field silently dropped at the call site must make it fail, not merely a future reader's
 // close reading of two interfaces.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /**
  * Pull the FIELD NAMES `resolvePlanCriteriaForReview`'s declared inline return type carries,

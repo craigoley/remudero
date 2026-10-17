@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── The instrument that found (and cleared) the fixture-time-bomb population, guarded so it cannot
 // silently stop working. `main` went red at exactly 12:00:00Z on a hardcoded fixture date; the probe
@@ -12,7 +12,7 @@ import { test } from "node:test";
 // re-implemented copy would prove nothing about the file `--import` actually loads — and the whole
 // value of this instrument is that its two controls are trustworthy.
 
-const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO = findRepoRoot();
 const PRELOAD = join(REPO, "scripts", "clock-shift.mjs");
 
 /** Evaluate `expr` in a fresh node process with the preload active at `days`. */

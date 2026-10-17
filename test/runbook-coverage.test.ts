@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { checkRunbookCoverage, isRunbookFullyCovered, REQUIRED_PROCEDURES } from "../src/lib/runbook-coverage.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T217: runbook coverage (RECON R-25 / the runbook half of R-30) ───────────────────────
 //
@@ -14,7 +15,7 @@ import { checkRunbookCoverage, isRunbookFullyCovered, REQUIRED_PROCEDURES } from
 // that the real docs/operator-guide.md currently satisfies it for every required procedure.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 test("checkRunbookCoverage: a fixture with every required heading + a real paragraph under each is fully covered", () => {
   const body =

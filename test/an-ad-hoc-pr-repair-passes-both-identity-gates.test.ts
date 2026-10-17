@@ -3,10 +3,11 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = fileURLToPath(new URL("..", import.meta.url));
+const root = findRepoRoot();
 const workerScript = join(root, "scripts", "worker-branch-shape.mjs");
 const worker = await import(pathToFileURL(workerScript).href) as {
   inspectDeclaredTaskIds: (path: string) => { ids: string[]; complete: boolean };

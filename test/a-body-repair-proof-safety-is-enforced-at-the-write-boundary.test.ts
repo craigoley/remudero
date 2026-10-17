@@ -19,8 +19,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { execGrepProofInWorktree, runFixRung } from "./helpers/run-task-test.js";
@@ -30,6 +29,7 @@ import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── Fixtures — byte-identical in shape to test/acceptance-gate-body-repair.test.ts's own ───────
 
@@ -147,7 +147,7 @@ function fakeIssueStore(): IssueGateway & { calls: Array<{ title: string; body: 
 
 const AUTHOR_GATE_CI_FAILURE: CiFailure = { name: "acceptance-author-gate", logTail: "REFUSED (empty-proofs)" };
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 test("W1-T3506 criterion 1: a repaired acceptance body with an authored malformed grep proof is refused before updatePrBody, and the prior body remains unchanged", async () => {
   const noReviewYet = fakeReview("failure", [], "original-head-sha");

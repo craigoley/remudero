@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── The budget ratchet names its compression candidates (W1-T419 design iii) ────────────────────
 //
@@ -33,7 +34,7 @@ import { dirname, join } from "node:path";
 // A dynamic specifier is not statically resolved, so this loads the REAL module with no shadow
 // copy to drift from it.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "learnings-budget-ratchet.mjs");
 const FIXTURES = join(__dirname, "fixtures", "learnings-citation-loop");
 

@@ -4,12 +4,12 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import type { Config } from "../src/lib/config.js";
 import { validateConfig } from "../src/lib/config.js";
 import { openWeightCommittedUsd, openWeightReservationUsd, reserveOpenWeightBudget, type OpenWeightAllowanceState } from "../src/lib/worker-provider.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = fileURLToPath(new URL("..", import.meta.url));
+const REPO = findRepoRoot();
 const ISO = "2026-09-27T12:00:00.000Z";
 
 function config(root: string, shared: string, cap = 25): Config {

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { censusMembershipCommand } from "../src/run-task.js";
 import {
@@ -14,6 +13,7 @@ import {
 } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { discoverSourceTextReaders, type SourceTextReader } from "../src/lib/source-text-readers.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function captured(fn: () => number): { code: number; out: string } {
   const lines: string[] = [];
@@ -137,7 +137,7 @@ test("W1-T3238: candidates are a separate section and the named set is byte-iden
 // suite the verb never named: one walks test/*.test.ts through `git grep`, one reads src/run-task.ts
 // through a single readFileSync. Neither spells a directory-walk idiom the recognizer admits.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 let treeReaders: SourceTextReader[] | undefined;
 const realReaders = () => (treeReaders ??= discoverSourceTextReaders(REPO_ROOT));
 

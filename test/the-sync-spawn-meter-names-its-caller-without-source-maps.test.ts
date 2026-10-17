@@ -9,12 +9,13 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
 import { hostWorktreeGit } from "../src/lib/worktree-git.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const READ_PLANE = pathToFileURL(join(REPO_ROOT, "src", "lib", "read-plane.ts")).href;
 const THIS_FILE = /the-sync-spawn-meter-names-its-caller-without-source-maps\.test\.ts/;
 

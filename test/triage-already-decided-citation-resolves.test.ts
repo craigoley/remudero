@@ -12,6 +12,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4936: a well-formed ALREADY_DECIDED verdict used to close the feedback as `rejected` without
 // anyone asking whether the task id, path or PR it cites exists. The resolver below checks the
@@ -19,7 +20,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 // already opens, so the entry parks with a human instead of being silently dropped.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t",

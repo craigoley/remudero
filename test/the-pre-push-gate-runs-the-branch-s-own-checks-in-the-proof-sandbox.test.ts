@@ -3,15 +3,16 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import * as push from "../src/lib/git-push.js";
 import { probeProofSandbox, ProofSandboxUnavailableError } from "../src/lib/review.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { worktreeAdd } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repo = fileURLToPath(new URL("../", import.meta.url));
+const repo = findRepoRoot();
 const credentials = { GH_TOKEN: "fixture-token", GH_APP_ID: "123", GH_APP_PRIVATE_KEY_PATH: "/fixture/key", NODE_OPTIONS: "--require /fixture/evil" };
 const credentialKeys = (env: Record<string, unknown>) => Object.keys(env).filter((k) => /^(GH_|GITHUB_)|TOKEN|PRIVATE_KEY/.test(k));
 

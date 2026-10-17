@@ -5,7 +5,6 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, uti
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { createLedgerRotationMemo, ledgerRotationEntries } from "../src/lib/ledger-union.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
@@ -13,6 +12,7 @@ import { buildActionResultsRoute } from "../src/lib/action-results.js";
 import { readReportedAnomalies } from "../src/lib/cost-anomaly.js";
 import { createFollowUpHistoryReader } from "../src/lib/follow-up-policy.js";
 import { createLatestMeasurementReader } from "../src/lib/measurement-cadence.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const reduce = (rows: Array<Record<string, unknown>>) => rows.filter((row) => row.keep);
 const noParse = () => { throw new Error("loaded rotations must not be parsed inline"); };
@@ -173,7 +173,7 @@ test("all four async holders reuse their versioned digests in a new process", as
       await buildActionResultsRoute(dir + "/ledger.ndjson").handler({ url: "/v1/action-results" },
         { writeHead() {}, end() {} }, {});
       console.log(JSON.stringify({ archiveReads, anomalies: [...anomalies.costAnomaly], follows, measurements, retention }));
-    `, fx.dir], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8" });
+    `, fx.dir], { cwd: findRepoRoot(), encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr);
     const output = JSON.parse(child.stdout.trim());
     assert.equal(output.archiveReads, 0);

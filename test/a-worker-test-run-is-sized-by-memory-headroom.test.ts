@@ -10,15 +10,15 @@ import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 import { admitTestFile, isTestRunnerArgv, type TestFileAdmissionOptions } from "../src/lib/test-file-admission.js";
 import { boundedTestArgv, explicitTestConcurrency, NPM_TEST_SLOT_LABEL, runBoundedTest, type BoundedTestRunOptions } from "../src/lib/test-run.js";
 import { acquireTestSlot, memoryTestConcurrency, TEST_FILE_PEAK_BYTES, type TestSlotLease } from "../src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const MiB = 1024 ** 2;
 const GiB = 1024 ** 3;
 const SUITE = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "test/**/*.test.ts"];

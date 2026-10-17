@@ -20,9 +20,9 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import test from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function functionBody(src: string, name: string): string {
   const start = src.indexOf("function " + name + "(");
@@ -39,7 +39,7 @@ test("W1-T3067: every DESTRUCTIVE credit consumer supplies mergedPathsByPr", () 
   // one and not the other is the failure this pins: the refusal fixed in one surface, open in the
   // other. Structural because these builders construct DeriveDeps inline — nothing but the source
   // says whether the evidence reaches them.
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = findRepoRoot();
   const src = readFileSync(join(root, "src", "run-task.ts"), "utf8");
   for (const fn of ["buildCreditCandidates", "buildEscalationReconcileCandidates"]) {
     const body = functionBody(src, fn);
@@ -54,7 +54,7 @@ test("W1-T3067: the DISPLAY consumers are deliberately NOT wired, and that is a 
   // them closes anything, and the board renders per request while readMergedPathsByPr scans
   // thousands of commits. Recorded as a test so the asymmetry is a decision on the record rather
   // than an oversight a later reader "fixes" into a per-render repo scan.
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = findRepoRoot();
   const board = readFileSync(join(root, "src", "lib", "status-board.ts"), "utf8");
   assert.match(board, /DeriveDeps = \{/, "the board does derive status");
   assert.doesNotMatch(board, /mergedPathsByPr/,

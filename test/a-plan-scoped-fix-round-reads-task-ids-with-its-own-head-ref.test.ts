@@ -12,7 +12,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import * as runner from "../src/run-task.js";
 import {
   planPrPreflightAtCommit,
@@ -23,8 +22,9 @@ import {
 import type { OpenPrView } from "../src/lib/sweep.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HEAD_REF = "run-W1-T90002-1791000000000";
 const HEAD = "a".repeat(40);
 const NEXT = "b".repeat(40);

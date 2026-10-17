@@ -24,15 +24,15 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { planNightlyRun, readsMutatedModuleSource } from "../scripts/mutation-ratchet.mjs";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { buildBody, MAX_BODY } from "../scripts/needs-human-issue.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const alwaysFast = () => ({ ms: 1, ok: true, timedOut: false });
 
 // ── the discriminator ─────────────────────────────────────────────────────────────────────────

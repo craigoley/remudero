@@ -7,8 +7,9 @@ import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { reviewCommand, resolveReviewTaskId, runReview } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const HEAD_SHA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 const RUN_BRANCH = "run-W1-T2846-1788560597630";
 const PR_URL = "https://github.com/acme/remudero/pull/42";

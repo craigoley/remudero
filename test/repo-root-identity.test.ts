@@ -25,8 +25,9 @@ import { fileURLToPath } from "node:url";
 import { lintPlanCommand, resolveRepoRoot, stripRepoRootFlag } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { formatReadIdentity, isPathOutsideRoot } from "../src/lib/task-linter.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 
 function sha256_12(raw: string): string {
   return createHash("sha256").update(raw, "utf8").digest("hex").slice(0, 12);

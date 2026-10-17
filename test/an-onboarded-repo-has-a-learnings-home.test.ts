@@ -27,13 +27,14 @@ import {
   type SynthesizeGhGateway,
   type SynthesizeGitGateway,
 } from "../src/lib/onboard/synthesize.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // This repo's own committed learnings/ home — the ground truth "same shard split" claims are
 // checked against, and the real generator CLI these tests shell out to, mirroring
 // test/learnings-index.test.ts's own convention for exercising scripts/generate-learnings-index.mjs
 // (a plain .mjs outside tsconfig's `include`) only via its CLI surface.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GENERATE_INDEX_SCRIPT = join(REPO_ROOT, "scripts", "generate-learnings-index.mjs");
 
 function tmpRoot(prefix: string): string {

@@ -10,9 +10,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 // @ts-expect-error — plain .mjs, no declaration file. A namespace import, so a tree without the
@@ -20,8 +19,9 @@ import { parse as parseYaml } from "yaml";
 import * as tierManifest from "../scripts/test-tier-manifest.mjs";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YAML = readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8");
 type Step = { name?: string; id?: string; run?: string; env?: Record<string, string> };
 const jobs = (parseYaml(CI_YAML) as { jobs: Record<string, { steps: Step[] }> }).jobs;

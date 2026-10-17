@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { checkCliFreshness, testRunnerOnItsOwnCheckout } from "../src/lib/self-sync.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // 2026-10-09: on a Mac, a local run of test/cli-verbs-mint-the-app-token.test.ts drove the real
 // main(), whose CLI freshness check fetched origin, fast-forwarded the checkout under test (twice in
@@ -11,7 +11,7 @@ import { makeTempDir } from "../src/lib/tmp.js";
 // setup refuses. The suite then failed with "generated asynchronous activity after the test ended".
 // CI never reached that path only because its CI=true guard fires first.
 
-const OWN_CHECKOUT = fileURLToPath(new URL("..", import.meta.url));
+const OWN_CHECKOUT = findRepoRoot();
 
 test("under the test runner, the CLI freshness check on its own checkout is guarded: no fetch, no fast-forward, no re-exec", () => {
   let reexecs = 0;

@@ -5,7 +5,6 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import {
   nextRunnable,
@@ -26,6 +25,7 @@ import { DECISION_RELEVANT_LEDGER_STEPS } from "../src/lib/ledger.js";
 import type { Config } from "../src/lib/config.js";
 import { drainCommand, daemonCommand, escalateLifetimeCapExceeded } from "../src/run-task.js";
 import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T271 — THE LOOP THAT SUCCEEDS: dispatchesWithoutNewOwnedPr (the existing streak
 // breaker) resets to 0 on every pr.opened line, so a task that re-dispatches forever
@@ -497,7 +497,7 @@ test("W1-T951: runnableCandidates carries the SAME onSinglePathCredit observatio
 // at that -- the exact shape test/ledger-rotation.test.ts's own W1-T964 check uses (fixed by
 // #2881), reproduced here rather than re-derived.
 test("W1-T951: removing the durable credit lookup fails the positive test", () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const statusTsRelPath = join("src", "lib", "status.ts");
   const statusTsPath = join(repoRoot, statusTsRelPath);
   const targetTestFile = "test/open-pr-corroboration.test.ts";

@@ -26,16 +26,17 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { stringify as stringifyYaml } from "yaml";
 
 import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HYGIENE_HREF = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
 const GH_FIRST_HREF = pathToFileURL(join(REPO_ROOT, "test", "helpers", "gh-first-on-path.ts")).href;
 

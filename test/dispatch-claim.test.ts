@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   decideDispatchClaim,
@@ -25,6 +24,7 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── WHAT THIS FILE PROVES (W1-T1268) ─────────────────────────────────────────────────────────
 // `isDispatchEligible`'s ten probes (src/lib/drain.ts) all read a PUBLISHED artifact — an open
@@ -36,7 +36,7 @@ import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/work
 // spawn). Every DECISION is pure and asserted without a git remote; the one I/O seam is asserted
 // against a real local bare repo. It mirrors auto-triage.ts's triage claim structurally.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const RUN_TASK_SRC = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 

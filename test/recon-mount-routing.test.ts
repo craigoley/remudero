@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RECON_MAX_TURNS, resolveRunMounts } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── THE DEFECT ────────────────────────────────────────────────────────────────────────
 // The RECON spawn passed neither `model` nor `effort`. Both are optional on SpawnWorkerArgs
@@ -20,7 +21,7 @@ import { RECON_MAX_TURNS, resolveRunMounts } from "../src/run-task.js";
 // configured and has no reader.
 
 const SRC = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-const REPO_ROOT = new URL("..", import.meta.url).pathname;
+const REPO_ROOT = findRepoRoot();
 
 /**
  * A mounts.yaml fixture. The HEADER (tiers/efforts/architect/judge) is taken verbatim from the

@@ -18,10 +18,11 @@ import type { MountHeadroomCell } from "../src/lib/mount-recommender.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildRegisteredGarden, type GardenBuildContext } from "../src/run-task.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const execFileAsync = promisify(execFile);
 const NOW = Date.parse("2026-10-01T12:00:00.000Z");
-const REPO = resolve(import.meta.dirname, "..");
+const REPO = findRepoRoot();
 const SCRIPT = join(REPO, "scripts", "mount-headroom-sweep.mjs");
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

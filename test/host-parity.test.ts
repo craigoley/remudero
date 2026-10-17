@@ -17,8 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   HOST_PARITY_BASELINE,
   diffHostParity,
@@ -36,8 +35,9 @@ import {
   runHostParityCli,
   shouldCaptureCli,
 } from "../scripts/host-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** A TAP stream the way `node --test` really writes one — `not ok`, the YAML block carrying
  *  `location:`, and the trailing summary that makes it a RESULT rather than a fragment. */

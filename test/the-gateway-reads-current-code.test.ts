@@ -33,8 +33,9 @@ import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import type { Plan } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const ENTRYPOINT = join(REPO_ROOT, "deploy", "entrypoint.sh");
 const CLOCK = fixedClock(Date.parse("2026-09-23T12:00:00Z"));
 const READ_TOKEN = "gateway-checkout-read";

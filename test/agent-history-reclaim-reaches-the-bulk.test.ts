@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T3676 — the agent-history reclaim (W1-T3626, section 4b of deploy/host-update.sh) could not
@@ -29,7 +29,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  * bytes this task exists for are free pages INSIDE a live database, and only a real database has any.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
 
 /** Minimal `docker` stub for `--reclaim-only`: `good` has no container up, `live` has one fleet container. */

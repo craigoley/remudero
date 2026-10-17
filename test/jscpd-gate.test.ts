@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T97: jscpd duplication gate (MASTER-PLAN §5 TIER 2, quality gate 3/4) ──
 //
@@ -26,7 +27,7 @@ import { dirname, join } from "node:path";
 // only via subprocess, never imported.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const JSCPD_BIN = join(REPO_ROOT, "node_modules", "jscpd", "run-jscpd.js");
 const FIXTURES = join(__dirname, "fixtures", "jscpd");
 

@@ -23,7 +23,6 @@ import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // Namespace imports, not named ones: this file must LOAD on the base tree (where these exports do
@@ -32,8 +31,9 @@ import * as noLiveRemote from "./setup/no-live-remote.js";
 import * as tmpHygiene from "./setup/tmp-hygiene.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const { GH_CONFIG_DIR_PREFIX, pidIsAlive, reapDeadOwnerDirs } = noLiveRemote;
 const { GH_REFUSE_DIR_PREFIX } = tmpHygiene;
 

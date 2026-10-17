@@ -18,10 +18,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const mod = (await import(pathToFileURL(join(REPO_ROOT, "scripts/lib/inherited-violation.mjs")).href)) as {
   contentAtRef: (run: unknown, ref: string, path: string) => { kind: string; text?: string; why?: string };
   splitInheritedViolations: (v: unknown[], o: Record<string, unknown>) => {

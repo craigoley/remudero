@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T5368 — ci.yml's `commitlint` check run is the AND of two UNRELATED steps: the PR-title lint and
 // the `rule-checks` step (the tree-derived census and ratchet suites, W1-T4433). W1-T3720 titles a
@@ -17,7 +17,7 @@ import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 // These tests EXECUTE the real workflow steps (the rule-checks step and the reporting step) under
 // bash with stubbed `node`/`gh`, so a later edit to either is what they check.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 type Step = { id?: string; env?: Record<string, string>; run?: string };
 
 function commitlintSteps(): Step[] {

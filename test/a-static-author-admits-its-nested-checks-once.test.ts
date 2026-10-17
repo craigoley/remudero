@@ -4,10 +4,10 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { acquireTestSlot, resolveTestSlotDir, testSlotHasAncestor, testSlotProcessFacts, TEST_SLOT_PARENT_ENV } from "../src/lib/test-slot.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const probe = `
   import { acquireTestSlot } from './src/lib/test-slot.ts';
   const logs=[];

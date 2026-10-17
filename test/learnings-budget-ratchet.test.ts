@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T38: KNOWLEDGE BUDGET AS A CI RATCHET (MASTER-PLAN §8A) ──────────────────────────────────
 //
@@ -19,7 +20,7 @@ import { dirname, join } from "node:path";
 // test/learnings-assert-check.test.ts's convention for their sibling scripts.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "learnings-budget-ratchet.mjs");
 const FIXTURES = join(__dirname, "fixtures", "learnings-budget-ratchet");
 

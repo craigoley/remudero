@@ -3,7 +3,6 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import { canonicalWorkerProviderId, ConfigValidationError, enabledWorkerProviders, validateConfig, type Config } from "../src/lib/config.js";
@@ -49,8 +48,9 @@ import { buildVerifyHumanJudgeSpawnArgs, VERIFY_HUMAN_JUDGE_TOOLS } from "../src
 import { fixedClock } from "../src/lib/clock.js";
 import { buildInboxDraftSpawnArgs, draftProposalBatch } from "../src/run-task.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const SETTINGS_FILE = join(REPO_ROOT, "settings", "worker.json");
 
 function validMounts() {

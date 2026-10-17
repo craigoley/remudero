@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 import { buildProjectInit } from "../src/lib/project-init.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3725 — A PLAN-ONLY FILING PAID 3.8 MINUTES OF CodeQL ON A DIFF WITH NO CODE ──────────
 //
@@ -23,7 +23,7 @@ import { buildProjectInit } from "../src/lib/project-init.js";
 //
 // WHAT IS REAL HERE: the committed workflow file, parsed. No fixture stands in for it.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const FIXED_NOW = () => new Date("2026-07-18T12:00:00.000Z");
 const REAL_BASELINES = { coveragePct: 73.4, branchesPct: 68.9, mutationScorePct: 61.2, dupPct: 4.2 };
 const codeql = parse(readFileSync(join(ROOT, ".github", "workflows", "codeql.yml"), "utf8")) as {

@@ -3,14 +3,14 @@ import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_IDLE_STARVED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
 import { IDLE_STARVED_PULSE_MS, IDLE_STARVED_PULSE_STEP } from "../src/lib/poll-interval.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "entrypoint.sh");
 
 /**

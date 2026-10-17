@@ -3,7 +3,6 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import {
   applyGhReadCadence, applyGhReadCadenceAsync, ghReadCadenceStampPath, GhReadCadenceRefusal,
@@ -12,6 +11,7 @@ import {
 } from "../src/lib/github-transport.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function fixture(t: TestContext, cooldown?: string, elapsedMs = 120_000) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-next-id-floor-"));
@@ -220,7 +220,7 @@ test("W1-T7957: writes and budget probes neither wait nor earn a read burst", as
   }
 });
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const ROOT = findRepoRoot();
 const WINDOW_S = 180;
 const STAMP_AGE_S = 120;
 

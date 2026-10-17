@@ -31,15 +31,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { selectorShadowReport } from "../src/lib/selector-shadow-gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { COVERAGE_CLASSES, classifyCoverage } from "../scripts/diff-class.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 type Step = { name?: string; id?: string; if?: string; uses?: string; run?: string };
 type Job = { steps: Step[] };
 const jobs = (parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as { jobs: Record<string, Job> }).jobs;

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   citeRetrosInWindow,
@@ -27,13 +26,14 @@ import { daemonCommand, buildDigestCadenceDaemonHooks } from "../src/run-task.js
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { NotifyChannel } from "../src/lib/notify.js";
 import type { Config } from "../src/lib/config.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2277: the digest (lib/digest.ts) shipped built and had a CLI verb, but nothing ever
 // fired it on a cadence, its window had no configurable interval, and its one delivery adapter
 // (iMessage) cannot run on this (Linux) fleet. This file proves the eight acceptance criteria on
 // W1-T2277's own shard, in order.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = new Date("2026-08-25T12:00:00.000Z");
 
 function tmp(prefix: string): string {

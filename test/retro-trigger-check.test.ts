@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { retroTriggerCheck, buildRetroDaemonHooks, recordRetroAttempt, recentRetroAttempt, RETRO_ATTEMPT_RETRY_MS } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { saveMarker, type RetroTriggerDecision, type ShippedGithub } from "../src/lib/retro.js";
 import { loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T160: retroTriggerCheck — the IMPURE wiring behind evaluateRetroTrigger ────
 //
@@ -46,7 +46,7 @@ function fixtureRoot(): { config: Config; markerPath: string } {
 // field stays schema-valid) with just the `retro` row overridden — the minimal fixture a
 // test needs to prove the injected value, not retro.ts's literal, governs the decision.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED_POLICY: Policy = loadPolicy(policyPath(REPO_ROOT));
 
 function policyFixture(retro: { mergesThreshold: number; daysThreshold: number }): Policy {

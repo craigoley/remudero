@@ -5,15 +5,15 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { createRequire } from "node:module";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { runChildMain } from "../src/run-child-main.js";
 import { startInstallationTokenRefresh } from "../src/lib/github-app.js";
 import { RUN_CHILD_SCHEMA, readStatus, writeSpec } from "../src/lib/run-child-contract.js";
 import {
   runChildCredentialSocket, startRunChildGitCredentialSocket, startDaemonGitCredentialSocket,
 } from "../src/lib/secret-boundary.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "rmd-child-creds-"));
@@ -171,7 +171,7 @@ test("unconfigured children retain ambient credentials and start no socket", asy
 
 test("the real bundled child starts its socket thread and cleans up before exiting", { timeout: 120_000 }, async () => {
   const { dir } = fixture();
-  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = findRepoRoot();
   const engine = join(dir, "engine");
   mkdirSync(engine);
   cpSync(join(repo, "src"), join(engine, "src"), { recursive: true });

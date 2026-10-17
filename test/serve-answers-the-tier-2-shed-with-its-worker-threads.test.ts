@@ -20,8 +20,9 @@ import { workerThreads } from "../src/lib/worker-heaps.js";
 import { serveCommand } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const BOARD_BRANCH_LISTS = { listMergedHeadBranches: () => [], listOpenHeadBranches: () => [], findMergedByHeadBranch: () => [] };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const gatewayShim = ghShim([{ when: "api ", stdout: "[]" }], { kind: "tier-2-shed-gh" });

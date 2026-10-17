@@ -28,7 +28,6 @@ import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   acceptanceAuthorTimeCheck,
@@ -49,6 +48,7 @@ import type { AlertLaneAlert } from "../src/lib/alert-lane.js";
 import type { Config } from "../src/lib/config.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const WRAPPED = `## Acceptance
 
@@ -583,7 +583,7 @@ test("W1-T952: a well-formed body is accepted in the same run", async () => {
 // stronger than "restored", since there is no window in which it ever changed.
 
 test("W1-T952: removing the diagnostics call fails the refusal test", () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const runTaskTsPath = join(repoRoot, "src", "lib", "alert-fix-body.ts");
   const targetTestFile = "test/acceptance-block-diagnostics.test.ts";
   const positiveTestName = "W1-T952: a body with no acceptance header is refused at author time";

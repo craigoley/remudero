@@ -13,7 +13,6 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { DEFAULT_INSTANCE_STATE_BASE, instancePath, probeInstanceState, type InstanceGatewayOptions } from "../src/lib/instance-gateway.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
@@ -21,8 +20,9 @@ import { loadPlan } from "../src/lib/plan.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { createGardenerRuntimeWriter } from "../src/lib/gardener-runtime.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const READ = "one-gateway-read-token";
 const WRITE = "one-gateway-write-token";
 const CAPABILITY = "example.com/cap/remudero-w1t4228";

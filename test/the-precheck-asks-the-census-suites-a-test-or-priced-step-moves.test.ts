@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { listRuleSuites } from "../src/lib/ci-parity.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const PRICED = "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts";
 const HOST = "test/host-capability-fixtures.test.ts";
@@ -114,7 +114,7 @@ test("the two triggered censuses have executable scripts, parity entries and CI 
     assert.equal(member.script, script);
     assert.deepEqual(precheck.PRECHECK_PARITY[testFile], { run: script });
     assert.equal(scripts[script], `node --test --import tsx --import ./test/setup/tmp-hygiene.ts ${testFile}`);
-    assert.ok(precheck.ciCensusPopulation(listRuleSuites(fileURLToPath(new URL("..", import.meta.url)))).includes(testFile));
+    assert.ok(precheck.ciCensusPopulation(listRuleSuites(findRepoRoot())).includes(testFile));
     assert.ok(!ciOnly.includes(testFile));
   }
 });

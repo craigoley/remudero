@@ -4,9 +4,9 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const ROOT = findRepoRoot();
 const SUITE = "test/a-check-proof-child-runs-the-precompiled-entry-when-current.test.ts";
 
 // fb-1791916356285-50ef47: drive the existing real bundle-build/launch assertion under a deterministic path.

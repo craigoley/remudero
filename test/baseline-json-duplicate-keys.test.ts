@@ -27,12 +27,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // The repo's idiom for a plain-JS script under test: a dynamic import with an explicit cast, since
 // the .mjs files carry no declarations (test/comment-load-ratchet.test.ts does the same).
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const load = async (rel: string) => (await import(pathToFileURL(join(REPO_ROOT, rel)).href)) as Record<string, Function>;
 
 const { duplicateKeys } = await load("scripts/lib/json-duplicate-keys.mjs");

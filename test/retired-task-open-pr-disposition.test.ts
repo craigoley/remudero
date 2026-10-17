@@ -11,18 +11,18 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { buildOpenPrViews } from "../src/run-task.js";
 import { RETIREMENT_REASONS, type Plan, type RetirementReason, type Task } from "../src/lib/plan.js";
 import { auditProducerCompleteness } from "../src/lib/producer-completeness.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "../src/lib/sweep.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const NOW = Date.parse("2026-09-12T17:00:00.000Z");
 const PR_NUMBER = 5202;
 const TASK_ID = "W1-T3331";
-const REPO = fileURLToPath(new URL("..", import.meta.url));
+const REPO = findRepoRoot();
 
 function planWith(retirement: RetirementReason | undefined): Plan {
   const task: Task = {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3648: A GATE PRINTS A REMEDY ITS OWN MATCHER WOULD REJECT ────────────────────────────────
 //
@@ -27,7 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // other text trailing it on the same line.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 const HOLDER_BRANCH = "unknown";

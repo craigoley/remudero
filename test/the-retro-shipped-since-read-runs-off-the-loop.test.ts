@@ -3,7 +3,6 @@ import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
@@ -19,13 +18,14 @@ import * as runTask from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // After #9708 the daemon's retro trigger awaited its ledger read and its throttle probe, but
 // `shippedSince` (from `retroTriggerConclude`) still read through `buildBatchedGithub`'s index: a
 // synchronous `gh api` page walk, plus the commit-trailer `git` reads, on the daemon loop. These pin
 // the awaited gateway that replaces them.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED_POLICY: Policy = loadPolicy(policyPath(REPO_ROOT));
 const POLICY: Policy = { ...SHIPPED_POLICY, values: { ...SHIPPED_POLICY.values, retro: { mergesThreshold: 2, daysThreshold: 99_999 } } };
 const NOW = new Date("2026-10-06T12:00:00.000Z");

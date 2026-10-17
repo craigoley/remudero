@@ -10,12 +10,12 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 // @ts-expect-error — this executable .mjs intentionally has no declaration output; the seam this
 // suite consumes is typed immediately below rather than left as any.
 import * as probeModule from "../scripts/openweight-probe.mjs";
 import { OPENWEIGHT_OUTPUT_CONTRACT } from "../src/lib/worker-provider.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 let otherRepo: GitRepo | undefined;
 const otherWorkTree = (): string => (otherRepo ??= gitRepo({ kind: "openweight-probe-other" })).dir;
@@ -77,7 +77,7 @@ const probe = probeModule as {
   AZURE_NAME_RE: RegExp;
 };
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const FAKE_KEY = "rmd-fixture-fake-openweight-key-7f3a9c";
 const ENDPOINT = "https://probe-fixture.example.invalid/";
 const EXPECTED_URL =

@@ -7,8 +7,9 @@ import { BAKED_RUNTIME_SOURCE_PATHS } from "../src/lib/baked-runtime-inputs.js";
 import { BAKED_PATHS, checkImageDrift } from "../src/lib/image-drift.js";
 import { IMAGE_BAKED_PATHS } from "../src/lib/deploy-judge.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = findRepoRoot();
 
 function runtimeImports(source: string): string[] {
   const specs: string[] = [];

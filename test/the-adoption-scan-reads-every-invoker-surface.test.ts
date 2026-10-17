@@ -26,12 +26,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function repo(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}adoption-surfaces-`));

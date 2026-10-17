@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
 import { createService } from "../src/lib/service.js";
@@ -19,6 +18,7 @@ import { skillsDir } from "../src/lib/skill.js";
 import { lintTask } from "../src/lib/task-linter.js";
 import type { Task } from "../src/lib/plan.js";
 import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W3-T8 round 3: invoking Refine runs the plan --mode=clarify skill and shows the grill ──
 // inline (MASTER-PLAN §5B/§7) — the review gate's UNMET acceptance claim from rounds 1 and 2.
@@ -249,7 +249,7 @@ test("groundClarifyRequest: no registry / no plan.yaml -> an empty list, never a
 });
 
 test("groundClarifyRequest: against the SHIPPED .remudero/skills/plan.yaml + real MASTER-PLAN.md — W3-T8 really is grounded in its own §5B/§7 text", () => {
-  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const repoRoot = findRepoRoot();
   const task = { id: "W3-T8", title: "Panel skill actions" } as unknown as Task;
   const notes = groundClarifyRequest(repoRoot, task);
   const masterPlanNote = notes.find((n) => n.source === "MASTER-PLAN.md");
@@ -262,7 +262,7 @@ test("groundClarifyRequest: against the SHIPPED .remudero/skills/plan.yaml + rea
 // call site onto the wider signature. See plan/tasks.d/W1-T935-*.yaml for the full rationale.
 
 test("W1-T935: the correction cites the merged task instead of amending it", () => {
-  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const repoRoot = findRepoRoot();
   const shardDir = join(repoRoot, "plan", "tasks.d");
   const files = readdirSync(shardDir);
   const w933 = files.find((f) => f.startsWith("W1-T933-"));
@@ -318,7 +318,7 @@ test("W1-T935: an undeclared source stays unsearched", () => {
 });
 
 test("W1-T935: the existing caller uses the wider signature", () => {
-  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const repoRoot = findRepoRoot();
   const src = readFileSync(join(repoRoot, "src", "lib", "panel-skill-run.ts"), "utf8");
   // `groundClarifyRequest`'s one production call site (buildRunSkillRoute's handler, per this
   // module's own doc) must be refactored onto the wider (root, task, query, skillName) signature

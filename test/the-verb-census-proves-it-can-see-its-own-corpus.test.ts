@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { attributeVerbs, deriveCliVerbs, deriveStepPrefixes } from "../src/lib/emissions.js";
 import { assertVerbScanAgreesWithRegistry, COMMANDS, emissionsCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO = findRepoRoot();
 const RUN_TASK_SOURCE = readFileSync(join(REPO, "src", "run-task.ts"), "utf8");
 
 // The full source corpus emissionsCommand itself scans for ledger-step prefixes — `notify.sent`

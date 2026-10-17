@@ -8,16 +8,17 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import type { Worker, WorkerOptions } from "node:worker_threads";
 import { execArgvWithoutTsx, setWorkerEntryLog, startWorker } from "../src/lib/child-entry-argv.js";
 
 type StartWorkerOpts = NonNullable<Parameters<typeof startWorker>[2]>;
 import { spawnSite } from "../src/lib/worker-heaps.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "build-child-entries.mjs");
 const HELPER = join(REPO_ROOT, "src", "lib", "child-entry-argv.ts");
 const HEAPS = join(REPO_ROOT, "src", "lib", "worker-heaps.ts");

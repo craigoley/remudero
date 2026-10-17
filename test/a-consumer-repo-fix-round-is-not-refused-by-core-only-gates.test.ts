@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { gitRepo } from "./helpers/git-repo.js";
 import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const ROOT = findRepoRoot();
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const BASELINE = "scripts/affected-reach-baseline.json";
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";

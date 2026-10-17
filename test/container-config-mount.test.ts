@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const RECYCLE_SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 const HOST_UPDATE_SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
 const RUNTIME_ENV_FILE = join(REPO_ROOT, "deploy", "runtime-env-vars.sh");

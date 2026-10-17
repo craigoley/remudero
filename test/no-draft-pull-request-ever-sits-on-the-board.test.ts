@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 // @ts-expect-error — `scripts/**` sits outside tsconfig's `include`, so this executable .mjs has no
 // declaration output (TS7016). The seam is typed below, the idiom the acceptance-author-gate tests use.
 import * as census from "../scripts/no-draft-pull-request-census.mjs";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 type DraftHit = { path: string; line: number; pattern: string; text: string };
 const findDraftPullRequestCreators = census.findDraftPullRequestCreators as (
@@ -23,7 +23,7 @@ const DRAFT_CREATOR_PATTERNS = census.DRAFT_CREATOR_PATTERNS as unknown[];
 // W1-T4415 — operator ruling 2026-09-24: a draft PR holds work exactly like a stuck one. The plan
 // gardener opened #6912 as a draft; these prove every open draft is readied and no source opens one.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 test("the census refuses a source file that opens a draft pull request", () => {
   const files: Record<string, string> = {

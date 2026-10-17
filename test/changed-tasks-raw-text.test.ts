@@ -22,15 +22,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { rawChangedTaskIds, splitTaskRecordBlocks } from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
 import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function shard(id: string, design: string): string {
   return [`- id: ${id}`, `  title: "t ${id}"`, "  design: |", `    ${design}`, "  status: queued", ""].join("\n");

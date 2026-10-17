@@ -8,16 +8,16 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { TYPECHECK_BUILDINFO_NAME } from "../src/lib/typecheck-buildinfo.js";
 import { acquireTestSlot } from "../src/lib/test-slot.js";
 import { dirIsWritable, NPM_TYPECHECK_SLOT_LABEL, prepareTypecheckRun, runTypecheck, WORKTREE_BUILDINFO_NAME } from "../src/lib/typecheck-run.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "typecheck.mjs");
 const TSCONFIG = JSON.stringify({ compilerOptions: { types: [], noEmit: true, strict: true }, include: ["*.ts"] });
 

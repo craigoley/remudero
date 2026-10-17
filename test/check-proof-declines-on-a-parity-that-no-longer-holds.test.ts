@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2686 ───────────────────────────────────────────────────────────────────────────────────
 //
@@ -24,7 +24,7 @@ import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
 // two-commit git repos (never a re-implementation of the decision), and asserts the stale
 // "same scope"/"NOT COMPARABLE" story is gone for good.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Run `checkProofCommand` with stdout captured, from `cwd`. Restores both, always. */
 function runCheckProof(

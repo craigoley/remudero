@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { configPath } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -20,6 +19,7 @@ import {
   type PlanCoherenceShardListing,
 } from "../src/lib/retro.js";
 import { readPlanCoherenceInputs, retroCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T2642 — THE MONOLITH-VS-SHARD QUESTION, MEASURED. `loadPlan`'s merged view is coherent by
 // construction (duplicate ids and unresolved `depends_on` both throw `PlanError`), but the two
@@ -29,7 +29,7 @@ import { readPlanCoherenceInputs, retroCommand } from "../src/run-task.js";
 // hand-authored, never the live plan — the suite must not go red just because the plan changed.
 
 const MONOLITH_PATH = "plan/tasks.yaml";
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** A minimal well-formed task entry — the smallest shape `parseTasksFromYaml` accepts (mirrors
  *  test/main-plan-load-guard.test.ts's own `task` helper). */

@@ -3,8 +3,7 @@ import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { triageClaimReserverFor } from "../src/run-task.js";
 import {
   TRIAGE_CLAIM_AGE_ONLY_CEILING_MS,
@@ -19,6 +18,7 @@ import {
   type TriageClaimReserver,
   type TriageLivenessRow,
 } from "../src/lib/auto-triage.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4769 — a dead holder's triage claim stalled a 44-entry backlog because every pass re-selected
 // the same oldest entry and nothing could release a claim whose lane died before its `finally`.
@@ -242,7 +242,7 @@ test("W1-T4769 WIRING: the default ledger read, the unresolvable-repo arm and a 
   const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
   const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
   const { mkdirSync, writeFileSync } = await import("node:fs");
-  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = findRepoRoot();
   const candidates = newFeedbackIdsOldestFirst(repo);
   if (candidates.length < 1) return; // nothing `status: new` in this checkout: the sweep is never reached
   const shipped = loadPolicy(policyPath(repo));
@@ -301,7 +301,7 @@ test("W1-T4769 WIRING: autoTriageCheck skips a held head and releases a dead hol
   const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
   const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
   const { mkdirSync } = await import("node:fs");
-  const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repo = findRepoRoot();
   const candidates = newFeedbackIdsOldestFirst(repo);
   if (candidates.length < 2) return; // the checkout holds too few `status: new` entries to have a head to skip
   const shipped = loadPolicy(policyPath(repo));

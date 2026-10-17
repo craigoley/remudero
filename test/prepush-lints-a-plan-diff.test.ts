@@ -9,15 +9,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error -- test executes the untyped executable module directly.
 import { lintArgvFromPackage, lintPlanPrecheckVerdict, runLintPlanPrecheck } from "../scripts/lint-plan-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
 const LINT_SCRIPT = `node --import tsx ${join(REPO_ROOT, "scripts", "lint-plan-offline.mjs")} --base origin/main --merge-base`;
 

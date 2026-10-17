@@ -7,8 +7,9 @@ import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import test from "node:test";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS, routingAbCommand } from "../src/lib/routing-experiments.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = join(import.meta.dirname, "..");
+const root = findRepoRoot();
 const script = join(root, "scripts/private-routing-daily-review.mjs");
 const { dailyRoutingReview } = await import(pathToFileURL(script).href);
 const epoch = ROUTING_EXPERIMENTS.find((item) => item.id === "sol61-vs-sonnet55")!;

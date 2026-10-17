@@ -20,7 +20,6 @@
 //     for an identical "used to be a literal, now reads a table" proof.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { headroomPolicyFromCurve } from "../src/run-task.js";
@@ -31,8 +30,9 @@ import { DEFAULT_POLL_INTERVAL_MS, buildDefaultHeadroomPolicy, resolveHeadroomLi
 import { DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { DEFAULT_MAX } from "../src/lib/drain.js";
 import { generateLaunchdPlist } from "../src/lib/launchd.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED = loadPolicy(policyPath(REPO_ROOT));
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
 

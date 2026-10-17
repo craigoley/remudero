@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import test from "node:test";
 import { excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T137 (#842) shipped `hooks/commit-msg` and wired it into every worktree via
 // `core.hooksPath`, but `worktreeAdd` never supplied the `node_modules` that hook
@@ -13,7 +13,7 @@ import { excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesS
 // with "commitlint is not installed in this worktree". These tests pin BOTH halves:
 // the gate now passes a well-formed message, and STILL rejects a malformed one.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HAS_COMMITLINT = existsSync(join(REPO_ROOT, "node_modules", ".bin", "commitlint"));
 
 function tmp(prefix: string): string {

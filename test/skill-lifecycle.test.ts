@@ -23,9 +23,10 @@ import {
   skillLifecycleCommand,
   skillLifecyclePrBody,
 } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 function tmpDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
 }

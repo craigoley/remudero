@@ -9,7 +9,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import {
@@ -26,8 +25,9 @@ import {
   testManifestProposalPath,
 } from "../src/lib/test-gardener.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const probePromise = loadTestManifestProbe(REPO_ROOT);
 const MANIFEST = "scripts/test-tier-manifest.json";
 const DAY = DURATION_ADOPTION_CADENCE_MS;

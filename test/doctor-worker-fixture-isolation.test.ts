@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repo = findRepoRoot();
 const titles = [
   "doctor: the verb registration dispatches into the doctor module",
   "W1-T1109: a live run's lock is not reported as stale",

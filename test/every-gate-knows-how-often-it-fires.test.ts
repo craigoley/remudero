@@ -14,10 +14,11 @@ import { renderGateFireRates, summarizeGateFireRates, measureGateFireRates, gate
 import { renderDigest, summarize } from "../src/lib/digest.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildCiLearningCadenceRunner } from "../src/run-task.js";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const SCRIPT = join(fileURLToPath(new URL("..", import.meta.url)), "scripts", "unwired-gate-check.mjs");
+const SCRIPT = join(findRepoRoot(), "scripts", "unwired-gate-check.mjs");
 const { collectExecutingStrings, collectWiringText, isWired } = (await import(pathToFileURL(SCRIPT).href)) as {
   collectExecutingStrings: (doc: unknown) => string[];
   collectWiringText: (repoRoot: string) => string;

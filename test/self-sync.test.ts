@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   checkCliFreshness,
   checkServiceFreshness,
@@ -12,6 +11,7 @@ import {
   SELF_SYNC_GUARD_ENV,
   type GitRunner,
 } from "../src/lib/self-sync.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T79: CLI self-freshness at entry (the #138 incident shape — the runner correct on
 // main, but the OPERATOR'S invocation was a stale checkout that predated the merge). Real,
@@ -448,7 +448,7 @@ test("freshness guard: a CLEAN tree is unchanged — dirty=false, behind=null, b
 test("freshness guard: its git flags MATCH deploy/entrypoint.sh's, read from both sources", () => {
   // The pairing asserted against the REAL script rather than assumed. If either side changes its
   // flags, this fails and names the divergence instead of leaving a silent relaunch storm.
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const entrypoint = readFileSync(join(repoRoot, "deploy", "entrypoint.sh"), "utf8");
   assert.ok(
     entrypoint.includes('status --porcelain -uno'),

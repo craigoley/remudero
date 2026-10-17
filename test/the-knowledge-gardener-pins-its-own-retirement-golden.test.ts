@@ -13,15 +13,16 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { decideAutoMergeArm, judgeReview } from "../src/lib/review.js";
 import { fileDiff, knowledgeGardenSpec, KNOWLEDGE_RETIRE_GOLDEN, type GardenAction, type GardenWorkspace } from "../src/lib/knowledge-gardener.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const gate = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "prompt-surface-gate.mjs")).href)) as {
   evaluatePromptSurfaceGate: (opts: { root: string; base: string; head?: string }) => { ok: boolean; message: string; surfaces: string[]; evidence: string[] };
 };

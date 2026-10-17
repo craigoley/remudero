@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T409: PLAN-STATE SELF-CONSISTENCY gate (the offline half of W1-T392's split) ────────────
 //
@@ -47,7 +48,7 @@ import { dirname, join } from "node:path";
 // directly instead of manufacturing an unreachable CLI scenario.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "plan-state-claims.mjs");
 const FIXTURES = join(__dirname, "fixtures", "plan-state-claims");
 const FIXTURE_PLAN = join(FIXTURES, "tasks.yaml");

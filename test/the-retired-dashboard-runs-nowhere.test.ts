@@ -7,8 +7,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CI_PARITY_TABLE, parseCiJobNames } from "../src/lib/ci-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = findRepoRoot();
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
 const DASHBOARD_SCRIPTS = ["dashboard:ci", "build:console", "test:dashboard", "typecheck:dashboard"];
 

@@ -18,8 +18,9 @@ import { ProviderCapacityBlockedError, type ProviderCapacity } from "../src/lib/
 import { readProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
 import { createClaudeExecutableCache, spawnWorker, workerLedgerFields, type WorkerResult } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const STATUS_FIXTURE = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "anthropic-status-2026-09-03.json"), "utf8"));
 const NOW = Date.parse("2026-09-03T14:00:00.000Z");
 

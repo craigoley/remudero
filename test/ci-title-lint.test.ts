@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T351: commitlint must read the PR title LIVE, not the opened-event payload snapshot ──
 //
@@ -29,7 +30,7 @@ import { parse as parseYaml } from "yaml";
 // `commitlint` producer, so these pins read that workflow instead.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function loadCommitlintStep() {
   const workflowText = readFileSync(join(REPO_ROOT, ".github", "workflows", "pr-title-lint.yml"), "utf8");

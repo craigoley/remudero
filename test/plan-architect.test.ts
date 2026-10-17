@@ -23,6 +23,7 @@ import {
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { planCommand } from "../src/run-task.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * A real, throwaway git repo seeded with a baseline `plan/tasks.yaml` + `MASTER-PLAN.md` and
@@ -390,7 +391,7 @@ test("planCommitMessage passes real configured commitlint", () => {
       "Repair RMD triage claim execution when the canonical target clone has no node_modules. Live evidence: rmd triage created its worktree then refused its claim.",
   });
   for (const line of message.split("\n")) assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = findRepoRoot();
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
     cwd: root,
     input: message,
@@ -433,7 +434,7 @@ test("planCommitMessage wraps structured plan acceptance and preserves trailer",
   // completed build.
   assert.doesNotMatch(message, /^Remudero-Task:/m, "a plan-filing commit must never carry the trailer");
 
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = findRepoRoot();
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
     cwd: root,
     input: message,
@@ -478,7 +479,7 @@ test("planCommitMessage wraps a long brief and preserves it", () => {
   assert.match(bodyBlock.trimEnd(), /^Operator brief \(summary\) — repair the RMD plan lane so a long/);
   assert.doesNotMatch(message, /Two real rmd plan|^Brief:/m);
 
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = findRepoRoot();
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {
     cwd: root,
     input: message,
@@ -865,7 +866,7 @@ async function withGrillWireHarness(
   const savedBranch = process.env.RMD_SHIM_BRANCH;
   const savedLog = process.env.GH_CALL_LOG;
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const REPO_ROOT = join(__dirname, "..");
+  const REPO_ROOT = findRepoRoot();
   try {
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
     writeFileSync(

@@ -47,9 +47,10 @@ import {
   type HostFacts,
 } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** A neutral facts row where every non-node axis is inert — the fixture the six per-guard
  *  tests below start from, so each guard varies ONE dimension at a time. */

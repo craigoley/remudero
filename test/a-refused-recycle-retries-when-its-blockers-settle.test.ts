@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   IMAGE_RECYCLE_FAILURE_BACKOFF_MS,
   decideDeployTrigger,
@@ -21,6 +20,7 @@ import {
   type TriggerInputs,
 } from "../src/lib/deployer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // MEASURED 2026-10-11 (core): a recycle PAUSE held every lane from ~16:16Z and was refused at 17:08:02Z, "still in
 // flight after 3000s"; the drift recycle then waited a fixed hour and re-paused the fleet for another fixed 3000 s
@@ -30,7 +30,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const MIN = 60_000;
 const HEAD = "c".repeat(40);
 const NOW = Date.parse("2026-10-11T18:00:00.000Z");
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 
 /** The watchdog tick: checkout current, daemon alive, the running image behind a published baked change. */

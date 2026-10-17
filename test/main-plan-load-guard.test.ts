@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { loadPlan, loadPlanAtRef, type FileIntegrityIO } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GUARD_PATH = join(REPO_ROOT, ".github", "workflows", "main-plan-guard.yml");
 
 // ── W1-T491: the guard that asks whether `main`'s plan still loads ────────────────────────────

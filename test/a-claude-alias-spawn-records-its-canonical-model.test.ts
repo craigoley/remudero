@@ -19,8 +19,9 @@ import {
   type WorkerSelectionAssignment,
 } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-25T12:00:00.000Z");
 const POLICY = { preference: "automatic" as const, reservePercent: 5, provenance: "default" as const };
 const CAPABILITIES = loadMounts(mountsPath(REPO_ROOT)).capabilities;

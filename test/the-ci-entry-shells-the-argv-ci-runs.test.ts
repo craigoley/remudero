@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { CI_PARITY_TABLE } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
 function ciEntry() {

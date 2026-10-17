@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { chromium, type Browser } from "playwright";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1027 round 2: apt is off the critical path, so nothing has to survive it ────────────
 //
@@ -28,7 +29,7 @@ import { chromium, type Browser } from "playwright";
 // Scoped to `ci.yml`, the only file carrying the step, and reads the real file on disk rather
 // than a fixture, so a later edit is what this suite actually reads.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 
 type CiJob = { name?: string; steps?: Array<{ run?: string }> };

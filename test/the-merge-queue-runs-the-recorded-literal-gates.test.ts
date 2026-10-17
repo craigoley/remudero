@@ -17,15 +17,16 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { ghShim } from "./helpers/gh-shim.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOWS = join(REPO_ROOT, ".github", "workflows");
 const RUNNER = join(REPO_ROOT, "scripts", "ci-gate-from-contract.mjs");
 const runner = (await import(pathToFileURL(RUNNER).href)) as { contractRun: (text: string) => { env: Record<string, string> } };

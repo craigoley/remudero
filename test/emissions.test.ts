@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   attributeVerbs,
@@ -14,8 +13,9 @@ import {
 import { configPath } from "../src/lib/config.js";
 import { emissionsCommand, ledgerCorpusFiles } from "../src/run-task.js";
 import { rotationStampIso } from "../src/lib/ledger-grep.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO = findRepoRoot();
 
 function captureEmissions(stateDir?: string): { code: number; out: string } {
   const lines: string[] = [];

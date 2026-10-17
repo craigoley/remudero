@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   loadPolicy,
@@ -14,6 +12,7 @@ import {
 } from "../src/lib/policy.js";
 import { DEFAULT_BUDGET_USD, dailyCostCeilingReloader } from "../src/run-task.js";
 import { checkCostGovernor, type CostGovernorResult, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T408 acceptance 4 ─────────────────────────────────────────────────────────────────────
 // "the per-spawn budget is untouched by this change, and a test pins the two mechanisms apart"
@@ -25,7 +24,7 @@ import { checkCostGovernor, type CostGovernorResult, DEFAULT_SWEEP_POLICY } from
 // share to is a completely separate, ledger-derived figure. These tests prove the two neither
 // share a knob, a type, nor a value — configuring one never moves the other.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED: Policy = loadPolicy(policyPath(REPO_ROOT));
 
 test("W1-T408 acceptance 4 — DEFAULT_BUDGET_USD (the per-run backstop) is a plain module constant, untouched by anything this task added", () => {

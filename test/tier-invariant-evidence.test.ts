@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   architectLaneShare,
@@ -12,8 +11,9 @@ import {
   type LedgerRecord,
 } from "../src/lib/retro.js";
 import { loadMounts, mountsPath } from "../src/lib/mounts.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 
 /** A minimal but complete ledger corpus over the six named lanes (four Architect
  *  authoring lanes + the two comparison lanes), deliberately spanning a wide `ts`

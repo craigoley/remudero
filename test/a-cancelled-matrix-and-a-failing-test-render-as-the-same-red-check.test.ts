@@ -11,14 +11,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
 import { ghAnswering, pathWith } from "./helpers/gh-stub.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 const workflow = parse(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as {
   jobs: Record<string, {

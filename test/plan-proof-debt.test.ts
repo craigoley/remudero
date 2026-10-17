@@ -42,15 +42,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { loadPlan, type Task, type TaskStatus } from "../src/lib/plan.js";
 import { proofDialectViolations, proofResolvabilityViolations, type LintViolation } from "../src/lib/task-linter.js";
 import { parseWhitelistedProof, resolveNameFilteredCandidates } from "../src/lib/review.js";
 import { classifyFailingMergeEvidence, defaultMergeEvidenceLog } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED_PLAN_PATH = join(REPO_ROOT, "plan", "tasks.yaml");
 
 // ── the pure mechanism, mirroring the house scripts/*-ratchet.mjs shape ─────────────────────

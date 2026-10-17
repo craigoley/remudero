@@ -25,8 +25,9 @@ import { assertProvenance, lintPrompt } from "../src/lib/provenance.js";
 import { renderImplementPrompt } from "../src/run-task.js";
 import { IMPLEMENT_ROLE_LINES } from "../src/lib/compaction.js";
 import type { Task } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(new URL("..", import.meta.url).pathname);
+const REPO_ROOT = findRepoRoot();
 
 /** A tiny tagged corpus: two containment facts, one CI fact. */
 const CORPUS: LearningEntry[] = [

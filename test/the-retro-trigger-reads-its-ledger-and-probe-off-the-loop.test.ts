@@ -3,7 +3,6 @@ import { execFile } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
@@ -17,13 +16,14 @@ import * as ledgerUnion from "../src/lib/ledger-union.js";
 import * as retro from "../src/lib/retro.js";
 import * as runTask from "../src/run-task.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // After #9636 the daemon's retro trigger awaited its merged-commits read, but the check still ran
 // its run-ledger union read (resolveLedgerUnion: every rotation read and gunzipped with readFileSync,
 // 919 files / 3.84 GB decompressed on the fleet host) and the GitHub throttle probe (two `gh api`
 // calls through execFileSync) on the daemon loop. These pin the awaited replacements.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED_POLICY: Policy = loadPolicy(policyPath(REPO_ROOT));
 const POLICY: Policy = { ...SHIPPED_POLICY, values: { ...SHIPPED_POLICY.values, retro: { mergesThreshold: 2, daysThreshold: 99_999 } } };
 const NOW = new Date("2026-10-06T12:00:00.000Z");

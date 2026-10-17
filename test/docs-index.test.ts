@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include` (see tsconfig.json), so a static
 // `import … from "../scripts/generate-docs-index.mjs"` is a TS7016 — the same reason
@@ -57,7 +58,7 @@ const {
 // test/plan-index.test.ts's convention for the CLI half of scripts/generate-plan-index.mjs.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-docs-index.mjs");
 
 function runGenerate(dir: string, out: string) {

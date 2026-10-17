@@ -15,6 +15,7 @@ import {
 } from "../src/lib/plan-pr-emitter.js";
 import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T136: the shared plan-PR gate-contract module ────────────────────────────────────────
 //
@@ -26,7 +27,7 @@ import { parseAcceptanceBlock } from "../src/lib/review.js";
 // make structurally impossible; each has a named falsifier below.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 const GENERATE_PLAN_INDEX_SCRIPT = join(REPO_ROOT, "scripts", "generate-plan-index.mjs");
 

@@ -17,6 +17,7 @@ import {
   type ClarificationRule,
   type ReplyContext,
 } from "../src/lib/reply-interpreter.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2499: three onboarding question generators, a validator, an unanswered-set and an
 // assert-complete guard all ship today (onboard/session.ts, onboard/synthesize.ts) -- and grep
@@ -37,7 +38,7 @@ import {
 //   9. the reply route calls the interpreter rather than the interpreter standing alone
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");

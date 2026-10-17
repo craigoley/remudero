@@ -5,9 +5,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { headShaRestArgs, prUrlTarget, readHeadShaRest, realArmDeps } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── The post-review head-sha read, migrated off GraphQL ──────────────────────────────────────
 //

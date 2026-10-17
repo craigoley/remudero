@@ -17,8 +17,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import * as affected from "../src/lib/affected-suites.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = join(import.meta.dirname, "..");
+const REPO = findRepoRoot();
 
 /** Each module beside a suite importing it; the suite is selected only through the module's edge. */
 function world(modules: Record<string, string>): Map<string, string> {

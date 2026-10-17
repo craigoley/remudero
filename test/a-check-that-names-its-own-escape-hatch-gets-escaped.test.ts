@@ -27,11 +27,11 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CONFIG_READER_SEAMS_PATH = join(REPO_ROOT, "test", "config-reader-seams.test.ts");
 const ROUTE_SCOPE_MATRIX_PATH = join(REPO_ROOT, "test", "route-scope-matrix.test.ts");
 

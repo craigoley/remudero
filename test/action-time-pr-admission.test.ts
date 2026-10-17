@@ -16,9 +16,10 @@ import { DEFAULT_SWEEP_POLICY, type OpenPrView, buildSweepEffects as libSweepEff
 import { ghShim } from "./helpers/gh-shim.js";
 import { ghExec } from "../src/lib/github-transport.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const sha = "a".repeat(40);
-const checkoutSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: join(import.meta.dirname, ".."), encoding: "utf8" }).trim();
+const checkoutSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: findRepoRoot(), encoding: "utf8" }).trim();
 const target = { owner: "example", repo: "core", prNumber: 42, headSha: sha };
 const settings: AdmissionSettings = { mode: "shadow", repositoryId: 3,
   policy: { version: "v1", ownerIds: [1], organizationIds: [9], services: [{ id: 2, actions: ["review", "auto-merge"] }], maxEvidenceAgeMs: 100 },

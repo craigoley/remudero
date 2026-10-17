@@ -9,6 +9,7 @@ import { meaningOfStep } from "../src/lib/ledger-steps.js";
 import type { LedgerLine } from "../src/lib/ledger.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, selectUpdateBranchDecision, selectUpdateBranchTarget,
   type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const NOW = Date.parse("2026-10-08T12:00:00.000Z"), ASOF = new Date(NOW).toISOString();
 const START = new Date(NOW - 86_400_000).toISOString();
@@ -120,7 +121,7 @@ test("the actual daily CLI retains CI guard decisions in its existing bounded so
     const row = receipt({ ts: new Date(now - 1000).toISOString(), sweep_input_as_of: new Date(now - 2000).toISOString() });
     writeFileSync(join(state, "ledger.ndjson"), JSON.stringify(row) + "\n", { mode: 0o600 });
     const child = spawnSync(process.execPath, ["--import", "tsx", "scripts/private-routing-daily-review.mjs",
-      "--source", "core=" + state, "--out-dir", out], { cwd: join(import.meta.dirname, ".."), env, encoding: "utf8" });
+      "--source", "core=" + state, "--out-dir", out], { cwd: findRepoRoot(), env, encoding: "utf8" });
     assert.equal(child.status, 0, child.stderr);
     const saved = JSON.parse(readFileSync(join(out, "latest.json"), "utf8"));
     const metric = saved.sources[0].selfImprovement.ciRefreshDeferrals;

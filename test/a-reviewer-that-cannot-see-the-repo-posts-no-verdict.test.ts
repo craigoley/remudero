@@ -6,12 +6,13 @@ import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { postReviewStatusGuarded } from "../src/lib/review.js";
 import { reviewCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4410 — on 2026-09-23 an operator session ran `rmd review 1706 --repo remudero-console` on a Mac with no
 // managed console checkout, and the refusal posted `remudero-review: FAIL — review-subject-missing` on the PR
 // head. A refusal about the reviewer's machine judged nothing about the change, yet only a new commit cleared it.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function restPull(head: string) {
   return {

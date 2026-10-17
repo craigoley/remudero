@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadPlanIndex } from "../src/lib/plan-index.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T383: the MASTER-PLAN.md CAPABILITY SNAPSHOT generator + drift gate ─────────────────────
 //
@@ -24,7 +25,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // `capability-snapshot:check` invoke it via the `tsx` bin.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-capability-snapshot.mjs");
 
 const CLAIM_LABELS = ["Daemon dispatch lanes", "Daily cost ceiling", "Recon turn cap", "ci-gate REQUIRED checks"];

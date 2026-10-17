@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import {
@@ -12,6 +11,7 @@ import {
   FAST_GATE_STEPS,
   censusPopulationDrift,
 } from "../src/lib/ci-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2647: THE CENSUS DENOMINATOR, PINNED AGAINST THE ARTIFACT THAT ALREADY SHIPPED IT ──────
 //
@@ -35,7 +35,7 @@ import {
 // THIS file too, not only test/the-census-admission-set-is-derived-not-enumerated.test.ts (W1-T2643's
 // own falsifier, which this file deliberately does not duplicate assertion-for-assertion).
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 const CENSUS_STEPS = FAST_GATE_STEPS.filter((s) => s.boundMs !== undefined);
 

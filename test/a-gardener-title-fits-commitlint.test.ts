@@ -8,9 +8,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "../src/lib/commit-message.js";
@@ -18,8 +17,9 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gardenCheckout } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const COMMITLINT = join(REPO_ROOT, "node_modules", ".bin", "commitlint");
 const CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 

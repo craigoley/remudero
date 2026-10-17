@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore executable module without declarations
 import { main, runCensusSuitesViaChild } from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const MEMBER = { testFile: "test/population.test.ts", script: "census:population", walks: ["lib/"] };
 
 function fixture(baseCount = 1) {

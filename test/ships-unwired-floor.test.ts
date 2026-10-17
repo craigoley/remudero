@@ -11,6 +11,7 @@ import { netStateAdvisorySectionFor, openTaskIdsFromPlan, runReview, scopeGuardO
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { StatusProjection } from "../src/lib/status.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T322 — SHIPS-UNWIRED advisory floor. ONE reachability scan (lib/reachability.ts),
 // consumed at review time (judgeReview's `unwiredAdvisories`, ADVISORY ONLY — never touches
@@ -465,7 +466,7 @@ diff --git a/src/lib/orphan3.ts b/src/lib/orphan3.ts
 // consumer's resolver) can find scanUnreachedExports's OWN definition in this repo's real source.
 
 test("sanity: findExportDefinition resolves a real export against the actual repo tree (the retro-time consumer's resolver)", () => {
-  const repoRoot = join(import.meta.dirname, "..");
+  const repoRoot = findRepoRoot();
   assert.equal(findExportDefinition("scanUnreachedExports", repoRoot), "src/lib/reachability.ts");
   assert.equal(findExportDefinition("thisSymbolDoesNotExistAnywhere123", repoRoot), undefined);
 });

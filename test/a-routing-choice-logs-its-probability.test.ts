@@ -30,11 +30,12 @@ import {
   type WorkerSelectionAssignment,
 } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4617: every routed assignment records each candidate's selection probability, the draw and
 // its seed, and an experiment keeps ONE arm per task across retries and fix rungs.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-27T12:00:00.000Z");
 const SOL_VS_SONNET = ROUTING_EXPERIMENTS.find((experiment) => experiment.id === "sol-vs-sonnet")!;
 const AUTOMATIC = { preference: "automatic" as const, reservePercent: 5, provenance: "default" as const };

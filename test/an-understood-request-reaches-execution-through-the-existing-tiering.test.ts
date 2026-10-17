@@ -18,6 +18,7 @@ import {
   type SpecialistPanelInput,
 } from "../src/lib/specialist-panel.js";
 import type { Plan } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2500: W1-T2499 leaves a thread "understood" (an empty unanswered set) and stops there
 // by design -- it asks, it never acts. Nothing carried that state anywhere: the interpreter's
@@ -39,7 +40,7 @@ import type { Plan } from "../src/lib/plan.js";
 //   9. letting a model choose the worker set fails the pure-predicate assertion
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");

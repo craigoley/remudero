@@ -10,8 +10,9 @@ import type { Plan } from "../src/lib/plan.js";
 import { DEFAULT_SWEEP_POLICY, type OpenPrView } from "./helpers/sweep-test.js";
 import { buildSweepEffects, reviewCommand, runReview } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const HEAD_SHA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
 const FILING_BODY = [
   "## Acceptance",

@@ -25,6 +25,7 @@ import {
   type MeasurementCadenceRunResult,
 } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const scratch = (): string => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t6495-`));
 const configAt = (root: string): Config => ({ claudeBin: "/bin/true", root }) as Config;
@@ -70,7 +71,7 @@ test("W1-T6495: a named config the child cannot read is a failed row, never a fa
   const statePath = join(scratch(), "state.json");
   const entry = fileURLToPath(new URL("../src/measurement-cadence-child.ts", import.meta.url));
   const child = spawnSync(process.execPath, ["--import", "tsx", entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, "RUN-NAMED"], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    cwd: findRepoRoot(),
     env: { ...process.env, HOME: home, USERPROFILE: home, [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: "{named but broken" },
     encoding: "utf8",
     timeout: 110_000,

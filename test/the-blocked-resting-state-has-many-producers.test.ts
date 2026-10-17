@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   GATE_POSTURE_DECLARATIONS,
@@ -16,8 +15,9 @@ import {
   type GatePostureFs,
   type GatePostureTree,
 } from "../src/lib/gate-posture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 const declaration = (posture: GatePostureDeclaration["posture"], complies = true): GatePostureDeclaration => ({
   posture,

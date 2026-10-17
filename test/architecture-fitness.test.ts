@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
@@ -35,7 +36,7 @@ function testCorpus(): { dir: string; files: string[] } {
  * warns about — suspicious until falsified, not proof of anything.
  */
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 

@@ -5,9 +5,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import type { GoldenCorpusItem } from "../src/lib/golden-corpus.js";
 import type { HeldOutSelection } from "../src/lib/skill-eval.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // Phase 2 of 5 of the held-out skill eval (operator rulings 2026-10-13): the pure selector that picks
 // the K merged tasks a skill draft is attempted on, its leak refusals, and the import boundary that
@@ -153,7 +153,7 @@ test("heldOutSetHash is a sha256 of the sorted selected ids and is stable under 
 
 // ── The import boundary: the real dependency-cruiser binary over a planted fixture tree ─────────
 
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const repoRoot = findRepoRoot();
 const depcruiseBin = join(repoRoot, "node_modules", ".bin", "depcruise");
 const configPath = join(repoRoot, ".dependency-cruiser.cjs");
 

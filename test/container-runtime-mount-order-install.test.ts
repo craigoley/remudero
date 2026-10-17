@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T2856: docker.service AND containerd.service must both wait for their own runtime roots,
 // and docker.service must also wait for the explicit Remudero state bind mount, before either
@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 // plan/tasks.d/W1-T2856-docker-can-start-before-the-state-bind-mount.yaml for the acceptance
 // criteria this file proves.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "install-container-runtime-mount-order.sh");
 const OPERATOR_GUIDE = join(REPO_ROOT, "docs", "operator-guide.md");
 const BASH_BIN = ["/opt/homebrew/opt/bash/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"].find(existsSync) ?? "bash";

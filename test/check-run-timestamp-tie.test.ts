@@ -3,15 +3,15 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { rollupFromRest } from "../src/lib/open-prs-rest.js";
 import { checksStateFromRollup, dedupeRollupByLatestAttempt } from "../src/lib/sweep.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const NAME = "acceptance-author-gate";
 const STARTED = "2026-09-28T21:25:45Z";
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 
 type Run = { id: number; name: string; status: string; conclusion: string; started_at: string };
 const run = (id: number, conclusion: string): Run => ({ id, name: NAME, status: "completed", conclusion, started_at: STARTED });

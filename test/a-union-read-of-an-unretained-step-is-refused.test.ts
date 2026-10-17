@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import is a TS7016 — the same reason
 // test/docs-index.test.ts and test/clock-sweep.test.ts reach their scripts through a runtime
 // import. A dynamic specifier loads the REAL module with no shadow copy to drift from it.
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CENSUS_URL = pathToFileURL(join(REPO_ROOT, "scripts", "union-retention-census.mjs")).href;
 
 const {

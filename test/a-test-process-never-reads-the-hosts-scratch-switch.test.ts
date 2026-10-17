@@ -20,8 +20,9 @@ import { test } from "node:test";
 // does not exist) so its assertions, not a module-load error, are what fail there.
 import * as noLiveRemote from "./setup/no-live-remote.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const LIB = join(REPO_ROOT, "deploy", "scratch-mounts.sh");
 const { installNoLiveRemote } = noLiveRemote;
 const deadSwitch = (noLiveRemote as unknown as { DEAD_SCRATCH_SWITCH?: string }).DEAD_SCRATCH_SWITCH;

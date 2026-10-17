@@ -15,13 +15,13 @@ import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { waitForProcessGroupExit } from "../src/lib/in-tree-budget.js";
 import * as emitter from "../src/lib/plan-pr-emitter.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const GREEN = { status: 0, output: "" };
 /** How long a hung leg sleeps before it would exit 0 on its own: far past every budget below. */
 const HANG_MS = 6_000;

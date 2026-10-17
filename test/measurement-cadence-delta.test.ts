@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { buildMeasurementCadenceRow, runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { RuleSignature } from "../src/lib/rule-efficacy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** W1-T4271 made the shipped ci.stalled rule ACTIVITY-shaped, so it can no longer reach REPEATING. These
  *  cases measure the cadence's own arithmetic over a recurrence, so they grade the same rows against a
@@ -30,7 +30,7 @@ const STALL_VIOLATION_RULES: readonly RuleSignature[] = [{
 // things ("nothing to compare" vs "measured, unchanged") and a delta that cannot tell them apart
 // reports a converged loop on its very first fire.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function tmp(kind: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}`));

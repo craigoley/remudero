@@ -10,9 +10,10 @@ import { test } from "node:test";
 import { parseRuleHeadlines } from "../src/lib/learnings.js";
 import { CODEX_PROJECT_DOC_MAX_BYTES, spawnCodexWorker } from "../src/lib/worker-provider.js";
 import type { ContainedSpawnOptions } from "../src/lib/worker-containment.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-agents-md.mjs");
 
 // `scripts/**` is outside tsconfig's include, so use the runtime-import pattern the other

@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2215: the claims harness gets a THIRD state ──────────────────────────
 //
@@ -24,7 +25,7 @@ import { parse as parseYaml } from "yaml";
 // never imported, keeping this test file itself clean under `tsc --noEmit`.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "claims-check.mjs");
 const FIXTURES = join(__dirname, "fixtures", "claims-check");
 

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1048: TASK-ID EXISTENCE gate ────────────────────────────────────────────────────────
 //
@@ -30,7 +31,7 @@ import { test } from "node:test";
 // test/claims-check.test.ts / test/no-hand-rolled-fetch-check.test.ts.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "task-id-existence-check.mjs");
 
 const GIT_ENV = {

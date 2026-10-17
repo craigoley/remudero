@@ -17,8 +17,9 @@ import { test } from "node:test";
 
 import { MEMORY_HIGH_ANNOTATION, readResourcePolicyDrift, type ResourcePolicyDrift } from "../src/lib/deployer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const TUNER = join(REPO_ROOT, "deploy", "memory-high-tuner.sh");
 const MIB = 1024 * 1024;
 const HOST_KB = 16371996; // the fleet host's MemTotal, read 2026-10-09 (15988 MiB)

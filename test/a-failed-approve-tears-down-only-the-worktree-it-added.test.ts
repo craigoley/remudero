@@ -16,15 +16,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, mock, test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { addLockedRunWorktree, addLockedRunWorktreeAsync, approveCommand } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 type Row = Record<string, unknown>;
 const noLog = (): void => {};
 

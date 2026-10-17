@@ -17,7 +17,6 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { composeRealDeps } from "../src/lib/composition-root.js";
 import type { Config } from "../src/lib/config.js";
@@ -30,8 +29,9 @@ import { excludeNodeModulesFromGit, worktreeAdd } from "../src/lib/worker.js";
 import { WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = fileURLToPath(new URL("..", import.meta.url));
+const REPO = findRepoRoot();
 const ID = GIT_REPO_FIXTURE_IDENTITY;
 
 let root: string;

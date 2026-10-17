@@ -19,8 +19,9 @@ import { readMountPlanDrift } from "../src/lib/deployer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { age, fixture as cleanupFixture, git as cleanupGit, repos as cleanupRepos, run as runCleanup } from "./helpers/host-cleanup-fixture.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const LIB = join(REPO_ROOT, "deploy", "scratch-mounts.sh");
 const CHECKOUT_DEST = "/home/node/Remudero/remudero";
 

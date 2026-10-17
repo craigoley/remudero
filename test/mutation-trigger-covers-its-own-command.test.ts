@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── R-42 (docs/audits/recon-2026-09-05.md), W1-T108/W1-T133's own sibling gap ──────────────────
 //
@@ -32,7 +33,7 @@ import { dirname, join } from "node:path";
 // that would need a shadow copy to stay in sync.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const STRYKER_CONFIG = join(REPO_ROOT, "stryker.conf.json");
 const RATCHET_SCRIPT = join(REPO_ROOT, "scripts", "mutation-ratchet.mjs");
 

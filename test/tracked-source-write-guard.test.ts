@@ -6,6 +6,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2291: TRACKED-SOURCE-WRITE GUARD ─────────────────────────────────────────────────────
 //
@@ -27,7 +28,7 @@ import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review
 // runtime import rather than a typed one. A dynamic specifier is not statically resolved, so this
 // loads the REAL module with no shadow copy to drift from it.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "tracked-source-write-check.mjs");
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   scanSource: (source: string, relPath: string) => Array<{ file: string; line: number; call: string; label: string; targetExpr: string }>;

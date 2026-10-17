@@ -4,7 +4,6 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, write
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   approveProposal,
   approveRunBranch,
@@ -19,6 +18,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { approveCommand } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4437: six `chore(plan): ratify ...` PRs opened together (one per `rmd approve` invocation
 // the console spawns per click) each took 139-144 min and merged origin/main into themselves
@@ -237,7 +237,7 @@ test("priorApproveRunBranch and mostRecentApprovePr answer two different questio
 // so only a JOINED run clears the run-ownership guard (an approval on its own branch is refused right
 // after the gateway returns), and its CI answers red on the first poll — no wait, no review.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const PRIOR_RUN_ID = "APPROVE-P-FIRST-1790000000000";
 const PRIOR_PR_URL = "https://github.com/craigoley/remudero/pull/4437";
 const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/4438";

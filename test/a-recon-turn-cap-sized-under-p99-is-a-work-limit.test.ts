@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { RECON_MAX_TURNS, workerErrorVerdict } from "../src/run-task.js";
 import { frontierPeerWorkerRow, loadMounts, mountsPath } from "../src/lib/mounts.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const MOUNTS_PATH = mountsPath(REPO_ROOT);
 const RECON_P99_TURNS = 21;
 const RECON_MAX_OBSERVED_TURNS = 26;

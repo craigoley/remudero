@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
   AUTOMATIC_BRANCH_REAP_INTERVAL_MS,
@@ -16,8 +15,9 @@ import {
 import { runAutomaticBranchReapRung } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
 
 test("automatic branch cadence: first pass fires, an unchanged set is throttled, a changed set fires, and the time bound re-arms it", () => {

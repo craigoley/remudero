@@ -30,9 +30,10 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { FAST_GATE_STEPS } from "../src/lib/ci-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT_PATH = join(REPO_ROOT, "scripts", "worker-branch-shape.mjs");
 const SCRIPT_SOURCE = readFileSync(SCRIPT_PATH, "utf8");
 // W1-T2907: the script no longer spawns git directly -- it calls the shared git()/gitOrThrow()

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   MAIN_RUN_GAP_STEP,
   dispatchMainRunGaps,
@@ -15,6 +14,7 @@ import {
   type MainRunGapDispatch,
 } from "../src/lib/main-run-gaps.js";
 import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "./helpers/sweep-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T4817: a main commit NO workflow ran on ─────────────────────────────────────────────
 //
@@ -23,7 +23,7 @@ import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep } from "./helpers/swe
 // shape below reproduces it: the head and the commit two back have runs, the one between them has
 // none. A finder that let the successor's runs cover its predecessor reads this history as clean.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 const linear = (...shas: string[]): MainCommitRef[] =>
   shas.map((sha, i) => ({ sha, parents: i + 1 < shas.length ? [shas[i + 1]!] : [] }));

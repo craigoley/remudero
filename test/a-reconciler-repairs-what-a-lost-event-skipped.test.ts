@@ -12,6 +12,7 @@ import {
 import { parseWorkflowPushTrigger } from "../src/lib/main-run-gaps.js";
 import { deployMarkerPath } from "../src/lib/deployer.js";
 import { DEFAULT_SWEEP_POLICY, buildSweepEffects, runSweep, type BuildSweepEffectsDeps } from "./helpers/sweep-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 test("W1-T4840: a gap between desired and observed state is repaired once and recorded", async () => {
   const ledger: Record<string, unknown>[] = [];
@@ -343,7 +344,7 @@ test("W1-T4840: the production effect reads main state and ledger history before
     deploy.behind = 0;
     deploy.failure = undefined;
     const effects = buildSweepEffects({
-      owner: "acme", repo: "widgets", repoRoot: join(import.meta.dirname, ".."),
+      owner: "acme", repo: "widgets", repoRoot: findRepoRoot(),
       config: { root } as never, ledgerPath, runId: "t4840", plan: { tasks: [], byId: new Map() } as never,
       policy: DEFAULT_SWEEP_POLICY, log: () => {}, fleetDeployStateImpl: deploy,
       readJsonImpl: async (args) => {
@@ -370,7 +371,7 @@ function fixtureEffects(root: string, overrides: Partial<BuildSweepEffectsDeps> 
   const ledgerPath = join(root, "state", "ledger.ndjson");
   if (!existsSync(ledgerPath)) writeFileSync(ledgerPath, "");
   return buildSweepEffects({
-    owner: "acme", repo: "widgets", repoRoot: join(import.meta.dirname, ".."),
+    owner: "acme", repo: "widgets", repoRoot: findRepoRoot(),
     config: { root } as never, ledgerPath, runId: "t4840", plan: { tasks: [], byId: new Map() } as never,
     policy: DEFAULT_SWEEP_POLICY, log: () => {}, readJsonImpl: async () => [], ghRunImpl: () => {},
     ...overrides,

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // -- W1-T98: TS-strict proven ACTIVE by a planted probe (MASTER-PLAN §5 TIER 2, quality gate 4/4) --
 //
@@ -27,7 +28,7 @@ import { dirname, join } from "node:path";
 // on this compiler version and the second test below would be vacuous.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const TSC_BIN = join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
 const PROBE_FILE = join(REPO_ROOT, "scripts", "strict-probe.ts");
 

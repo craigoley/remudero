@@ -28,8 +28,9 @@ import { test } from "node:test";
 // @ts-expect-error The exercised gate is a plain .mjs script without a declaration file.
 import { computeMergeBaseDiff, ensureRawCoverageDir, extractCoverageFlags, main, makeTempDiffDir, mergeBaseDiff, readCiYaml, removeTempDiffDir, runDiffCoverageGate, runInstrumentedTests, statLcov, writeDiffFile } from "../scripts/diff-coverage-local.mjs";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const REAL_CI_YAML_TEXT = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
 
 /** A recording logger pair, plus the two lists it fills, for asserting on `main`'s own output. */

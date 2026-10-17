@@ -36,7 +36,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { hashInstallInputs } from "../src/lib/install-hash.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
@@ -49,9 +48,10 @@ import {
   worktreeAdd,
 } from "../src/lib/worker.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** The install root `resolveNodeModulesSource` falls back to: this checkout, package "remudero". */
-const INSTALL_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const INSTALL_ROOT = findRepoRoot();
 const INSTALL_ROOT_NM = join(INSTALL_ROOT, "node_modules");
 
 type LogLine = { step: string } & Record<string, unknown>;

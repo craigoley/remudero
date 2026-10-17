@@ -28,8 +28,9 @@ import {
   playwrightCoreVersionCommitsBehind,
   realDeployDeps,
 } from "../src/lib/deployer.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function lockfile(playwrightCoreVersion: string | undefined, otherDepVersion = "1.0.0"): string {
   return JSON.stringify({

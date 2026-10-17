@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { makeTempDir } from "../src/lib/tmp.js";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import { ANCHOR_SHAPES, ANCHOR_WINDOW, FIXTURES, census, classifyRecord, findCitations, formatReport, isAnchored, loadCorpus, measurePrecision } from "../scripts/citation-anchor-census.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2649: CITATION-ANCHOR CENSUS ─────────────────────────────────────────────────────────
 //
@@ -18,7 +18,7 @@ import { ANCHOR_SHAPES, ANCHOR_WINDOW, FIXTURES, census, classifyRecord, findCit
 // line, (2) precision declared via a hand-labelled fixture set BEFORE any count is trusted, (3)
 // the census reports and never gates, and (4) the anchor forms are a DATA table.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "citation-anchor-census.mjs");
 
 function runCli(args: string[]) {

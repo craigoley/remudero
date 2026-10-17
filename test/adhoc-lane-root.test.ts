@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import type { Config } from "../src/lib/config.js";
 import { ADHOC_LANE_REAP_GRACE_MS, adhocLaneRoot, unmanagedWorktreeLanes, worktreesDir } from "../src/lib/worker.js";
 import { DEFAULT_WORKTREE_REAP_GRACE_MS } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * test/adhoc-lane-root.test.ts — W1-T2847, the ROOT half.
@@ -29,7 +29,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
  * and never a home directory.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function cfg(root: string): Config {
   return { root } as unknown as Config;

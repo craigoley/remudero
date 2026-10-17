@@ -21,7 +21,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
@@ -31,8 +30,9 @@ import {
   resolveNameFilteredCandidates,
 } from "../src/lib/review.js";
 import { proofDialectViolations } from "../src/lib/task-linter.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 // W1-T3071's REAL shape, not invented punctuation — the design says so explicitly.
 const REAL_PATH = "test/cli-verbs-mint-the-app-token.test.ts";

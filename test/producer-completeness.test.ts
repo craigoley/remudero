@@ -9,6 +9,7 @@ import {
   producerAssignedKeys,
   KNOWN_UNWIRED,
 } from "../src/lib/producer-completeness.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * recon-DW found NINE optional `OpenPrView` fields that no producer assigns, each with live
@@ -16,7 +17,7 @@ import {
  * check that stops a tenth from shipping silently.
  */
 
-const REPO = join(import.meta.dirname, "..");
+const REPO = findRepoRoot();
 
 /** A synthetic tree, so the checker's own behaviour is testable without touching the real one. */
 function fixtureTree(iface: string, producer: string): { srcRoot: string; interfaceFile: string } {

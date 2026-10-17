@@ -45,7 +45,6 @@ import {
   type VerifyHumanRouteDeps,
 } from "../src/run-task.js";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan } from "../src/lib/plan.js";
@@ -533,7 +532,7 @@ function sweepRoot(tasks: string): string {
   return root;
 }
 
-const REPO_ROOT_FOR_FIXTURES = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT_FOR_FIXTURES = findRepoRoot();
 
 const PARKED_PLAN = `- id: W1-T9001
   title: "should the fleet commit under its own identity?"
@@ -726,6 +725,7 @@ test("W1-T3188: a shard whose file IS in git reports a real age in days, not the
 });
 
 import { world as whyMeWorld } from "./helpers/why-me-world.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 test("the production sweep intake reads correction receipts from its configured state root", async t => {
   const repo = gitRepo({ kind: "why-me-production", seedCommit: false });

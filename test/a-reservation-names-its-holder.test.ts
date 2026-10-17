@@ -16,6 +16,7 @@ import {
   type RemoteReserveOutcome,
 } from "../src/lib/task-id-reservation.js";
 import { classifyReservationAnchor, describeContestedId, nextTaskIdCommand, readReservationHolder } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const mintRepo = gitRepo({ kind: "holder-mint-plan" });
 mkdirSync(join(mintRepo.dir, "plan"), { recursive: true });
@@ -24,7 +25,7 @@ mintRepo.git("add", "plan/tasks.yaml");
 mintRepo.git("commit", "--quiet", "-m", "fixture plan");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const gate = await import(pathToFileURL(join(REPO_ROOT, "scripts", "task-id-existence-check.mjs")).href);
 
 const NO_OPEN_PRS = (): string[] => [];

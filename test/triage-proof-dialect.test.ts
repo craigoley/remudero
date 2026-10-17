@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { writeMutantModule } from "./helpers/mutant-module.js";
 import { mutateTriageProofSource } from "./helpers/triage-proof-needle.js";
@@ -21,6 +20,7 @@ import {
 } from "../src/lib/review.js";
 import { feedbackEntryRepoPath } from "../src/lib/feedback.js";
 import type { FeedbackStatus } from "../src/lib/feedback.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── impl-GZ: every triage PR used to post CAPPED — 0/1 proofs executed ─────────────────────────
 //
@@ -240,7 +240,7 @@ test("W1-T963: the triage proof fails at base and passes at head", () => {
 // `test/a-hand-rolled-mutation-test-collides-with-the-real-harness.test.ts` for the mechanism and
 // the proof that this survives an instrumented copy.
 test("W1-T963: removing the discrimination makes the proof match the BASE too", async () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const triageTsPath = join(repoRoot, "src", "lib", "triage.ts");
   const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 

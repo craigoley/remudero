@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { implementPromptParts } from "../src/run-task.js";
 import type { Task } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const WORKER_TS = join(REPO_ROOT, "src", "lib", "worker.ts");
 const PROVIDER_TS = join(REPO_ROOT, "src", "lib", "worker-provider.ts");
 const SDK_DTS = join(REPO_ROOT, "node_modules", "@anthropic-ai", "claude-agent-sdk", "sdk.d.ts");

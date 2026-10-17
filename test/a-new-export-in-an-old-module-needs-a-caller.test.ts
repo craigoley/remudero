@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { loadPlan, type Task } from "../src/lib/plan.js";
 import { addedExportsFromPatch, callSiteViolations, lintTask, type AddedExport } from "../src/lib/task-linter.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 const BASE: Task = {
   id: "W1-T3218-FIXTURE",

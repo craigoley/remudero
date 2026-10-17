@@ -19,14 +19,15 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { selectAffectedSuites, shadowRecord, type AffectedSuitesInput } from "../src/lib/affected-suites.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // `scripts/**` sits outside tsconfig's `include` (a plain `import` is a TS7016), so this runtime
 // import — the same route test/a-census-suite-is-unreachable-from-the-symbols-a-diff-changes.test.ts

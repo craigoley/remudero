@@ -17,8 +17,9 @@ import {
   type BaseProofDir,
   type ReviewRunResult,
 } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CONTROLLER_HEAD = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 function taskYaml(id: string, claim: string, repo = "portal"): string {

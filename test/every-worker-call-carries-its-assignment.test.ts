@@ -20,7 +20,6 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -39,10 +38,11 @@ import {
   WORKER_ACTIVITY_LEDGER_STEP,
   type WorkerStateSensor,
 } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // @source-text-subject: the census half inventories spawnWorker entrypoints in source text; its
 // planted-site control proves the census names a newly unreceipted caller.
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const SETTINGS_FILE = join(REPO_ROOT, "settings", "worker.json");
 
 // ─── 1. the census ─────────────────────────────────────────────────────────────────────────────

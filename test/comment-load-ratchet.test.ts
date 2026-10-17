@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // The falsifier suite for scripts/comment-load-ratchet.mjs (docs/comment-standard.md).
 //
@@ -20,7 +21,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // commits fails on every CI runner and passes on every dev machine. `gitEnv` below pins the
 // identity and blanks the ambient config, which reproduces the runner exactly.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "comment-load-ratchet.mjs");
 const BASELINE = join(REPO_ROOT, "scripts", "comment-load-baseline.json");
 

@@ -7,6 +7,7 @@ import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sym
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { narrowNameFilteredArgs, parseWhitelistedProof } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2292: COVERAGE-SESSION-BLANKING GUARD ────────────────────────────────────────────────
 //
@@ -23,7 +24,7 @@ import { narrowNameFilteredArgs, parseWhitelistedProof } from "../src/lib/review
 // rather than a typed one. A dynamic specifier is not statically resolved, so this loads the REAL
 // module with no shadow copy to drift from it.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "coverage-session-blanking-check.mjs");
 const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   COVERAGE_VAR: string;

@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   fileRatificationDraft,
@@ -20,13 +19,14 @@ import { changedFilesBlockDrift, hasChangedFilesBlock } from "../src/lib/plan-pr
 import { lintTask } from "../src/lib/task-linter.js";
 import { lintPlanCommand } from "../src/run-task.js";
 import { isolatedCheckout } from "./helpers/isolated-checkout.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4700. PR #7608 (`rmd approve verify-human-automate:W1-T4471`) filed shards shaped like
 // MALFORMED below: `repo: master-plan` (no such repository), `verify` an object rather than
 // auto/human, and no acceptance. `lintDraftedFragment` and `lintTask` both read ZERO violations for
 // it, and the approve path wrote every task in the fragment whatever its stamp named.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const PROPOSAL = "verify-human-automate:W1-T4471";
 const KNOWN = new Set(["none", "remudero"]);
 

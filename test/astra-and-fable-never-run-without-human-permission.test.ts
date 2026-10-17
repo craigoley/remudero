@@ -19,12 +19,13 @@ import {
 } from "../src/lib/worker-provider.js";
 import { createClaudeExecutableCache, spawnWorker } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // Operator ruling, 2026-09-22: "We should never use Astra or Fable without getting human
 // permission first." Astra is the Codex account's DEFAULT model, and the Claude CLI's own default
 // is Opus with a 1M context, so a spawn that names no model is the quiet way either rule breaks.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-22T20:00:00.000Z");
 const APPROVED = [{ model: "gpt-6-astra", approvedBy: "craig", approvedAt: "2026-09-22T19:00:00.000Z" }];
 

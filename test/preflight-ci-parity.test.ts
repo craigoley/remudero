@@ -12,9 +12,10 @@ import { preflightCommand } from "../src/run-task.js";
 import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // These tests fake subprocesses while the outer full gate can own this checkout's real
 // coverage lock. Keep every fixture run isolated without changing production lock identity.

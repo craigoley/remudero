@@ -10,6 +10,7 @@ import { appendTaskTrailerToCommit } from "../src/run-task.js";
 import { commitMessageContractLines } from "../src/lib/compaction.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { gitPushRunBranch } from "../src/lib/git-push.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T1012: THE MERGE-CREDIT TRAILER IS WRITTEN TO THE PR BODY AND NEVER TO THE COMMIT, SO THE
 // SQUASH DISCARDS IT. `gh pr merge --squash` runs with no `--subject`/`--body` at every call
@@ -21,7 +22,7 @@ import { gitPushRunBranch } from "../src/lib/git-push.js";
 // so the trailer is part of the record the squash keeps, by construction.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function makeRepoWithCommit(message: string): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-trailer-commit-"));

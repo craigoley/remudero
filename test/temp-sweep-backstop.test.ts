@@ -18,14 +18,14 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Config } from "../src/lib/config.js";
 import type { Plan } from "../src/lib/plan.js";
 import { loadPolicy, policyPath } from "../src/lib/policy.js";
 import { DEFAULT_TEMP_SWEEP_MAX_AGE_MS, RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildSweepHook, runTmpSweepRung } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 // The REAL loaded policy value — never a fixture number — so every test below proves behavior
 // against what a real daemon would actually read from the committed plan/policy.yaml.
 const SHIPPED_TMP_MAX_AGE_MS = loadPolicy(policyPath(REPO_ROOT)).values.sweep.tmpMaxAgeMs;

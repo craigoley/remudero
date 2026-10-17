@@ -14,7 +14,7 @@ import {
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import {
@@ -35,6 +35,7 @@ import { priorEscalatedAlertIds } from "../src/lib/ops.js";
 import { alreadyFiledForSignature } from "../src/lib/coverage-improvement.js";
 import { parseWhitelistedProof, narrowNameFilteredArgs } from "../src/lib/review.js";
 import { verifyStalledTask, type StallEvidence } from "../src/lib/stall-verifier.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T209: "the ledger grows unbounded with no archival, and any rotation that hides a
 // decision-relevant line silently zeroes the dispatch breaker it also backs" (RECON R-9,
@@ -1053,7 +1054,7 @@ test("FALSIFIER — W1-T470 coverage-improvement dedupe: dropping the coverage.i
 // writes the real `src/lib/status.ts` in exactly this shape. A sibling instance of the same
 // defect, out of scope for this one-concern change, named so it is not mistaken for absent.
 test("W1-T964: removing the pinning fails the idempotency test", () => {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const ledgerTsRelPath = join("src", "lib", "ledger.ts");
   const ledgerTsPath = join(repoRoot, ledgerTsRelPath);
   const targetTestFile = "test/followup-rotation-idempotency.test.ts";

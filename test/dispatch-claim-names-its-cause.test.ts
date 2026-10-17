@@ -22,8 +22,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   decideDispatchClaim,
@@ -31,8 +30,9 @@ import {
   gitDispatchClaimReserver,
   type DispatchClaimReserver,
 } from "../src/lib/dispatch-claim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The exact stderr the production reproduction produced. */
 const REAL_STDERR = "fatal: could not read Username for 'https://github.com': No such device or address\n";

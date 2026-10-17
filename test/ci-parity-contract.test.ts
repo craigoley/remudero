@@ -22,16 +22,17 @@
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { outputContractLines, renderAnchorBlock } from "../src/lib/compaction.js";
 import { CI_PARITY_TABLE, runCiParity } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Records every spawn call, falling back to a clean `{status: 0}` for anything unlisted —
  *  duplicated locally per test/preflight-ci-parity.test.ts's own file-scoping convention. */

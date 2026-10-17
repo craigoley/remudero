@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -29,8 +29,9 @@ import {
 import { loadPlan } from "../src/lib/plan.js";
 import { daemonCommand } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = resolve(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const MB = 1048576;
 const GB = 1024 * MB;
 const HIGH = 8_786_018_304; // the core container's memory.high, read 2026-10-10

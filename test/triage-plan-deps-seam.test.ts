@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { planCommand, triageCommand } from "../src/run-task.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── WHAT THIS FILE PROVES ────────────────────────────────────────────────────────────
 // `triageCommand` and `planCommand` took no deps parameter, so no offline test could get
@@ -29,7 +30,7 @@ import type { WorkerResult } from "../src/lib/worker.js";
 // pass. If these two ledger lines are absent, the seam bought nothing.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t",

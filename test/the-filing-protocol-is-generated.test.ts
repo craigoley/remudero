@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3739 — THE FILING PROTOCOL IS TYPED WHEN A FUNCTION ALREADY PRODUCES IT ──────────────
 //
@@ -26,7 +26,7 @@ import { parseAcceptanceBlock } from "../src/lib/review.js";
 // WHAT IS REAL HERE: the production generators, imported from the scripts that own the matcher and
 // the refusal they exist to make unreachable. The round-trip goes through the REVIEWER'S parser.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const idGate = (await import(pathToFileURL(join(ROOT, "scripts", "task-id-existence-check.mjs")).href)) as {
   scaffoldShardStub: (o: Record<string, unknown>) => string;
   writeScaffoldedShard: (o: Record<string, unknown>, fs?: unknown) => string | undefined;

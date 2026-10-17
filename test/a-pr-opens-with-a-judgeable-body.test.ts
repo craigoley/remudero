@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { acceptanceGateBodyRepair, ghPrCreateFillCommand } from "../src/run-task.js";
 import { bodyNeedsAcceptanceRepair, renderAcceptanceBlock } from "../src/lib/plan-pr-emitter.js";
 import { loadPlan } from "../src/lib/plan.js";
@@ -12,8 +12,9 @@ import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { defaultProofRunner, openPullRequestChecked } from "../src/lib/pr-open.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const GATE_URL = pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href;
 const { evaluateGate } = (await import(GATE_URL)) as {
   evaluateGate: (input: { body: string; authorLogin?: string }) => { ok: boolean; defect?: string; message: string };

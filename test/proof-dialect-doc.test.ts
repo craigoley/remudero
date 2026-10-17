@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ACCEPTANCE_HEADER_RE, ACCEPTANCE_BULLET_RE, PROOF_DIALECT, parseWhitelistedProof } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2762: the docs/proof-dialect.md generator + drift gate ──────────────────────────────
 //
@@ -25,7 +26,7 @@ import { ACCEPTANCE_HEADER_RE, ACCEPTANCE_BULLET_RE, PROOF_DIALECT, parseWhiteli
 //       instead of surviving silently until the next incident.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "generate-proof-dialect.mjs");
 // W1-T3323: CLAUDE.md is an INDEX and the rule bodies live in `doctrine/`, so a raw read of
 // the file no longer contains the prose this pins. `resolveDoctrineForReader` follows every

@@ -24,8 +24,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const BASELINE_PATH = fileURLToPath(new URL("../scripts/error-subclass-baseline.json", import.meta.url));
 
 // Direct extension only ("class X extends Error") -- a class that extends another named

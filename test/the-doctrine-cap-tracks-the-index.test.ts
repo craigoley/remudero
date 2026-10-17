@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -13,6 +12,7 @@ import {
 } from "../src/lib/learnings.js";
 import { detectInstrumentEntanglement } from "../src/lib/review.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T3341: the doctrine cap must track the index W1-T3323 left behind ────────────────────────
 //
@@ -27,7 +27,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // `entangled: false`. So this is the sanctioned instrument-only shape — and the last test below
 // proves this diff really is instrument-only rather than merely intending to be.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const CLAUDE_MD = join(REPO_ROOT, "CLAUDE.md");
 const BASELINE = join(REPO_ROOT, "scripts", "claude-md-budget-baseline.json");
 const RATCHET = join(REPO_ROOT, "scripts", "claude-md-budget-ratchet.mjs");

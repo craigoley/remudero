@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T129: commitlint lints the ARTIFACT THAT PERSISTS ────────────────────
 //
@@ -24,7 +25,7 @@ import { dirname, join } from "node:path";
 // relocated rather than merely being described as relocated.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
 function lint(message: string) {

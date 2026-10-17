@@ -27,14 +27,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { loadPlanFromYaml, RETIREMENT_REASONS, type Plan, type Task } from "../src/lib/plan.js";
 import { blockedRecordUnruledViolations, lintPlan, lintTask, type BlockedDispositionContext } from "../src/lib/task-linter.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── shared fixtures (pure, in-memory — no I/O, mirrors every other suite in this file family) ──
 

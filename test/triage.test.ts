@@ -30,9 +30,10 @@ import { TRIAGE_WORKER_TOOLS, triageCommand } from "../src/run-task.js";
 import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalate.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { workerTranscript, type WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function tempLedgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-triage-grill-")), "ledger.ndjson");

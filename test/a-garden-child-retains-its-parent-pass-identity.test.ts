@@ -8,6 +8,7 @@ import type { GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { LIVE_LEDGER_DENY_ROOT_ENV } from "../src/lib/live-write-guard.js";
 import * as origin from "../src/lib/worker-containment.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const passId = "a5142db1-3dab-4f50-8f8f-a25cfb8e8db1";
 // Namespace import lets the canonical executor load this test on the old module:
@@ -78,7 +79,7 @@ test("a real queued garden child links priced and unpriced ledger rows to its pa
   const completed = new Promise<void>(resolve => { done = resolve; });
   const previous = process.env[GARDENER_ORIGIN_ENV];
   const child = childGardenPassSpawn({ execPath: process.execPath, execArgv: ["--import", "tsx"],
-    entry, cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, [GARDENER_ORIGIN_ENV]: carrier } });
+    entry, cwd: findRepoRoot(), env: { ...process.env, [GARDENER_ORIGIN_ENV]: carrier } });
   const garden = startGardenOffLoop("config", 60_000, { spawnPass: boundedGardenPassSpawn(child, 1), log: () => {},
     observe: event => { observed.push(event); if (["completed", "failed", "cancelled"].includes(event.phase)) done(); } });
   t.after(() => garden.stop());
@@ -100,7 +101,7 @@ test("direct garden spawns clear inherited origins and concurrent children never
   await writeFile(entry, `import {appendLedger} from ${JSON.stringify(new URL("../src/lib/ledger.ts", import.meta.url).href)};
     appendLedger(${JSON.stringify(join(dir, "ledger.ndjson"))}, {run_id:process.argv[4],task_id:'DAEMON',step:'garden.probe'});`);
   const spawn = childGardenPassSpawn({ execPath: process.execPath, execArgv: ["--import", "tsx"], entry,
-    cwd: new URL("..", import.meta.url).pathname, env: { ...process.env, [GARDENER_ORIGIN_ENV]: carrier } });
+    cwd: findRepoRoot(), env: { ...process.env, [GARDENER_ORIGIN_ENV]: carrier } });
   const other = "e6921695-5c56-45c2-89f4-1f1e4d67c826";
   assert.deepEqual(await Promise.all([spawn("plan", [], { stopped: false, passId }),
     spawn("gate", [], { stopped: false, passId: other }), spawn("test", [], { stopped: false })]), [0, 0, 0]);

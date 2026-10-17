@@ -12,12 +12,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import type { Writable } from "node:stream";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { drained } from "../src/lib/flush-exit.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 const FLUSH_EXIT = join(ROOT, "src", "lib", "flush-exit.ts");
 const ROWS = 5000;
 /** How long the parent leaves the pipe unread — long enough for a child to fill it and exit. */

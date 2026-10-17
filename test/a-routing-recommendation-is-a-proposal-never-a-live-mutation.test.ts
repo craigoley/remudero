@@ -33,7 +33,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { validateMounts, type Mounts } from "../src/lib/mounts.js";
 import { updateProposalRegistry } from "../src/lib/inbox.js";
@@ -52,6 +51,7 @@ import {
   type MountRecommendation,
   type MountRefusal,
 } from "../src/lib/mount-recommender.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── A minimal, VALID mounts table (mirrors test/mounts.test.ts's own `goodRaw`) — real
 // validation, not a hand-typed stub, so a drift in mounts.ts's shape breaks THIS suite too. ──────
@@ -172,7 +172,7 @@ function tmpDir(): string {
 
 // ── Claim 1: reached from a production caller ──────────────────────────────────────────────
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 test("recommendMounts( is called from src/run-task.ts, not only from this test", () => {
   const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");

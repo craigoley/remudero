@@ -16,8 +16,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { daemonMemoryTelemetryReader, type RunResult } from "../src/run-task.js";
@@ -28,8 +27,9 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { createDaemonFootprint } from "../src/lib/daemon-footprint.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { sampleCgroupMemory, sampleDaemonMemory, type DaemonMemorySources, type WorkerHeapFields } from "../src/lib/daemon-memory-telemetry.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 const YAML = `
 - id: A

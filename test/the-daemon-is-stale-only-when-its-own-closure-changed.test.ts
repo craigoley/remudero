@@ -6,7 +6,6 @@ import { createRequire } from "node:module";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 import {
   daemonClosureGit, daemonProcessClosure, daemonProcessEntry, withDaemonClosure, type ClosureGit,
@@ -17,8 +16,9 @@ import { FRESHNESS_DECISION_STEP } from "../src/lib/deploy-judge.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { requestStop, stopDetail } from "../src/lib/fleet-control.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const ENTRY = "src/entry.ts";
 
 /** A tree whose entry imports one module; `src/lib/unloaded.ts` is imported by nothing. */

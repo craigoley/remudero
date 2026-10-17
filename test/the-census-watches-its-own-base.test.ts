@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join as joinPath } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join as joinPath } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T3655 — THE CENSUS WATCHES ITS OWN BASE.
 //
@@ -19,7 +20,7 @@ import { parse as parseYaml } from "yaml";
 // fails typecheck -- the same reason test/expiring-fixture-census.test.ts loads it this way. A
 // dynamic specifier is not statically resolved, so this loads the REAL module with no shadow copy
 // that could drift from it.
-const REPO_ROOT = joinPath(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = joinPath(REPO_ROOT, "scripts", "expiring-fixture-census.mjs");
 const CI_YAML_PATH = joinPath(REPO_ROOT, ".github", "workflows", "ci.yml");
 

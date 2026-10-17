@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T123: ci-gate dedupes check-runs BY NAME, evaluates only the LATEST attempt ──────────
 //
@@ -23,7 +24,7 @@ import { parse as parseYaml } from "yaml";
 // behavior, not a reimplementation of it.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_GATE_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 
 type CheckRun = {

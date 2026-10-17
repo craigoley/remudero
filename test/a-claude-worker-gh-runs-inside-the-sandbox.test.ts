@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import * as settings from "../src/lib/settings.js";
 import * as workerHome from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * A CLAUDE WORKER'S `gh` RUNS INSIDE THE SANDBOX, AND ITS HOME NEVER REACHES THE OPERATOR'S gh CONFIG.
@@ -23,7 +23,7 @@ import * as workerHome from "../src/lib/worker-home.js";
  * FIXTURES ONLY: every HOME here is a throwaway directory, and nothing below runs gh.
  */
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const GH_CONFIG_REL = join(".config", "gh");
 
 function policy(): { permissions: { deny: string[] }; sandbox: Record<string, unknown> & { filesystem: { denyRead: string[] } } } {

@@ -20,14 +20,14 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 // @ts-expect-error — a plain .mjs instrument outside tsconfig's include, imported for its pure exports.
 import { classifyCoverageTier, evaluateRatchet } from "../scripts/coverage-ratchet.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const BASELINE = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/coverage-baseline.json"), "utf8")) as Record<string, unknown>;
 
 test("W1-T3384: branches far below the block cut PASS — the deepest band owes work, it does not stall the queue", () => {

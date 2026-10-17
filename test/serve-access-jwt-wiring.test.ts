@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { accessIdentityProviders } from "../src/lib/serve.js";
 import type { CloudflareAccessKeyCache, IdentityProvider } from "../src/lib/service.js";
 import type { IncomingMessage } from "node:http";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── W1-T996: THE ACCESS JWT PROVIDER IS BUILT, TESTED, AND HAD ZERO PRODUCTION CALL SITES ────
 //

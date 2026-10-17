@@ -10,7 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { GARDEN_LEDGER_BUCKET_MS, gardenStatePath, readGardenState, runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
@@ -35,8 +35,9 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { daemonCommand } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 // scripts/ is outside tsconfig's include; load the real .mjs module through a URL, as the
 // existing test-with-retry suites do, while keeping this test's seam explicitly typed.
 const { appendFlakeLedger } = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "test-with-retry.mjs")).href)) as {

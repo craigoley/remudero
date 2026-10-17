@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { REAPABLE_TEST_PREFIX, reapableTmpPrefix } from "./setup/reapable-prefix.js";
 import { DEFAULT_TEMP_SWEEP_MAX_AGE_MS, sweepStaleTempDirs } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HYGIENE_IMPORT = join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts");
 
 // ── the pure prefix normalizer ─────────────────────────────────────────────────

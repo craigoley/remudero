@@ -16,14 +16,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { CI_PARITY_TABLE, EMPTY_DIFF_COVERAGE_REFUSAL } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 
 type SpawnResult = { status: number | null; stdout: string; stderr: string };

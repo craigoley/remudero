@@ -13,9 +13,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   RETRO_PREFLIGHT_STALL_MS,
   RETRO_PREFLIGHT_TOTAL_BACKSTOP_MS,
@@ -24,8 +23,9 @@ import {
   type RetroPrepublishCommandResult,
   type RetroPrepublishRunner,
 } from "../src/lib/retro-preflight.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function options(timeout: number, totalBackstopMs?: number, env: NodeJS.ProcessEnv = process.env): Parameters<RetroPrepublishRunner>[2] {
   // Only these synthetic -e scripts are excluded. The importing test process still covers the

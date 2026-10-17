@@ -19,18 +19,19 @@
 // a naive heuristic gets wrong.
 
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import of a .mjs there is a TS7016 —
 // the same reason test/acceptance-author-gate.test.ts and test/mutation-ratchet.test.ts reach their
 // scripts through a runtime import rather than a typed one. A dynamic specifier is not statically
 // resolved, so this loads the REAL module with no shadow copy to drift from it.
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 /** What `isTypeOnlyModule` reports when it CANNOT decide — the verdict still fails closed. */
 type Undecidable = { file: string; stage: string; message: string };
 

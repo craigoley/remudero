@@ -17,15 +17,15 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** `checkProofCommand` from `cwd` with `GIT_DIR` set to `gitDir`; stdout, stderr, cwd and env restored. */
 function runVerbUnderGitDir(argv: string[], cwd: string, gitDir: string, deps: Parameters<typeof checkProofCommand>[1]): { code: number; out: string; err: string } {

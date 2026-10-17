@@ -15,8 +15,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { buildStatusStream } from "../src/lib/board.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = findRepoRoot();
 const BASELINE_PATH = "scripts/openapi-route-baseline.json";
 
 /** `/v1/tasks/:id` and `/v1/tasks/{id}` are the same route. */

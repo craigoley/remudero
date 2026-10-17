@@ -33,11 +33,12 @@ import { filingAcceptanceCriteria } from "../src/lib/plan-pr-emitter.js";
 import { buildFixturePlanPrBody } from "./helpers/plan-pr-body-fixture.js";
 import { parseAcceptanceBlock } from "../src/lib/review.js";
 import { loadPlanIndex } from "../src/lib/plan-index.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── commitlint (W1-T136 class) — same subprocess pattern as test/commit-message.test.ts,
 // redefined locally per that file's own convention of not sharing a lint helper. ──────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const COMMITLINT_CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
 function lint(message: string) {

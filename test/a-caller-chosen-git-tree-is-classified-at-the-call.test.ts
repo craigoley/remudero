@@ -19,7 +19,6 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { readAffectedSuitesInput } from "../src/lib/affected-suites.js";
 import type { Config } from "../src/lib/config.js";
@@ -33,8 +32,9 @@ import { worktreeAdd } from "../src/lib/worker.js";
 import { WorktreePointerRefusedError } from "../src/lib/worktree-git.js";
 import { functionBody, widenedGitSites, WIDENED_SITE_EXCEPTIONS } from "./every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO = fileURLToPath(new URL("..", import.meta.url));
+const REPO = findRepoRoot();
 const ID = GIT_REPO_FIXTURE_IDENTITY;
 
 interface CallerRecord {

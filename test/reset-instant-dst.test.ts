@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const DAEMON_MODULE = fileURLToPath(new URL("../src/lib/daemon.ts", import.meta.url));
 
@@ -35,7 +36,7 @@ function resolveThreePmInChild(tz: string, nowIso: string): { hour: number; minu
     `process.stdout.write(JSON.stringify({ hour: resolved.getHours(), minute: resolved.getMinutes(), date: resolved.getDate(), month: resolved.getMonth() }));`,
   ].join("\n");
   const result = spawnSync(process.execPath, ["--import", "tsx", "-e", script], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    cwd: findRepoRoot(),
     env: { ...process.env, TZ: tz },
     encoding: "utf8",
   });

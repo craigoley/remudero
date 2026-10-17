@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   CENSUS_ADMITTED_MEMBERS,
@@ -11,6 +10,7 @@ import {
   runPreflightFast,
 } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // THE GAP THIS CLOSES. `census:self-path-proof` ratchets each shard's self-path proof count, and a
 // plan-only PR can fail it — #6596 did, on 2026-09-22, taking one shard from its baseline of 5 to
@@ -23,7 +23,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 // CENSUS_POPULATION would make censusPopulationDrift report it `stale`. So it is a plain, plan-shaped
 // step beside lint-plan, with no `boundMs` — the key the census class is identified by.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = "census:self-path-proof";
 const STEP = FAST_GATE_STEPS.find((s) => s.script === SCRIPT);
 

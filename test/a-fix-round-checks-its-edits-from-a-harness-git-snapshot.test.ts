@@ -10,8 +10,9 @@ import { renderFixPrompt } from "../src/lib/prompt-render.js";
 import type { WorkerResult, SpawnWorkerArgs } from "../src/lib/worker.js";
 // @ts-ignore executable census module has no declaration file.
 import { CENSUS_SNAPSHOT_ROOTS, main, readCensusSnapshot } from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const ROOT = findRepoRoot();
 const REACH = "test/the-affected-suite-reach-ratchet.test.ts";
 const SNAPSHOT_ENV = "RMD_CENSUS_SNAPSHOT";
 const IMPORT_CLI = `import ${JSON.stringify("../src/run-task.js")};\n`;

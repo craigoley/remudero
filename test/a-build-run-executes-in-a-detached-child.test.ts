@@ -8,9 +8,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { deriveLedgerActor, markRunChildProcessActor } from "../src/lib/ledger.js";
 import { isFleetAutomationActor } from "../src/lib/operator-interventions.js";
@@ -29,8 +28,9 @@ import type { RunResult } from "../src/lib/run-result.js";
 import { killProcessGroup } from "../src/lib/worker-containment.js";
 import { runChildMain, type RunChildRunTask } from "../src/run-child-main.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHA = "b".repeat(40);
 const HASH = "a".repeat(64);
 const GEN = { containerId: "c", initStart: "i" };

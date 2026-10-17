@@ -21,8 +21,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
@@ -35,8 +34,9 @@ import {
   openWeightUsageUsd,
   spawnOpenWeightWorker,
 } from "../src/lib/worker-provider.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const MOUNTS = join(REPO_ROOT, ".remudero", "mounts.yaml");
 const NANO = "gpt-5-nano";
 const OSS = "gpt-oss-120b";

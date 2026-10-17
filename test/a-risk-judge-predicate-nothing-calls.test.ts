@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T3056 — TWO RISK-JUDGE PREDICATES WERE EXPORTED, TESTED AND CALLED BY NOTHING.
 //
@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 // W1-T3056's first half wires declaredFilesAbsentFromChange into the prompt. The second predicate
 // remains an unwired fixture until a merge-base fact producer exists.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const RISK_JUDGE_REL_PATH = "src/lib/risk-judge.ts";
 
 /** Every top-level `export function NAME(` declared directly in `risk-judge.ts` — the shape both

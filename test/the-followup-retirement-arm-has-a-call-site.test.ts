@@ -14,13 +14,13 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { retireSettledFollowups, routeFollowupsToRegistry, type FollowupReferentRead } from "../src/lib/retro.js";
 import type { Proposal } from "../src/lib/inbox.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
 
 /** A registry entry in exactly the shape `routeFollowupsToRegistry` mints, so the referent parses

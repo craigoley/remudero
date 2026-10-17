@@ -5,6 +5,7 @@ import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1250: every workflow's node-test-runner invocation must carry the fixture harness ──
 //
@@ -26,7 +27,7 @@ import { parse as parseYaml } from "yaml";
 // two agree, so this suite proves the workflow SIDE without ever depending on the file whose
 // correctness caused the drift to matter.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
 const HARNESS_IMPORT = "--import ./test/setup/tmp-hygiene.ts";
 

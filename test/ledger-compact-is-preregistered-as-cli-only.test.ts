@@ -5,11 +5,12 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const mod = (await import(pathToFileURL(join(ROOT, "scripts", "console-parity-ratchet.mjs")).href)) as {
   BASELINE_PATH: string;
   CLI_ONLY: Record<string, string>;

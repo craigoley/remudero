@@ -3,11 +3,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getPriority } from 'node:os';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { gitRepo } from './helpers/git-repo.js';
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = findRepoRoot();
 const SCRIPT = join(ROOT, 'scripts/preflight-author.mjs');
 const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {}) as {
   verifiedSuites: (root: string, suites: string[]) => string[];

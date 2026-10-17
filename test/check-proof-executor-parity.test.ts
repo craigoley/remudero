@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { execWhitelistedProof, parseWhitelistedProof } from "../src/lib/review.js";
 import { COMMANDS } from "../src/run-task.js";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T387: check-proof and the reviewer's executor CANNOT be two different programs ───────────
 //
@@ -27,7 +28,7 @@ import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
 // check of its own. This suite proves that call is real, not merely present.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // Assembled at runtime ON PURPOSE, same discipline as test/proof-grep-safety.test.ts's sentinel:
 // `resolveNameFilteredCandidates` greps SOURCE with a FIXED STRING, so if this file's own bytes

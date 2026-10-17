@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T31: generated CHANGELOG + semver (MASTER-PLAN §6A) ──────────────────
 //
@@ -19,7 +20,7 @@ import { dirname, join } from "node:path";
 // subprocess-against-a-fixture shape as claims-check.test.ts / coverage-ratchet.test.ts.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CLI = join(REPO_ROOT, "node_modules", ".bin", "commit-and-tag-version");
 
 function makeScratchRepo(startVersion: string): string {

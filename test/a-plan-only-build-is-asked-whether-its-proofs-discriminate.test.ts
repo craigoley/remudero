@@ -1,22 +1,23 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import { certainStaleProofs, isDialectGrepProof, type StaleProofRow } from "../src/lib/proof-base-stale.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { runPreflightProofs } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T4921 — #7882 was W1-T4550's BUILD (branch run-W1-T4550-..., diff only a plan shard) and the pre-push precheck
  * skipped it as "a plan-only filing", while nothing pre-push asked the merge base whether a grep proof discriminates.
  * The reviewer's own classifier answers that for a grep proof in milliseconds, from one base blob, with no worktree.
  */
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const { proofResolveVerdict } = (await import(pathToFileURL(join(REPO_ROOT, "scripts/proof-resolve-precheck.mjs")).href)) as {
   proofResolveVerdict: (input: {
     diff: string;

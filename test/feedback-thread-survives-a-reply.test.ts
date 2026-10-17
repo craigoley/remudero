@@ -12,6 +12,7 @@ import { captureFeedback, listFeedback, readFeedbackEntry, setFeedbackStatus, ty
 import type { TraceGithub, TracePrView } from "../src/lib/trace.js";
 import type { GitHub } from "../src/lib/status.js";
 import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2278: a reply is a new item, and the link back to what it answers must be a durable ────
 // field, not only prose inside the reply's own text ─────────────────────────────────────────
@@ -235,7 +236,7 @@ test("POST /v1/feedback stays write-scoped, tier low -- no new tier introduced f
 // proven here by scanning the real source rather than trusting a single exercised path.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 function readSrc(relPath: string): string {
   return readFileSync(join(REPO_ROOT, "src", relPath), "utf8");

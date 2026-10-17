@@ -11,15 +11,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 // A NAMESPACE import, so the file still LOADS on a tree without the shared constant and fails by
 // assertion there: a load error would read as an environment gap, not a red.
 import * as workerProvider from "../src/lib/worker-provider.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const { OPENWEIGHT_CHECKS, spawnOpenWeightWorker } = workerProvider;
 
-const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const repoRoot = findRepoRoot();
 
 /** The `--import <specifier>` values an argv carries, in load order. */
 function importsOf(argv: readonly string[]): string[] {

@@ -9,8 +9,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { COMMANDS } from "../src/run-task.js";
 import { parseWhitelistedProof } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = findRepoRoot();
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
 
 test("W1-T4585: no live proof root, parity row or size row names a retired console surface", () => {

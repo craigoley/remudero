@@ -19,6 +19,7 @@ import {
   type AlertPolicy,
 } from "../src/lib/alert-lane.js";
 import { alertOriginId, alertTaskId } from "../src/lib/ops.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function tmpRoot(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -332,7 +333,7 @@ test("REQUIRED_CRITICAL_PATH_CATEGORIES names exactly the five P20 categories", 
 });
 
 test("loadAlertPolicy: the real plan/alert-policy.yaml loads and validates cleanly", () => {
-  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const repoRoot = findRepoRoot();
   const policy = loadAlertPolicy(join(repoRoot, "plan", "alert-policy.yaml"));
   assert.ok(policy.actSeverities.includes("medium"));
   assert.ok(policy.actSeverities.includes("low"));

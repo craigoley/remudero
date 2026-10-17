@@ -9,6 +9,7 @@ import { main, nextTaskIdCommand, triageCommand } from "../src/run-task.js";
 import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /** A minimal, byte-cheap `WorkerResult` — only the fields the harness actually reads matter, the
  *  rest are filler so the type checks. */
@@ -47,7 +48,7 @@ function mintFakeWorker(text: string): WorkerResult {
 // test's record nondeterministically.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t",

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T5281: on 2026-10-02 the 14:00Z core recycle was started over SSH, wrote state/PAUSE at 14:00:56Z
 // and began its bounded wait for in-flight workers. The SSH session dropped at 14:26:55Z, the HUP killed
@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 // fleet state. The run is ASYNC here (spawn, not spawnSync) so the test can signal it mid-flight, and
 // every wait polls an observable (a stdout line, a stub marker file) rather than sleeping blindly.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
 const RECYCLE_REASON = "container recycle (deploy/recycle-container.sh)";
 

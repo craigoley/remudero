@@ -17,15 +17,15 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { approveRunBranch } from "../src/lib/inbox.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import * as runTaskModule from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const RUN_TASK_SRC = join(REPO_ROOT, "src", "run-task.ts");
 type Row = Record<string, unknown>;
 type Log = (step: string, extra?: Record<string, unknown>) => void;

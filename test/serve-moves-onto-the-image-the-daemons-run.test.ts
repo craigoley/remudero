@@ -8,6 +8,7 @@ import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS } from "../src/lib/deployer.js";
 import type { Escalation } from "../src/lib/escalate.js";
 import { realServePolicyDeps, runServePolicyCycle, type ServeImageDrift } from "../src/lib/serve-policy-convergence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const OLD = `sha256:${"b".repeat(64)}`;
 const CURRENT = `sha256:${"e".repeat(64)}`;
@@ -201,7 +202,7 @@ test("the default image seam shells out and reports docker failures as unknown",
   const run = () => execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
     `import { realServePolicyDeps } from './src/lib/serve-policy-convergence.ts';
      console.log(JSON.stringify(realServePolicyDeps(${JSON.stringify(f)}).serveImageDrift()));`],
-    { cwd: join(import.meta.dirname, ".."), encoding: "utf8", env: { ...process.env, PATH: `${f.root}:${process.env.PATH}` } });
+    { cwd: findRepoRoot(), encoding: "utf8", env: { ...process.env, PATH: `${f.root}:${process.env.PATH}` } });
   assert.deepEqual(JSON.parse(run()), DRIFT);
   writeFileSync(docker, "#!/bin/sh\necho 'docker unavailable' >&2\nexit 1\n");
   const unknown = JSON.parse(run()) as { kind: string; reason: string };

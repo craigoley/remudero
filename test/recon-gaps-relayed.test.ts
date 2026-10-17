@@ -12,6 +12,7 @@ import type { GitHub } from "../src/lib/status.js";
 import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * THE RECON'S OWN WARNING NEVER REACHED THE WORKER WHO COULD ACT ON IT.
@@ -290,7 +291,7 @@ test("BEHAVIOURAL: INFERRED is still NOT relayed — a conclusion recon drew but
 
 test("the RECON prompt's fixed instruction text is byte-identical to origin/main's — only an optional task/record pointer was added (W1-T2632)", () => {
   const mainSrc = execFileSync("git", ["show", "origin/main:src/run-task.ts"], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    cwd: findRepoRoot(),
     encoding: "utf8",
     maxBuffer: 1 << 28,
   });

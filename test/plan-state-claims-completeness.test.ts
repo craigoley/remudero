@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { loadPlan } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2223: plan-state-claims reports EVERY not-shipped site per id, not only the first ─────────
 //
@@ -33,7 +34,7 @@ import { loadPlan } from "../src/lib/plan.js";
 // functions' return shapes, distinct from the sibling suite's CLI-surface end-to-end coverage.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT_URL = pathToFileURL(join(REPO_ROOT, "scripts", "plan-state-claims.mjs")).href;
 const FIXTURES = join(__dirname, "fixtures", "plan-state-claims");
 

@@ -37,9 +37,10 @@ import {
   type AutoTriagePolicy,
 } from "../src/lib/auto-triage.js";
 import { loadPolicy, policyPath } from "../src/lib/policy.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The SHIPPED policy — not a fixture. A revert of plan/policy.yaml changes this. */
 function shippedAutoTriagePolicy(): AutoTriagePolicy {

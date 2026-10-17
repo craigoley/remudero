@@ -3,10 +3,10 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { FAST_GATE_STEPS } from "../src/lib/ci-parity.js";
 import { COMMANDS, PREFLIGHT_BOOL_FLAGS, PREFLIGHT_VALUE_FLAGS, renderFastGateScriptList } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2646: the preflight help text stops RE-TYPING a table the code owns ────────────────────
 //
@@ -19,7 +19,7 @@ import { COMMANDS, PREFLIGHT_BOOL_FLAGS, PREFLIGHT_VALUE_FLAGS, renderFastGateSc
 // row changes the rendered text with no edit to the string), the flag list is SHARED with the
 // validator (not retyped), and the doc generator agrees.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function preflightSpec() {
   const spec = COMMANDS.find((c) => c.name === "preflight");

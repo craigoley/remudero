@@ -22,14 +22,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { lintPlanCommand, type LintPlanStatusDeps } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The fixture's OWN committer. `commit-tree` refuses with "Author identity unknown" when neither
  *  the repo nor the global config names one, and `actions/checkout` configures neither — so this

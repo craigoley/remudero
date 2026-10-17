@@ -10,6 +10,7 @@ import {
   parseWhitelistedProof,
   type ProofExecutor,
 } from "../src/lib/review.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T128: THE DEAD PROOF FLOOR ────────────────────────────────────────────
 //
@@ -30,7 +31,7 @@ import {
 // proves the FOUR acceptance criteria named on the task.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 // ── Acceptance #1: the dead floor is measurably alive on the REAL plan corpus ─
 

@@ -15,7 +15,7 @@
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -32,9 +32,10 @@ import {
   runCiParity,
   type HostFacts,
 } from "../src/lib/ci-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Records every spawn call, falling back to a clean `{status: 0}` for anything unlisted —
  *  duplicated locally per test/preflight-ci-parity.test.ts's own file-scoping convention. */

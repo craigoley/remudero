@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T3720 — A BUNDLED JOB REPORTED UNDER ONE GATE'S NAME WHILE ANOTHER GATE REFUSED. MEASURED
 // 2026-09-17 on five PRs: the `comment-load-ratchet` check run was red while comment-load-ratchet
@@ -14,7 +15,7 @@ import { successfulReporterSetupFixture } from "./helpers/reporter-setup.js";
 // derivation (scripts/bundled-gate-report.mjs) AND the real ci.yml reporting step that uses it,
 // executed with a stub `gh`, so a later edit to either is what they check.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 type Constituent = { id: string; outcome: string; report?: string };
 type Described = { name: string; conclusion: string; title: string; refusedBy: string[] };
 type Mod = {

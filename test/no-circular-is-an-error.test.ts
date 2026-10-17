@@ -27,15 +27,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { ORIENTATION_DOC, isInPlanScope, outOfPlanScopeFiles } from "../src/lib/plan-scope.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "../src/lib/time-window.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "../src/lib/poll-interval.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const DEPCRUISE_BIN = join(REPO_ROOT, "node_modules", ".bin", "depcruise");
 const CONFIG_PATH = join(REPO_ROOT, ".dependency-cruiser.cjs");
 

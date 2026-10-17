@@ -13,9 +13,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import { selectAffectedSuites, shadowRecord, stripComments, type AffectedSuitesInput } from "../src/lib/affected-suites.js";
 import {
@@ -41,8 +41,9 @@ import { gitRepo } from "./helpers/git-repo.js";
 import * as ratchet from "../scripts/coverage-merge-ratchet.mjs";
 // @ts-expect-error -- plain .mjs script, no type declarations
 import * as shadowScript from "../scripts/select-affected-suites.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TSX = import.meta.resolve("tsx");
 const MERGER = join(REPO_ROOT, "scripts", "coverage-merge-ratchet.mjs");
 

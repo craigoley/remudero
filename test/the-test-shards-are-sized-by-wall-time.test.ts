@@ -11,6 +11,7 @@ import { parse as parseYaml } from "yaml";
 import { DEFAULT_CI_SHARD_COUNT, proposalIsMaterial } from "../scripts/test-tier-manifest.mjs";
 // @ts-expect-error — plain .mjs, no declaration file.
 import { assertExpectedShardCount } from "../scripts/coverage-merge-ratchet.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T4436 ──────────────────────────────────────────────────────────────────────────────────
 //
@@ -36,7 +37,7 @@ import { assertExpectedShardCount } from "../scripts/coverage-merge-ratchet.mjs"
 const CANONICAL_SHARD_COUNT = 8;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CI_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const CI_GATE_YAML_PATH = join(REPO_ROOT, ".github", "workflows", "ci-gate.yml");
 const TEST_TIER_MANIFEST_SOURCE_PATH = join(REPO_ROOT, "scripts", "test-tier-manifest.mjs");

@@ -6,14 +6,15 @@
 // This file pins the three-valued answer and the report that tells them apart.
 
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "diff-coverage.mjs");
 
 type Verdict = { verdict: "type-only" | "emits-code" | "undecidable"; stage?: string; message?: string };

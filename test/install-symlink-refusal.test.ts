@@ -39,7 +39,6 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   ensureInstallFresh,
@@ -51,8 +50,9 @@ import {
 import { killProcessGroup } from "../src/lib/worker-containment.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { waitForServeBanner } from "./helpers/serve-boot-banner.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SERVE_BOOT_BOUND_MS = 120_000;
 
 /** A port nobody holds right now — asked of the OS rather than guessed (the siblings' shape). */

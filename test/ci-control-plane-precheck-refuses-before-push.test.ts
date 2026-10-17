@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error -- test executes the untyped executable module directly.
 import { runCiControlPlanePrecheck } from "../scripts/ci-control-plane-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
 const CONTROL_PRECHECK = join(REPO_ROOT, "scripts", "ci-control-plane-precheck.mjs");
 const CAPABILITY_CHECK = join(REPO_ROOT, "scripts", "generate-capability-snapshot.mjs");

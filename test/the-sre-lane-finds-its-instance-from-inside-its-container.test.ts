@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
 import { resolveSreLaneInstance, sreLaneStartRow } from "../src/lib/sre-lane.js";
 import * as runTask from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * W1-T9500 — the SRE lane names its own registry instance from INSIDE its container. W1-T8232
@@ -24,7 +24,7 @@ import * as runTask from "../src/run-task.js";
  * this ships, and the suite must read the same there as on a laptop or CI.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const REPO_REGISTRY = join(REPO_ROOT, ".remudero", "daemon-instances.yaml");
 /** The state root the core daemon's 15:56:34.487Z `sre_lane.disabled` row named. */
 const CONTAINER_ROOT = "/home/node/Remudero";

@@ -14,11 +14,12 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SUBJECT = "test/view-shadow.test.ts";
 const HYGIENE_HREF = pathToFileURL(join(REPO_ROOT, "test", "setup", "tmp-hygiene.ts")).href;
 const NOTE = /^\s*# view-shadow cleanup: (.+)$/gm;

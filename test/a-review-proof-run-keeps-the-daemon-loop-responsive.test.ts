@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   defaultAsyncProofSpawner,
   ensureDepsAsync,
@@ -19,8 +18,9 @@ import {
 } from "../src/lib/review.js";
 import { discriminateReviewReuse, discriminateReviewReuseAsync } from "../src/lib/sweep.js";
 import { inlineJudgedTally } from "./helpers/judged-pool-run.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const root = findRepoRoot();
 
 function fixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-async-review-proof-"));

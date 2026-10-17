@@ -30,6 +30,7 @@ import {
   type MeasurementCadenceRunResult,
 } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const YAML = `
 - id: A
@@ -285,7 +286,7 @@ test("W1-T5723: the real child entry runs the real cadence and records its failu
   const statePath = join(scratch(), "state.json");
   const entry = fileURLToPath(new URL("../src/measurement-cadence-child.ts", import.meta.url));
   const child = spawnSync(process.execPath, ["--import", "tsx", entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, "RUN-REAL"], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    cwd: findRepoRoot(),
     env: { ...process.env, HOME: home, USERPROFILE: home },
     encoding: "utf8",
     timeout: 110_000,

@@ -6,16 +6,16 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 import { findRawWorktreeAddSites, RAW_WORKTREE_ADD_RE } from "../src/lib/worktree-sites.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const CENSUS = "test/worktree-creation-census.test.ts";
 const SOURCE = "src/lib/engine-tree.ts";
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const raw = (dir: string) => `  run(["-C", repo, "worktree", "add", "--detach", ${dir}, sha]);`;
 
 function started(path: string, head: string | null, base: string | null): string[] {

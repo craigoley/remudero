@@ -5,8 +5,9 @@ import { test } from "node:test";
 
 import { loadMounts, mountsPath, resolveMount } from "../src/lib/mounts.js";
 import { loadPlan, parseTasksFromYaml, PlanError, TASK_TYPES } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function shard(type: string): string {
   return `- id: T-${type}

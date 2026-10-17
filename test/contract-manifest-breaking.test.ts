@@ -2,17 +2,18 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T3896: the validator must refuse the three ways a cross-repository contract silently breaks
 // a consumer — a state no manifest documents, a record missing a field the manifest requires, and
 // a breaking state or field change shipped under the SAME version — and must accept a breaking
 // change only as a new version that names what it supersedes and links a migration note.
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = findRepoRoot();
 const SCRIPT = join(ROOT, "scripts", "validate-contract-manifest.mjs");
 const MANIFEST_PATH = "contracts/automation-flow-v1.json";
 

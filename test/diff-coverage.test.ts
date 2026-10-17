@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T212 (recon R-12): per-diff coverage gate ────────────────────────────
 //
@@ -23,7 +24,7 @@ import { dirname, join } from "node:path";
 // tsconfig's `include`, so it is exercised here only via its CLI surface, never imported.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(__dirname, "..", "scripts", "diff-coverage.mjs");
 const FIXTURES = join(__dirname, "fixtures", "diff-coverage");
 

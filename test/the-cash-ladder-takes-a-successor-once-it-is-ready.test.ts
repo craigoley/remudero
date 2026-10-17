@@ -18,11 +18,12 @@ import {
   type OpenWeightAllowanceState,
 } from "../src/lib/worker-provider.js";
 import { runOpenWeightWalkingLadder, type WorkerResult } from "../src/lib/worker.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4079 (operator ruling 2026-09-22): stay on gpt-5.6 until GPT-6 is priced and shaped,
 // then select it automatically. A measured 404 still drops the unavailable deployment briefly.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-23T01:00:00.000Z");
 
 function ladder(): CapabilityLadder {

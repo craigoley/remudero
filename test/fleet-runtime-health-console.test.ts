@@ -12,9 +12,8 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   FLEET_RUNTIME_HEALTH_STALE_MS,
   fleetRuntimeHealthPath,
@@ -24,8 +23,9 @@ import {
 import { buildServeRoutes, buildServeServer, withFleetRuntimeHealth, type ServeDeps } from "../src/lib/serve.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const HEARTBEAT = join(REPO_ROOT, "scripts", "fleet-heartbeat.sh");
 const READ_TOKEN = "runtime-health-read-token";
 const WRITE_TOKEN = "runtime-health-write-token";

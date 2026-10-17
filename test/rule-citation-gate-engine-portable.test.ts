@@ -17,8 +17,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolveDoctrineForReader } from "../src/lib/learnings.js";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -29,8 +28,9 @@ import {
   symbolDefinitionPattern,
   type GrepRunner,
 } from "./helpers/rule-citation-symbols.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** git 2.54.0's observed behaviour: a pattern containing `\b` matches NOTHING; every other pattern
  *  resolves normally. Simulated rather than shelled, for the reason in this file's header. */

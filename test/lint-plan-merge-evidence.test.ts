@@ -21,8 +21,7 @@
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -32,8 +31,9 @@ import {
   lintPlanCommand,
 } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Builds a `%s%x00%b%x01`-format dump from (subject, body) pairs — the exact wire shape
  *  defaultMergeEvidenceLog produces, so the pure classifier is tested over the real format. */

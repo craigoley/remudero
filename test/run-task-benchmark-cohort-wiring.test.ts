@@ -9,6 +9,7 @@ import { buildBenchmarkCohortDaemonHooks, daemonCommand } from "../src/run-task.
 import { runBenchmarkCohortIdlePass } from "../src/lib/benchmark-cohort.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 test("run task wires benchmark cohort state root", async () => {
   const home = mkdtempSync(join(tmpdir(), "rmd-benchmark-wiring-"));
@@ -80,14 +81,14 @@ test("benchmark cohort backlog progresses during supervised idle starvation", as
       "finite backlog reaches a completed checkpoint without a model worker");
     const direct = spawnSync(process.execPath, ["--import", "tsx",
       fileURLToPath(new URL("../src/lib/benchmark-cohort.ts", import.meta.url)), stateDir], {
-      cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 10_000,
+      cwd: findRepoRoot(), encoding: "utf8", timeout: 10_000,
     });
     assert.equal(direct.status, 0, direct.stderr);
     assert.match(direct.stdout, /"event":"benchmark_cohort.idle_pass"/);
     assert.ok(!direct.stdout.includes("a1"), "the idle process emits metadata, never assignment IDs");
     const usage = spawnSync(process.execPath, ["--import", "tsx",
       fileURLToPath(new URL("../src/lib/benchmark-cohort.ts", import.meta.url))], {
-      cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8", timeout: 10_000,
+      cwd: findRepoRoot(), encoding: "utf8", timeout: 10_000,
     });
     assert.equal(usage.status, 2);
     assert.match(usage.stderr, /usage: node --import tsx src\/lib\/benchmark-cohort\.ts <state-dir>/);

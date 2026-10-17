@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T9409: on 2026-10-14 the watchdog's recycle (pid 405262) wrote state/PAUSE at 08:12:24Z and exited
 // rc=2 one second later in its wait phase, before `docker stop`. Its only EXIT trap cleaned temp files,
@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 // HERMETIC: `docker` and `az` are stubs on PATH. Writer liveness is real: a dead writer is a child that was
 // spawned and reaped, a live writer a running child with its real start time.
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const RELEASE = join(REPO_ROOT, "deploy", "release-orphan-recycle-pause.sh");
 const RECYCLE = join(REPO_ROOT, "deploy", "recycle-container.sh");
 const INSTALLER = join(REPO_ROOT, "deploy", "install-host-units.sh");

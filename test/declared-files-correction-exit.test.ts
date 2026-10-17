@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2248: the operator guide documents the files: correction exit ───────────────────────
 //
@@ -21,7 +22,7 @@ import { dirname, join } from "node:path";
 // actually turn RED against stale/missing wording, not merely proven to parse today.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Markdown prose wraps at ~80 cols, so a literal multi-word phrase can straddle a line break
  *  in the real file even though it reads as one phrase. Collapse all whitespace runs (including

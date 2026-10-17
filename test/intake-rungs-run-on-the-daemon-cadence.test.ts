@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { fixedClock } from "../src/lib/clock.js";
@@ -11,8 +10,9 @@ import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { loadPolicy, policyPath, type Policy } from "../src/lib/policy.js";
 import { buildIntakeRungsDaemonHooks, ledgerPathFor } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = new Date("2026-09-10T12:00:00.000Z");
 
 function fixture(): { root: string; planPath: string; cleanup: () => void } {

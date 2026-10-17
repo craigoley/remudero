@@ -4,7 +4,6 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   approveRunBranch,
@@ -22,6 +21,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { approveCommand } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // W1-T4706. W1-T4700 routed the SINGLE approve through `fileRatificationDraft` (the stamp and repo
 // re-check, and a PR body naming only the paths written). The BATCH lane still wrote through the
@@ -30,7 +30,7 @@ import { gitRepo, GIT_REPO_FIXTURE_IDENTITY, type GitRepo } from "./helpers/git-
 // two-shard body. The drives below run the REAL un-injected gateways offline: a bare throwaway
 // origin, a `gh` shim on PATH, and `approveCommand` itself.
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 const KNOWN = new Set(["none", "remudero"]);
 const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/4706";
 const PRIOR_PR_URL = "https://github.com/craigoley/remudero/pull/4437";

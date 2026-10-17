@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = join(import.meta.dirname, "..");
+const ROOT = findRepoRoot();
 const ci = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
 const titleWorkflow = readFileSync(join(ROOT, ".github/workflows/pr-title-lint.yml"), "utf8");
 const requiredGate = readFileSync(join(ROOT, ".github/workflows/ci-gate.yml"), "utf8");

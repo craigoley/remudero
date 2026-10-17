@@ -16,7 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { classifyAskRecordItem } from "../src/lib/ask-classification.js";
-import { fileURLToPath } from "node:url";
 import { createServer, type AddressInfo } from "node:net";
 import { buildServeRoutes, resolveConsoleSha, CONSOLE_SHA_UNKNOWN, buildServeServer, DEFAULT_BOARD_PREWARM_MS, DEFAULT_SERVE_PORT, prewarmBoardGithub, resolveServePort, resolveServeHost, resolveServeHosts, DEFAULT_SERVE_HOST, resolveServiceTokens, serviceTokensPath, defaultIsListening, type ServeDeps } from "../src/lib/serve.js";
 import type { Route } from "../src/lib/service.js";
@@ -32,6 +31,7 @@ import type { RatifyCliGateway } from "../src/lib/panel-graph.js";
 // suite's re-verification measures the identical fixture, not a second one that could quietly
 // drift out of "production scale" over time.
 import { FIXED_NOW_ISO, corpusLedgerPath, loadCorpusGithub, loadCorpusLedgerLines, loadCorpusPlan } from "./fixtures/w1-t187/load.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T139: rmd serve -- the front door ─────────────────────────────────────────────────
 //
@@ -529,7 +529,7 @@ function extractW1T154Content(planYaml: string): { title: string; rationale: str
 const W1_T154_CONTENT_SHA256 = "b5d3eb1f7e3d1a1b6758b3937d1394520b2b1d00b77a2df17af8bc272560b7a8";
 
 function repoRootFromThisFile(): string {
-  return fileURLToPath(new URL("..", import.meta.url));
+  return findRepoRoot();
 }
 
 test("W1-T188 criterion 1: first-paint-to-data is RE-MEASURED empirically at production-corpus scale against a real server, and the result is recorded with numbers", async () => {

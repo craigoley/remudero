@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { test } from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 /**
  * test/a-house-layout-site-is-judged-against-the-merge-base.test.ts — W1-T3701.
@@ -35,7 +35,7 @@ import { test } from "node:test";
  * dependency on this repository's own drifting file count.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 /** The house-layout literals a non-test `src/*.ts` file may assume instead of resolving through
  *  {@link "../src/lib/repo-layout.js".resolveRepoLayout} — kept identical to

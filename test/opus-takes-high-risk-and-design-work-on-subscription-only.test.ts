@@ -15,12 +15,13 @@ import {
   type WorkerResult,
 } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // Operator ruling 2026-09-24 (DECISIONS.md): Opus takes risk:high and design work on its FIRST
 // attempt, as a peer of the Architect and judge (G-17 amended). A later operator ruling permits
 // a bounded Foundry cash exception only when both subscriptions block and cash can serve the tools.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-24T12:00:00.000Z");
 
 test("a task that edits the design record is design work whatever else it touches", () => {

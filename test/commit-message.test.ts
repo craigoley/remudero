@@ -19,6 +19,7 @@ import {
 } from "../src/lib/commit-message.js";
 import { commitMessageContractLines, outputContractLines } from "../src/lib/compaction.js";
 import { renderFixPrompt } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T136/W1-T137 class: machine-built commit messages must pass the REAL gate ──
 //
@@ -29,7 +30,7 @@ import { renderFixPrompt } from "../src/run-task.js";
 // some future PR.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
 function lint(message: string) {

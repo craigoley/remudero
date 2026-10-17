@@ -3,10 +3,10 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const LEDGER = "test/ledger-rotation.test.ts";
 const UNION = "test/a-union-read-of-an-unretained-step-is-refused.test.ts";
@@ -94,7 +94,7 @@ test("W1-T5692: triggered and admitted suites share one deduplicated child; unre
 });
 
 test("W1-T5692: triggered suite registrations expose executable scripts and leave the CI-only baseline", () => {
-  const root = fileURLToPath(new URL("..", import.meta.url));
+  const root = findRepoRoot();
   const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
   const ciOnly = JSON.parse(readFileSync(join(root, precheck.PRECHECK_PARITY_BASELINE), "utf8")).ciOnly;
   for (const member of precheck.PRECHECK_TRIGGERED_SUITES) {

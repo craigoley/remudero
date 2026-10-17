@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyGrepZeroHit } from "../src/lib/grep-zero-cause.js";
 import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T1224: a zero-hit `grep:` proof must say WHY it read zero ────────────────────────────────
 //
@@ -15,7 +16,7 @@ import { checkProofCommand, CHECK_PROOF_EXIT } from "../src/lib/check-proof.js";
 // wiring's real output.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 
 /** Run `checkProofCommand` with stdout captured, from `cwd` (default: this repo). Restores both,
  *  always — same discipline test/check-proof-executor-parity.test.ts already established. */

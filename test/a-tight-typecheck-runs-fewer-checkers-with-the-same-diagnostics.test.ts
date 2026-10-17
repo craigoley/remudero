@@ -9,17 +9,17 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 import { typecheckStep, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import {
   lowMemoryTypecheckArgs, TSC_DEFAULT_CHECKERS, TSC_LOW_MEMORY_MIN_CHECKERS, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES,
 } from "../src/lib/typecheck-buildinfo.js";
 import { runTypecheck } from "../src/lib/typecheck-run.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const TSC = join(REPO_ROOT, "node_modules", ".bin", "tsc");
 const GiB = 1024 ** 3;
 

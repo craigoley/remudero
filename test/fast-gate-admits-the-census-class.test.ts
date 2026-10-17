@@ -4,10 +4,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2478: the fast gate admits the census class under a MEASURED bound ─────────────────────
 //
@@ -33,7 +33,7 @@ import { FAST_GATE_CENSUS_BOUND_MS, FAST_GATE_STEPS, runPreflightFast } from "..
 // until it is made cheaper or its own cost is argued separately, refused by the same predicate a
 // future entry would be, never by a written exception (task rationale, "NOT IN SCOPE").
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 const REAL_PACKAGE_JSON = JSON.stringify({
   scripts: Object.fromEntries(FAST_GATE_STEPS.map((s) => [s.script, "echo stub"])),

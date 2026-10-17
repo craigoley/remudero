@@ -3,7 +3,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { gateGardenSpec, loadGateProbes, renderDefuseShard, type GateDefuseSources } from "../src/lib/gate-gardener.js";
@@ -11,8 +10,9 @@ import { runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { lintPlanCommand } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = findRepoRoot();
 const NOW = Date.parse("2026-10-04T00:00:00Z");
 const DAY = 86_400_000;
 const FILE = "test/fixture.test.ts";

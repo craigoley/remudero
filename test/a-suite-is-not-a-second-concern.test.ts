@@ -8,6 +8,7 @@ import {
   subsystemsOf,
 } from "../src/lib/task-linter.js";
 import type { Task } from "../src/lib/plan.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 /**
  * W1-T2543 — `moduleIdFromPath` derives a concern id from a BASENAME, and naming a suite after the
  * claim it proves rather than the module it covers IS the house convention here. So a change to
@@ -23,7 +24,7 @@ function task(over: Partial<Task> = {}): Task {
 test("W1-T2543 THE MEASUREMENT: most suites here are named after their claim, not their module", () => {
   // The whole justification. `git ls-files` (never a bare glob — an untracked or NUL-bearing file
   // reads as absent to this harness's grep, per the repo's own investigation rules).
-  const root = new URL("..", import.meta.url).pathname;
+  const root = findRepoRoot();
   const list = (args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
   const srcStems = new Set(list(["ls-files", "src/*.ts", "src/lib/*.ts"]).map((p) => p.replace(/^.*\//, "").replace(/\.ts$/, "")));
   const suites = list(["ls-files", "test/*.test.ts"]);

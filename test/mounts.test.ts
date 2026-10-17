@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import {
@@ -15,8 +13,9 @@ import {
   frontierPeerWorkerRow,
 } from "../src/lib/mounts.js";
 import { DEFAULT_TASK_CLASS } from "../src/lib/task-class.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED = mountsPath(REPO_ROOT);
 
 /** A minimal, VALID table used as the base for negative-case mutations. Every

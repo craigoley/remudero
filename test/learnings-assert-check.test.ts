@@ -5,6 +5,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T34: SELF-VERIFYING LEARNINGS (extends W1-T29 plan-claims to KNOWLEDGE) ──────────────────
 //
@@ -27,7 +28,7 @@ import { dirname, join } from "node:path";
 // test/learnings-index.test.ts's convention for their sibling scripts.)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "learnings-assert-check.mjs");
 const FIXTURES = join(__dirname, "fixtures", "learnings-assert-check");
 

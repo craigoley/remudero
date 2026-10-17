@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
 import {
@@ -12,12 +11,13 @@ import {
   testGardenCheapFingerprint, testGardenInventory, testGardenSpec,
 } from "../src/lib/test-gardener.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const FAST = "scripts/test-tier-manifest.json";
 const COVERAGE = "scripts/test-tier-coverage-manifest.json";
 const FAST_PREFIX = "test-tier-manifest-proposal";
 const COVERAGE_PREFIX = "test-tier-coverage-manifest-proposal";
-const probePromise = loadTestManifestProbe(fileURLToPath(new URL("..", import.meta.url)));
+const probePromise = loadTestManifestProbe(findRepoRoot());
 const files = { "test/a.test.ts": 100, "test/b.test.ts": 0 };
 const manifest = (rows = files) => JSON.stringify({ thresholdMs: 5000, files: rows }) + "\n";
 

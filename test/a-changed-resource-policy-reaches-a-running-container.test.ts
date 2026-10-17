@@ -26,8 +26,9 @@ import {
   type TriggerInputs,
 } from "../src/lib/deployer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-09-23T13:34:00.000Z");
 const HEAD = "c".repeat(40);
 const MIB = 1024 * 1024;

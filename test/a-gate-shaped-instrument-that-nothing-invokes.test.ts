@@ -6,6 +6,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T2735: A GATE-SHAPED INSTRUMENT THAT NOTHING INVOKES ──────────────────────────────────
 //
@@ -28,7 +29,7 @@ import { parse as parseYaml } from "yaml";
 // test/clock-sweep.test.ts reach their scripts through a runtime import. A dynamic specifier is
 // not statically resolved, so this loads the REAL module with no shadow copy to drift from it.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const SCRIPT = join(REPO_ROOT, "scripts", "unwired-gate-check.mjs");
 
 type Stale = { script: string; why: string };

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const root = fileURLToPath(new URL("..", import.meta.url));
+const root = findRepoRoot();
 const json = (path: string) => JSON.parse(readFileSync(join(root, path), "utf8"));
 
 test("Haiku 5.5 image pins the CLI declared by its actual locked SDK", () => {

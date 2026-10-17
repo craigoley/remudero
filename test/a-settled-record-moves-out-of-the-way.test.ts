@@ -13,7 +13,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   ARCHIVE_POINTER_RE,
@@ -33,6 +32,7 @@ import {
 import { fixedClock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { knowledgeCommand } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 function tempRoot(tag: string): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4096-${tag}-`));
@@ -90,7 +90,7 @@ test("W1-T4096: every decision carries a status and a superseded one names its s
 });
 
 test("W1-T4096 (§4): every real DECISIONS.md entry carries a status, and every superseded one names a successor", () => {
-  const root = fileURLToPath(new URL("..", import.meta.url));
+  const root = findRepoRoot();
   const before = readFileSync(join(root, "DECISIONS.md"), "utf8");
   const { entries } = deriveDecisionStatuses(before);
   assert.ok(entries.length > 0);

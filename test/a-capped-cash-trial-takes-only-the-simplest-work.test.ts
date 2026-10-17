@@ -36,12 +36,13 @@ import {
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
 import { runTask } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // Operator ruling 2026-09-24 (DECISIONS.md): a small capped share of the simplest implement work
 // runs on a cheap cash model beside a same-class subscription control, tagged trial "cash-simple",
 // and stops itself when the cash arm falls below the bar. It re-opens as its failures age out.
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const docsTask = { id: "T-DOCS", type: "implement", risk: "low", files: ["docs/guide.md"] };
 
 test("only low-risk single-file docs or plan implement work is trial work", () => {

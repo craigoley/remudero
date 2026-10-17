@@ -29,9 +29,8 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import type { IssueGateway } from "../src/lib/escalate.js";
@@ -44,8 +43,9 @@ import {
 import type { GhApiFetcher } from "../src/lib/open-prs-rest.js";
 import { mainHealthFromRollup, type RollupCheckEntry } from "../src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "main-tripwire.yml");
 
 type WorkflowJob = {

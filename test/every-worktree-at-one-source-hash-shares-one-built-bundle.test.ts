@@ -22,8 +22,9 @@ import {
   buildIntoStore, defaultChildEntryStoreRoot, materializeFromStore, pruneChildEntryStore, runBuildScriptInChild,
   type RunBuildScript,
 } from "../src/lib/child-entry-store.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const NAME = "check-proof-main";
 const SOURCE = "src/check-proof-main.ts";
 const OUT = join("dist", "child-entries");

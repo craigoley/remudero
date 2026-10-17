@@ -14,15 +14,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { planPrPreflight, planPrPreflightAsync } from "../src/lib/plan-pr-emitter.js";
 import { runSuiteShifted } from "../src/lib/gate-gardener.js";
 import { runOpenWeightCheck, spawnOpenWeightWorker } from "../src/lib/worker-provider.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const UNREPORTED = "test-judge: UNREPORTED FILE ";
 
 /** One passing test, then the real `process.exit(0)` before the next test runs. */

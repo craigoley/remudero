@@ -11,6 +11,7 @@ import { RepoLayoutError, resolveRepoLayout } from "../src/lib/repo-layout.js";
 import { loadPlanForLayout } from "../src/lib/plan.js";
 import { loadLearningsCorpus, projectLearningsHome } from "../src/lib/learnings.js";
 import { loadAlertPolicyForRepo } from "../src/lib/alert-lane.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // `scripts/**` sits OUTSIDE tsconfig's `include`, so a static import is a TS7016 (same reason
 // test/comment-load-ratchet.test.ts loads it this way). W1-T3701 reuses this REAL module's split
@@ -72,7 +73,7 @@ const { houseLiteralCounts, listHouseLayoutSrcFiles } = (await import(
  * recorded as a conversion task and admits the diff) and the caller-vs-inliner adoption ratio.
  */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function fixtureRoot(): string {
   return mkdtempSync(join(tmpdir(), "rmd-repo-layout-"));

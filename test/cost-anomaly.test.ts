@@ -3,7 +3,6 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   alreadyLedgeredCostAnomalyRunIds,
   COST_ANOMALY_STEP,
@@ -26,8 +25,9 @@ import { parseLedger, type RunSummary } from "../src/lib/retro.js";
 import { buildStatusBoard, renderStatusBoardText, type StatusBoardDeps } from "../src/lib/status-board.js";
 import { runSweep, type FixDispatchEvidence, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import type { ClarificationQuestion } from "./helpers/sweep-test.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 
 function ledgerTmpPath(): string {
   return join(mkdtempSync(join(tmpdir(), "cost-anomaly-ledger-")), "ledger.ndjson");

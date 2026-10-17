@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   loadPolicy,
@@ -13,6 +11,7 @@ import {
   type Policy,
 } from "../src/lib/policy.js";
 import { dailyCostCeilingReloader } from "../src/run-task.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── W1-T408 acceptance 1 ─────────────────────────────────────────────────────────────────────
 // "the day-scoped ceiling is configurable per instance, so an operator running several can
@@ -25,7 +24,7 @@ import { dailyCostCeilingReloader } from "../src/run-task.js";
 // a shared file), and actually reaches the LIVE governor input `dailyCostCeilingReloader` feeds
 // `costGovernorGateFor` (run-task.ts).
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED: Policy = loadPolicy(policyPath(REPO_ROOT));
 
 test("W1-T408 acceptance 1 — resolveDailyCostCeilingInstanceShare reads a configured share off its own env var, separate from the committed default", () => {

@@ -41,6 +41,7 @@ import {
   type MountRecommendation,
   type MountRefusal,
 } from "../src/lib/mount-recommender.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── PART ONE: routingObjectiveFor, exercised directly ──────────────────────────────────────
 
@@ -244,7 +245,7 @@ test("routingObjectiveFor( is called from src/lib/mount-recommender.ts, not only
   const { readFileSync } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const { join } = await import("node:path");
-  const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+  const repoRoot = findRepoRoot();
   const src = readFileSync(join(repoRoot, "src", "lib", "mount-recommender.ts"), "utf8");
   assert.match(src, /\broutingObjectiveFor\(/, "mount-recommender.ts must call routingObjectiveFor(...) from a production rung");
 });

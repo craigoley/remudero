@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // ── R-50: cache npm, cancel superseded PR runs, bound every job with a timeout ─────────────
 //
@@ -17,7 +18,7 @@ import { parse as parseYaml } from "yaml";
 // invariants this task adds; test/workflow-job-timeouts.test.ts already owns ci.yml's own
 // heavy/light timeout BAND (a narrower, pre-existing concern) and is unchanged by this file.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
 const CI_YAML_PATH = join(WORKFLOWS_DIR, "ci.yml");
 const CI_GATE_YAML_PATH = join(WORKFLOWS_DIR, "ci-gate.yml");

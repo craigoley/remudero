@@ -3,7 +3,6 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { Config } from "../src/lib/config.js";
 import { runDaemon } from "../src/lib/daemon.js";
@@ -17,12 +16,13 @@ import * as selfSync from "../src/lib/self-sync.js";
 import * as runTask from "../src/run-task.js";
 import { buildRetroDaemonHooks, parseGitLogCitationCommits, recordRetroAttempt, retroTriggerCheck } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // MEASURED 2026-10-06: the retro trigger full-history `git log` (retroShippedGithubGateway
 // mergedCommits) ran as execFileSync on the daemon loop — 6 loop_lag rows, 279 s of sync spawn,
 // single reads up to 54 s. The daemon now awaits one bounded async read per check.
 
-const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
+const REPO_ROOT = findRepoRoot();
 const SHIPPED_POLICY: Policy = loadPolicy(policyPath(REPO_ROOT));
 const POLICY: Policy = { ...SHIPPED_POLICY, values: { ...SHIPPED_POLICY.values, retro: { mergesThreshold: 1, daysThreshold: 99_999 } } };
 // Read through the namespace so this file loads on a tree without them: each test then fails alone.

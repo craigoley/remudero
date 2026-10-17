@@ -32,8 +32,9 @@ import {
 import type { LedgerLine } from "../src/lib/ledger.js";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
 import { gitWorkTreeAncestor } from "../src/lib/worker-home.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = join(import.meta.dirname, "..");
+const REPO_ROOT = findRepoRoot();
 const NOW = Date.parse("2026-10-09T12:00:00.000Z");
 const MIB = 1024 * 1024;
 

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { SHARE_ENV, Worker } from "node:worker_threads";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 // @source-text-subject: this census IS about source text — it locates every `new Worker(` in src/ and reads
 // its options, because a thread spawned without `env: SHARE_ENV` copies process.env once and never sees the
@@ -19,7 +19,7 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 // and forwards them unchanged, so each call is censused at its call site like `new Worker`; startWorker's own spawn is
 // a pass-through exemption.
 
-const root = fileURLToPath(new URL("..", import.meta.url));
+const root = findRepoRoot();
 
 /** Blank comments, string/template text and regex bodies (length and newlines preserved). */
 function mask(src: string): string {

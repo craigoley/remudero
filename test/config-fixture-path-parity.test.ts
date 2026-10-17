@@ -45,7 +45,6 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   configPath,
   findFixtureConfigPathViolations,
@@ -57,8 +56,9 @@ import { defaultReconRunLens } from "../src/run-task.js";
 import type { ProbeExecResult } from "../src/lib/containment.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { Config } from "../src/lib/config-schema.js";
+import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
-const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const REPO_ROOT = findRepoRoot();
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
