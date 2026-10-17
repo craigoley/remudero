@@ -15,7 +15,7 @@ const {createBoundedAuthorScratch, lowFootprintSandbox, nativeAuthorCommand} = a
 
 test('native low-footprint volume enforces capacity and its sandbox refuses escaped writes and installs',
   {skip: process.platform !== 'darwin'}, t => {
-    const parent = mkdtempSync(join(tmpdir(), 'lf-native-'));
+    const parent = mkdtempSync(join(tmpdir(), 'rmd-lf-native-'));
     let scratch: ReturnType<typeof createBoundedAuthorScratch> | undefined;
     t.after(() => {
       scratch?.release();

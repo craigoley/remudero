@@ -47,7 +47,7 @@ export function lowFootprintSandbox(volume) {
 
 export function createBoundedAuthorScratch(bytes, {parent = tmpdir(), command = nativeAuthorCommand} = {}) {
   if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes % MIB !== 0) throw new Error('invalid bounded scratch capacity');
-  const dir = realpathSync(mkdtempSync(join(parent, 'rt-author-'))), identity = lstatSync(dir);
+  const dir = realpathSync(mkdtempSync(join(parent, 'rmd-author-'))), identity = lstatSync(dir);
   const image = join(dir, 'scratch.dmg'), volume = join(dir, 'v');
   mkdirSync(volume);
   let attached = false;

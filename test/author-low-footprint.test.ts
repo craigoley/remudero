@@ -35,7 +35,7 @@ test('low-footprint author requires explicit bounded inputs and never discovers 
 });
 
 test('low-footprint author confines writes and refuses dependency payloads and networking', t => {
-  const dir = mkdtempSync(join(tmpdir(), 'low-policy-'));
+  const dir = mkdtempSync(join(tmpdir(), 'rmd-low-policy-'));
   t.after(() => rmSync(dir, {recursive: true}));
   const policy = lowFootprintSandbox(dir);
   assert.ok(policy.includes('(deny file-write*)'));
@@ -93,7 +93,7 @@ test('low-footprint image qualification refuses missing, oversized and unmounted
   const {createBoundedAuthorScratch} = await import(subject) as {
     createBoundedAuthorScratch: (bytes: number, opts: {parent: string; command: Function}) => {release: () => void};
   };
-  const parent = mkdtempSync(join(tmpdir(), 'lf-errors-'));
+  const parent = mkdtempSync(join(tmpdir(), 'rmd-lf-errors-'));
   t.after(() => rmSync(parent, {recursive: true}));
   const bytes = 64 * 1024 ** 2;
   assert.throws(() => createBoundedAuthorScratch(bytes, {parent, command: () => {throw new Error('create refused');}}), /create refused/);
@@ -117,7 +117,7 @@ test('low-footprint modeled image lifecycle verifies capacity and identity befor
   const {createBoundedAuthorScratch} = await import(subject) as {
     createBoundedAuthorScratch: (bytes: number, opts: object) => {dir: string; release: () => void};
   };
-  const parent = mkdtempSync(join(tmpdir(), 'lf-modeled-'));
+  const parent = mkdtempSync(join(tmpdir(), 'rmd-lf-modeled-'));
   t.after(() => rmSync(parent, {recursive: true}));
   const stat = fs.lstatSync, statfs = fs.statfsSync;
   t.mock.method(fs, 'lstatSync', (path: fs.PathLike, opts?: object) => {
@@ -141,7 +141,7 @@ test('low-footprint portable workflow keeps native test failures and incomplete 
   const {captureStepSync} = await import(capturePath) as {captureStepSync: (file: string, args: string[], opts: object) => object};
   for (const kind of ['pass', 'fail', 'incomplete', 'skipped', 'changed', 'cleanup-failed', 'capture-threw']) {
     const f = makeRuntimeFixture(kind === 'fail'); t.after(() => f.cleanup());
-    const volume = mkdtempSync(join(tmpdir(), 'lf-portable-'));
+    const volume = mkdtempSync(join(tmpdir(), 'rmd-lf-portable-'));
     t.after(() => rmSync(volume, {recursive: true, force: true}));
     const command = (file: string, argv: string[], opts?: object) => {
       if (file === '/usr/bin/sandbox-exec') {writeFileSync(argv[5]!, 'control'); return '';}
