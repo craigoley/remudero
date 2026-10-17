@@ -1,0 +1,30 @@
+- id: W1-T9937
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — read_model.materialize_failed landed 151 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:read_model.materialize_failed"
+  files:
+    - test/scout-read-model-materialize-failed.test.ts
+  acceptance:
+    - claim: "read_model.materialize_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9937: read_model.materialize_failed no longer recurs\" in test/scout-read-model-materialize-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step read_model.materialize_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 19 in the older half, 132 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filing reports recurrence counts but supplies no underlying failure details or diagnosed cause; the finding cannot be verified from the evidence shown, meeting the stated escalation condition.; on the change's description/files alone, no diff was read — The task requests a cause fix while explicitly leaving the emitting code unidentified and declaring only a new test file. Its implementation scope is therefore unresolved.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that establishes text presence, not that the test passes or recurrence stops."
+    judged_at: "2026-10-16T23:08:00.784Z"
+    pin: "f9fe65c801ccd39c030d9dd26bf712db051f1906c49653c4532074d14b1578d4"

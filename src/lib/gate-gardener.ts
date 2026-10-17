@@ -16,6 +16,7 @@ import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.j
 import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations, retirementHoldsOrigin, taskLandedArgs } from "./plan.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { loadPolicy } from "./policy.js";
+import { sameTestFile } from "./test-path-resolver.js";
 
 /**
  * lib/gate-gardener.ts (W1-T4116) — the gates tend themselves.
@@ -235,7 +236,8 @@ function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateD
   const runSuite = sources.runSuite ?? ((file: string, days: number) => runSuiteShifted(deps.repoRoot, file, days));
   return [...byFile.values()].flatMap((finding): GateGardenAction[] => {
     const target = `expiring-fixture:${finding.file}`;
-    if (covered.has(target)) {
+    if ([...covered].some((origin) => origin?.startsWith("expiring-fixture:") &&
+      sameTestFile(origin.slice("expiring-fixture:".length), finding.file))) {
       deps.log("gate_garden.defuse_deferred", defuseEvidence(finding, leadDays));
       return [];
     }

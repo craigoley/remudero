@@ -1,0 +1,48 @@
+- id: W1-T9873
+  title: "CI WORKFLOWS FIND TESTS IN SUBFOLDERS — mutation-nightly lists test/ with find -maxdepth 1, ci.yml counts `ls test/*.test.ts` under pipefail (the step fails once no flat test is left), and recovery-drill's paths: trigger names one exact test path (test restructure, letter D, part 5)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, CI workflows over nested tests; spans three workflow files
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter D (part 5 of 5)'
+  plan_refs: [W1-T9870, W1-T9879]
+  files:
+    - .github/workflows/mutation-nightly.yml
+    - .github/workflows/ci.yml
+    - .github/workflows/recovery-drill.yml
+    - test/ci-workflows-find-nested-tests.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Citations re-verified at origin/main 889966ea5 (2026-10-16). (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section B, rows 8, 9 and 16)
+    - .github/workflows/mutation-nightly.yml:66 runs `find test -maxdepth 1 -type f -name '*.test.ts'`. After a partial
+      move the population narrows silently; after a full move the step fails as "NIGHTLY BLOCKED".
+    - .github/workflows/ci.yml:475 runs `TOTAL="$(ls test/*.test.ts | grep -c .)"` under `-eo pipefail`, so the step
+      FAILS once no flat test remains. ci.yml:287 also counts with `find test -maxdepth 1` (cosmetic).
+    - .github/workflows/recovery-drill.yml:34 names "test/recovery-drill.test.ts" in its pull_request paths: trigger.
+    clock-sweep.yml is handled by W1-T9870, with the sweep it triggers. Workflow run: lines that name an exact test file
+    (ci.yml ~1177 test/containment.test.ts, recovery-drill.yml ~66) are re-keyed by the move tool, W1-T9879.
+  design: |
+    1. mutation-nightly.yml lists test files recursively (`git ls-files 'test/**/*.test.ts'` or `find test -name ...
+       -not -path 'test/fixtures/*'`), and the nightly's per-file mapping still keys on the full path.
+    2. ci.yml:475 and :287 count recursively, using the same population as the npm test glob, and cannot fail on an
+       empty flat folder.
+    3. recovery-drill.yml's paths: entry becomes `test/**/recovery-drill.test.ts`.
+    4. test/ci-workflows-find-nested-tests.test.ts parses the three workflows. It fails if any step lists test/ with
+       -maxdepth 1 or a flat `test/*.test.ts` shell glob, or if a pull_request paths: entry names an exact
+       test/<name>.test.ts path. It asserts it parsed > 0 steps in each file. New test flat in test/.
+  acceptance:
+    - claim: 'no workflow step lists test/ only at its top level'
+      proof: 'grep: test("W1-T9873: no workflow step lists test/ only at its top level" in test/ci-workflows-find-nested-tests.test.ts'
+    - claim: 'no pull_request paths trigger names an exact flat test path'
+      proof: 'grep: test("W1-T9873: no paths trigger names an exact flat test path" in test/ci-workflows-find-nested-tests.test.ts'
+    - claim: 'the recovery-drill trigger follows its test into any folder'
+      proof: 'grep: test/\*\*/recovery-drill\.test\.ts in .github/workflows/recovery-drill.yml'
+  falsifier: |
+    On origin/main mutation-nightly.yml:66 has `find test -maxdepth 1`, ci.yml:475 has `ls test/*.test.ts`, and
+    recovery-drill.yml:34 names the exact path, so both new tests fail and the grep misses.

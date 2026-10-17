@@ -1,0 +1,68 @@
+- id: W1-T9934
+  title: "A REPEAT CASH-TRIAL DECISION READS ONLY WHAT IS NEW IN ITS 7-DAY WINDOW — decideCashTrial's windowedRows gunzips and scans every rotation in the window (readLedgerUnionRawLinesSync, on the daemon loop) on each cash-arm decision, and four held decisions in 70 min on 2026-10-16 each re-read it; one root-disk burst of about 264 MB ended as the 16:45:32Z decision was written"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, how the cash trial reads its window; the rows it decides on and its strict live-read rule are unchanged
+  band_meaning: blast-radius
+  origin: 'wipe-test hand-fix PR 12406 (head 48ef3814f) builder report, follow-up; coordinator brief batch1016b item 5'
+  plan_refs: [W1-T4556, W1-T9390, W1-T9710]
+  files:
+    - src/lib/cash-trial.ts
+    - src/run-task.ts
+    - test/a-repeat-cash-trial-decision-reads-only-what-is-new.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    DEPENDS ON PR 12406 (the wipe-test cadence hand-fix, head 48ef3814f, no task id). Build only after it merges. It
+    is the model for a windowed, counted, incremental reader and for the bytes and rotations fields on a row.
+    READ at origin/main fb566039c (symbols, not lines):
+    - src/lib/cash-trial.ts decideCashTrial: a task in the control arm returns before any read. For a cash-arm task
+      it calls windowedRows unless `readRows` is injected.
+    - windowedRows calls readLedgerUnionRawLinesSync with `sinceTs` (policy windowDays, default 7),
+      `pattern: /cash-simple|"step":"verdict"|selection_assignment_id/` and refuseIncomplete. Every rotation not
+      before the window is read and gunzipped in full on every call. Its own rule refuses the decision ("ledger
+      source unreadable or incomplete for paid-trial spend") when any rotation is unread, the live file fails to
+      read or is absent, or a file is unclassified.
+    - It filters raw lines by a field pattern, not by step. createIncrementalLedgerUnion caches only `step` reads,
+      so it cannot share PR 12406's step-filtered reader.
+    - src/run-task.ts logs `cash_trial.decided` with only arm and reason.
+    OBSERVED, core ledger (13 files modified since 2026-10-15 20:00Z): 5 cash_trial.decided rows on 2026-10-16. One is
+    control (no read); four are held after a read, at 16:45:32, 17:03:17, 17:14:19 and 17:55:28, all "5 failed cash
+    runs in 7d exceed the 4 the bar tolerates at n=20". actor daemon, so the read is on the daemon loop.
+    OBSERVED (logs-8864/rootio-burst-split-1.txt and rootio-burst-ledger-1.txt): a root-disk burst "cash/run.start
+    W1-T9626 45s 259:1 264.1 MB", gz-busy 16:44:56 to 16:45:31, then cash_trial.decided for W1-T9626 at 16:45:32.
+    INFERRED, by timing only: that burst is this read. PR 12406's builder measured 260.6 MB for 290 of 377 rotations
+    in the whole-union wipe-test read, the same order of size.
+  design: |
+    1. A cash-trial window reader, built once per daemon (held by the run-task deps that call decideCashTrial, the
+       way PR 12406 holds createWipeTestEvidenceReader). Each rotation in the window is reduced once to the lines its
+       pattern keeps. The result is kept in memory and as a durable digest through ledgerRotationDigests, under its
+       own holder and a reducerVersion that names the pattern. A repeat decision reads no rotation whose name, size
+       and mtime are unchanged. The window's start still drops rotations before it, as rotationBeforeWindow does.
+    2. Keep the strict rule unchanged. The live file is read on every decision, and an absent or unreadable live
+       file, an unread rotation, an unclassified file or an unreadable row still yields the same
+       unavailableReason, so a decision never spends on partial evidence.
+    3. A cold rotation (no digest yet) is loaded off the loop where the caller can await it, as
+       createEscalationTriageHistoryReader does. Where it cannot, it is parsed inline once and digested.
+    4. cash_trial.decided carries evidence_bytes_read, evidence_rotations_read and evidence_rotations (the names
+       PR 12406 uses), so the fleet can see a repeat decision read only the live tail. A control-arm decision
+       records 0 for each.
+    5. No new constant. The window stays policy.windowDays.
+    Tests go in test/a-repeat-cash-trial-decision-reads-only-what-is-new.test.ts, titled verbatim as in the proofs,
+    over a temp state dir with real gzipped rotations and a counting fs seam.
+  acceptance:
+    - claim: "a second cash-arm decision with unchanged rotations reads no rotation and reaches the same evidence"
+      proof: 'grep: test("W1-T9934: a repeat cash decision with unchanged rotations reads no rotation" in test/a-repeat-cash-trial-decision-reads-only-what-is-new.test.ts'
+    - claim: "an unreadable live file still refuses the decision as unreadable evidence, digests or not"
+      proof: 'grep: test("W1-T9934: an unreadable live file still refuses the cash decision" in test/a-repeat-cash-trial-decision-reads-only-what-is-new.test.ts'
+    - claim: "the cash_trial.decided row carries the evidence bytes and rotations read"
+      proof: 'grep: test("W1-T9934: the cash decision row carries its evidence read cost" in test/a-repeat-cash-trial-decision-reads-only-what-is-new.test.ts'
+  falsifier: |
+    On origin/main, windowedRows reads every rotation in the window again on the second decision, so a counting fs
+    sees a non-zero rotation count and the first test fails. The cash_trial.decided row has only arm and reason, so
+    the third fails. The second passes before and after; it guards against a cache that skips the live-read rule.

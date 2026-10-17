@@ -1,0 +1,99 @@
+- id: W1-T9860
+  title: "A TEST IS FOUND BY ITS UNIQUE BASENAME WHEN ITS CITED PATH IS GONE — one shared resolveTestPath behind every proof executor, and a check that keeps every test basename unique, so moving test/ into folders strands no proof (test restructure, letter A, part 1)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how a cited test path resolves; it touches every proof executor, so a wrong fallback could pass a proof
+  band_meaning: blast-radius
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter A (part 1 of 3)'
+  plan_refs: [W1-T9861, W1-T9862, W1-T9879]
+  files:
+    - src/lib/test-path-resolver.ts
+    - src/lib/review.ts
+    - src/lib/check-proof.ts
+    - src/lib/task-linter.ts
+    - scripts/acceptance-author-gate.mjs
+    - scripts/proof-discrimination-gate.mjs
+    - scripts/proof-resolve-precheck.mjs
+    - test/a-moved-test-is-found-by-its-unique-basename.test.ts
+    - test/every-test-basename-is-unique.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OPERATOR RULING 5 (2026-10-16): a test's unique basename is its identity. A census keeps basenames unique, and every
+    path-keyed reader falls back to a basename lookup. Merged proofs are not rewritten, and open proofs need no
+    re-pointing. This task is the resolver and the proof executors. W1-T9861 and W1-T9862 move the other readers onto it.
+    MEASURED at origin/main a323d87ed (plan/seeds/test-restructure-2026-10-16/taxonomy.md section 7, coupling-inventory.md section A):
+    - 3,640 flat test/*.test.ts files, and 3,640 of 3,640 basenames are unique;
+    - 9,748 of 14,397 plan proofs name a test path; 147 open tasks cite 202 existing test files.
+    Citations re-verified at origin/main 889966ea5 (2026-10-16).
+    - scripts/acceptance-author-gate.mjs (~line 597) calls lintTask with `moduleExists: (path) => existsSync(join(REPO_ROOT, path))`
+      and keeps only `credited-test-path` violations (creditedTestPathViolations, src/lib/task-linter.ts). This is a
+      required BLOCK. A credited task naming test/x.test.ts after x moved is refused, and Rule 15 forbids the worker from
+      amending the shard.
+    - src/lib/review.ts parseWhitelistedProof turns `unit test: test/x.test.ts` into `node --test ... <path>`, and a
+      `grep: ... in test/x.test.ts` into a grep argv on that exact path. judgeCriterion grades it. A ghost path grades
+      executed_fail or exec_error, which means FAIL and fix rounds.
+    - src/lib/check-proof.ts (--base), scripts/proof-discrimination-gate.mjs (runCheckProof,
+      evaluateProofDiscrimination) and scripts/proof-resolve-precheck.mjs (proofResolveVerdict) execute the same proofs.
+    INFERRED: without a resolver, every open task built after its tests move goes red on a path. The alternative is
+    about 5,850 plan amendments.
+  design: |
+    1. src/lib/test-path-resolver.ts exports resolveTestPath(pathOrBasename, { root, tree }), returning
+       { path, how: "exact" | "basename" } or { unresolved: "absent" | "ambiguous", candidates }.
+       - The exact path is tried first, in the tree being judged.
+       - Otherwise the basename `<name>.test.ts` is looked up in an index of `git ls-files -- 'test/**/*.test.ts'`
+         for that tree. test/fixtures/ is excluded, because it holds a fixture test/existing.test.ts.
+       - Only test/**.test.ts shapes are eligible. Any other path resolves exactly or not at all.
+    2. LOOKUP COST. The index is built ONCE per tree SHA (`git rev-parse <rev>^{tree}`) and cached in-process in a Map.
+       There is never a per-call walk of ~4k files. When check-proof judges base and head, each tree gets its own index,
+       so a base proof resolves against base.
+    3. FAIL CLOSED.
+       - Zero hits is `absent` and two or more is `ambiguous`; neither is ever guessed.
+       - Every caller keeps today's outcome for an unresolved path: executed_fail or exec_error, the credited-test-path
+         BLOCK, or the precheck refusal.
+       - A caller that used the fallback says so in its output (`resolved test/x.test.ts -> test/<folder>/x.test.ts by
+         basename`), so a reviewer can see it happened.
+    4. CALLERS. These resolve through resolveTestPath instead of a bare path or existsSync:
+       - review.ts parseWhitelistedProof / judgeCriterion, for whole-file `unit test:` and `grep: ... in test/...` proofs;
+       - check-proof.ts, at base and at head;
+       - proof-discrimination-gate.mjs;
+       - proof-resolve-precheck.mjs;
+       - acceptance-author-gate.mjs's credited-test-path moduleExists.
+       Title-only `unit test: <title>` proofs already search recursively and are left alone.
+    5. UNIQUENESS CHECK, test/every-test-basename-is-unique.test.ts.
+       - It walks `git ls-files -- 'test/**/*.test.ts'` (recursive, fixtures excluded) and fails naming both paths when
+         two tests share a basename.
+       - It asserts that the inspected count is > 0 and equals an independent `find test -name '*.test.ts'` count with
+         fixtures excluded. A check that compares nothing must go red.
+       - Its name avoids census|ratchet|baseline, so RULE_SUITE_NAME_RE (src/lib/ci-parity.ts) does not enrol it by name.
+    6. No proof text under plan/ is rewritten (ruling 5).
+    New tests stay flat in test/: this phase-0 task lands before the readers are recursive, and the move waves place
+    them later. Prove each new test is load-bearing by deleting the fix and watching it go red.
+  acceptance:
+    - claim: 'a moved test resolves by its unique basename when its cited path is gone'
+      proof: 'grep: test("W1-T9860: a moved test resolves by its unique basename" in test/a-moved-test-is-found-by-its-unique-basename.test.ts'
+    - claim: 'an absent or ambiguous basename stays a failure, never a pass'
+      proof: 'grep: test("W1-T9860: an absent or ambiguous basename stays a failure, never a pass" in test/a-moved-test-is-found-by-its-unique-basename.test.ts'
+    - claim: 'the basename index is built once per tree sha, never per call'
+      proof: 'grep: test("W1-T9860: the basename index is built once per tree sha" in test/a-moved-test-is-found-by-its-unique-basename.test.ts'
+    - claim: 'a whole-file proof and a grep proof on a moved path run against the moved file'
+      proof: 'grep: test("W1-T9860: a whole-file or grep proof on a moved path runs the moved file" in test/a-moved-test-is-found-by-its-unique-basename.test.ts'
+    - claim: 'the credited-test-path gate accepts a moved test and still refuses an absent one'
+      proof: 'grep: test("W1-T9860: the credited-test-path gate accepts a moved test and refuses an absent one" in test/a-moved-test-is-found-by-its-unique-basename.test.ts'
+    - claim: 'two tests sharing a basename are refused by name, and the check inspects a non-empty population'
+      proof: 'grep: test("W1-T9860: two tests sharing a basename are refused by name" in test/every-test-basename-is-unique.test.ts'
+    - claim: 'review resolves cited test paths through the shared resolver'
+      proof: 'grep: resolveTestPath( in src/lib/review.ts'
+    - claim: 'check-proof resolves cited test paths through the shared resolver'
+      proof: 'grep: resolveTestPath( in src/lib/check-proof.ts'
+    - claim: 'the acceptance-author gate resolves credited test paths through the shared resolver'
+      proof: 'grep: resolveTestPath( in scripts/acceptance-author-gate.mjs'
+  falsifier: |
+    On origin/main no resolver exists, so every grep above misses. A proof naming test/x.test.ts after x moved to
+    test/<folder>/x.test.ts hands node --test a ghost path and grades executed_fail. acceptance-author-gate's existsSync
+    returns false and the credited-test-path BLOCK fires. Two files sharing a basename are not detected.

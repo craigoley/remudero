@@ -35,7 +35,8 @@
   cited: "2026-07-14"
 - id: criteria-go-stale-on-relocation
   subsystem: acceptance
-  lifecycle: active
+  # knowledge gardener: retire criteria-go-stale-on-relocation
+  lifecycle: superseded
   operator_impact: true
   files: [plan/tasks.yaml, src/lib/review.ts]
   fact: >-

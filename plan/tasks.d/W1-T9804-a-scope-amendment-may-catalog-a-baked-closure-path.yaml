@@ -14,8 +14,9 @@
     - src/lib/proof-amendment.ts
     - src/run-task.ts
     - test/a-scope-amendment-may-catalog-a-baked-closure-path.test.ts
-  status: queued
-  priority: 1  # operator-2026-10-16: a baked-closure join is unfixable by the fix lane and needs a hand push; three PRs joined the closure in three days
+  status: blocked
+  retirement: retired  # operator ruling 2026-10-16 (Craig, to the operator session): REJECTED as a security weakening. The auto-mode classifier refused the edit as [Security Weaken], and builder B19 found that a "tracked-path token insertion" into codeql.yml or semgrep.yml `paths-ignore` passes this shard's rule and removes a path from scanning. Craig chose to PREVENT, not carve out: the fix lane never edits a workflow file; a baked-closure join is caught before the PR opens and the implement build updates the lists; a missed one escalates to a person. Superseded by W1-T9806 (the closure censuses are asked before the push and name the lists) and W1-T9851 (the implement build catalogs the join; a miss reaches a person)
+  superseded_by: W1-T9806
   attempts: 0
   rationale: |
     READ at origin/main db88033a3 (2026-10-16):

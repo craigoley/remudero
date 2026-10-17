@@ -1,0 +1,85 @@
+- id: W1-T9918
+  title: "A LIGHT PASS REACHES REVIEW ELIGIBILITY WITHOUT WAITING ON ITS READY-REFRESH READS — buildSweepLightHook runs buildBehindMainByPr's compare reads (synchronous ghJson, on the daemon loop) and runLightPassReadyRefresh before either batch reaches sweep.review_eligible, and nothing ledgers how long each read takes; builder B23 measured daemon.alive → the light pass's first sweep.pass at 4.7-9.3 min on 2026-10-16 (16:30:25 → 16:39:42Z, of which 16:33:18 → 16:39:22 sits between sweep.plan_filing_classified and sweep.review_eligible): measure each pre-review read, then take it off the critical path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the light pass's pre-review critical path (what it waits on before review eligibility); which PR is refreshed, and when, is unchanged
+  band_meaning: blast-radius
+  origin: "coordinator fan-out 2026-10-16, builder B23 measurement relayed to filing agent F6 as lead 4 (P1 by the coordinator)"
+  plan_refs: [W1-T7214, W1-T7735, W1-T5696, W1-T9595, W1-T9743, W1-T9780, W1-T9820, W1-T100, W1-T9748]
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/a-light-pass-reaches-review-eligibility-without-waiting-on-ready-refresh-reads.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED by builder B23 (relayed 2026-10-16): from `daemon.alive` to a light pass's first `sweep.pass` takes 4.7 to
+    9.3 min. It is now the largest share of each light-pass gap.
+    RE-READ by F6 on the Azure host's core ledger (archive ledger.2026-10-16T17-23-25-589Z, read-only) for B23's
+    example:
+    - 16:30:25 `daemon.alive` (loop_delay_max_ms 29,226, sync_spawn_ms 144,431 in its window).
+    - 16:33:18 six `sweep.plan_filing_classified`.
+    - Nothing on the light pass's path until 16:39:22, which has `sweep.update_branch.attempted` / `.error` for
+      #12355 (`update_reason: ready-overlap`, behind_by 10), then five `sweep.review_eligible`.
+    - 16:39:42 nine light `sweep.pass` rows; 16:39:43 the reviews are admitted.
+    - So ~6 min of that pass sits in the ready-refresh stretch, and no row names what it spent the time on.
+    - A full pass also ran in that window (`sweep.full_prelude` at 16:37:47, elapsed_ms 1,106,900). Whether the light
+      pass waited on the loop, on a shared reader or on its own reads is NOT measured. That is design step 1.
+    READ at origin/main 34b3bf216 (symbols, not lines):
+    - src/run-task.ts `buildSweepLightHook`: after `buildOpenPrViewsAsync`, a ready snapshot (green checks, success
+      review) calls `buildBehindMainByPr(owner, repo, readyPrs, ...)`, then awaits `runLightPassReadyRefresh`, then
+      awaits `runLightPassRefreshAdmission` (W1-T9595). Only after these does either `runSweepLightPass` batch start,
+      and the batches are where `sweep.review_eligible` is written.
+    - `buildBehindMainByPr` defaults `fetch` to `ghJson` (src/lib/github-transport.ts), which shells out through
+      `execFileSync`. Up to DISTANCE_REFRESH_PROBE_LIMIT compare reads (`repos/<o>/<r>/compare/<head>...main`) run
+      synchronously on the daemon loop each pass. Nothing memoizes one, so an unchanged head against an unchanged
+      main is read again every pass.
+    - src/lib/sweep.ts `runLightPassReadyRefresh` reads the ledger, the Actions status summary and
+      `buildRefreshValueGate` (W1-T7735) before choosing a target. None of these reads ledgers its duration.
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and all origin heads: 26 main shards match the light-pass and
+    ready-refresh subject, and no head reads more. None owns this stretch:
+    - W1-T7214 and W1-T5696 (merged) built the ready refresh and its distance read.
+    - W1-T7735 (merged as #12308; its shard still reads `queued`) gates a refresh on its worth.
+    - W1-T9595 (merged) adds the admission.
+    - W1-T9743 (queued) owns the review admissions AFTER `sweep.review_eligible`.
+    - W1-T9780 owns memory-admission waits.
+    - W1-T9820 owns plan-filing file reads.
+    - lint-plan's duplicate-surface notes W1-T100 (blocked_ci routed to the ci-log fix path) and W1-T9748 (tracing
+      declared files to the staging step). Both share only the two large files src/run-task.ts and src/lib/sweep.ts;
+      neither touches the light pass's pre-review path, which is what this task changes.
+  design: |
+    Operator ruling: no new fixed threshold, no new interval or cap.
+    1. MEASURE FIRST. Each light pass ledgers one row (`sweep_light.pre_review_timing`) with the wall ms of each phase
+       before the first batch starts: open-PR views, ready-set compare reads (count, and ms per read), the ready
+       refresh's ledger read, its Actions read, the value gate, the update itself, and the refresh admission. The row
+       also carries the synchronous on-loop ms the pass spent. The PR reports these numbers from a fixture and, after
+       merge, from the host.
+    2. The compare reads use the async gh transport and never block the loop. A compare result is memoized by
+       (head sha, main sha): an unchanged head against an unchanged main is not read again. The memo holds counts and
+       file lists, not rows, and is bounded by the open-PR set it is keyed on.
+    3. A PR outside the ready set never waits on the ready refresh or the admission. Only the ready PRs, whose arm
+       W1-T7214 holds until their distance is known, wait. This keeps W1-T7214's guarantee: no ready PR is armed on a
+       base main has left. If step 1's numbers show a different phase dominates, the builder takes THAT phase off the
+       path by the same two means (async, memoize by its input), names it in the PR, and does not grow the task
+       further.
+    4. Which PR is refreshed, the refresh's value gate, and the admission's decisions are unchanged.
+    Tests go in test/a-light-pass-reaches-review-eligibility-without-waiting-on-ready-refresh-reads.test.ts, titled
+    verbatim as in the proofs. Drive the real buildSweepLightHook with injected readers whose ready-refresh read is
+    held open on a deferred promise. Assert that a non-ready PR's `sweep.review_eligible` is written WHILE the read is
+    still pending; its absence is the defect. Positive control: a ready PR's arm still waits for its distance.
+  acceptance:
+    - claim: "each light pass ledgers the wall time of every pre-review phase and its synchronous on-loop ms"
+      proof: 'grep: test("W1-T9918: a light pass ledgers each pre-review phase duration" in test/a-light-pass-reaches-review-eligibility-without-waiting-on-ready-refresh-reads.test.ts'
+    - claim: "a non-ready PR reaches review eligibility while the ready refresh's read is still pending, and a ready PR still waits for its distance"
+      proof: 'grep: test("W1-T9918: a non-ready PR is review-eligible before the ready refresh settles" in test/a-light-pass-reaches-review-eligibility-without-waiting-on-ready-refresh-reads.test.ts'
+    - claim: "an unchanged head against an unchanged main reuses its compare, and no compare read runs synchronously on the loop"
+      proof: 'grep: test("W1-T9918: an unchanged head and main reuse their compare off the loop" in test/a-light-pass-reaches-review-eligibility-without-waiting-on-ready-refresh-reads.test.ts'
+  falsifier: |
+    At origin/main, holding the ready refresh's read open leaves every batch unstarted. No `sweep.review_eligible` is
+    written for the non-ready PR until the read resolves, so the second test fails. A second pass over the same
+    head and main calls `ghJson` compare again, synchronously, so the third test fails.

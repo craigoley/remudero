@@ -295,10 +295,13 @@ test("W1-T3562: a fetch failure refuses the whole reconciliation with the git re
 
 test("W1-T3562: an unreadable landing-branch file is skipped rather than treated as fatal", () => {
   const rootDir = seededOrigin("branch-race").clone();
+  // W1-T9803: the landing source is the branch's own diff from its merge base with main, read by blob.
+  const blob = "1".repeat(40);
   const git = (args: string[]): string => {
     if (args[0] === "fetch") return "";
-    if (args[0] === "ls-tree") return "plan/feedback/fb-raced-away.yaml\n";
-    if (args[0] === "show") throw new Error("branch moved during scan");
+    if (args[0] === "diff") return `:000000 100644 ${"0".repeat(40)} ${blob} A\0plan/feedback/fb-raced-away.yaml\0`;
+    if (args[0] === "ls-tree") return `100644 blob ${blob}\tplan/feedback/fb-raced-away.yaml\0`;
+    if (args[0] === "cat-file") throw new Error("object pruned during scan");
     throw new Error(`unexpected git call: ${JSON.stringify(args)}`);
   };
 
@@ -337,7 +340,7 @@ test("W1-T3562: an unparseable origin/main copy is classified as a surfaced diff
   writeEntry(rootDir, "fb-invalid-origin", { status: "new" });
   const git = (args: string[]): string => {
     if (args[0] === "fetch") return "";
-    if (args[0] === "ls-tree") return "";
+    if (args[0] === "diff") return "";
     if (args[0] === "show" && args[1] === "origin/main:plan/feedback/fb-invalid-origin.yaml") {
       return "status: [\n";
     }

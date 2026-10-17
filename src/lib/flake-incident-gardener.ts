@@ -40,6 +40,7 @@ import {
   selectorShadowPlanTasksAsync, type SelectorShadowMainFailures, type SelectorShadowTaskIdMinter,
 } from "./selector-shadow-gardener.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { sameTestFile } from "./test-path-resolver.js";
 
 export const FLAKE_INCIDENT_GARDEN_NAME = "flake-incident";
 
@@ -192,6 +193,11 @@ export function flakeIncidentOriginFile(origin: string): string | undefined {
   return origin.slice("flake-incident:".length).split("#")[0];
 }
 
+function sameIncidentOrigin(a: string, b: string): boolean {
+  const fileA = flakeIncidentOriginFile(a), fileB = flakeIncidentOriginFile(b);
+  return a === b || (fileA !== undefined && fileB !== undefined && sameTestFile(fileA, fileB));
+}
+
 /** The repo paths a test file's own relative imports name — the source its failure could come from.
  *  A `.js` specifier names its `.ts` source (this repo's ESM convention). A `.mjs` specifier names a
  *  real `.mjs` file (scripts/*.mjs), so it is kept as written, beside the `.mts` a TypeScript build
@@ -340,7 +346,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   const openTaskFor = async (origin: string): Promise<string | undefined> => {
     const tasks = await planTasks();
     const file = flakeIncidentOriginFile(origin);
-    const sameFile = (o: unknown) => typeof o === "string" && (o === origin || (file !== undefined && flakeIncidentOriginFile(o) === file));
+    const sameFile = (o: unknown) => typeof o === "string" && sameIncidentOrigin(o, origin);
     const open = tasks.find((t) => sameFile(t.origin) && !closed.has(t.status ?? "") && t.retirement === undefined);
     if (open) return `open-task ${open.id}`;
     for (const t of tasks) {
@@ -349,7 +355,8 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
       if (retirementHoldsOrigin(t, () => landed)) return `superseded-by ${t.superseded_by}`;
     }
     if (byStep(FLAKE_INCIDENT_MAIN_INHERITED_STEP).some((r) => sameFile(r.origin))) return MAIN_INHERITED_HANDLED;
-    if (file !== undefined && filedThisPass.has(file)) return `open-task ${filedThisPass.get(file)}`;
+    const held = file === undefined ? undefined : [...filedThisPass].find(([path]) => sameTestFile(path, file));
+    if (held) return `open-task ${held[1]}`;
     const filed = byStep("flake_incident.filed").filter((r) => sameFile(r.origin) && typeof r.task_id === "string")
       .sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)))[0];
     if (filed && !tasks.some((t) => t.id === filed.task_id) && nowMs - Date.parse(String(filed.ts)) < policy.pendingFilingHoldMs) {
@@ -360,7 +367,7 @@ export async function runFlakeIncidentGardener(deps: GardenerDeps, sources: Flak
   /** The origin's newest filing: when it was written, and the newest CI run it cited (absent on an older row). */
   const lastFiling = (origin: string): { ms: number; maxRunId?: number } => {
     const last = byStep("flake_incident.filed")
-      .filter((r) => r.origin === origin || (typeof r.origin === "string" && flakeIncidentOriginFile(r.origin) === flakeIncidentOriginFile(origin)))
+      .filter((r) => typeof r.origin === "string" && sameIncidentOrigin(r.origin, origin))
       .map((r) => ({ ms: Date.parse(String(r.ts)), runs: Array.isArray(r.run_ids) ? r.run_ids.filter(isCount) : [] }))
       .filter((r) => Number.isFinite(r.ms)).sort((a, b) => b.ms - a.ms)[0];
     if (last === undefined) return { ms: 0 };

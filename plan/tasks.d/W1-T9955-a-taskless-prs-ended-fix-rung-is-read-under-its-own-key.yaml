@@ -1,0 +1,64 @@
+- id: W1-T9955
+  title: "A TASKLESS PR'S ENDED FIX RUNG IS READ UNDER THE KEY ITS ROWS CARRY — fixLedgerTaskIdFor returns undefined for a PR with no task id, so fixRungStalledWithoutNewHead(lines, undefined) is false and the sweep stands down 'fix already dispatched for this head — awaiting its outcome' forever, while the fix lane wrote that rung's fix.dispatch and its NEEDS_DESIGN fix.done under PR-<n>; on 2026-10-16 #12409 (codex/semgrep-source-build-20261016) sat from 20:37Z, after its rung ended, with no further round and no escalation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the ledger key the sweep reads a taskless PR's fix rows under. Strike caps, the stall rules and the dedup set are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 PR-queue triage (agent D32, 21:50Z queue): #12409 held review-failed / fix-lane with no owner acting"
+  plan_refs: [W1-T1110, W1-T1210, W1-T5866, W1-T5839, W1-T106]
+  files:
+    - src/lib/sweep.ts
+    - test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts
+    - test/a-taskless-prs-ended-fix-rung-is-read-under-its-own-key.test.ts
+  status: queued
+  priority: 1.5  # every taskless PR (codex/*, any head with no Remudero-Task trailer) whose first fix round ends without a push is parked forever with no escalation
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger (live ledger.ndjson on the Azure host, streamed read-only to the Mac):
+    - #12409 head e7926e54 (branch codex/semgrep-source-build-20261016, no trailer). Every `sweep.disposed` row for it is
+      `task_id` SWEEP, so the sweep's OpenPrView has no taskId.
+    - 20:37:13.052Z `fix.dispatch` task_id PR-12409, mode reviewer-unmet, strike 1/2.
+    - 20:37:13.109Z `fix.needs_design` task_id PR-12409: both proofs spawn python3, which the reviewer sandbox lacked.
+    - 20:37:13.114Z `fix.done` task_id PR-12409, fix_outcome NEEDS_DESIGN, worker_exit "unobserved", no push.
+    - Every `sweep.disposed` row the live file keeps from then (12 rows, 21:24:44Z to 21:38:56Z; the 21:23Z rotation
+      archived the earlier ones): disposition blocked-fixable, blocker review-failed, owner fix-lane,
+      "NOT DISPATCHED this pass: fix already dispatched for this head (e7926e5) — awaiting its outcome before spending
+      another strike". No escalation and no further round was ever written.
+    READ at origin/main 77f68d26a:
+    - src/lib/sweep.ts `fixLedgerTaskIdFor` returns `undefined` when `pr.taskId === undefined`, and
+      `reviewLedgerKeyFor` (src/lib/review.ts) only maps a defined id; but `reviewLedgerKeyFor(undefined, n)` is
+      `PR-<n>`, the key the fix rung stamps on every row it writes for such a PR.
+    - The blocked-fixable / conflicted dedup case computes
+      `alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, fixLedgerTaskIdFor(pr))`, and
+      `fixRungStalledWithoutNewHead` returns false for an undefined task id before reading any row.
+    - An in-process probe at 77f68d26a, with exactly the three rows above: stalled via fixLedgerTaskIdFor({prNumber:12409})
+      = false; stalled via "PR-12409" = true (the fix.done worker_exit "unobserved" arm).
+    - The same undefined key also blinds `fixRoundTally`, `buildFixProgressInput` and the strike ladder for a taskless PR,
+      so its strikes and refusals always read zero.
+    - test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts asserts
+      `fixLedgerTaskIdFor({ prNumber: 1 }) === undefined` ("a PR with no id has no strike history to read"). The live
+      ledger above refutes that premise: the fix lane does dispatch for a taskless PR and writes its history under PR-<n>.
+    NOT COVERED ELSEWHERE: W1-T1110 and W1-T1210 built the stall read, keyed by task id. W1-T5866 gave run-unfiled PRs
+    their PR-<n> fix identity but left a PR with no id at all on undefined. Swept plan/tasks.d on origin/main and the two
+    open plan-file heads (plan-file-1792186755746, plan-file-daemon-worker-entry-log) for fixLedgerTaskIdFor,
+    "fix already dispatched" and NEEDS_DESIGN at 22:05Z: no other shard changes this key.
+  design: |
+    1. `fixLedgerTaskIdFor(pr)` returns `reviewLedgerKeyFor(pr.taskId, pr.prNumber)`: a real task id is unchanged,
+       `unfiled` and no id both read PR-<n>, which is the key the fix rung writes under.
+    2. Every caller (the dedup stall check, fixRoundTally, buildFixProgressInput, the strike ladder) then reads a
+       taskless PR's own rows. A taskless PR whose rung ended without a new head re-enters the existing judge and strike
+       ladder exactly as a task-keyed PR does; nothing new decides what happens next.
+    3. The W1-T5866 assertion that a PR with no id has no history flips to PR-<n>, with the reason above.
+    No new bound and no LLM.
+  acceptance:
+    - claim: "a taskless PR whose fix rung ended without a push is no longer deduped as awaiting its outcome"
+      proof: 'grep: test("W1-T9955: a taskless PR whose fix rung ended is re-judged, not awaited forever" in test/a-taskless-prs-ended-fix-rung-is-read-under-its-own-key.test.ts'
+    - claim: "a taskless PR still inside a live fix rung keeps the dedup"
+      proof: 'grep: test("W1-T9955: a taskless PR inside a live fix rung keeps its dedup" in test/a-taskless-prs-ended-fix-rung-is-read-under-its-own-key.test.ts'
+  falsifier: |
+    At origin/main, the first test's sweep disposes the taskless PR with "fix already dispatched for this head", because
+    fixLedgerTaskIdFor returns undefined and the stall read never opens a row.

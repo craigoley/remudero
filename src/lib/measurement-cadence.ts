@@ -1,10 +1,11 @@
+import { stampMechanicalAsk } from "./inbox-retirement.js";
 import { reconcilePlan } from "./plan-reconcile.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
-import { dirname, join, posix, relative } from "node:path";
+import { basename, dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
 import { validateConfig, type Config } from "./config.js";
 import { validateConfigShape } from "./config-schema.js";
@@ -22,7 +23,16 @@ import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from 
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { appendLedger } from "./ledger.js";
 import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import {
+  createIncrementalLedgerUnion,
+  createLedgerRotationMemo,
+  readLedgerUnionRecordsMemoized,
+  readLedgerUnionRecordsSync,
+  realLedgerFs,
+  type LedgerGrepFsDeps,
+  type LedgerUnionRecordRead,
+  type LedgerUnionRecordReadOptions,
+} from "./ledger-union.js";
 import {
   buildBoardReview,
   type BoardItem,
@@ -323,14 +333,20 @@ export interface WipeTestCadenceReportResult {
   factors: WipeTestFactorCadenceResult[];
 }
 
+/** A decision's evidence-read cost, and whether it reused its slot's earlier skip. */
+export interface WipeTestCadenceEvidence extends WipeTestEvidenceCost {
+  reused: boolean;
+}
+
 export type WipeTestCadenceDecision =
-  | { fire: false; reason: string }
+  | { fire: false; reason: string; evidence?: WipeTestCadenceEvidence }
   | {
       fire: true;
       reason: string;
       seq: number;
       subject: WipeTestPairSubject;
       factor: WipeTestFactor;
+      evidence?: WipeTestCadenceEvidence;
     };
 
 export interface WipeTestCadenceRunResult {
@@ -1417,7 +1433,7 @@ export function mintProofDebtProposals(
   offenders: readonly ProofQueueAuditOffender[],
   shardPathFor: (taskId: string) => string | undefined,
   registryPath: string,
-  opts?: UpdateProposalRegistryOpts,
+  opts?: UpdateProposalRegistryOpts & { sourcePermit?: object },
 ): ProofDebtMintCadenceResult {
   const candidates: { o: ProofQueueAuditOffender; shardPath: string }[] = [];
   for (const o of offenders) {
@@ -1472,13 +1488,13 @@ export function mintProofDebtProposals(
         const detail = rows
           .map((o) => `criterion ${o.criterionIndex} (${o.cause}) — "${o.claim}"`)
           .join("; ");
-        additions.push({
+        additions.push(stampMechanicalAsk({
           id,
           summary:
             `proof-debt: ${taskId} has ${rows.length} criterion(s) whose proof cannot resolve against the ` +
             `checkout (rmd proof-queue-audit): ${detail}.`,
           evidenceAnchors: anchors,
-        });
+        }, taskId, opts?.sourcePermit));
         mintedProposalIds.push(id);
       }
       return additions.length > 0 ? [...current, ...additions] : null;
@@ -1815,9 +1831,10 @@ export interface MeasurementCadenceReportOpts {
   /** W1-T3226's plan-reconcile rung. Optional: omitted skips it entirely, the same opt-in shape
    *  every producer above uses. */
   planReconcile?: PlanReconcileCadenceOpts;
-  /** proof-queue-audit's population and resolvers, bound to a real checkout by the caller.
-   *  Optional: omitted skips this producer entirely. */
+  /** Optional proof-queue-audit population and resolvers, bound to a real checkout by the caller. */
   proofDebt?: {
+    /** Opaque capability from the real open-and-unmerged production population. */
+    sourcePermit?: object;
     tasks: readonly Task[];
     resolveNameFilteredCandidates?: ProofQueueAuditOpts["resolveNameFilteredCandidates"];
     pathExists?: ProofQueueAuditOpts["pathExists"];
@@ -2208,31 +2225,90 @@ export function scheduleWipeTestAblation(opts: {
   return { fire: true, reason: `${paced.reason}; ${why}`, factor: behind.factor, share: behind.share, draw, shares };
 }
 
-const WIPE_TEST_EVIDENCE_PATTERN = /"step":"(?:wipetest\.pair|learnings\.used)"/;
+export const WIPE_TEST_EVIDENCE_STEPS: readonly string[] = [WIPE_TEST_PAIR_STEP, "learnings.used"];
+
+/** The fields the fold reads, plus `ts` and the run id that keep rows apart under replay dedupe. Bump `reducerVersion` on change. */
+const WIPE_TEST_EVIDENCE_FIELDS: ReadonlySet<string> = new Set([
+  "ts", "step", "run_id", "task_id", "factor", "arm_a_run_id", "arm_b_run_id", "verdict_a", "verdict_b",
+  "turns_delta", "cost_delta", "strikes_delta", "proof_exec_pass_a", "proof_exec_pass_b",
+  "silent", "injected_ids", "used_ids",
+]);
+
+function projectWipeTestEvidenceRow(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([field]) => WIPE_TEST_EVIDENCE_FIELDS.has(field)));
+}
+
+export type WipeTestEvidenceUnion = (stateDir: string, readOpts: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead;
+
+export type WipeTestAblationEvidence =
+  | { ok: true; pairs: WipeTestPair[]; claimedUse: Partial<Record<WipeTestFactor, number | null>> }
+  | { ok: false; reason: string };
 
 /** Every measured pair plus the claimed-use shares, from one ledger-union read. */
-export function readWipeTestAblationEvidence(
-  stateDir: string,
-  ledgerUnion: (stateDir: string, pattern: RegExp) => LedgerUnionResult = resolveLedgerUnion,
-):
-  | { ok: true; pairs: WipeTestPair[]; claimedUse: Partial<Record<WipeTestFactor, number | null>> }
-  | { ok: false; reason: string } {
-  const union = ledgerUnion(stateDir, WIPE_TEST_EVIDENCE_PATTERN);
+export function readWipeTestAblationEvidence(stateDir: string, read: WipeTestEvidenceUnion): WipeTestAblationEvidence {
+  const union = read(stateDir, { step: WIPE_TEST_EVIDENCE_STEPS, requireArchives: true, refuseIncomplete: true });
   if (!union.ok) {
     const why = union.archiveCount === 0 ? "no rotation corpus" : `${union.unread.length} unreadable file(s)`;
     return { ok: false, reason: `wipe-test cadence ledger union unreadable under ${union.stateDir}: ${why}` };
   }
-  const rows: Record<string, unknown>[] = [];
-  for (const line of union.matches) {
-    try {
-      const parsed: unknown = JSON.parse(line);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
-    } catch (e) {
-      void e; // a torn line is not a measured pair; it must not advance the rotation
-    }
-  }
-  const pairs = rows.map(wipeTestPairFromLedgerObject).filter((p): p is WipeTestPair => p !== undefined);
-  return { ok: true, pairs, claimedUse: wipeTestClaimedUse(rows) };
+  const pairs = union.rows.map(wipeTestPairFromLedgerObject).filter((p): p is WipeTestPair => p !== undefined);
+  return { ok: true, pairs, claimedUse: wipeTestClaimedUse(union.rows) };
+}
+
+export interface WipeTestEvidenceCost {
+  bytesRead: number;
+  rotationsRead: number;
+  rotations: number;
+}
+
+/** Each rotation is parsed once and digested, so a repeat read takes only the live tail; each read reports its disk bytes. */
+export function createWipeTestEvidenceReader(
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+): (stateDir: string) => { evidence: WipeTestAblationEvidence; cost: WipeTestEvidenceCost } {
+  let bytesRead = 0;
+  let rotationsRead = 0;
+  const base: Required<LedgerGrepFsDeps> = { ...realLedgerFs, ...fsDeps };
+  const isRotation = (path: string): boolean =>
+    basename(path) !== LEDGER_FILENAME && /^ledger\..+\.ndjson(?:\.gz)?$/.test(basename(path));
+  const counting: LedgerGrepFsDeps = {
+    ...base,
+    readFileSync: (path) => {
+      const buf = base.readFileSync(path);
+      bytesRead += buf.length;
+      if (isRotation(path)) rotationsRead += 1;
+      return buf;
+    },
+    readRangeSync: (path, start, end) => {
+      const buf = base.readRangeSync(path, start, end);
+      bytesRead += buf.length;
+      return buf;
+    },
+  };
+  const union = createIncrementalLedgerUnion(
+    { holder: "wipetest.cadence-evidence", reducerVersion: "1", project: projectWipeTestEvidenceRow },
+    counting,
+  );
+  return (stateDir) => {
+    bytesRead = 0;
+    rotationsRead = 0;
+    let rotations = 0;
+    const evidence = readWipeTestAblationEvidence(stateDir, (dir, readOpts) => {
+      const read = union(dir, readOpts);
+      rotations = read.archiveCount;
+      return read;
+    });
+    return { evidence, cost: { bytesRead, rotationsRead, rotations } };
+  };
+}
+
+export function wipeTestCadenceEvidenceFields(decision: WipeTestCadenceDecision): Record<string, unknown> {
+  if (!decision.evidence) return {};
+  return {
+    evidence_bytes_read: decision.evidence.bytesRead,
+    evidence_rotations_read: decision.evidence.rotationsRead,
+    evidence_rotations: decision.evidence.rotations,
+    decision_reused: decision.evidence.reused,
+  };
 }
 
 // ── W1-T4243: the knowledge-measurement rung ─────────────────────────────────────────────────
@@ -2573,7 +2649,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
       symbolFoundAt: opts.proofDebt.symbolFoundAt,
     });
     proofDebtMint = opts.escalate
-      ? mintProofDebtProposals(proofDebtReport.offenders, opts.proofDebt.shardPathFor, registryPath)
+      ? mintProofDebtProposals(proofDebtReport.offenders, opts.proofDebt.shardPathFor, registryPath, { sourcePermit: opts.proofDebt.sourcePermit })
       : {
           status: proofDebtReport.offenders.length > 0 ? "backlog" : "clear",
           mintedProposalIds: [],

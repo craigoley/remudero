@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { observeSelectedRegistrySync, selectedRegistryObserverInContext, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -41,6 +42,8 @@ import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stri
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
+import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
+import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
 
 /**
  * `rmd inbox` — the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110).
@@ -79,6 +82,9 @@ export interface ReframeRecord {
 
 /** One ACTIVE (not-yet-ratified) proposal the inbox tiers. */
 export interface Proposal {
+  /** Explicit mechanical producer purpose; never backfilled from human wording or verify mode. */
+  automaticRetirement?: MechanicalAskPurpose;
+  verificationAsk?: { producer: "verify-human-judge-v1" | "machine-filing-judge-v1"; taskId: string; proposalDigest: string };
   /** e.g. "P25" */
   id: string;
   summary: string;
@@ -757,6 +763,8 @@ export interface PredicateFailure {
 export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired" | "declined";
 
 export interface InboxClassification {
+  retirement?: InboxRetirementView;
+  needsTriageReason?: string;
   releaseTaskId?: string;
   proposalId: string;
   state: InboxState;
@@ -789,6 +797,7 @@ export interface InboxClassification {
 }
 
 export interface ReadinessContext {
+  retirement?: (proposal: Proposal) => InboxRetirementView | { unknown: string } | undefined;
   clock?: Clock;
   /** The CURRENT plan (plan/tasks.yaml on main) the drafted tasks would land into — resolves depends_on ids the
    *  fragment cites that already exist. */
@@ -957,6 +966,7 @@ export interface ThreadEventDraft {
 export const THREAD_EVENT_STEPS: readonly string[] = [
   "ratify.reframed", "panel.proposal_declined", "panel.proposal_restored", "ratify.approved",
   "ratify.approve_refused", "approve.shards_written", "inbox.drafted",
+  "inbox.gardener_retired", "inbox.gardener_restored", "inbox.gardener_outcome",
 ];
 
 /** The tasks a shards path names: `plan/tasks.d/W1-T123-slug.yaml` → `W1-T123`. */
@@ -989,6 +999,14 @@ export function threadEventsForRow(
   const taskId = typeof row.task_id === "string" ? row.task_id : undefined;
   const clip = (value: unknown, fallback: string) => (typeof value === "string" && value.trim() ? value.trim().slice(0, 500) : fallback);
   switch (step) {
+    case "inbox.gardener_retired":
+    case "inbox.gardener_restored":
+    case "inbox.gardener_outcome": {
+      const receipt = inboxDismissalReceipt(row.dismissalAuditReceipt);
+      if (!receipt || receipt.scope.proposalId !== taskId) return [];
+      return draft(taskId!, step === "inbox.gardener_retired" ? "retired" : step === "inbox.gardener_restored" ? "restored" : "retirement_outcome",
+        clip(row.reason, "Inbox lifecycle evidence updated."));
+    }
     case "ratify.reframed":
       return taskId ? draft(taskId, "reframed", clip(row.feedback, "Asked for a different draft.")) : [];
     case "panel.proposal_declined":
@@ -1335,10 +1353,50 @@ export function classifyProposal(
   if (declinedReason !== undefined) {
     return { proposalId: proposal.id, state: "declined", reasons: [], declinedReason };
   }
+  const taskIdForProtection = deriveTaskReferent(proposal.id) ?? mechanicalAskPurpose(proposal)?.taskId;
+  const held = taskIdForProtection === "W1-T216" || (taskIdForProtection && ctx.plan.byId.get(taskIdForProtection)?.dispatch_hold === true);
+  const purpose = mechanicalAskPurpose(proposal), purposeTask = purpose && ctx.plan.byId.get(purpose.taskId);
+  if (proposal.automaticRetirement && !purpose || purpose && (!purposeTask || purpose.taskDigest !== inboxMechanicalTaskDigest(purposeTask)))
+    return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: mechanical producer task facts changed" }], needsTriageReason: "Mechanical purpose no longer matches current task ownership or criteria" };
+  const lifecycle = ctx.retirement?.(proposal);
+  if (held) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: current task dispatch hold requires operator review" }], needsTriageReason: "Current security or dispatch hold preserves this ask for operator review" };
+
+  if (lifecycle && !held) {
+    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown };
+    if (lifecycle.state === "retired" && lifecycle.proofKind === "merged-task" &&
+      (!lifecycle.scope.taskId || !ctx.plan.byId.has(lifecycle.scope.taskId) || ctx.depsUnobservable?.(lifecycle.scope.taskId) !== undefined || !ctx.isMerged(ctx.plan.byId.get(lifecycle.scope.taskId)!))) {
+      return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "deps_observable", detail: "needs-triage: current merge credit no longer confirms the retirement" }],
+        needsTriageReason: "The retained retirement is history; current source no longer confirms its proof", retirement: { ...lifecycle, state: "restored_for_review" } };
+    }
+    if (lifecycle.state === "retired") return { proposalId: proposal.id, state: "retired", reasons: [], retiredReason: lifecycle.reason, retirement: lifecycle };
+    return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: restored ask requires operator review" }], needsTriageReason: lifecycle.reason, retirement: lifecycle };
+  }
+  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
+  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
+  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
+  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const verifiedFamily = proposal.verificationAsk?.producer === "verify-human-judge-v1" ? `verify-human:${releasedTaskId}`
+    : proposal.verificationAsk?.producer === "machine-filing-judge-v1" ? `machine-judge:${releasedTaskId}` : undefined;
+  if (!held && releasedTaskId && proposal.verificationAsk?.taskId === releasedTaskId &&
+    proposal.verificationAsk.proposalDigest === inboxMechanicalProposalDigest(proposal) && proposal.id === verifiedFamily && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
+    };
+  }
+  const currentTaskReferent = taskIdForProtection ? ctx.plan.byId.get(taskIdForProtection) : undefined;
+  if (currentTaskReferent && ((currentTaskReferent.status === "blocked" && currentTaskReferent.retirement) ||
+    ctx.depsUnobservable?.(currentTaskReferent.id) === undefined && ctx.isMerged(currentTaskReferent)))
+    return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: terminal task facts require an exact reversible ask receipt" }], needsTriageReason: "A task's terminal state alone does not answer an unqualified operator ask; source revalidation is required" };
+  // Typed mechanical asks retire through the reversible journal. Untyped human asks never gain
+  // terminal authority from their ID, changed verification mode, or a related task's merge.
+  const automaticTerminal = !held && !proposal.automaticRetirement && !taskIdForProtection;
   // W1-T2451: RESOLVED is a terminal override — such a proposal has no live referent to be ABOUT. UNREADABLE never
   // short-circuits: it only sets a flag, so a failed read never blocks a READY.
   const referent = resolveBoardReferent(proposal, ctx.boardReferents);
-  if (referent.kind === "resolved") {
+  if (automaticTerminal && referent.kind === "resolved" && proposal.id.startsWith("board-review:")) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1356,7 +1414,7 @@ export function classifyProposal(
   // judgement and needs an operator to reverse it; this restates a live measurement. If the
   // mechanism loses its adopter again, the next scan reports the finding again and the proposal
   // stops being retired on its own — no restore, no re-mint, nothing for anyone to notice.
-  if (proposal.id.startsWith("adoption:") && ctx.adoptionFindingGone?.(proposal.id) === true) {
+  if (automaticTerminal && proposal.id.startsWith("adoption:") && ctx.adoptionFindingGone?.(proposal.id) === true) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1376,7 +1434,7 @@ export function classifyProposal(
   // other terminal overrides, and gated on the successor being genuinely open — `openProposalIds`
   // is every registry id, so a DECLINED successor must not retire the finding it was meant to carry.
   const successor = supersedingProposalId(proposal.id);
-  if (successor !== undefined && ctx.openProposalIds.has(successor) && ctx.isDeclined?.(successor) === undefined) {
+  if (automaticTerminal && successor !== undefined && ctx.openProposalIds.has(successor) && ctx.isDeclined?.(successor) === undefined) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1389,7 +1447,7 @@ export function classifyProposal(
   }
   const taskAskId = deriveTaskReferent(proposal.id);
   const taskAsk = taskAskId ? ctx.plan.byId.get(taskAskId) : undefined;
-  if (taskAsk?.status === "blocked" && taskAsk.retirement) {
+  if (automaticTerminal && taskAsk?.status === "blocked" && taskAsk.retirement) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1399,21 +1457,8 @@ export function classifyProposal(
   }
   // A risk-judge escalation is not cleared by verify: auto alone: only the exact
   // task's explicit retirement or authoritative merge credit resolves that ask.
-  const humanTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
-  const humanTask = humanTaskId ? ctx.plan.byId.get(humanTaskId) : undefined;
-  // A current plan task that no longer requires human verification makes its old
-  // verify-human proposal obsolete. Derive this only from a present, unheld task:
-  // missing plan evidence or an explicit hold must leave the ask visible.
-  if (humanTask?.verify === "auto" && humanTask.dispatch_hold !== true) {
-    return {
-      proposalId: proposal.id,
-      state: "retired",
-      reasons: [],
-      retiredReason: `${proposal.id}'s current plan task ${humanTaskId} is verify: auto without a dispatch hold; its prior operator ask remains in history`,
-    };
-  }
   const mergedTaskReferent = taskReferentMerged(proposal, ctx);
-  if (mergedTaskReferent !== undefined) {
+  if (automaticTerminal && mergedTaskReferent !== undefined) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1422,18 +1467,6 @@ export function classifyProposal(
         `${proposal.id}'s task ${mergedTaskReferent} has merged, so this proposal is about finished ` +
         `work and can never render READY again; it stays in the registry as a record of the finding, ` +
         `never deleted`,
-    };
-  }
-  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
-  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
-  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
-  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
-  if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
-    return {
-      proposalId: proposal.id,
-      state: "retired",
-      reasons: [],
-      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
     };
   }
   const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};
@@ -2032,7 +2065,8 @@ export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
 /** W1-T4700: the names a task's `repo:` may carry — every fleet-registry instance, the managed set, and `none`
  *  (status.ts's no-repo sentinel). `undefined` on an unreadable registry, which leaves the repo rule silent. */
-export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefined {
+export function knownPlanRepos(repoRoot: string, observer: SelectedRegistryObserver | undefined = selectedRegistryObserverInContext()): ReadonlySet<string> | undefined {
+  return observeSelectedRegistrySync(observer, "inbox-discovery", { instanceName: undefined }, () => {
   const text = readInstanceRegistryText(repoRoot);
   if (text === undefined) return undefined;
   try {
@@ -2042,6 +2076,7 @@ export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefine
     // Deliberate skip: a malformed registry or managed-repos file names no repos, so the rule refuses none.
     return undefined;
   }
+  });
 }
 
 const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -3133,6 +3168,15 @@ export function updateProposalRegistry(
 
     const next = update(current);
     if (next === null) return null;
+    for (const p of next) {
+      const prior = current.find(before => before.id === p.id)?.automaticRetirement;
+      if (p.automaticRetirement && JSON.stringify(p.automaticRetirement) !== JSON.stringify(prior) &&
+        (!isMechanicalProducerObject(p) || !mechanicalAskPurpose(p)))
+        throw new Error("mechanical retirement purpose requires the maintained proof-audit producer");
+      const oldVerification = current.find(before => before.id === p.id)?.verificationAsk;
+      if (p.verificationAsk && JSON.stringify(p.verificationAsk) !== JSON.stringify(oldVerification) && !isVerificationProducerObject(p))
+        throw new Error("verification ask purpose requires the maintained verification producer");
+    }
     const currentIds = new Set(current.map((p) => p.id));
     const nextIds = new Set(next.map((p) => p.id));
 

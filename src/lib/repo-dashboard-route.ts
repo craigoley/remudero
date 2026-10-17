@@ -25,6 +25,7 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import type { Route } from "./service.js";
+import { observeSelectedRegistry, observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { sendJson } from "./panel-actions.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
@@ -684,6 +685,7 @@ function statStampSync(path: string): string {
 }
 
 export interface RepoDashboardOptions {
+  selectedRegistryObserver?: SelectedRegistryObserver;
   /** Repository root containing the managed-repos state file. */
   root: string;
   /** A validated gateway registry identity limits an instance route to its own ledger and plan. */
@@ -833,6 +835,10 @@ function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome
  */
 export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
   { ok: true; summary: RepoDashboardResult; shadow?: Record<string, RepoShadowFacts>; fileReads: RepoSummaryFileReads } | { ok: false; reason: string } {
+  return observeSelectedRegistrySync(deps.selectedRegistryObserver, "repo-dashboard",
+    { get instanceName() { return deps.ownInstance; }, get repository() {
+      const repo = deps.instanceRepository; return repo && `${repo.owner}/${repo.repo}`;
+    } }, () => {
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
   const replay = deps.fileReads;
   let text: string | undefined;
@@ -867,6 +873,7 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
     return facts ? [[`${identity.repo.owner}/${identity.repo.repo}`, { ...facts, condition }]] : [];
   }));
   return { ok: true, summary: dashboardResult(projectionDeps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}), fileReads: reads };
+  });
 }
 
 /**
@@ -875,6 +882,7 @@ export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
  * so a portfolio card needs neither the whole portfolio nor `/status`. Both share one cached pass.
  */
 export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
+  const selectedRegistryObserver = deps.selectedRegistryObserver;
   const clock = deps.clock ?? systemClock;
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
   const inProcess = deps.readLedger !== undefined || deps.readPlan !== undefined;
@@ -914,12 +922,15 @@ export function buildRepoDashboardRoutes(deps: RepoDashboardOptions): Route[] {
     }
     return resolveIdentities(deps, parseRegistryRepos(text));
   };
-  const project = async (onlyOwn: boolean): Promise<RepoDashboardResult> => {
+  const project = (onlyOwn: boolean): Promise<RepoDashboardResult> => observeSelectedRegistry(selectedRegistryObserver, "repo-dashboard",
+    { get instanceName() { return deps.ownInstance; }, get repository() {
+      const repo = deps.instanceRepository; return repo && `${repo.owner}/${repo.repo}`;
+    } }, async () => {
     const resolved = await resolve();
     const measured = resolved.identities.length > 0 && deps.ledgerPath !== undefined ? await measure(resolved.identities, deps.ledgerPath) : undefined;
     if (measured && !measured.outcome.ok) throw new RepoTelemetryUnavailableError(measured.outcome.reason);
     return dashboardResult(deps, resolved, measured?.outcome, measured ? measured.atMs : clock.now(), onlyOwn);
-  };
+  });
   return [
     { method: "GET", path: "/v1/repos", scope: "read", handler: async (_req, res) => sendJson(res, 200, await project(false)) },
     { method: "GET", path: "/v1/repos/summary", scope: "read", handler: async (_req, res) => sendJson(res, 200, await project(true)) },

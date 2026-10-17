@@ -40,9 +40,9 @@ function updateBranchOutcomes(): string[] {
 
 /** The step literals `sweepUpdatedHeadsForTask` compares a row against before it reads it. */
 function stepsReadBySweepUpdatedHeads(): Set<string> {
-  const src = srcText("../src/run-task.ts");
+  const src = srcText("../src/lib/tick-read-worker.ts"); // W1-T9722: moved with the tick-read producer
   const start = src.indexOf("function sweepUpdatedHeadsForTask(");
-  assert.ok(start >= 0, "sanity: run-task.ts still defines sweepUpdatedHeadsForTask");
+  assert.ok(start >= 0, "sanity: tick-read-worker.ts still defines sweepUpdatedHeadsForTask");
   const body = src.slice(start, src.indexOf("\n}\n", start));
   return new Set([...body.matchAll(/\.step\s*!==\s*"([^"]+)"/g)].map((x) => x[1]));
 }

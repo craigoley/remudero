@@ -1,0 +1,84 @@
+- id: W1-T9906
+  title: "AN ENGINE ON MAIN THAT IS NEWER THAN THE DAEMON'S CHECKOUT QUALIFIES FOR A RUN CHILD — startRunChildProbe and spawnRunChild judge engines against the checkout's `rev-parse HEAD`, which trails origin/main while freshness coalesces, and every engine is now cut from a run worktree at origin/main's tip, so none is HEAD or an ancestor of it: on 2026-10-16 boot 3 (HEAD e539a44a5) skipped every probe 'no current engine tree for main' with engines fed973ff and 479b097d on disk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which commit a run child's engine must be reachable from; the engine-safety checks in newestCurrentEngine are unchanged
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-16, verification agent V1 finding 10a (~/Remudero-notes/flow-verify-2026-10-16/RESULTS.txt), filed by agent F7"
+  plan_refs: [W1-T9077, W1-T9082, W1-T9085, W1-T9374, W1-T9738, W1-T9816, W1-T9838]
+  files:
+    - src/lib/run-child.ts
+    - test/an-engine-on-main-newer-than-the-daemon-checkout-qualifies.test.ts
+  status: merged
+  priority: 1  # builds-as-children (ADR 0007) are the lever for the freshness yields, and no probe can run while the checkout trails main
+  attempts: 0
+  rationale: |
+    READ at origin/main c73ab052d. Symbols, not lines.
+    - src/lib/run-child.ts `startRunChildProbe` and `spawnRunChild` both default their `mainSha` port to
+      `hostWorktreeGitAsync(repoDir, ["rev-parse", "HEAD"])`, then call `newestCurrentEngine(stateRoot, mainSha, ...)`.
+      Their `repoDir` is the daemon's `effectiveRepoRoot` (src/run-task.ts `daemonCommand`, `runOne`). That checkout
+      moves only when `deploy/entrypoint.sh`'s sync_tree runs at a restart, so between restarts its HEAD trails main.
+    - src/lib/engine-tree.ts `newestCurrentEngine` keeps an engine only if `engine.sha === mainSha` or
+      `isAncestor(engine.sha, mainSha)`. The ancestry skip writes no row.
+    - Engines are built by `buildEngineAfterStore(worktreePath, ...)` (src/run-task.ts, after `buildIntoStore` on
+      a fresh run worktree, W1-T9374). It cuts the engine at that worktree's HEAD, which is origin/main's tip when
+      the run started. So every new engine is a descendant of the daemon checkout's HEAD, never an ancestor.
+    - W1-T9077's design and ADR 0007 decision 4 say the child spawns on "the newest engine whose bundle is current",
+      judged against main's tip. The checkout's HEAD is not main's tip.
+    OBSERVED 2026-10-16, core ledger (V1's corpus, read on the Mac):
+    - Boot 3 started 17:11:32Z at e539a44a5. Every `engine.lag` row reads main_sha e539a44a5, engine_sha null.
+    - `engine.built` fed973ff6 at 17:18:52Z and 479b097de at 17:57:27Z. Both are descendants of e539a44a5 (1 and 15
+      commits) and ancestors of origin/main (`git merge-base --is-ancestor`, checked from the Mac).
+    - `run_child.shadow_skipped` "no current engine tree for main" at 17:13:30Z (x3), 17:54:26Z and 17:58:13Z. At
+      17:54 and 17:58 fed973ff was on disk and was not in any `engine.candidate_skipped` row, so the ancestry check
+      dropped it silently. The other 17 engines were skipped `node-modules-dangling` (W1-T9838's case).
+    - `run_child.mode_decision` stayed shadow. Boot 2's probe on engine 9bb91fadc exited 0 with the contract ok at
+      16:37:15Z, so the engine link fix (W1-T9738) works; the currency check is what holds builds-as-children off.
+    RELATION TO W1-T9838 (P2, queued; src/lib/engine-tree.ts): it rebuilds a present engine whose node_modules link
+    is unsafe in the pass that finds it. It does not make a newer, safe engine qualify, and this task does not touch
+    the modules check or engine-tree.ts. They are independent: different files, no ordering. With both merged, a
+    dangling engine is rebuilt at once and a fresh one on main is chosen.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the open heads updated since 2026-10-11 for
+    newestCurrentEngine, "no current engine tree", mainSha and origin/main in an engine context. The only hits are
+    the merged W1-T9077/9082/9085/9738 and queued W1-T9838 above.
+  design: |
+    1. src/lib/run-child.ts gains one exported default, `mainTipSha(repoDir)`: `rev-parse --verify --quiet
+       refs/remotes/origin/main^{commit}` through `hostWorktreeGitAsync`, trimmed. It is the default `mainSha` port of
+       both `startRunChildProbe` and `spawnRunChild`, replacing `rev-parse HEAD`. The port's name and shape are
+       unchanged, so injected fakes keep working. The daemon's plan sync fetches origin in that checkout every tick,
+       so the ref is main's tip as last fetched.
+    2. An unreadable tip is never answered with HEAD, and its reason starts "origin/main tip unreadable". The probe
+       catches the read where it makes it and skips (`run_child.shadow_skipped`), so the failure is not written as a
+       `run_child.shadow` row with contract unknown, as a probe that ran. The spawn's existing catch already falls
+       back (`run_child.fallback`) with the error in its reason.
+    3. newestCurrentEngine is unchanged. The modules check (W1-T9738), the bundle-currency check and the
+       ancestor-of-tip check all still run. An engine cut at a worker's own commit, which is not reachable from
+       origin/main, is still refused. A running child still finishes on the engine it started on.
+    4. No new constant. `engine.lag` main_sha then names origin/main's tip, so commits_behind counts how far the
+       engine trails main, not the checkout.
+    5. Tests go in the new file, `test(` titles verbatim as in the proofs. Use a real git fixture (the gitRepo()
+       helper, with a local user identity): commit H, then D on top of it; HEAD at H; `update-ref
+       refs/remotes/origin/main D`; a side commit W on top of D that the ref does not reach. Engines are published
+       under a temp state root as `engines/<sourceHash>/engine.json` with a node_modules link to a directory outside
+       the worker-writable roots, and the `isCurrent` seam returns true. Fake the spawn, launch, plan and
+       reservation ports; leave `mainSha` on its default.
+  acceptance:
+    - claim: "a run child spawns on an engine at origin/main's tip that is newer than the checkout's HEAD"
+      proof: 'grep: test("W1-T9906: a run child spawns on an engine at origin/main tip newer than the checkout HEAD" in test/an-engine-on-main-newer-than-the-daemon-checkout-qualifies.test.ts'
+    - claim: "the shadow probe starts on an engine newer than the checkout's HEAD"
+      proof: 'grep: test("W1-T9906: the shadow probe starts on an engine newer than the checkout HEAD" in test/an-engine-on-main-newer-than-the-daemon-checkout-qualifies.test.ts'
+    - claim: "an engine whose commit origin/main does not reach is still refused"
+      proof: 'grep: test("W1-T9906: an engine whose commit is not on origin/main is still refused" in test/an-engine-on-main-newer-than-the-daemon-checkout-qualifies.test.ts'
+    - claim: "an unreadable origin/main tip skips the probe by name and never falls back to HEAD"
+      proof: 'grep: test("W1-T9906: an unreadable origin/main tip skips the probe by name" in test/an-engine-on-main-newer-than-the-daemon-checkout-qualifies.test.ts'
+  falsifier: |
+    At origin/main the default `mainSha` reads HEAD (H). D is not H and not an ancestor of H, so spawnRunChild returns
+    started:false "no current engine tree for main" and the probe skips with the same reason: the first two tests
+    fail. With refs/remotes/origin/main deleted, origin/main still reads HEAD and goes on to the same "no current
+    engine" skip rather than naming the tip, so the fourth fails. The third's refusal of W holds before and after,
+    which guards against a fix that drops the ancestry check; it fails at origin/main only where it asserts that
+    `engine.lag` measures against main's tip, because there main_sha is HEAD.

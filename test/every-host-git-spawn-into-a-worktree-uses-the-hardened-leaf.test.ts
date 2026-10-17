@@ -240,10 +240,16 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "the managed source checkout (-C repoDir)",
   },
   "src/run-task.ts": {
-    count: 75,
+    count: 70,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
+  },
+  "src/lib/tick-read-worker.ts": {
+    count: 5,
+    reason:
+      "CHECKOUT (W1-T6135): the credit evidence root's 4 sites and the async plan-sync runner moved with the tick-read worker, still " +
+      "classed per function in RUN_TASK_WIDENED_SITES in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
   },
 };
 

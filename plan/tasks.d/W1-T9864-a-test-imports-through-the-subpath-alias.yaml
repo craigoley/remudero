@@ -1,0 +1,86 @@
+- id: W1-T9864
+  title: "TESTS IMPORT src, scripts AND test HELPERS THROUGH #src/*, #scripts/* AND #test/* — a package.json subpath-import alias, so a test's content stops depending on its folder depth and a later move is a pure rename (test restructure, letter C, part 0)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, location-free test imports; spans package.json and the codemod script
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter C (part 0 of 4)'
+  plan_refs: [W1-T9865, W1-T9866, W1-T9867, W1-T9868, W1-T9879]
+  files:
+    - package.json
+    - scripts/test-location-codemod.mjs
+    - test/a-test-imports-through-the-subpath-alias.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    THROWAWAY PROBE, run while filing (2026-10-16, in a scratch worktree off origin/main 889966ea5, then reverted). The
+    toolchain was Node 24.21.0 (.nvmrc), tsx ^4.23.15 and TypeScript 7.0.2 with module/moduleResolution nodenext.
+    - Setup: package.json gained `"imports": {"#src/*": "./src/*", "#test/*": "./test/*"}`. A nested file,
+      test/zz-probe/alias-probe.test.ts, imported:
+      - "#src/lib/ledger-path.js";
+      - a type-only "#src/lib/config.js";
+      - "#test/helpers/git-repo.js";
+      - a dynamic import("#src/lib/ledger-path.js").
+    - Results:
+      - `node --test --import tsx --import ./test/setup/tmp-hygiene.ts` gave 1 pass and 0 fail.
+      - `tsc -p` over the probe gave exit 0.
+      - So the .js specifier maps to the .ts source under both tsx and tsc.
+    - Controls:
+      - A missing #src module plus a deliberate type error gave TS2307 and TS2322.
+      - With the alias removed, tsc gave TS2307 on all four specifiers and node threw ERR_PACKAGE_IMPORT_NOT_DEFINED.
+    - Not probed: running without tsx. The deny-floor hook refuses a hand-run node --test without the preload, and the
+      repo always runs tests under tsx.
+    MEASURED at 889966ea5 over the 3,640 flat tests:
+    - imports of ../src: 3,276 files;
+    - ./helpers|setup|fixtures|lib: 1,171;
+    - ../scripts: 101;
+    - ../packages|bin|package.json: 4;
+    - a sibling `./x.js`: 35;
+    - a first line `// test/<own-name>.test.ts`: 413.
+    The inventory adds 175 dynamic imports, 51 runtime reads of ./fixtures, and about 42 sites reading another test by
+    its test/<name> path.
+    WHY THE MOVE MUST BE PURE (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section E, best-practices section 4.1):
+    - A probe with git 2.54 detected 1,100 moved-and-edited files as renames. With 3,700 it printed "exhaustive rename
+      detection was skipped", and every file showed as A. flake-screen.mjs, check-proof.ts and run-task.ts key on A.
+    - Exact renames are always paired.
+    - A branch editing a short file that main moved AND rewrote gets a modify/delete conflict.
+  design: |
+    1. Add the subpath imports to package.json: "#src/*" -> "./src/*", "#test/*" -> "./test/*", and
+       "#scripts/*" -> "./scripts/*". DEVIATION FROM THE PLAN TEXT: the plan named only #src and #test. 101 tests import
+       ../scripts, and without #scripts/* each of them would break when it moves. The PR body states this.
+    2. scripts/test-location-codemod.mjs [--folder <name> ...] [--files <list>] makes each named test location-free, as
+       a content-only edit:
+       - static and dynamic relative imports of src/, scripts/ and test/ (helpers, setup, lib, siblings) become
+         #src/, #scripts/ and #test/;
+       - runtime reads of ./fixtures and of another test by path go through repoRoot() (W1-T9863) and resolveTestPath
+         (W1-T9860);
+       - a first-line `// test/<own-name>.test.ts` self-path comment is removed, because it would be false after the
+         move;
+       - shapes it cannot rewrite safely (for example the 4 package.json, bin and packages reads) are listed, never
+         guessed.
+       --folder takes its membership from scripts/test-placement/test-folders.tsv (W1-T9874) when that file exists.
+       This task ships the codemod and runs it over NO test file; the four batch tasks run it.
+    3. GUARD, test/a-test-imports-through-the-subpath-alias.test.ts:
+       - a nested fixture test importing #src, #scripts and #test resolves under tsx and typechecks under tsc;
+       - the number of test files carrying any location-relative specifier may not exceed the number at the merge base
+         (derived from `git merge-base HEAD origin/main`, never a constant);
+       - a new test file carries none.
+  acceptance:
+    - claim: 'package.json declares the #src subpath import'
+      proof: 'grep: #src/\*": "\./src/\*" in package.json'
+    - claim: 'package.json declares the #test subpath import'
+      proof: 'grep: #test/\*": "\./test/\*" in package.json'
+    - claim: 'a nested test importing through the aliases runs under tsx and typechecks'
+      proof: 'grep: test("W1-T9864: a nested test importing through the aliases runs and typechecks" in test/a-test-imports-through-the-subpath-alias.test.ts'
+    - claim: 'the count of location-relative test files never rises above the merge base'
+      proof: 'grep: test("W1-T9864: location-relative test files never rise above the merge base" in test/a-test-imports-through-the-subpath-alias.test.ts'
+    - claim: 'the codemod rewrites a relative src import to the alias and removes a self-path line'
+      proof: 'grep: test("W1-T9864: the codemod rewrites relative specifiers to the aliases" in test/a-test-imports-through-the-subpath-alias.test.ts'
+  falsifier: |
+    On origin/main package.json has no "imports" field. A specifier "#src/lib/x.js" throws ERR_PACKAGE_IMPORT_NOT_DEFINED
+    under node and TS2307 under tsc, as the probe's control showed. No codemod and no guard test exist.

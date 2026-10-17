@@ -99,7 +99,7 @@ test("the legacy inbox view pages the last classification without classifying", 
   const answered = legacy.compute(new URLSearchParams({ section: "needsYou" }));
   assert.ok(!("error" in answered));
   assert.deepEqual(answered.data, view.data, "the shadow comparator's legacy side equals the slow lane's body over the same classification");
-  assert.match(String((legacy.compute(new URLSearchParams({ section: "needsYou", cursor: "99" })) as { error: string }).error), /no such page/);
+  assert.match(String((legacy.compute(new URLSearchParams({ section: "needsYou", cursor: "99" })) as { error: string }).error), /inbox_snapshot_changed/);
 });
 
 test("the feedback view projects a merged proposal as accepted and writes nothing", (t) => {
@@ -171,7 +171,7 @@ test("a page that empties is dropped from the read model and from serve", async 
   ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: many });
   assert.equal(posted.filter((m) => m.type === "body").length, bodiesPosted, "an unchanged page is not posted again");
 
-  const few = inboxViewBodies(inboxLanes({ proposals: [], classifications: [], ledgerLines: [] as never }, deps.inboxRoot), SOURCE);
+  const few = inboxViewBodies(inboxLanes({ proposals: [], classifications: [], ledgerLines: [] as never }, deps.inboxRoot), SOURCE, "a".repeat(64));
   ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: few });
   const dropped = posted.filter((m): m is Extract<ReadModelWorkerMessage, { type: "drop" }> => m.type === "drop").map((m) => m.key).sort();
   assert.deepEqual(dropped, many.map((b) => b.key).filter((k) => !few.some((f) => f.key === k)).sort(), "every page that emptied is dropped");

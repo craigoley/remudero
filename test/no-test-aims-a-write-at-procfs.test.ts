@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,24 @@ import { fileURLToPath } from "node:url";
 // once with ENOTDIR, and depends on no kernel-specific behaviour.
 
 const TEST_DIR = fileURLToPath(new URL(".", import.meta.url));
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: TEST_DIR, encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 const SELF = "no-test-aims-a-write-at-procfs.test.ts";
 
 /** Write-shaped fs entry points. A procfs literal reaching any of these can block. */
@@ -33,18 +52,18 @@ interface Offence { file: string; line: number; text: string }
 
 function scan(): Offence[] {
   const out: Offence[] = [];
-  for (const entry of readdirSync(TEST_DIR, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
+  const { dir, files } = testCorpus();
+  for (const name of files) {
     // THIS FILE IS EXCLUDED, and must be: it names the forbidden shape twice on purpose — once in
     // the comment that explains the incident, once in the fixture that proves the detector fires.
     // A census that scans itself reports its own documentation as the defect.
-    if (entry.name === SELF) continue;
-    const lines = readFileSync(join(TEST_DIR, entry.name), "utf8").split("\n");
+    if (name.split("/").at(-1) === SELF) continue;
+    const lines = readFileSync(join(dir, name), "utf8").split("\n");
     lines.forEach((raw, i) => {
       if (!raw.includes("/proc/")) return;
       const call = WRITE_CALLS.some((c) => raw.includes(`${c}(`));
       const option = WRITE_OPTIONS.some((o) => new RegExp(`\\b${o}\\s*:\\s*["'\`]/proc/`).test(raw));
-      if (call || option) out.push({ file: entry.name, line: i + 1, text: raw.trim().slice(0, 120) });
+      if (call || option) out.push({ file: name, line: i + 1, text: raw.trim().slice(0, 120) });
     });
   }
   return out;
@@ -66,7 +85,7 @@ test("W1-T3345: no test aims a write-shaped call at procfs — it blocks rather 
 test("W1-T3345: the scanner reads real suites and recognises the shape it forbids", () => {
   // THE ROW THAT STOPS THIS PASSING OVER NOTHING. A scanner pointed at an empty directory, or one
   // whose pattern matches nothing, reports zero offences exactly like a clean tree.
-  const files = readdirSync(TEST_DIR).filter((f) => f.endsWith(".test.ts"));
+  const { files } = testCorpus();
   assert.ok(files.length > 100, `expected to scan the real suite directory, saw ${files.length} file(s)`);
 
   // And the detector fires on the exact line that caused the incident, reconstructed here as text.

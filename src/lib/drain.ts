@@ -298,6 +298,10 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   dispatchValueContext?: DispatchValueContext;
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
   isOpenPr?: OpenPrCheck;
+  /** Tasks holding a pending pre-PR handoff receipt (daemon.ts `pendingWorkerBoundaryHandoffs`): a run of each
+   *  was yielded by the harness before its pull request opened. They are walked ahead of every fresh start, in
+   *  their own dispatch order. Ordering only: each still passes the whole eligibility chain. */
+  resumableTaskIds?: ReadonlySet<string>;
 
   /** W1-T2675 — a FAILED credit read, which is not the same as "not merged". `deriveStatus`
    *  (status.ts) returns `indeterminate: true` when the GitHub read genuinely failed, and a caller
@@ -447,8 +451,13 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
 /** Measured stride passes first when a ready cost-of-delay context exists, else priority first (W1-T4064, W1-T9323). Without readable evidence,
  * the historic scope/id order remains deterministic; the comparator performs no reads. */
 // Why: the shard-starvation defect this replaces and what sorting by id costs — docs/forensics/drain.md.
-export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext): Task[] {
-  return [...tasks].sort((a, b) => compareDispatch(a, b, context));
+export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext, resumable?: ReadonlySet<string>): Task[] {
+  const ordered = [...tasks].sort((a, b) => compareDispatch(a, b, context));
+  if (resumable === undefined || resumable.size === 0) return ordered;
+  // A task the harness yielded before its pull request already won a lane; the yield took it, not the queue.
+  // MEASURED 2026-10-17: W1-T9089 and W1-T9757 yielded at 22:07Z to a restart and re-entered at stride ranks 28
+  // and 31, behind a high-fanout family filed four hours earlier, and had no run.start for 6.8 h.
+  return [...ordered.filter((t) => resumable.has(t.id)), ...ordered.filter((t) => !resumable.has(t.id))];
 }
 
 /** Total order. With a ready cost-of-delay context (W1-T9323): stride pass, priority as the first tiebreak,
@@ -532,7 +541,7 @@ function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
   opts.beginSelectionPass?.();
-  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
+  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
     if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
     // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
     // is returned unchanged, so it is structurally incapable of changing the answer.
@@ -812,7 +821,7 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
 function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts): Task[] {
   opts.beginSelectionPass?.();
   const eligible: Task[] = [];
-  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
+  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
   }
   return eligible;

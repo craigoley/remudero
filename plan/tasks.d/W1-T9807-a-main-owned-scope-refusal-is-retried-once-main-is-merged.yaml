@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/a-main-owned-scope-refusal-is-retried-once-main-is-merged.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-16: a scope need on a hot file is refused for good, so the PR waits for an operator amendment (#12043, #12297)
   attempts: 0
   rationale: |

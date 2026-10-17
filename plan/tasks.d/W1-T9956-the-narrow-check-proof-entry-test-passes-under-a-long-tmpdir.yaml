@@ -1,0 +1,48 @@
+- id: W1-T9956
+  title: "THE NARROW CHECK-PROOF ENTRY TEST PASSES UNDER A LONG TMPDIR — test/a-check-proof-child-loads-a-narrow-entry.test.ts spawns bin/rmd, whose tsx CLI listens on <TMPDIR>/tsx-<uid>/<pid>.pipe; with a 130-byte path that exceeds the unix socket limit and the CLI dies `listen EINVAL`, so the test fails on the runner's TMPDIR length, not on the code"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, that this test's verdict does not depend on the runner's TMPDIR length
+  band_meaning: blast-radius
+  origin: 'W1-T9803 builder report (logs-8864/9803-census.tap, 9803-census-rerun.tap); coordinator brief batch1016b item 8'
+  plan_refs: [W1-T7728, W1-T8775]
+  files:
+    - test/a-check-proof-child-loads-a-narrow-entry.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/9803-census.tap, W1-T9803 builder, sha 06733a234, 2026-10-16 ~20:22Z): "W1-T7728: the
+    narrow entry and rmd check-proof agree on verdict and exit code" failed with `Error: listen EINVAL: invalid
+    argument .../scratchpad/tmp9803/tsx-1000/3111687.pipe` from tsx/dist/cli.mjs createIpcServer, exit 1 where 0
+    was expected. That path is 130 bytes; a unix socket path must fit in 108 bytes, NUL included (sun_path).
+    9803-census-rerun.tap: the same sha with a short TMPDIR passed 2/2.
+    READ at origin/main 77f68d26a (symbols, not lines):
+    - The test spawns `bin/rmd check-proof ...` with `env: { ...process.env, RMD_SELF_SYNC_DONE: "1" }`, so the
+      runner's TMPDIR passes through.
+    - bin/rmd `exec`s node_modules/.bin/tsx, and the tsx CLI (4.23.15) creates its IPC server at
+      `<os.tmpdir()>/tsx-<uid>/<pid>.pipe` before running the program. The narrow-entry spawn (plain node)
+      starts no IPC server, so only the CLI arm fails.
+    INFERRED: any test that spawns bin/rmd or the tsx CLI has the same exposure. 53 test files on origin/main name
+    bin/rmd or the tsx CLI path. BUILDER-RULES now tells hand builders to keep the default TMPDIR; CI's is short.
+  design: |
+    1. The test gives both of its spawns a private short TMPDIR: a mkdtemp under `/tmp` when
+       `join(tmpdir(), "tsx-<uid>", "<pid>.pipe")` could exceed the socket limit, and the runner's TMPDIR otherwise.
+       It removes that directory in `finally`. Its verdict then does not depend on the runner's TMPDIR length.
+    2. A regression test drives the CLI arm with a TMPDIR padded past the limit and expects the same verdict and
+       exit code as the narrow entry.
+    3. Out of scope, named for a follow-up: making bin/rmd itself refuse a TMPDIR whose tsx pipe path cannot fit,
+       with a message naming the limit, or point tsx at a short socket directory. That changes the CLI for every
+       caller and is an OPERATOR DECISION.
+    No new constant beyond the platform's socket limit, which the builder reads from a named constant with a cited
+    source.
+  acceptance:
+    - claim: "with a TMPDIR whose tsx pipe path exceeds the unix socket limit, the CLI arm still agrees with the narrow entry"
+      proof: 'grep: test("W1-T9956: the check-proof CLI arm agrees under an over-long TMPDIR" in test/a-check-proof-child-loads-a-narrow-entry.test.ts'
+  falsifier: |
+    On origin/main, a run with a TMPDIR padded past 108 bytes makes the bin/rmd spawn exit 1 with listen EINVAL, so
+    the new test's exit-code assertion fails, as 9803-census.tap shows for the existing test.

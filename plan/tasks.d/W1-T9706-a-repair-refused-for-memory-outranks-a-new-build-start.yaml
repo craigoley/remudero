@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: two hours of zero fix admissions means a red PR goes green only by hand
   attempts: 0
   rationale: |
@@ -28,8 +28,9 @@
     - The build gate: dispatch_memory_observed at 17:05:47Z read observed_available_mib 5,898 against
       memory_floor_mib 3,072, tier "fits", and three builds started 25 s later. checkMemoryGovernor (src/lib/sweep.ts)
       admits a new build when MemAvailable is at or above policy.memoryFloorMib and charges the build nothing.
-      plan/policy.yaml keeps hostMemoryBudget mode "shadow" for every class but garden, so implement starts are not
-      gated by the budget. The shadow verdicts for those three starts (17:08:37-17:10:47Z) all read would_admit false
+      At 17:06Z plan/policy.yaml kept hostMemoryBudget mode "shadow" for every class but garden, so implement starts
+      were not gated by the budget. That is stale since #12106 (19:47Z 10-15); see AMENDED 2026-10-16 below. The
+      shadow verdicts for those three starts (17:08:37-17:10:47Z) all read would_admit false
       for unrealized-reservations, with unrealizedMib 2,789-8,259 and projectedAvailableMib -278 to 1,401.
     - The repair gate: createSweepFixAdmissionController (W1-T9498) admits a fix only while MemAvailable minus the same
       3,072 floor covers every planned review at its learned p90 (1,199-1,234 MiB each) plus one fix at its learned p90
@@ -37,7 +38,7 @@
     - So the gate with the lowest bar admits the lowest-priority work, and nothing tells it that a repair is waiting for
       memory. HOST_MEMORY_PRIORITY_PROPOSAL.classWeight already ranks fix (2) above implement (1), but only the
       counterfactual review yield (wouldYieldToReview, src/lib/host-memory-priority.ts) reads it, and only in shadow.
-    - W1-T9679 (#12110, open) adds typical-peak rungs to the repair controller. Replaying its rule on the 93
+    - W1-T9679 (#12110, merged 19:52Z 10-15) adds typical-peak rungs to the repair controller. Replaying its rule on the 93
       refusals admits 49 (no review charged, and what is left covers the 478 MiB median). The other 44 stay refused:
       36 with 1-4 planned reviews charged, 8 container-short. Builds are not ordered against those repairs.
     NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the plan/ diffs of the 82 origin heads updated since
@@ -45,6 +46,27 @@
     the repair arithmetic, W1-T9582 orders repairs against reviews, W1-T7095 is the shadow-only review yield, and
     W1-T5347 wired the floor. W1-T100 (lint names it for the same two files) routes blocked_ci to the ci-log fix path
     and does not touch admission. None makes a build start yield to a waiting repair.
+    AMENDED 2026-10-16, budget classes enforce since #12106 (read at origin/main 6ca8596ef). The premise is NARROWED,
+    not gone:
+    - GONE: "a new build is charged nothing above the floor". #12106 set hostMemoryBudget.classModes implement, fix,
+      review and advisory to "enforce", so every implement worker start now passes awaitMemoryAdmission
+      (src/lib/host-memory-admission.ts, called from spawnWorker in src/lib/worker.ts) after checkMemoryGovernor.
+      Since W1-T9762 (#12296) that check charges the start its class median plus every live tree's decayed typical
+      growth plus one tail, against hostReserveMib. The three 17:06Z starts, whose shadow verdicts read would_admit
+      false for unrealized-reservations, would now wait. memoryGovernorGateFor itself is unchanged, so the falsifier
+      below still reads as written.
+    - STILL OPEN: the yield. rankDemand in awaitMemoryAdmission orders only starts already waiting in its own queue
+      (classWeight fix 2 above implement 1). A repair that createSweepFixAdmissionController (src/lib/sweep.ts)
+      refuses never reaches spawnWorker, so it is not in that queue, and a build that fits the budget still starts
+      while that repair waits. The two gates also use different arithmetic: the repair gate charges memoryFloorMib
+      plus every planned review's p90 plus the fix rungs (W1-T9679); the budget charges hostReserveMib plus typical
+      growth and one tail. So the budget can admit a build in a state where the repair gate refuses a fix.
+    - MEASURED 2026-10-16 (core ledger, archive union, core booted on W1-T9762 at 14:18Z): sweep.fix_capacity
+      refused a fix 8 times between 16:16 and 17:10Z, every one with pressure_tier fits and 2-4 implement
+      memory_budget.enforce_admit within 10 min. At 16:45:51Z: headroom_mib 1,617, review_charge_mib 2,324 (2 planned
+      reviews at review_estimate_mib 1,162 each), fix_estimate_mib 859 against fix_typical_mib 279,
+      fix_admissions_available 0, admission_rung none. So the yield is still needed, and the repair gate's review charge
+      is the same p90-for-unseen over-charge that W1-T9762 removed from the budget. Do not retire this task.
   design: |
     One priority rule, adaptive, with no new fixed number (operator ruling: no hard thresholds):
     1. DEMAND. When createSweepFixAdmissionController refuses a claim on a readable pressure reading (the MiB arithmetic,

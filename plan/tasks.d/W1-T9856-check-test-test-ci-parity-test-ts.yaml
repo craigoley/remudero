@@ -1,0 +1,61 @@
+- id: W1-T9856
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/ci-parity.test.ts cost 28.8 PR minute(s) across 13 round(s) on 11 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.18
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/ci-parity.test.ts"
+  files:
+    - src/lib/ci-parity.ts
+    - test/check-test-test-ci-parity-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/ci-parity.test.ts"
+      proof: "grep: test(\"W1-T9856: check:test:test/ci-parity.test.ts is prevented, not retried\" in test/check-test-test-ci-parity-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/ci-parity.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/ci-parity.test.ts cost 28.8 PR minute(s) (seven-day half-life) across 13 fix round(s) on 11 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-parity.ts: test/ci-parity.test.ts imports it
+    - test/ci-parity.test.ts: named by the failing check
+    - the rounds name a failing test: test/ci-parity.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #11978 (https://github.com/craigoley/remudero/pull/11978) at 2026-10-16T01:27:25.453Z: ci-log round — ci-shard (3/8): test/ci-parity.test.ts
+        failing tests: reads only the plan and the merge-base diff, never the network"]; lint-plan:fast (the fast-gate's own script): runs for real, unmocked, on this checkout — reads only the plan and the merge-base diff, never the network
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — ["lint-plan:fast (the fast-gate's own script): runs for real, unmocked, on this checkout — reads only the plan and the merge-base diff, never the network"]
+          | not ok 3 - lint-plan:fast (the fast-gate's own script): runs for real, unmocked, on this checkout — reads only the plan and the merge-base diff, never the network
+          |   ---
+          |   duration_ms: 6642.315129
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/ci-parity.test.ts:1:3160'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     lint-plan:fast must pass on this checkout; got:
+          | 
+          |     rmd lint-plan:
+    - PR #12046 at 2026-10-15T16:30:02Z: hand fix PR #12046: scripts/calibrate-author-runtime.mjs, scripts/preflight-author.mjs, src/lib/ci-parity.ts, src/lib/commit-message.ts, src/lib/merge-probe.ts, src/lib/retro-preflight.ts, src/lib/tes
+    - PR #10918 at 2026-10-11T17:52:39Z: hand fix PR #10918: scripts/flake-screen.mjs, scripts/pool-run-marker.mjs, scripts/preflight-author.mjs, scripts/pure-test-pool.mjs, scripts/test-tier-manifest.mjs, scripts/test-with-retry.mjs, src/li
+    - PR #10611 at 2026-10-10T10:00:43Z: hand fix PR #10611: src/lib/ci-parity.ts, src/lib/secret-boundary.ts, src/lib/short-path-root.ts; minutes are the pass median proxy (6.14965), not measured repair time
+    - PR #10594 at 2026-10-10T07:34:55Z: hand fix PR #10594: src/lib/ci-parity.ts; minutes are the pass median proxy (6.14965), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared files are src/lib/ci-parity.ts and a new test file (test/check-test-test-ci-parity-test-ts.test.ts). The description gives no sign of touching secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The task is a CI-friction remedy with a measurable follow-up. The gardener compares fix-round share before and after merge, so the finding can be verified. The task also reopens the cause at rung 2 if the share does not fall."
+      - "The family track record is mixed (27 merged, 40 declined, Beta mean 0.62). That calls for ordinary scrutiny but is not a gates-state concern. The change still goes through CI and review."
+      - "The filing shows a flaky test (a FLAKE-RETRY on lint-plan:fast) and repeated hand fixes to ci-parity.ts. This is a well-trodden area, and the work is a code change plus a test, not a policy decision for the operator."
+    judged_at: "2026-10-16T20:43:26.118Z"
+    pin: "a164edd8c22997ede576e0c676cde67ccbb7803ae18e4213a6db5a9529953c85"
