@@ -6,7 +6,7 @@
   verify: auto
   risk: high
   band_meaning: span
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "console-follow-up:gardener-worker-call-coverage-2026-10-15"

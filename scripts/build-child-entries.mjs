@@ -32,11 +32,12 @@ export const CHILD_ENTRIES = Object.freeze([
 ]);
 /**
  * W1-T8777: the modules that start a worker thread from their own URL, each built as its own bundle so a bundled
- * parent can start it with no tsx loader. ADR 0006 decision 4 names these four; `grep -rln "new Worker(" src`
- * is the live inventory of the rest.
+ * parent can start it with no tsx loader. ADR 0006 decision 4 names the first four; `grep -rln "new Worker(" src`
+ * is the live inventory of the rest. W1-T9722: the daemon's read-plane worker entry (src/lib/tick-read-worker.ts).
  */
 export const WORKER_ENTRIES = Object.freeze([
   "src/lib/read-model-worker.ts", "src/lib/read-model-slow-lane.ts", "src/lib/status.ts", "src/lib/board-worker.ts",
+  "src/lib/tick-read-worker.ts",
 ]);
 /** A worker module's bundle file name: `src/lib/board-worker.ts` → `worker-lib-board-worker.mjs`. */
 export const workerBundleName = (module) => `worker-${module.replace(/^src\//, "").replace(/\.[cm]?[jt]sx?$/, "").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.mjs`;

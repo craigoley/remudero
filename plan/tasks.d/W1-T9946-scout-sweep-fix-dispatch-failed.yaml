@@ -1,0 +1,30 @@
+- id: W1-T9946
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — sweep.fix.dispatch_failed landed 3 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3.4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:sweep.fix.dispatch_failed"
+  files:
+    - test/scout-sweep-fix-dispatch-failed.test.ts
+  acceptance:
+    - claim: "sweep.fix.dispatch_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9946: sweep.fix.dispatch_failed no longer recurs\" in test/scout-sweep-fix-dispatch-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step sweep.fix.dispatch_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The supplied record reports three recurrence rows but provides no underlying row evidence or diagnosed cause; its finding cannot be verified from what is shown, meeting the explicit escalation condition.; on the change's description/files alone, no diff was read — The task requires fixing a cause that remains to be located, while declaring only a new test file. Its sole acceptance proof greps for a test declaration rather than executing a behavioral check, leaving the proposed remedy insufficiently bounded and verified."
+    judged_at: "2026-10-16T23:28:40.997Z"
+    pin: "d9d8e063c68bb2eae3d0e546459ca62802c7cf1492332b0c5d2f1f6895b28c16"

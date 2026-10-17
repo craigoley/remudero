@@ -1,0 +1,98 @@
+- id: W1-T9924
+  title: "A LATCHED RESTART WITH NO HOLDOUT LEFT REFILLS NO DISPATCH LANE ITS DRAIN WOULD ABANDON — on 2026-10-16 7 build refills started from 16:36 to 16:59 under the 16:30:23 latch with waiting_on empty, and each was asked to yield as latch_refill_past_restart within 1 to 3 minutes, because W1-T9069's span check runs only while a holdout waits and child mode skips the stale-code close"
+  repo: remudero
+  depends_on: [W1-T9808]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, whether a freed dispatch lane refills after the restart latch; the drain, its bound, W1-T9069's holdout comparison and W1-T5721's protection are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16, filing agent F8 task C from builder B24 (W1-T9808, #12402): the live 7 refills after the latch were dispatch-lane refills, not light-pass review refills, so W1-T9808 does not cover them"
+  plan_refs: [W1-T147, W1-T9808, W1-T9069, W1-T8172, W1-T7806, W1-T5721, W1-T9085, W1-T9114, W1-T8136, W1-T8141]
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - test/a-latched-restart-with-no-holdout-refills-no-lane-its-drain-would-abandon.test.ts
+  status: merged
+  priority: 2  # each refill wastes its claim, start and recon, and holds the lane until the boot; it self-heals at the restart, so not P1
+  attempts: 0
+  rationale: |
+    EVIDENCE, core ledger (host ~/rmd-state2/state/ledger.2026-10-16T17-23-25-589Z.ndjson.gz, bounded zgrep):
+      - `daemon.restart_latch_cost` 17:10:52.995Z: latched_at 16:30:23.364Z, waited_ms 2429631, idle_lane_ms 3295580,
+        refills_under_latch 7, yields_asked 9. Seven holdouts read `yielded_latch_refill_past_restart`: W1-T9067,
+        W1-T9626, W1-T8945, W1-T9124, W1-T9628, W1-T8959 and W1-T9097.
+      - Each was a `dispatch.lane_refilled` row with `restart_pending: true` and `waiting_on: []`:
+        W1-T9067 at 16:36:13, W1-T9626 16:39:31, W1-T8945 16:42:19, W1-T9124 16:44:11, W1-T9097 16:55:04,
+        W1-T9628 16:56:31, W1-T8959 16:59:00. Each then took its claim and `run.start`.
+      - Each was asked to yield 1 to 3 minutes later. Example: W1-T9067 got `daemon.restart_yield_asked` at
+        16:37:16, phase recon, reason latch_refill_past_restart, self_scoped true, restart_at_ms equal to now,
+        `expected_finish_ms: null`. Its claim was released at 16:37:30.
+      - The null expected finish means no W1-T9069 span was recorded for the refill: it was admitted without the
+        span check.
+    READ at origin/main 07a425844, src/lib/daemon.ts (runDaemon's lane pool):
+      - `chooseRefill`'s `decide` runs W1-T9069's check only under
+        `inFlightFreshness && restartStillWaitingOnHoldout() && !refillClosed`. That check takes only a candidate
+        whose `classMedianSpans` span ends before R, and refuses every candidate on `latchSelfScoped()`. With no
+        holdout left it falls to `else next = candidates[0]`.
+      - `conclude` closes such a refill with "stale code" only when `!childMode`. `actOnDispatchFreshness` closes
+        refill (`refillClosed ??= "stale code"`) only when `!childMode` too.
+      - `childMode` is true whenever `deps.adoptRunChildren` is wired, and core wires it. Yet each of these runs
+        executed in-process (its yield row carries a run id and phase recon). `restartAtWorkerBoundary` therefore
+        asked it to yield at once, because with no holdout R is now.
+      - So, in child mode with no holdout left and the restart waiting on in-process work (W1-T8172's drain), every
+        freed lane refills unconditionally, and the refill is abandoned at its first boundary.
+    NOT COVERED ELSEWHERE:
+      - W1-T9808 (queued; #12402, branch run-W1-T9808-1792174220004, open) adds `restartAdmission(kind, surface)`
+        with a `restartWindow` deadline (latch time plus `sweepWallClockBoundMs`). Its lengths are for "review" and
+        "fix-dispatch" only, read at light passes, refills of reviews and the full sweep. It never reaches the
+        dispatch pool's `chooseRefill`, and B24 confirmed the 7 live refills are outside it.
+      - W1-T9069 (merged) built the span check, but only while a holdout waits.
+      - W1-T8136 (queued) keeps a recycle PAUSE from admitting review workers.
+      - W1-T8141 (queued) ends a fix worker's round on a pending restart.
+      - W1-T9114 (queued) moves reviews and detached actions into run children.
+      - None admits or holds a dispatch-lane refill with no holdout left.
+      - Swept plan/tasks.d on origin/main and the plan diffs of all 436 open heads for admittedUnderLatch,
+        decideLatchedRestart, latch_refill_past_restart and refill under the latch. The only open hit is
+        plan-file-1792174568000's W1-T9808 amendment, which names these 7 refills as context it does not stop.
+    OVERLAP (lint duplicate-surface): W1-T147 is the overnight chaos drill. It shares src/lib/daemon.ts and
+    src/run-task.ts as broad files only and never decides a refill under the restart latch.
+  design: |
+    Operator rulings: no hard thresholds (no fixed wait, age or count), lean into automation.
+    1. ONE PREDICATE, W1-T9808's. `restartAdmission` gains the kind "dispatch-refill". Its measured length is the
+       candidate's own class median settled span (`classMedianSpans`, W1-T9069's measure, `run.start` to `verdict`).
+       The refill admits only while the time left to the drain's deadline (`restartWindow.deadlineMs`) exceeds that
+       length. While a holdout still waits, W1-T9069's R-based check is kept as well, and the tighter of the two
+       budgets decides. With no history for the class it admits as today, and the row says `no_history`.
+    2. CHILD MODE DECIDES PER RUN, NOT PER POOL. A refill skips the predicate only when the run-child policy will run
+       it as an adoptable child. That decision lives in src/run-task.ts (W1-T9085's `runChildModeFor` over
+       `childModeTracker`), so a new daemon dep, `refillRunsAsChild(task)`, is wired there and read at the refill;
+       unwired, it reads false. Then the restart does not wait on it. A refill that will run in-process is judged by (1), whatever `childMode` says.
+       The `else next = candidates[0]` branch no longer admits under a latch with no holdout.
+    3. A HELD REFILL PARKS THE LANE on the existing latch-park path, so a latch state change wakes it, never the tick.
+       It writes `daemon.admission_held` with surface "dispatch-refill", kind, task, class, time left, measured
+       length, samples and the child decision, once per lane and state. `daemon.restart_latch_cost` gains
+       `refills_held_after_latch`.
+    4. Work already admitted is waited on as today. W1-T5721's protection of live fix workers, W1-T9069's holdout
+       comparison and the drain's bound are unchanged.
+    5. Tests (new file, test titles verbatim as in the proofs below; drive runDaemon with an injected runOne,
+       `adoptRunChildren`, restart-history lines and a fake clock, as W1-T9069's suite does):
+       - in child mode, a latch with no holdout, the drain waiting on in-process work, and a refill candidate whose
+         class median exceeds the time left: no refill starts and a `daemon.admission_held` row names it. At
+         origin/main the lane refills (`dispatch.lane_refilled` with `restart_pending: true`);
+       - the same refill, when its class median fits the time left, starts (positive control);
+       - a refill the run-child policy will run as an adoptable child starts under the latch;
+       - with no latch, or no class history, refill is unchanged.
+  acceptance:
+    - claim: "a latch with no holdout refills no in-process lane whose measured span exceeds the drain's time left, and names the hold"
+      proof: 'grep: test("W1-T9924: a latch with no holdout refills no lane its drain would abandon" in test/a-latched-restart-with-no-holdout-refills-no-lane-its-drain-would-abandon.test.ts'
+    - claim: "a refill whose measured span fits the drain's time left still starts"
+      proof: 'grep: test("W1-T9924: a refill that fits the drain still starts under the latch" in test/a-latched-restart-with-no-holdout-refills-no-lane-its-drain-would-abandon.test.ts'
+    - claim: "a refill that will run as an adoptable child starts under the latch"
+      proof: 'grep: test("W1-T9924: a refill that runs as an adoptable child starts under the latch" in test/a-latched-restart-with-no-holdout-refills-no-lane-its-drain-would-abandon.test.ts'
+    - claim: "with no latch or no class history, refill is unchanged"
+      proof: 'grep: test("W1-T9924: with no latch or no history refill is unchanged" in test/a-latched-restart-with-no-holdout-refills-no-lane-its-drain-would-abandon.test.ts'
+  falsifier: |
+    At origin/main, runDaemon with `adoptRunChildren` wired, a latched restart, no holdout, an in-process refill
+    candidate with a 30-minute class median and a drain with minutes left still refills the lane: `dispatch.lane_refilled`
+    with `restart_pending: true` and no `daemon.admission_held` row, so the first test fails.

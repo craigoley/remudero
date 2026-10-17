@@ -9,9 +9,10 @@ import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 import { grepOnlyBaseTargets, materialiseBaseGrepTree, type BaseGrepTreeReaders } from "./proof-base-stale.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { hostWorktreeGit, WorktreePointerRefusedError, type HostWorktreeGitOptions } from "./worktree-git.js";
+import { resolveTestPath } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
-  parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs,
+  parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath,
   execWhitelistedProof, defaultProofSpawner, registerReviewerCheckout, type ProofSpawner,
 } from "./review.js";
 
@@ -148,11 +149,15 @@ export function buildBaseProofDir(
     return noBase; // unresolvable base ⇒ no staleness signal, never a false positive
   }
   if (!base) return noBase;
+  // W1-T9860: the BASE tree resolves each cited test path in its own index, so a test that sat elsewhere at the base
+  // is materialised where the base really had it. An exact hit or an unresolved path leaves the proof as cited.
+  const baseCriteria = criteria.map((c) =>
+    typeof c.proof === "string" ? { ...c, proof: resolveProofTestPath(c.proof, headCheckoutDir, { tree: base }).proof } : c);
 
   const dir = makeDir();
   // A review whose every proof is a `grep:` reads the base blobs it names and checks nothing out: the
   // grep reads one path, and a checkout of the whole tree for it was observed taking 66 minutes on a loaded host.
-  const grepTargets = grepOnlyBaseTargets(criteria);
+  const grepTargets = grepOnlyBaseTargets(baseCriteria);
   if (grepTargets !== undefined) {
     const tree = materialiseBaseGrepTree(headCheckoutDir, base, grepTargets, dir, { ...deps.grepTree, showBlob: deps.showBlob });
     if (tree.needsCheckout.length === 0) {
@@ -205,7 +210,7 @@ export function buildBaseProofDir(
   }
   // FALLBACK: the pre-R-11 blob materialisation, byte-for-byte, into the same dir.
   const { written, unreadable } = materialiseBaseProofBlobs(
-    criteria,
+    baseCriteria,
     base,
     (rev: string, rel: string) => showBlob(headCheckoutDir, rev, rel),
     (rel: string, contents: string) => {
@@ -325,7 +330,9 @@ export function checkProofCommand(
     console.error("rmd check-proof: give me a proof, e.g. `rmd check-proof 'grep: foo in src/lib/bar.ts'`\n" + usage);
     return CHECK_PROOF_EXIT.refused;
   }
-  const w = parseWhitelistedProof(proof, target);
+  // W1-T9860: a cited test path that moved resolves by its unique basename at the head, and this verb says so.
+  const headResolution = resolveProofTestPath(proof, process.cwd(), { target });
+  const w = parseWhitelistedProof(headResolution.proof, target);
   if (!w) {
     console.log(`proof:      ${proof}`);
     console.log("parse:      REFUSED — parseWhitelistedProof returned null.");
@@ -342,6 +349,9 @@ export function checkProofCommand(
   }
   console.log(`proof:      ${proof}`);
   console.log(`parse:      OK — kind=${w.kind}${w.nameFiltered ? " (name-filtered)" : ""}`);
+  if (headResolution.note !== undefined) console.log(`resolved:   ${headResolution.note}`);
+  else if (headResolution.resolution !== undefined && "unresolved" in headResolution.resolution && headResolution.resolution.unresolved === "ambiguous")
+    console.log(`resolved:   NOT — ${headResolution.cited} is absent and its basename names ${headResolution.resolution.candidates.join(", ")}; not guessed`);
 
   let args = w.args as readonly string[];
   if (w.nameFiltered && w.runner === "vitest") {
@@ -527,11 +537,18 @@ export function checkProofCommand(
     // still reports exec_error and exit 4 exactly as before (no caller shifts), it simply gains
     // this line. Checked with existsSync rather than the classifier: there is no file text to
     // read at all, so classifyGrepZeroHit has nothing to classify.
-    if (w.kind === "grep" && grepTargetPath !== undefined && !existsSync(join(process.cwd(), grepTargetPath)))
+    if (w.kind === "grep" && grepTargetPath !== undefined && !existsSync(join(process.cwd(), grepTargetPath))) {
       console.log(
         `cause:      path-absent — ${grepTargetPath} does not exist; grep could not even look (a\n` +
           "            renamed/missing target, or a permission error).",
       );
+      // W1-T9860: say what the basename lookup found, so a moved test's ambiguity is named rather than silent.
+      const lookup = resolveTestPath(grepTargetPath, { root: process.cwd() });
+      if ("unresolved" in lookup && lookup.reason === undefined) {
+        const named = lookup.candidates.length > 0 ? ` (${lookup.candidates.join(", ")})` : "";
+        console.log(`            basename lookup: ${lookup.unresolved}${named} — never guessed`);
+      }
+    }
     if (grepPatternHasBlockingMetachar) console.log(GREP_METACHAR_NOTE);
     return CHECK_PROOF_EXIT.execError;
   }
@@ -579,26 +596,37 @@ export function checkProofCommand(
 
   function compareAgainstBase(base: BaseProofDir): number {
     const { baseCheckoutDir, baseUnreadablePaths } = base;
-    // grepTargetPath (mirrors grepProofTargetPath, review.ts, unexported) was already resolved
-    // above, before the W1-T387 collapse — reused here rather than re-derived a second time.
+    // W1-T9860: the base resolves the CITED path in its own tree, as buildBaseProofDir materialised it. A base that
+    // cannot resolve it re-runs the head's proof, as if the plan had cited the moved path itself.
+    const baseResolution = resolveProofTestPath(proof, process.cwd(), { tree: baseRef!, target });
+    if (baseResolution.note !== undefined) console.log(`base resolved: ${baseResolution.note}`);
+    const baseW =
+      baseResolution.note !== undefined
+        ? (parseWhitelistedProof(baseResolution.proof, target) ?? w!)
+        : baseResolution.resolution !== undefined && "path" in baseResolution.resolution
+          ? (parseWhitelistedProof(proof, target) ?? w!)
+          : w!;
+    const baseGrepTargetPath = baseW.kind === "grep" && baseW.args.length >= 1 ? baseW.args[baseW.args.length - 1] : undefined;
+    // baseGrepTargetPath mirrors grepProofTargetPath (review.ts, unexported): the argv's last element, read off the
+    // base's own resolved proof. It equals the head's grepTargetPath unless a test moved between the two trees.
     // A grep tree holds a target only when the base had it and the read succeeded, so a missing one
     // reads exactly as the blob path's absent or unreadable blob does.
     const grepTreeLacksTarget =
       base.baseIsGrepTree === true &&
-      grepTargetPath !== undefined &&
-      !base.addedTestFiles.has(grepTargetPath) &&
-      !existsSync(join(baseCheckoutDir!, grepTargetPath));
+      baseGrepTargetPath !== undefined &&
+      !base.addedTestFiles.has(baseGrepTargetPath) &&
+      !existsSync(join(baseCheckoutDir!, baseGrepTargetPath));
 
     if (baseCheckoutDir === undefined || grepTreeLacksTarget) {
-      if (grepTargetPath !== undefined && baseUnreadablePaths.has(grepTargetPath)) {
+      if (baseGrepTargetPath !== undefined && baseUnreadablePaths.has(baseGrepTargetPath)) {
         console.log(
-          `base:       UNREADABLE — \`git show ${baseRef}:${grepTargetPath}\` failed to read; the base\n` +
+          `base:       UNREADABLE — \`git show ${baseRef}:${baseGrepTargetPath}\` failed to read; the base\n` +
             "            comparison is inconclusive and never counted as a false discrimination — the same\n" +
             "            base_unreadable degrade the reviewer itself uses (W1-T460).",
         );
-      } else if (grepTargetPath !== undefined) {
+      } else if (baseGrepTargetPath !== undefined) {
         console.log(
-          `base:       ABSENT at ${baseRef} — ${grepTargetPath} did not exist there, so this proof could not\n` +
+          `base:       ABSENT at ${baseRef} — ${baseGrepTargetPath} did not exist there, so this proof could not\n` +
             "            have matched before the work existed (a forward reference) — the strongest possible\n" +
             "            form of discriminating.",
         );
@@ -608,7 +636,7 @@ export function checkProofCommand(
         console.log(
           `base:       UNKNOWN — a merge-base worktree at ${baseRef} could not be created` +
             (base.baseWorktreeFailure ? ` (${base.baseWorktreeFailure.split("\n")[0]})` : "") +
-            `, and a \`unit test:\` proof (kind=${w!.kind}) cannot be re-run against materialised\n` +
+            `, and a \`unit test:\` proof (kind=${baseW.kind}) cannot be re-run against materialised\n` +
             "            blobs — the reviewer grades exactly this base_unknown (R-11): no downgrade, and NO\n" +
             "            claim that the proof discriminates; the verdict above stands unchanged.",
         );
@@ -622,9 +650,9 @@ export function checkProofCommand(
     // file still names a path absent at the merge base, so it discriminates by construction. The
     // reviewer owns this distinction in `classifyBaseProofOutcome`; without this matching arm the
     // public diagnostic executes grep against the copied head file and falsely reports stale.
-    if (w!.kind === "grep" && grepTargetPath !== undefined && base.addedTestFiles.has(grepTargetPath)) {
+    if (baseW.kind === "grep" && baseGrepTargetPath !== undefined && base.addedTestFiles.has(baseGrepTargetPath)) {
       console.log(
-        `base:       ABSENT at ${baseRef} — ${grepTargetPath} was copied only to re-run added unit tests; ` +
+        `base:       ABSENT at ${baseRef} — ${baseGrepTargetPath} was copied only to re-run added unit tests; ` +
           "a grep proof still names a path the merge base did not contain.",
       );
       console.log("discrimination: discriminates — this proof's target did not exist at the merge base.");
@@ -653,11 +681,11 @@ export function checkProofCommand(
     };
     let baseOutcome: "pass" | "fail" | "no-match";
     try {
-      baseOutcome = execWhitelistedProof(w!, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
+      baseOutcome = execWhitelistedProof(baseW, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
     } catch (e) {
       const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
       const missingExport =
-        w!.kind === "test" && typeof loadOutput === "string"
+        baseW.kind === "test" && typeof loadOutput === "string"
           ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
           : undefined;
       if (missingExport !== undefined) {
@@ -672,7 +700,7 @@ export function checkProofCommand(
       console.log("discrimination: unknown — reported verdict above stands unchanged");
       return headExit;
     }
-    if (baseDiag && w!.kind === "grep") {
+    if (baseDiag && baseW.kind === "grep") {
       const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
       console.log(`base hits:  ${baseHits}`);
     }

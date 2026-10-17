@@ -1,0 +1,77 @@
+- id: W1-T9958
+  title: "Land the coverage reporter and stacked-PR session lessons in CI learnings"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 2.00
+  files:
+    - learnings/ci.yaml
+  origin: "feedback#fb-1789601878740-3711ab"
+  plan_refs: ["W1-T3709", "W1-T3712"]
+  status: queued
+  attempts: 0
+  note: |
+    Land the CI lessons after W1-T3709 restored headroom and W1-T3712's ruling required
+    landing rather than harvesting. Each entry must declare files matching the code it
+    constrains and src citing the feedback id. Record that coverage-ratchet is a REPORTER:
+    all four shards green plus a red ratchet means superseded; rerun failed jobs rather than
+    pushing a fresh SHA, and read diff-coverage: BLOCKED. Extract inline dispatch logic so
+    its function owns the precondition and its caller is unconditional. Also record that
+    merging a stack tip merges its base: close a base with an empty diff and a proof that
+    passes at both head and base rather than repairing its proofs. Doctrine edits are out of scope.
+  acceptance:
+    - claim: "the coverage reporter lesson is landed"
+      proof: "grep: coverage-ratchet is a REPORTER in learnings/ci.yaml"
+    - claim: "the stacked-PR lesson is landed"
+      proof: "grep: stack tip merges its base in learnings/ci.yaml"
+- id: W1-T9959
+  title: "Land the fixture git identity session lesson in testing learnings"
+  repo: remudero
+  depends_on: [W1-T9958]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 2.00
+  files:
+    - learnings/testing.yaml
+  origin: "feedback#fb-1789601878740-3711ab"
+  plan_refs: ["W1-T3709", "W1-T3712"]
+  status: queued
+  attempts: 0
+  note: |
+    Add an entry with files matching the code it constrains and src citing the feedback id.
+    gitRepo() supplies identity only for its own calls. Code under test that shells git commit
+    needs user.email and user.name configured in the fixture repo; Linux CI has no identity.
+  acceptance:
+    - claim: "the fixture identity lesson is landed"
+      proof: "grep: fixture git identity must be configured in learnings/testing.yaml"
+- id: W1-T9960
+  title: "Land the source-map coverage and explicit staging session lessons in testing learnings"
+  repo: remudero
+  depends_on: [W1-T9959]
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 2.00
+  files:
+    - learnings/testing.yaml
+  origin: "feedback#fb-1789601878740-3711ab"
+  plan_refs: ["W1-T3709", "W1-T3712"]
+  status: queued
+  attempts: 0
+  note: |
+    Add entries with files matching the code each constrains and src citing the feedback id.
+    Measure coverage with --enable-source-maps or tsx line numbers can misreport covered lines.
+    Stage by explicit path rather than git add -A. After interrupted runs, sweep only owned
+    disposable test/.tmp-w1-* and test/fixtures/**/zzz-*probe* artifacts; preserve shared or
+    unpublished work. This task follows the fixture lesson to serialize edits to testing.yaml.
+  acceptance:
+    - claim: "the source-map coverage lesson is landed"
+      proof: "grep: measure coverage with --enable-source-maps in learnings/testing.yaml"
+    - claim: "the explicit staging lesson is landed"
+      proof: "grep: stage by explicit path in learnings/testing.yaml"

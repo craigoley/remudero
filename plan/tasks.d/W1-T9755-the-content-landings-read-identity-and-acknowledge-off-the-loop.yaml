@@ -14,7 +14,7 @@
     - src/lib/feedback-landing.ts
     - test/the-content-landings-read-identity-and-acknowledge-off-the-loop.test.ts
     - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

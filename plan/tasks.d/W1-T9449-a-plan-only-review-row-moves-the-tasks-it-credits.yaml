@@ -1,7 +1,7 @@
 - id: W1-T9449
   title: "A PLAN-ONLY REVIEW ROW MOVES NO TASK ON THE BOARD PROJECTION — boardDirtForRow treats daemon.boot and a plan_only pr.opened as cross-task, but not a plan_only review.posted or its rotation marker review.plan_only_reviewed, though isPlanOnlyFilingPr and hasPlanOnlyReviewForPr read both whole-ledger for another task's credit; the marker carries review_task_id, not task_id, so it dirties nothing at all and only the 10-minute oracle heals the task"
   repo: remudero
-  depends_on: []  # W1-T9436 (filing PR #11664, not on main at filing time) rewrites how the derive reads these rows but keeps the dirty-set; land in either order, rebasing on whichever merges first
+  depends_on: [W1-T9719]  # amended 2026-10-17: build on W1-T9719's recorded cross-task reads (PR #12493, merged as 2f93023e5)
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -9,7 +9,7 @@
   risk: medium  # Rule 19: one concern — the board projection's dirty-set rule for plan-only review rows; one src file and one new test
   band_meaning: span
   origin: "operator session 2026-10-14: found by the W1-T9436 filing agent while reading the board projection's cross-task lookups"
-  plan_refs: [W1-T6253, W1-T6369, W1-T5552, W1-T3996]
+  plan_refs: [W1-T6253, W1-T6369, W1-T5552, W1-T3996, W1-T9719, W1-T9436]
   files:
     - src/lib/board-projection.ts
     - test/a-plan-only-review-row-moves-the-tasks-it-credits.test.ts
@@ -40,17 +40,41 @@
     derive will read from the store; its design changes what a re-derived task reads, not which tasks are
     re-derived, and its acceptance has no dirty-set criterion. No head modifies src/lib/board-projection.ts.
     Positive control: the same sweep finds `^- id: W1-T9436$` on that head only.
+    AMENDED 2026-10-17 (batch1017 filer, coordinator brief item 4). READ at origin/main 2f93023e5, where W1-T9719
+    (PR #12493) has merged. Symbols, not lines.
+    - W1-T9719 replaced "a cross-task row moves every task" with recorded reads: recordingCrossReads wraps the
+      derive's ledger index and records each ask of a BOARD_CROSS_TASK_STEPS step (`step:<name>`) and of
+      planOnlyFilingPrUrls (`filing:<url>`, or `filing:*` for a whole-set read). Each task's keys persist in
+      task_cross_read, and crossDigestOf folds their current answers into the task's stamp.
+    - Its planOnlyReviewedHeads getter returns index.planOnlyReviewedHeads UNRECORDED, and noteCrossRow counts only
+      daemon.boot and plan_only pr.opened rows. So the defect above still stands at main, and a plan_only
+      review.posted or review.plan_only_reviewed row still re-derives no task but the one its task_id names.
+    - With W1-T9719 merged, the all-task rule of this shard's first design would re-derive every task on each
+      plan-only review, the cost W1-T9719 just removed for filings. The narrower rule this shard already allowed
+      (design step 2 before the amendment) is now one more recorded read.
+    Not claimed and not shipped at amendment: no refs/rmd-dispatch/W1-T9449 and no run-W1-T9449-* head
+    (logs-8864/batch1017-W1-T9449-ls-remote.txt, 2026-10-17 04:46Z), no `Remudero-Task: W1-T9449` trailer on
+    origin/main, and no remote head's plan diff touches this shard (436 heads, 2 objects unreadable:
+    heartbeat-azure and run-W1-T9284-1792167647465).
   design: |
-    1. In boardDirtForRow, beside the plan_only pr.opened case, treat a plan_only review.posted row and every
-       review.plan_only_reviewed marker as cross-task (`{ all: true, reason }`), under the same `rules.crossTask`
-       switch. Name the readers in the header comment's cross-task line (isPlanOnlyFilingPr,
-       hasPlanOnlyReviewForPr).
-    2. If measuring the fixture shows the all-task re-derive is the cost, a narrower rule is acceptable instead:
-       move the tasks whose held projection credits that row's pr_url. Whichever rule is chosen, the oracle must
-       read zero mismatches for it in the test below.
+    AMENDED 2026-10-17: build on W1-T9719's recorded cross-task reads instead of making these rows dirty every task.
+    1. Record the read. recordingCrossReads wraps planOnlyReviewedHeads as it wraps planOnlyFilingPrUrls: `get(url)`
+       and `has(url)` record `reviewed:<url>`, and any other access (iteration, size) records `reviewed:*`. This is
+       the read isPlanOnlyFilingPr (with a head sha) and hasPlanOnlyReviewForPr make for a credited task.
+    2. Count the row. A plan_only review.posted row, and every review.plan_only_reviewed marker (it carries
+       review_task_id, not task_id), is noted like a plan_only pr.opened row: a per-url reviewed-heads answer (the
+       url's head count, or its newest seq) plus a whole-map count and seq for `reviewed:*`. crossAnswer answers the
+       `reviewed:` keys from them. A review.posted row still also dirties the task its task_id names, as today.
+    3. A task with no record keeps W1-T9719's rule: any cross-task row moves it. boardDirtForRow's `{ all: true }`
+       for these rows is only the "unrecorded" fallback, under the same rules.crossTask switch. Name the readers
+       (isPlanOnlyFilingPr, hasPlanOnlyReviewForPr) in the header comment's cross-task line.
+    4. Bump BOARD_PROJECTION_VERSION, since the stamp's cross part gains keys, and report these rows in
+       `cross_task` on read_model.board_oracle as W1-T9719 reports filings.
     Tests go in the new file, `test(` titles verbatim as in the proofs below. Build the projection over a fixture
-    plan with a task credited by a plan-only filing PR, append the review row (and separately the marker), update
-    WITHOUT an oracle pass, and compare the reused projection with a no-reuse derive.
+    plan with a task credited by a plan-only filing PR and an unrelated task. Append the review row (and separately
+    the marker), update WITHOUT an oracle pass, and compare the reused projection with a no-reuse derive. The
+    credited task must re-derive and the unrelated task must be reused (count derives through the update's
+    cross_task).
   acceptance:
     - claim: "the new test file passes"
       proof: "unit test: test/a-plan-only-review-row-moves-the-tasks-it-credits.test.ts"
@@ -59,6 +83,8 @@
     - claim: "appending a review.plan_only_reviewed marker with no task_id re-derives that task too"
       proof: 'grep: test("W1-T9449: a plan-only review marker with no task id re-derives the task its PR credits" in test/a-plan-only-review-row-moves-the-tasks-it-credits.test.ts'
   falsifier: |
-    Against main, append the marker row: boardDirtForRow returns `{ all: false, tasks: [] }`, the credited task keeps
-    its reused projection, and it differs from the no-reuse derive, so the marker test fails. Drop only the
-    review.posted half of the rule and the first test fails the same way.
+    Against origin/main 2f93023e5, append the marker row. boardDirtForRow names no task, noteCrossRow is never
+    reached, and the credited task's recorded keys hold no `reviewed:` entry, so its stamp is unchanged and it keeps
+    its reused projection. That differs from the no-reuse derive, so the marker test fails. A plan_only
+    review.posted row naming a different task fails the first test the same way. Recording the read but not
+    counting the row (or the reverse) still fails both.

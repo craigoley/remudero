@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14: #11645 (W1-T7898) sat closed with no further action"
   plan_refs: [W1-T5536, W1-T1207, W1-T534, W1-T8676, W1-T7898]
   files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-requeued-task-is-not-held-by-its-own-spent-checkpoint-branch.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

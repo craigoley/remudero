@@ -37,7 +37,8 @@ exit 0
 }
 function roots(fx: Fixture) {
   return [join(fx.home, "Remudero"), join(fx.home, "Remudero/lanes-wt"),
-    join(fx.home, "Remudero/remudero"), join(fx.home, "rmd-work"), fx.scratch];
+    join(fx.home, "Remudero/remudero"), join(fx.home, "rmd-work"),
+    join(fx.home, "Developer/remudero-operator-worktrees"), fx.scratch];
 }
 function setup() {
   const fx = fixture();
@@ -53,7 +54,7 @@ function data(root: string, name: string, hours = 7) {
 }
 function sweep(fx: Fixture, apply = true, extra: Record<string, string> = {}) {
   return spawnSync("bash", [SCRIPT, apply ? "--apply" : "--dry-run"], { encoding: "utf8", timeout: 60_000, env: {
-    ...process.env, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`, TMPDIR: fx.scratch,
+    ...process.env, HOME: fx.home, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`, TMPDIR: fx.scratch,
     REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.scratch,
     REMUDERO_JANITOR_LOG: join(fx.root, "janitor.log"), REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "janitor.lock"),
     REMUDERO_JANITOR_DIRECTORY_ROOTS: roots(fx).join(":"), ...extra,
@@ -77,18 +78,47 @@ test("six-hour directory purge reaches every account root and preserves each sca
 test("the default account policy includes Remudero, lanes-wt, the canonical checkout and rmd-work", () => {
   const fx = setup();
   try {
-    const old = roots(fx).slice(0, 4).map(root => data(root, "default-scope-data"));
+    const old = roots(fx).slice(0, -1).map(root => data(root, "default-scope-data"));
     const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: "" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    for (const path of old) assert.equal(existsSync(path), false, r.stdout);
+    for (const path of old) {
+      const macOnly = path.startsWith(join(fx.home, "Developer/remudero-operator-worktrees") + "/");
+      assert.equal(existsSync(path), macOnly && process.platform !== "darwin", path + r.stdout);
+    }
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("each Mac account's default operator-worktrees root retains young, active and evidence-bearing children", () => {
+  // This source-policy control is discriminating on Linux too: do not broaden
+  // production's Mac-only default merely to satisfy a cross-platform fixture.
+  assert.match(readFileSync(SCRIPT, "utf8"), /if \[ "\$OS_NAME" = "Darwin" \]; then\n(?:[^\n]*\n){0,4}  DIRECTORY_SCAN_ROOTS\+=\("\$USER_HOME\/Developer\/remudero-operator-worktrees"\)/);
+  for (const account of ["craigoley", "craigoleyagent"]) {
+    const fx = setup();
+    try {
+      fx.home = join(fx.root, account);
+      const root = join(fx.home, "Developer/remudero-operator-worktrees");
+      mkdirSync(root, { recursive: true });
+      const old = data(root, "old-idle-data");
+      const young = data(root, "five-hour-data", 5);
+      const held = data(root, "active-data");
+      const evidence = data(root, "uncommitted-evidence");
+      writeFileSync(join(evidence, "repair.patch"), "keep original work\n"); age(evidence, 8);
+      writeFileSync(fx.lsofList, held + "\n");
+      const r = sweep(fx, true, { REMUDERO_JANITOR_DIRECTORY_ROOTS: "" });
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      assert.equal(existsSync(old), process.platform !== "darwin", account + r.stdout);
+      for (const path of [root, young, held, evidence]) assert.equal(existsSync(path), true, account + path + r.stdout);
+      if (process.platform === "darwin") assert.match(r.stdout, new RegExp(`scratch-directory-scan: ${root}`));
+      else assert.ok(!r.stdout.includes(`scratch-directory-scan: ${root}`), "Linux must retain the Mac-only namespace");
+    } finally { rmSync(fx.root, { recursive: true, force: true }); }
+  }
 });
 
 test("unversioned source, reports, history, credentials and dependency seeds survive regardless of age", () => {
   const fx = setup();
   try {
     const base = roots(fx)[3]!;
-    const names = ["fix.py", "report.md", "summary.txt", "report.json", ".rmd-janitor-keep", "package.json", "ledger.ndjson", "backup.bundle", "source.tar", "source.zip", "credentials.pem", ".rmd-dependency-seed-root.json"];
+    const names = ["fix.py", "report.md", "summary.txt", "report.json", ".rmd-janitor-keep", "package.json", "ledger.ndjson", "backup.bundle", "source.tar", "source.zip", "credentials.pem", ".rmd-dependency-seed-root.json", "repair.patch", "repair.diff", "failed.rej", "backup.orig"];
     const held = names.map((file, i) => { const p = data(base, `held-${i}`); writeFileSync(join(p, file), "retain\n"); age(p, 8); return p; });
     const idle = data(base, "idle-sibling"); const r = sweep(fx);
     assert.equal(r.status, 0, r.stderr + r.stdout);
@@ -157,6 +187,27 @@ test("a mounted descendant or unreadable mount inventory keeps the directory", (
       const r = sweep(fx); assert.equal(r.status, 0, r.stderr + r.stdout);
       assert.equal(existsSync(path), true, r.stdout);
       assert.match(r.stdout, fail ? /mount visibility unavailable/ : /directory contains a mount/);
+    } finally { rmSync(fx.root, { recursive: true, force: true }); }
+  }
+});
+
+test("an exited ancestor CWD probe does not hold idle siblings but a live or unreadable PID does", () => {
+  for (const kind of ["gone", "live", "warning", "unreadable", "wrong-pid", "empty-command"] as const) {
+    const fx = setup();
+    try {
+      const path = data(roots(fx)[3]!, "ancestor-pid-case");
+      writeFileSync(fx.lsofList, fx.home + "\n");
+      const result = kind === "gone" ? "exit 1"
+        : kind === "warning" ? 'echo "permission denied" >&2; exit 1'
+        : kind === "unreadable" ? "exit 2"
+        : kind === "wrong-pid" ? "printf '99 /bin/sh\\n'"
+        : kind === "empty-command" ? "printf '1 \\n'"
+        : "printf '1 node rmd-work/ancestor-pid-case/job.mjs\\n'";
+      writeFileSync(join(fx.root, "bin/ps"),
+        `#!/bin/bash\nif [ "$1" = -ww ]; then ${result}; else printf '2 /bin/sh\\n'; fi\n`, { mode: 0o755 });
+      const r = sweep(fx); assert.equal(r.status, 0, r.stderr + r.stdout);
+      assert.equal(existsSync(path), kind !== "gone", `${kind}: ${r.stdout}`);
+      if (kind !== "gone") assert.match(r.stdout, /working directory active or unknown/);
     } finally { rmSync(fx.root, { recursive: true, force: true }); }
   }
 });

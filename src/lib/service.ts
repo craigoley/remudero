@@ -80,6 +80,8 @@ export interface Route {
   path: string;
   scope: Scope;
   handler: RouteHandler;
+  /** A maintained producer can qualify a cached read before any buffer/304 answers. No compute. */
+  cacheQualification?: (req: IncomingMessage) => { key: string } | { status: number; body: unknown } | undefined;
   /** Also accepts the bearer credential via `?token=`. Set ONLY on the static HTML document
    *  (`GET /`) — a browser navigation can't send an `Authorization` header (W1-T139 bootstrap
    *  paradox). NEVER on an API/data route: a token in the URL leaks via `Referer` and logs. */

@@ -1,0 +1,96 @@
+- id: W1-T9929
+  title: "DEP-REVIEW HOLDS A DEPENDABOT PR ON A RED ADVISORY CHECK — `redChecks` counts every red check except remudero-review, so the non-required Semgrep `Scan`, red on main and every PR while mcp stays 1.30.0, holds every Dependabot PR; hold only on checks branch protection or ci-gate requires, and name the advisory red"
+  repo: remudero
+  depends_on: [W1-T9828, W1-T9913]  # both in flight (#12398, #12413) and both edit depReviewCommand and dep-review.ts's result path; W1-T9828 reads result.redChecks for commitlint
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which red checks a dep-review hold counts; no gate, scanner, check list or security config changes
+  band_meaning: span
+  origin: "operator ruling 2026-10-16: \"dep-review holds only on required checks\" — a red advisory check no longer holds the lane; it stays visible and is named; not a waiver, every security gate untouched"
+  plan_refs: [W1-T54, W1-T103, W1-T1131, W1-T2399, W1-T3244, W1-T4056, W1-T9828, W1-T9913, W1-T9818]
+  files:
+    - src/lib/dep-review.ts
+    - src/run-task.ts
+    - test/dep-review-holds-only-on-required-checks.test.ts
+    - test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts
+  status: merged
+  priority: 1  # every Dependabot PR holds on the advisory Scan red today, #11968 included, and nothing retires that red until Semgrep accepts mcp>=1.30.0
+  attempts: 0
+  rationale: |
+    THE RULING (Craig, 2026-10-16): dep-review holds a Dependabot PR only on checks that branch protection or the
+    ci-gate requires, plus remudero-review. A red advisory check no longer holds the lane; it stays visible on the PR,
+    and the dep-review ledger row and comment name it (for example `advisory_red: ["Scan"]`). THIS IS NOT A WAIVER:
+    the Scan/Semgrep check, its config and every security gate stay untouched. No ignore, exclusion or dismissal.
+    READ at origin/main c75418448 (2026-10-16):
+    - src/lib/dep-review.ts `redChecks(checks)` keeps every check whose `conclusion ?? state` is in RED_CONCLUSIONS
+      and drops only `LANE_OWNED_STATUS_CONTEXT` (W1-T3244). It never consults a required list, so an advisory red
+      counts. `decideDepReview` returns `hold` with "required check(s) not green: ..." on any of them, which misnames
+      an advisory check as required.
+    - src/run-task.ts `depReviewCommand`, after the verdict: `checksStateFromRollup(selectedChecks, undefined)` turns
+      an `arm` into `hold` unless the selected checks read green. Passing `undefined` judges every context
+      (sweep.ts's documented fail-closed fallback), so an advisory red holds here too. Both sites must change.
+    - `Scan` is listed under ADVISORY in .github/workflows/ci-gate.yml, not REQUIRED. ci-gate fails only on a REQUIRED
+      red (W1-T1131), and branch protection requires `[ci-gate, remudero-review]` (dep-review.ts's module header). So a
+      Dependabot PR whose only red is Scan is mergeable by GitHub's rules, yet the lane never arms it.
+    - Scan is red on main and on every PR: Semgrep pins mcp==1.29.0, and main keeps mcp 1.30.0 (#12342 reverted the
+      GHSA-84m7-p3x7-pcfv ignore). It stays red until a Semgrep release accepts mcp>=1.30.0 or a replacement lands.
+    - So #11968 (the google/osv-scanner-action bump, head 676bed09) holds even after W1-T9828 (#12398, retitle) and
+      W1-T9913 (#12413, stale-event recreate) land.
+    - THE REQUIRED SET ALREADY HAS TWO READERS, so no hand list: `readCiGateRequiredChecks(root)` in
+      src/lib/ci-gate-required.ts (ci-gate.yml's REQUIRED; [] on any unreadable shape), used by main-health-rung
+      (`judged_against: "ci-gate-required" | "all-checks"`, W1-T4056) and sweep; and
+      `readRequiredStatusCheckContextsAsync` in src/lib/status.ts (branch protection, classified
+      contexts/none/unreadable, W1-T2399).
+    - SWEEP: plan/tasks.d on origin/main for dep-review shards naming advisory, required lists, Scan or Semgrep
+      (W1-T2274, W1-T2275, W1-T3244, W1-T9586, W1-T9797, W1-T9817, W1-T9818, W1-T9828, W1-T9913): none narrows the
+      hold to required checks. W1-T9913's stale-event verdict already reads only required checks. W1-T9818 changes when a
+      hold escalates, not what holds. Open heads swept (445 at 19:36Z): run-W1-T9828-1792173388994 and
+      run-W1-T9913-1792175458257 edit the same files but leave `redChecks` and the arm guard's required set alone; no
+      plan-file head covers this.
+  design: |
+    Deterministic, no LLM, no new bound. The required set is read, never written down.
+    1. PURE, in src/lib/dep-review.ts. `DepReviewInput` gains an optional `required` of shape
+       `{ kind: "required"; names: readonly string[] } | { kind: "all-checks"; fallback: string }`. `redChecks(checks,
+       required?)` keeps W1-T3244's exclusion of remudero-review. Under `kind: "required"` it splits the reds:
+       a name in the set is a required red and holds; any other red goes to `advisoryRed`. Under `all-checks`, or with
+       no `required`, every red holds exactly as today. `DepReviewResult` gains `advisoryRed: string[]`,
+       `judgedAgainst: "required" | "all-checks"` and, on fallback, `requiredFallback`. The hold reason names only
+       required reds. An arm with advisory reds says so in its reason.
+    2. THE SET, in `depReviewCommand` (src/run-task.ts), read once per run through an injectable deps seam:
+       the union of branch protection's contexts (`readRequiredStatusCheckContextsAsync` on the base branch) and
+       `readCiGateRequiredChecks(deps.root ?? repoRoot)`. Fall back to `all-checks` and keep today's hold-on-all when
+       protection reads `unreadable` or `none`, or when protection requires `ci-gate` and ci-gate's REQUIRED reads
+       empty. Name the cause in `fallback`, e.g. `protection-unreadable:<reason>` or `ci-gate-required-empty`.
+    3. THE ARM GUARD: `checksStateFromRollup(selectedChecks, ...)` gets the same names under `required` and keeps
+       `undefined` under `all-checks`, so a pending or red advisory check never blocks the arm and a pending
+       required one still does.
+    4. VISIBLE, NEVER HIDDEN. The `dep-review.decided` row carries `advisory_red` (sorted, always present, [] when
+       none), `judged_against`, and `required_fallback` on fallback. On arm, the remudero-review description appends
+       `advisory red: <names>` inside GitHub's description limit. The hold escalation (`buildDepReviewEscalation`'s
+       `hold` detail) lists advisory reds on their own line, apart from its "Blocker:" line. The check itself stays red on the PR.
+    5. UNCHANGED: ci-gate.yml's REQUIRED/ADVISORY/IGNORE lists, the Scan/Semgrep workflow and its config, every
+       OSV/CodeQL/licence gate, branch protection, W1-T3244's exclusion, and the refuse/escalate/migrate verdicts. Own-red,
+       refresh and hold escalation read `result.redChecks`, so they now see required reds only. That is intended: an
+       advisory red is not this PR's blocker. W1-T9828's `result.redChecks.includes("commitlint")` still works,
+       because commitlint is REQUIRED.
+    6. Tests. Pure tests go in the new file, which must not import src/run-task.ts (the affected-suite reach ratchet).
+       Command-level tests go in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts. The `test(` titles must
+       match the proofs below verbatim.
+  acceptance:
+    - claim: "a Dependabot minor bump whose only red is an advisory check arms and names the check in advisoryRed"
+      proof: 'grep: test("W1-T9929: an advisory-only red arms and is named in advisoryRed" in test/dep-review-holds-only-on-required-checks.test.ts'
+    - claim: "a red required check still holds when an advisory check is also red, and the hold reason names only the required one"
+      proof: 'grep: test("W1-T9929: a required red still holds and the reason names only required checks" in test/dep-review-holds-only-on-required-checks.test.ts'
+    - claim: "an unreadable required set keeps today's hold-on-all and names the fallback"
+      proof: 'grep: test("W1-T9929: an unreadable required set holds on every red and names the fallback" in test/dep-review-holds-only-on-required-checks.test.ts'
+    - claim: "the dep-review command arms past an advisory red, ledgers advisory_red and judged_against, and the remudero-review description names it"
+      proof: 'grep: test("W1-T9929: the dep-review command arms past an advisory red and ledgers advisory_red" in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts'
+  falsifier: |
+    At origin/main, on a Dependabot minor-bump fixture whose checks are ci-gate SUCCESS, commitlint SUCCESS and Scan
+    FAILURE, with ci-gate.yml's REQUIRED readable and protection requiring ci-gate and remudero-review: `decideDepReview`
+    returns `hold` with "required check(s) not green: Scan", and `depReviewCommand` posts no review and arms nothing.
+    At head the same fixture arms, ledgers `advisory_red: ["Scan"]` and `judged_against: "required"`. Adding a
+    commitlint FAILURE holds in both. An unreadable protection read holds on Scan at head too, with `required_fallback`
+    ledgered.

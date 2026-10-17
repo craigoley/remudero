@@ -9,10 +9,15 @@ import { classifyAllProposalsMemo, buildPanelGraphRoutes, type PanelGraphDeps } 
 import { inboxThreadId, type ThreadMessage } from "../src/lib/inbox-thread.js";
 import { listThreadViews, type InboxThreadItem } from "../src/lib/inbox-responder.js";
 import { createService } from "../src/lib/service.js";
+import { updateProposalRegistry } from "../src/lib/inbox.js";
+import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 
-const HUMAN = "verify-human:W1-T216";
+const TASK = "W1-T1216";
+const HUMAN = `verify-human:${TASK}`;
 const OTHER = "verify-human:W1-T217";
+const HELD = "verify-human:W1-T216";
+const GENERIC = "verify-human:W1-T1218";
 const RULING = "ruling:operator-choice";
 const UNKNOWN = "new-producer:incomplete";
 
@@ -21,7 +26,7 @@ function fixture(heldTaskId?: string, autoTaskId?: string, missingTaskId?: strin
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
-  writeFileSync(planPath, ["W1-T216", "W1-T217"].filter((id) => id !== missingTaskId).map((id) => `
+  writeFileSync(planPath, [TASK, "W1-T217", "W1-T216", "W1-T1218"].filter((id) => id !== missingTaskId).map((id) => `
 - id: ${id}
   title: "a controlled task"
   repo: remudero
@@ -37,9 +42,11 @@ function fixture(heldTaskId?: string, autoTaskId?: string, missingTaskId?: strin
     - claim: "a controlled check"
       proof: "unit test: controlled check"
 `).join(""));
-  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({
-    proposals: [HUMAN, OTHER, RULING, UNKNOWN].map((id) => ({ id, summary: `Current question about ${id}`, evidenceAnchors: [] })),
-  }));
+  updateProposalRegistry(join(root, "state", "inbox-proposals.json"), () => [
+    ...[TASK, "W1-T217", "W1-T216"].map(id => proposalFromJudgedShard({ id, title: "a controlled task", rationale: "operator review",
+      acceptance: ["a controlled check"], ageDays: 1, depsAllMerged: true, citedInSrc: false }, { decision: "needs_operator", reason: "The operator owns this release" })),
+    ...[GENERIC, RULING, UNKNOWN].map(id => ({ id, summary: `Current question about ${id}`, evidenceAnchors: [] })),
+  ]);
   const ledgerPath = join(root, "state", "ledger.ndjson");
   writeFileSync(ledgerPath, "");
   return {
@@ -78,22 +85,27 @@ async function threads(deps: PanelGraphDeps): Promise<Array<{ proposalId: string
 
 test("W1-T4738: a release receipt retires only its exact verify-human ask without erasing history", async () => {
   const world = fixture();
-  release(world.ledgerPath, "W1-T216");
+  release(world.ledgerPath, TASK);
+  release(world.ledgerPath, "W1-T1218");
   const classified = classifyAllProposalsMemo(world.deps);
   assert.equal(classified.classifications.find((row) => row.proposalId === HUMAN)?.state, "retired");
   assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "not_ready");
+  assert.equal(classified.classifications.find((row) => row.proposalId === GENERIC)?.state, "not_ready", "an ID without producer purpose cannot borrow the exact release");
+  assert.equal(classified.classifications.find((row) => row.proposalId === HELD)?.state, "not_ready");
   assert.ok(classified.proposals.some((row) => row.id === HUMAN), "history stays in the registry");
   const visible = await threads(world.deps);
   assert.ok(!visible.some((row) => row.proposalId === HUMAN));
   assert.ok(visible.some((row) => row.proposalId === OTHER));
   assert.ok(visible.some((row) => row.proposalId === RULING));
+  assert.ok(visible.some((row) => row.proposalId === GENERIC));
+  assert.ok(visible.some((row) => row.proposalId === HELD));
 });
 
 test("W1-T4738: release receipt invalidates the inbox memo", () => {
   const world = fixture();
   const before = classifyAllProposalsMemo(world.deps);
   assert.equal(before.classifications.find((row) => row.proposalId === HUMAN)?.state, "not_ready");
-  release(world.ledgerPath, "W1-T216");
+  release(world.ledgerPath, TASK);
   const after = classifyAllProposalsMemo(world.deps);
   assert.notStrictEqual(after, before);
   assert.equal(after.classifications.find((row) => row.proposalId === HUMAN)?.state, "retired");
@@ -101,37 +113,38 @@ test("W1-T4738: release receipt invalidates the inbox memo", () => {
 });
 
 test("a machine release cannot retire an explicitly held security ask", async () => {
-  const world = fixture("W1-T216");
-  appendFileSync(world.ledgerPath, JSON.stringify({ step: "ratify.approved", task_id: "W1-T216",
+  const world = fixture(TASK);
+  appendFileSync(world.ledgerPath, JSON.stringify({ step: "ratify.approved", task_id: TASK,
     released: "verify-human", released_by: "verify-human-judge", author_class: "machine" }) + "\n");
   const classified = classifyAllProposalsMemo(world.deps);
   assert.equal(classified.classifications.find((row) => row.proposalId === HUMAN)?.state, "not_ready");
   const visible = await threads(world.deps);
   assert.ok(visible.some((row) => row.proposalId === HUMAN && row.attention === "decision"));
   assert.ok(visible.some((row) => row.proposalId === OTHER));
+  release(world.ledgerPath, "W1-T216");
+  assert.ok((await threads(world.deps)).some((row) => row.proposalId === HELD && row.attention === "decision"));
 });
 
-test("W1-T4884: verify-auto retires only its stale human ask without erasing the registry", async () => {
-  const world = fixture(undefined, "W1-T216");
+test("W1-T4884: verify-auto alone preserves an unanswered human ask without erasing the registry", async () => {
+  const world = fixture(undefined, TASK);
   const classified = classifyAllProposalsMemo(world.deps);
   const stale = classified.classifications.find((row) => row.proposalId === HUMAN);
-  assert.equal(stale?.state, "retired");
-  assert.match(stale?.retiredReason ?? "", /verify: auto/);
+  assert.equal(stale?.state, "not_ready");
   assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "not_ready");
-  assert.ok(classified.proposals.some((row) => row.id === HUMAN), "retirement keeps the registry record");
+  assert.ok(classified.proposals.some((row) => row.id === HUMAN), "the unanswered ask stays in the registry");
   const visible = await threads(world.deps);
-  assert.ok(!visible.some((row) => row.proposalId === HUMAN));
+  assert.ok(visible.some((row) => row.proposalId === HUMAN && row.attention === "decision"));
   assert.ok(visible.some((row) => row.proposalId === OTHER));
   writeFileSync(world.planPath, readFileSync(world.planPath, "utf8").replace("verify: auto", "verify: human"));
   assert.equal(classifyAllProposalsMemo(world.deps).classifications.find((row) => row.proposalId === HUMAN)?.state, "not_ready");
-  assert.ok((await threads(world.deps)).some((row) => row.proposalId === HUMAN), "plan reversal restores the ask");
+  assert.ok((await threads(world.deps)).some((row) => row.proposalId === HUMAN), "verification-mode edits never answer the ask");
 });
 
 test("W1-T4884: a held or unverified task keeps its human ask", async () => {
   const cases = [
-    fixture("W1-T216", "W1-T216"),
+    fixture(TASK, TASK),
     fixture(),
-    fixture(undefined, undefined, "W1-T216"),
+    fixture(undefined, undefined, TASK),
   ];
   for (const world of cases) {
     const classified = classifyAllProposalsMemo(world.deps);
@@ -142,7 +155,7 @@ test("W1-T4884: a held or unverified task keeps its human ask", async () => {
 
 test("W1-T4738: no release evidence keeps the ask visible", async () => {
   const world = fixture();
-  release(world.ledgerPath, "W1-T216", "some-other-purpose");
+  release(world.ledgerPath, TASK, "some-other-purpose");
   release(world.ledgerPath, "W1-T999");
   const visible = await threads(world.deps);
   assert.ok(visible.some((row) => row.proposalId === HUMAN));

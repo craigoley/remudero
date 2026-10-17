@@ -129,6 +129,8 @@ function world(t: TestCtx): World {
       get github() { return gateway; },
       githubGeneration: () => generation,
       readCreditStore: () => structuredClone(CREDIT), readCreditOverrideFile: () => "",
+      // Each oracle pass here is the full re-derive a step is checked against: every task, not one slice.
+      oracleSlices: 1,
       ...(rules ? { rules } : {}),
     }),
   };

@@ -1,0 +1,39 @@
+- id: W1-T9846
+  title: "registryThreadItems builds the existing one-pass ledgerProposalVerdicts index once instead of rescanning the ledger per operator proposal"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: low
+  origin: architect
+  plan_refs: ["W1-T4261"]
+  files: ["src/lib/inbox-responder.ts","test/inbox-responder-verdict-index.test.ts"]
+  priority: 4
+  status: merged
+  # backlog gardener: band=4 evidence=057b2fc629ed5098
+  attempts: 0
+  rationale: |
+    Origin: operator-approved bounded runtime repair, feedback#fb-1792164749761-342906 (plan/feedback/fb-1792164749761-342906.yaml, submission_key operator-registry-ledger-index-20261016T151530Z). Craig authorized: "have the fleet repair registryThreadItems using the existing one-pass verdict index. Keep the fleet as the only branch writer."
+    DEFECT (current main): src/lib/inbox-responder.ts registryThreadItems calls readLedgerLines(ledgerPath) once, then declinedReasonInLedger(lines, p.id) inside the per-proposal map, so every operator proposal walks the whole live ledger again (O(proposals x rows)). src/lib/inbox.ts already exports ledgerProposalVerdicts (W1-T4261), a one-pass index with the same latest-wins decline/restore rule, the same "declined by an operator" default for a non-string reason, and the same rule that a non-string task_id matches no proposal. panel-graph.ts already adopts it; this responder does not.
+    EVIDENCE (operator-captured, see feedback raw): one authorized live profile (run DAEMON-1792160213250) shows the inbox responder subtree at 3.771843s/1893 samples of a 10.004805s sensitivity view. These are sample weights, not exact on-CPU time; the profile did not cover the earlier 59.36s stall and whole-stall causality is NOT claimed.
+    Settled by lookup: is this already filed or already decided? -> No. No plan/** record names registryThreadItems, inbox-responder-verdict-index or fb-1792164749761-342906, and src/lib/inbox-responder.ts line ~527 still calls declinedReasonInLedger per proposal (grep of plan/ and src/ in this run).
+    Settled by lookup: does the index need changing? -> No. ledgerProposalVerdicts(ledgerLines).isDeclined(id) returns string | undefined with semantics equal to declinedReasonInLedger for string ids (src/lib/inbox.ts ledgerProposalVerdicts / declinedReasonInLedger).
+    Settled by lookup: do neighbouring tasks already cover this? -> No. W1-T9286 (operator corrects why an ask needs them), W1-T9288 (inbox page classification snapshot) and W1-T9284 (gardener retires terminal asks) declare src/lib/inbox-responder.ts for different concerns; their claims are preserved and scheduling is left to native overlap/admission. Nothing is folded into them.
+    Settled by lookup: who calls registryThreadItems? -> the daemon readItems adapter in src/run-task.ts (readItems: () => registryThreadItems(join(config.root, "state"), ledgerPath)) plus direct tests test/inbox-reply-refuses-orphans.test.ts, test/an-operator-action-and-its-outcome-appear-on-the-items-thread.test.ts, test/an-inbox-item-is-a-conversation.test.ts.
+    Settled by lookup: is the falsifier suite a separate concern? -> No. test/inbox-responder-verdict-index.test.ts exists solely to prove this task's behavior and complexity claims, so it is the same concern as the source change (own-falsifier rule); shard slug and test slug are both inbox-responder-verdict-index.
+  design: |
+    In src/lib/inbox-responder.ts import the EXISTING ledgerProposalVerdicts from ./inbox.js. In registryThreadItems, after the single readLedgerLines call, build `const verdicts = ledgerProposalVerdicts(lines)` once per invocation and set state from `verdicts.isDeclined(p.id) !== undefined`. Drop the now-unused declinedReasonInLedger import from this file only if nothing else in it uses it. src/lib/inbox.ts and the helper API do not change.
+    PRESERVE: registry and plain-store reads, operator-owner filtering, proposal order, plain output and item shape, missing-ledger behavior, latest decline/restore alternation, empty-string reasons (still declined), default/non-string reasons, ignored non-string task IDs, ratification/readiness semantics, and the live-ledger population as read today.
+    NOT IN SCOPE: rotation unions, row caps, thresholds or a new cache, a wider reader rewrite, async/off-thread changes, policy/gate/provider/deploy changes, edits to W1-T9284/W1-T9286/W1-T9288 scope, or any live CPU profile (a new one needs fresh explicit operator approval; none is authorized here).
+    TESTS (new own falsifier test/inbox-responder-verdict-index.test.ts): real temp-dir files (inbox-proposals.json, plain store, ledger JSONL) driving registryThreadItems across multiple proposals and rows, covering decline -> restore -> decline alternation, empty-string and missing/non-string reasons, a non-string task_id row ignored, non-operator proposals filtered, order and plain output, and an absent ledger file. Complexity control: for a FIXED ledger, count ledger-row field inspections deterministically with a test-local technique (e.g. a counting property getter on parsed rows or a counting parse wrapper that still reads the real file) and assert the count does not grow with proposal count. No elapsed-time threshold and no new production seam just to mirror the implementation. A private test-local control restoring the OLD per-proposal declinedReasonInLedger scan must make that complexity assertion RED; the indexed implementation is GREEN.
+    BUILDER CHECKS: verify physical test paths and TAP `# tests` summaries; audit the src/run-task.ts readItems adapter and the three direct tests above; run applicable census membership suites; run author preflight on the committed tree and confirm rmd check-acceptance passes on GitHub's stored PR body. Normal harness preflight, required CI and review remain mandatory. Post-merge loaded adoption and any separately authorized health observation are distinct from these local tests and do not prove whole-stall causality.
+  acceptance:
+    - claim: "The one-pass registryThreadItems replacement preserves real-file decline/restore, reason, owner, order, plain-output and missing-ledger behavior while ledger-row inspections stay independent of proposal count; restoring the old scan fails its complexity control"
+      proof: "unit test: test/inbox-responder-verdict-index.test.ts"
+    - claim: "registryThreadItems uses the existing one-pass verdict index instead of per-proposal scans"
+      proof: "grep: ledgerProposalVerdicts( in src/lib/inbox-responder.ts"
+  falsifier: |
+    Restore `declinedReasonInLedger(lines, p.id)` per proposal inside registryThreadItems (or a private test control doing so): the fixed-ledger row-inspection count must then scale with proposal count and the complexity assertion must fail. Any change to decline/restore, reason, owner filtering, order, plain output or missing-ledger handling must fail the real-file behavior cases.
+  note: "verify:auto — pure synchronous function over real temp files; deterministic counters, no timing. risk:low — one function in one file, reusing an already-adopted helper with identical semantics; no API, gate or deploy surface."

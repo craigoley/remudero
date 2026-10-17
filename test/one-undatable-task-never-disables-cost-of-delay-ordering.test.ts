@@ -37,7 +37,10 @@ test("W1-T7534: a letter-suffixed task id is dated and the cost-of-delay context
   assert.ok(result.context.stridePassByTaskId?.has("W1-T12e"));
   assert.ok(result.context.stridePassByTaskId?.has(plain.id));
   assert.equal(result.context.costOfDelayUnscored, undefined);
-  assert.deepEqual(costOfDelayReadyRow("tree-sha", result.context), { key: "ready", plan_tree_sha: "tree-sha" });
+  // W1-T9967: every ready row now reports the tier waits, so it is keyed per plan tree; it names no gap.
+  const { tier_waits: waits, ...row } = costOfDelayReadyRow("tree-sha", result.context);
+  assert.deepEqual(row, { key: "ready:tree-sha", plan_tree_sha: "tree-sha" });
+  assert.ok(waits && waits.length > 0);
 });
 
 test("W1-T7534: an undatable open task is imputed at age zero and the rest of the queue keeps its stride order", () => {
@@ -64,6 +67,8 @@ test("W1-T7534: an undatable open task is imputed at age zero and the rest of th
   assert.deepEqual(dispatchOrder(tasks, context).map(t => t.id), byPass.map(t => t.id));
 
   // The ready row names the gap, keyed once per plan tree.
-  assert.deepEqual(costOfDelayReadyRow("tree-sha", context), { key: "ready:tree-sha", plan_tree_sha: "tree-sha", imputed: [undatable.id] });
+  const { tier_waits: waits, ...row } = costOfDelayReadyRow("tree-sha", context);
+  assert.deepEqual(row, { key: "ready:tree-sha", plan_tree_sha: "tree-sha", imputed: [undatable.id] });
+  assert.ok(waits && waits.length > 0);
   assert.notEqual(costOfDelayReadyRow("next-tree", context).key, costOfDelayReadyRow("tree-sha", context).key);
 });
