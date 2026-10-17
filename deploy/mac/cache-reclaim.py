@@ -898,8 +898,18 @@ def resolved_reference(parent, raw, budget):
     # not: aliases must compare against the same single-root candidate paths.
     remaining = [(part, True) for part in parent.parts[1:]] if not absolute else []
     remaining += [(part, False) for part in (operand.parts[1:] if absolute else operand.parts)]
-    links, seals = 0, []
+    links, seals = 0, {}
     anchors = {}
+
+    def recheck_reference_edges(fd):
+        for name, expected in seals.get(fd, []):
+            budget.check()
+            try:
+                after = identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            except FileNotFoundError:
+                after = None
+            if after != expected:
+                raise Hold("reference-symlink-changed")
 
     def visit(resolved, remaining):
         nonlocal links
@@ -923,7 +933,7 @@ def resolved_reference(parent, raw, budget):
             except OSError as error:
                 if error.errno not in (errno.ENOENT, errno.ENOTDIR):
                     raise
-                seals.append((fd, part, None))
+                seals.setdefault(fd, []).append((part, None))
                 resolved = child
                 continue
             observed = identity(before)
@@ -937,7 +947,13 @@ def resolved_reference(parent, raw, budget):
                     with pinned_reference_directory(child, budget, fd, part, observed) as child_fd:
                         anchors[str(child)] = child_fd
                         try:
-                            return visit(child, remaining)
+                            result = visit(child, remaining)
+                            # Descendant teardown can overlap a retarget of an
+                            # earlier alias. Recheck edges while their own
+                            # parent descriptor is still pinned, after deeper
+                            # contexts have finished closing.
+                            recheck_reference_edges(child_fd)
+                            return result
                         finally:
                             del anchors[str(child)]
                 resolved = child
@@ -946,28 +962,24 @@ def resolved_reference(parent, raw, budget):
                 if links > 40:
                     raise Hold("reference-symlink-unresolvable")
                 referent = Path(os.readlink(part, dir_fd=fd))
-                seals.append((fd, part, observed))
+                seals.setdefault(fd, []).append((part, observed))
                 if referent.is_absolute():
                     resolved = Path("/")
                     remaining = [(p, False) for p in referent.parts[1:]] + remaining
                 else:
                     remaining = [(p, False) for p in referent.parts] + remaining
             else:
-                seals.append((fd, part, observed))
+                seals.setdefault(fd, []).append((part, observed))
                 resolved = child
-        for fd, name, expected in seals:
-            budget.check()
-            try:
-                after = identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
-            except FileNotFoundError:
-                after = None
-            if after != expected:
-                raise Hold("reference-symlink-changed")
+        for fd in seals:
+            recheck_reference_edges(fd)
         return resolved
     try:
         with pinned_reference_directory(Path("/"), budget) as root_fd:
             anchors["/"] = root_fd
-            return visit(Path("/"), remaining)
+            result = visit(Path("/"), remaining)
+            recheck_reference_edges(root_fd)
+            return result
     except RecursionError as error:
         raise Hold("reference-chain-too-deep") from error
 

@@ -246,3 +246,27 @@ finally:os.stat=original_stat
     } finally { f.clean(); }
   }
 });
+
+test("cache reference resolver rechecks intermediate symlinks after deeper descriptor teardown", () => {
+  const f = fixture();
+  try {
+    const r = f.run(String.raw`elsewhere=home/'retained-elsewhere';elsewhere.mkdir()
+alias=home/'tmp/late-alias';alias.symlink_to(elsewhere,target_is_directory=True)
+other_inode=elsewhere.stat().st_ino;original_close=os.close;changed=[False]
+def closing(fd):
+ swap=os.fstat(fd).st_ino==other_inode and not changed[0]
+ original_close(fd)
+ if swap:
+  changed[0]=True;alias.unlink();alias.symlink_to(target,target_is_directory=True)
+os.close=closing
+try:
+ try:g['resolved_reference'](root,str(alias),budget)
+ except ns['Hold'] as error:assert str(error)=='reference-symlink-changed',error
+ else:raise AssertionError('symlink retargeted during descriptor teardown was accepted')
+ assert changed[0]
+finally:os.close=original_close
+`);
+    assert.deepEqual(r.shared, [f.target], JSON.stringify(r));
+    assert.ok(existsSync(f.target));
+  } finally { f.clean(); }
+});
