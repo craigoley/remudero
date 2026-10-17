@@ -247,7 +247,7 @@ export function readWholeAuthorPhases(root, path, expected, now = Date.now()) {
     }
     if (step.name === 'affected-tests') {
       const text = stdout.toString('utf8') + '\n' + stderr.toString('utf8');
-      for (const key of ['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']) {
+      for (const key of ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo']) {
         const rows = [...text.matchAll(new RegExp('^# ' + key + ' ([0-9]+)$', 'gm'))];
         if (rows.length !== 1 || Number(rows[0][1]) !== step.testSummary[key]) {
           throw new Error('whole author phases: test summary does not match captured output');

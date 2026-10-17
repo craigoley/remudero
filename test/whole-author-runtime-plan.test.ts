@@ -78,7 +78,7 @@ function phaseEvidence(dir:string,sourceHead:string){
   const now=new Date().toISOString(),testSummary={tests:2,suites:1,pass:2,fail:0,cancelled:0,skipped:0,todo:0};
   mkdirSync(join(dir,'coverage','phase-control'),{recursive:true});
   const steps=['census-precheck','static-preflight','affected-tests'].map((name,index)=>{
-    const prefix='coverage/phase-control/'+name,stdout=name==='affected-tests'?'# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n':'closed '+name+'\n';
+    const prefix='coverage/phase-control/'+name,stdout=name==='affected-tests'?'# tests 2\n# suites 1\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n':'closed '+name+'\n';
     const native={status:0,signal:null,error:null,outputComplete:true,durationMs:10+index,startedAt:now,finishedAt:now,observedBytes:Buffer.byteLength(stdout),storedBytes:Buffer.byteLength(stdout)};
     writeFileSync(join(dir,prefix+'.stdout'),stdout);writeFileSync(join(dir,prefix+'.stderr'),'');writeFileSync(join(dir,prefix+'.native.json'),JSON.stringify(native));
     return{name,ok:true,exitCode:0,durationMs:native.durationMs,startedAt:now,finishedAt:now,
@@ -105,8 +105,11 @@ test('whole author phase reader rereads physical native captures and refuses par
     writeFileSync(nativePath,JSON.stringify({...native,...change}));assert.throws(()=>runtime.readWholeAuthorPhases(f.dir,e.path,bindings));
   }
   writeFileSync(nativePath,raw);
-  const stdout=join(f.dir,'coverage/phase-control/affected-tests.stdout');writeFileSync(stdout,readFileSync(stdout,'utf8').replace('# pass 2','# pass 1'));
-  assert.throws(()=>runtime.readWholeAuthorPhases(f.dir,e.path,bindings),/summary does not match/);
+  const stdout=join(f.dir,'coverage/phase-control/affected-tests.stdout'),captured=readFileSync(stdout,'utf8');
+  for(const [from,to]of [['# pass 2','# pass 1'],['# suites 1','# suites 0']]){
+    writeFileSync(stdout,captured.replace(from,to));
+    assert.throws(()=>runtime.readWholeAuthorPhases(f.dir,e.path,bindings),/summary does not match/);
+  }
 });
 
 test('whole author planning CLI uses validated native profile and complete phases without granting execution',async t=>{
