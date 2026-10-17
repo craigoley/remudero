@@ -170,3 +170,41 @@ test("W1-T5616: the extras join the rule-check population once each, sorted", ()
   assert.deepEqual(joined, ["test/a-census.test.ts", "test/b-census.test.ts", "test/c.test.ts"]);
   assert.deepEqual(ciCensusPopulation([]), Object.keys(PRECHECK_EXTRA_CI_CENSUSES).sort());
 });
+
+test("W1-T9872: recursive test censuses refuse nested fixture defects before push, including removals", () => {
+  const architecture = "test/architecture-fitness.test.ts";
+  const orphan = "test/orphan-sweep-names-the-third-party.test.ts";
+  const loader = "test/the-mutant-loader-resolves-every-relative-import.test.ts";
+  const evaluate = (path: string, head: string | null, base: string | null, failing: string[]) => {
+    const ran: string[] = [];
+    const found = precheck.evaluateAdmittedCensusSuites({
+      changed: [path], readHead: () => head, readBase: () => base, loadMembers: () => [],
+      runSuites: (files: string[]) => { ran.push(...files); return failing.filter((file) => files.includes(file)); },
+    });
+    assert.equal(found.unmeasured, null);
+    return { ran, violations: found.violations as string[] };
+  };
+  for (const [snippet, suite] of [
+    ["return page.title();", architecture],
+    ['writeFileSync(join(dir, "copy.ts"), source);', architecture],
+    ["await import(copy);", architecture],
+    ['const env = { [RUN_ID_ENV]: ' + '"run-ended-x" };', orphan],
+    ['const copy = source.' + 'replace(/from "x"/g, replacement);', loader],
+  ]) {
+    const found = evaluate("test/nested/new.test.ts", snippet, "", [suite]);
+    assert.ok(found.ran.includes(suite), suite);
+    assert.equal(found.violations.length, 1);
+    assert.ok(found.violations[0].startsWith(`census-suite: ${suite} fails — run node --test`));
+    assert.deepEqual(evaluate("test/nested/new.test.ts", snippet, "", []).violations, []);
+    assert.deepEqual(evaluate("docs/example.md", snippet, "", [suite]).ran, []);
+  }
+  const removedLock = evaluate("test/nested/stray.test.ts", "", "withRealSweep" + "Lock();", [orphan]);
+  assert.deepEqual(removedLock.ran, [orphan]);
+  assert.equal(removedLock.violations.length, 1);
+  for (const suite of [architecture, orphan, loader]) {
+    assert.ok(evaluate(suite, "", "", [suite]).ran.includes(suite), "editing the census itself must ask it");
+  }
+  assert.deepEqual(evaluate("test/nested/plain.test.ts", "const n = 2;", "const n = 1;", []).ran, []);
+  assert.ok(!precheck.gitFreeCensusSuites().includes("test/host-capability-fixtures.test.ts"),
+    "tracked-test enumeration needs git even when every audit input is fixture data");
+});

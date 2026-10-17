@@ -1,12 +1,31 @@
 // @census-reads: test/
 /** @source-text-subject: this census audits the host dependencies declared by test suites. */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: TEST_DIR, encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 
 // Each observation is a host-sensitive operation in the six suites reported by W1-T4440.
 // The declaration names the isolation or the capability gate at the call site.
@@ -44,11 +63,8 @@ function undeclared(corpus: ReadonlyMap<string, string>): string[] {
 }
 
 test("W1-T4440: no suite reads host git or credential state without a declared capability", () => {
-  const corpus = new Map(
-    readdirSync(TEST_DIR)
-      .filter((file) => file.endsWith(".test.ts"))
-      .map((file) => [file, readFileSync(join(TEST_DIR, file), "utf8")] as const),
-  );
+  const { dir, files } = testCorpus();
+  const corpus = new Map(files.map((file) => [file, readFileSync(join(dir, file), "utf8")] as const));
   assert.deepEqual(undeclared(corpus), [], "host-dependent suites must declare their fixture or capability");
 
   // Positive control: dropping one declaration must name the suite that lost it.
