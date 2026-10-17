@@ -24,6 +24,9 @@
  * re-ask is ranked from the streak's start rather than from zero. Once the streak is at least the caller's own pass
  * cadence, it ranks first among this process's open streaks, no other aged child runs, and the shortfall is projected
  * rather than measured (not memory-available, not a sighted container ceiling), it is admitted on the "aged" tier.
+ * A RESTART SEED (the caller's dueSinceMs) joins the streak only at this process's first observed deferral: it keeps a
+ * restart from resetting the wait, but alone it never admits a first ask, and the aged row reports the queueing wait
+ * this process observed (waited_ms) apart from the age the seed carried in (seeded_ms).
  */
 
 import { join } from "node:path";
@@ -56,8 +59,8 @@ export const ADMISSION_BACKOFF = { baseMs: 5_000, maxMs: 60_000, jitter: 0.2 } a
 export type AdmissionTier = "fits" | "uncertain" | "shortfall";
 
 /** Why the aged rung did not admit a deferred start; each defer row names one. */
-export type AgedBlock = "no-cadence" | "younger-than-cadence" | "outranked" | "aged-child-running" | "memory-available"
-  | "container-sighted";
+export type AgedBlock = "no-cadence" | "younger-than-cadence" | "unobserved-seed" | "outranked" | "aged-child-running"
+  | "memory-available" | "container-sighted";
 
 /** Which tier a verdict is in. Pure. */
 export function admissionTier(verdict: Pick<ShadowVerdict, "wouldAdmit" | "reasons">): AdmissionTier {
@@ -87,7 +90,8 @@ export interface AdmissionRequest {
   /** What an enforced start does about a shortfall it could wait out: "wait" (default) backs off in place; "defer"
    *  returns `deferred` at once, for a caller whose next scheduled pass asks again. */
   onShortfall?: "wait" | "defer";
-  /** A "defer" caller's own pass cadence, and when it was last due if this process has not asked before (a restart). */
+  /** A "defer" caller's own pass cadence, and when it was last due if this process has not asked before (a restart).
+   *  The due time seeds the streak at this process's first observed deferral, never a first ask's admission. */
   deferral?: { cadenceMs: number; cadenceBasis: "measured" | "scheduled"; dueSinceMs?: number };
 }
 
@@ -116,9 +120,11 @@ interface Waiter {
 
 const waiting: Waiter[] = [];
 
-/** One open deferral streak: the waiter it ranks as, and how many deferrals it holds. */
+/** One open deferral streak: the waiter it ranks as (its start, a restart seed included), when this process first
+ *  asked in it, and how many deferrals it holds. */
 interface Streak extends Waiter {
   runId: string;
+  askedSinceMs: number;
   deferrals: number;
 }
 
@@ -144,9 +150,11 @@ export function endDeferralStreak(runId: string): void {
 
 /** Whether the aged rung admits this deferred start, or why not. Pure but for the streaks it ranks against. */
 function agedRungBlock(key: string, self: Waiter, deferral: AdmissionRequest["deferral"], verdict: ShadowVerdict,
-  ranking: HostMemoryPriorityPolicy, now: number): AgedBlock | undefined {
+  ranking: HostMemoryPriorityPolicy, now: number, seededSinceMs: number | undefined): AgedBlock | undefined {
   if (deferral === undefined) return "no-cadence";
-  if (now - self.waitingSinceMs < deferral.cadenceMs) return "younger-than-cadence";
+  if (now - self.waitingSinceMs < deferral.cadenceMs) {
+    return seededSinceMs !== undefined && now - seededSinceMs >= deferral.cadenceMs ? "unobserved-seed" : "younger-than-cadence";
+  }
   const others = [...streaks].filter(([other]) => other !== key).map(([, streak]) => streak as Waiter);
   if (rankDemand([...others, self], ranking, now)[0] !== self) return "outranked";
   if (agedRunning !== undefined) return "aged-child-running";
@@ -214,7 +222,11 @@ export async function awaitMemoryAdmission(
     const runId = request.runId ?? request.workerClass;
     const key = streakKey = `${root}\u0000${runId}`;
     const due = request.deferral?.dueSinceMs;
-    const since = !defers ? startedAt : streaks.get(key)?.waitingSinceMs ?? (due === undefined ? startedAt : Math.min(startedAt, due));
+    const open = defers ? streaks.get(key) : undefined;
+    // A restart seed waits for this process to observe a deferral: it joins the streak when one opens, below.
+    const since = open?.waitingSinceMs ?? startedAt;
+    const askedSince = open?.askedSinceMs ?? startedAt;
+    const seededSince = open === undefined && due !== undefined ? Math.min(startedAt, due) : undefined;
     waiter = { instance: root, workerClass: request.workerClass, waitingSinceMs: since };
     waiting.push(waiter);
     let attempt = 0;
@@ -229,7 +241,7 @@ export async function awaitMemoryAdmission(
             const verdict = evaluateShadowMemory(inputs, policy);
             const tier = admissionTier(verdict);
             const agedBlock = defers && tier === "shortfall"
-              ? agedRungBlock(key, waiter!, request.deferral, verdict, ports.priorityPolicy(), now) : undefined;
+              ? agedRungBlock(key, waiter!, request.deferral, verdict, ports.priorityPolicy(), now, seededSince) : undefined;
             const admitAs: AdmissionTier | "nothing-to-wait-for" | "aged" | undefined = tier === "fits" ? "fits"
               : tier === "uncertain" && attempt > 0 ? "uncertain"
                 : tier === "shortfall" && !reservedWorkRunning(inputs) ? "nothing-to-wait-for"
@@ -252,11 +264,13 @@ export async function awaitMemoryAdmission(
             const streak = streaks.get(key);
             if (defers) streaks.delete(key);
             if (admitAs === "aged") {
-              const waitedMs = now - since;
+              // The queueing wait this process observed, apart from the age a restart seed carried into the streak.
+              const waitedMs = now - askedSince;
               agedRunning = key;
               write({ step: ENFORCE_ADMIT_STEP, worker_class: request.workerClass, tier: "aged", waited_ms: waitedMs,
+                seeded_ms: askedSince - since, deferred_since: fixedClock(since).iso(),
                 deferrals: streak?.deferrals ?? 0, cadence_ms: request.deferral!.cadenceMs, cadence_basis: request.deferral!.cadenceBasis,
-                overrode: verdict.reasons, attempts: attempt, numbers: verdict.numbers });
+                reasons: verdict.reasons, overrode: verdict.reasons, attempts: attempt, numbers: verdict.numbers });
               const endAged = (): void => { if (agedRunning === key) agedRunning = undefined; };
               return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt, ...(reservation ? { reservation } : {}), endAged };
             }
@@ -268,12 +282,14 @@ export async function awaitMemoryAdmission(
             return { kind: "admitted", tier: admitAs, waitedMs, attempts: attempt, ...(reservation ? { reservation } : {}) };
           }
           if (tier === "shortfall" && defers) {
-            const streak = streaks.get(key) ?? { instance: root, workerClass: request.workerClass, waitingSinceMs: since, runId, deferrals: 0 };
+            const streak = streaks.get(key) ?? { instance: root, workerClass: request.workerClass, waitingSinceMs: seededSince ?? since,
+              askedSinceMs: askedSince, runId, deferrals: 0 };
             streak.deferrals += 1;
             streaks.set(key, streak);
             write({ step: ENFORCE_DEFER_STEP, worker_class: request.workerClass, tier, reasons: verdict.reasons,
               uncertainty: verdict.uncertainty, numbers: verdict.numbers, scenario: verdict.scenario, attempts: attempt,
-              waited_ms: now - startedAt, deferred_since: fixedClock(since).iso(), deferrals: streak.deferrals,
+              waited_ms: now - startedAt, deferred_since: fixedClock(streak.waitingSinceMs).iso(),
+              seeded_ms: streak.askedSinceMs - streak.waitingSinceMs, deferrals: streak.deferrals,
               cadence_ms: request.deferral?.cadenceMs ?? null, cadence_basis: request.deferral?.cadenceBasis ?? null, aged_blocked: agedBlock });
             return { kind: "deferred", reasons: verdict.reasons };
           }

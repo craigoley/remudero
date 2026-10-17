@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { importsModule } from "./helpers/import-sweep.js";
@@ -26,6 +26,24 @@ import { importsModule } from "./helpers/import-sweep.js";
 // See the block below the existing 8 falsifier tests.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: __dirname, encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 const SCRIPT = join(__dirname, "..", "scripts", "mutation-ratchet.mjs");
 const RELEVANT_PATHS_FILE = join(__dirname, "..", "scripts", "mutation-relevant-paths.json");
 const FIXTURES = join(__dirname, "fixtures", "mutation-ratchet");
@@ -342,13 +360,13 @@ test("the REAL PR gate config's commandRunner is scoped to exactly the test file
   // exits 0 (`node --test --import tsx test/block-reason.test.ts test/ghost.test.ts` -> `# pass
   // 15`, `# fail 0`, exit 0), so a leading entry costs a window in which it covers nothing, never
   // a broken mutation run.
-  const testFiles = readdirSync(join(REPO_ROOT, "test")).filter((f) => f.endsWith(".test.ts"));
+  const { dir: testDir, files: testFiles } = testCorpus();
   // W1-T2531: resolved through the shared any-import-form predicate rather than a static
   // `from`-only regex -- a classify.ts consumer reachable only via `await import(...)` or a
   // `type X = import(...).X` query must be counted too, or the census silently undercounts and
   // this test's own "every importer is in the command" guarantee stops meaning anything.
   const classifyImporters = testFiles
-    .filter((f) => importsModule(readFileSync(join(REPO_ROOT, "test", f), "utf8"), CLASSIFY_IMPORT_MATCHER))
+    .filter((f) => importsModule(readFileSync(join(testDir, f), "utf8"), CLASSIFY_IMPORT_MATCHER))
     .sort();
   assert.ok(
     classifyImporters.includes("classify.test.ts") && classifyImporters.includes("block-reason.test.ts"),

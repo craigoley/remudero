@@ -30,6 +30,8 @@
  * in full once and then extended from the rows the ingest reads anyway, so a build reads no step body it read before.
  * A row of a cached step deleted under it (an index-only count) or a store behind it drops the cache, and the oracle
  * audits it against a full read every pass; its `read_model.board_oracle` row carries what it read and reused.
+ * W1-T9718: a pass audits one slice of {@link BOARD_ORACLE_SLICES} in turn ({@link boardOracleSliceOf}), every task healed
+ * within {@link BOARD_ORACLE_RECURRENCE_MS}, and every non-plan projection; the rest are held. Both persist with the lease.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -73,6 +75,10 @@ export const BOARD_INTERN_MAX_CHARS = 96;
 export const BOARD_INGEST_CHUNK_MS = 250;
 /** A drift found again this soon after a self-heal is a projection bug, not a blip: it escalates (as #8075's oracle). */
 export const BOARD_ORACLE_RECURRENCE_MS = 24 * 60 * 60_000;
+/** OPERATOR DECISION (W1-T9718), pending: the oracle's slices. A drift is found within N passes, not one, and a pass
+ *  reads ~1/N of a full re-derive; 1 audits every task every pass, the behaviour before it. */
+export const BOARD_ORACLE_SLICES = 1;
+const ORACLE_SLICE_META = "board.oracle_slice";
 /** Steps some task's derivation reads across the whole ledger, whatever task they name. */
 export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot"]);
 /** Fact steps no reader on the projection path (status.ts, board.ts, status-board.ts) names: 60% of the
@@ -93,7 +99,8 @@ export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(
   CREATE TABLE IF NOT EXISTS board_oracle_run(at_ms INTEGER NOT NULL, outcome TEXT NOT NULL, mismatches INTEGER NOT NULL,
   healed INTEGER NOT NULL, issue_url TEXT);
   CREATE TABLE IF NOT EXISTS task_github_read(task_id TEXT PRIMARY KEY, digest TEXT NOT NULL, keys TEXT NOT NULL) WITHOUT ROWID;
-  CREATE TABLE IF NOT EXISTS task_cross_read(task_id TEXT PRIMARY KEY, keys TEXT NOT NULL) WITHOUT ROWID;`;
+  CREATE TABLE IF NOT EXISTS task_cross_read(task_id TEXT PRIMARY KEY, keys TEXT NOT NULL) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS board_oracle_heal(task_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL) WITHOUT ROWID;`;
 
 /** W1-T9604: what the step cache read and reused since the last `read_model.board_oracle` row, which carries it. */
 export interface BoardStepReads {
@@ -163,6 +170,11 @@ function differingFields(a: StatusProjection | undefined, b: StatusProjection | 
 
 function sha1(text: string): string {
   return createHash("sha1").update(text).digest("hex").slice(0, 16);
+}
+
+/** W1-T9718: the oracle slice of `of` that `taskId` belongs to, fixed by the id alone, so a rotation covers every task. */
+export function boardOracleSliceOf(taskId: string, of: number): number {
+  return of <= 1 ? 0 : Number.parseInt(sha1(taskId).slice(0, 8), 16) % of;
 }
 
 /** The default GitHub generation: the open PRs' identity and heads, and whether the read failed. */
@@ -417,6 +429,8 @@ export interface BoardProjectionOptions {
   deriveFromRows?: boolean;
   /** Each ingest's fresh fact rows, in the order read: a feed that takes each row once (the now view's recent feed). */
   onIngest?: (rows: ReadonlyArray<Row>) => void;
+  /** W1-T9718: the slices one oracle rotation audits in turn; {@link BOARD_ORACLE_SLICES} when omitted. */
+  oracleSlices?: number;
 }
 
 /**
@@ -457,6 +471,8 @@ export interface BoardOracleResult {
   escalationReasons: string[];
   /** The issue URL, null when nothing escalated, the escalation failed, or no path was supplied. */
   issueUrl: string | null;
+  /** W1-T9718: which plan tasks this pass audited, sorted: its slice's, and those healed within the recurrence window. */
+  slice: { index: number; of: number; audited: string[]; alwaysAudited: string[] };
 }
 
 export interface BoardUpdate {
@@ -764,6 +780,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     upsertCross: db.prepare(`INSERT INTO task_cross_read(task_id, keys) VALUES(?, ?)
       ON CONFLICT(task_id) DO UPDATE SET keys = excluded.keys`),
     removeCross: db.prepare("DELETE FROM task_cross_read WHERE task_id = ?"),
+    upsertHeal: db.prepare("INSERT INTO board_oracle_heal(task_id, at_ms) VALUES(?, ?) ON CONFLICT(task_id) DO UPDATE SET at_ms = excluded.at_ms"),
+    removeHeal: db.prepare("DELETE FROM board_oracle_heal WHERE task_id = ?"),
     latest: db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
     taskFacts: db.prepare(`SELECT seq, ts_ms, step, body FROM fact WHERE task_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
       UNION ALL SELECT f.seq, f.ts_ms, f.step, f.body FROM fact_alias a JOIN fact f ON f.seq = a.seq WHERE a.task = ? AND f.seq <= ? AND f.step NOT IN (${unreadSql})`),
@@ -1383,9 +1401,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
    *
    * W1-T9604: `cached` (every index but the oracle's) takes its step buckets and plan-only sets from the projection's
    * step cache, which is read in full once and then extended by the rows the ingest reads; uncached, the index reads
-   * them in full, as before, so the oracle derives from a read the cache never touched.
+   * them in full, as before, so the oracle derives from a read the cache never touched. `tally` counts what it reads.
    */
-  function storeIndex(bound: ReadonlyArray<Row>, cached = true): LedgerIndex {
+  function storeIndex(bound: ReadonlyArray<Row>, cached = true, tally?: { rows: number; bytes: number }): LedgerIndex {
     const upTo = lastSeq;
     if (cached) {
       stepReads.indexes++;
@@ -1398,10 +1416,23 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const runSql = taskRunStatements();
     let filing: Set<string> | undefined;
     let reviewed: Map<string, Set<string>> | undefined;
+    const fullRead = (rowCount: number, bytes: number): void => {
+      if (tally) [tally.rows, tally.bytes] = [tally.rows + rowCount, tally.bytes + bytes];
+    };
+    const counted = (body: unknown): string => {
+      const text = String(body);
+      fullRead(1, text.length);
+      return text;
+    };
+    const fullStep = (step: string): readonly Row[] => {
+      const own = readStep(step, upTo);
+      fullRead(own.rows.length, own.bytes);
+      return own.rows;
+    };
     const taskBucket = (id: string): Row[] => {
       const facts: Array<{ row: Row; key: [number, number, number] }> = [];
       const source = aliasReady ? sql.taskFacts.iterate(id, upTo, ...unread, id, upTo, ...unread) : sql.taskFacts.iterate(id, upTo, ...unread, "\u0000", 0, ...unread);
-      for (const r of source) facts.push({ row: parse(r.body), key: [Number(r.ts_ms), 0, Number(r.seq)] });
+      for (const r of source) facts.push({ row: parse(counted(r.body)), key: [Number(r.ts_ms), 0, Number(r.seq)] });
       if (!aliasReady) {
         if (!aliasSeqs) {
           // A store whose writer has not yet backfilled `fact_alias`: one scan of the fact bodies, held for this index only.
@@ -1434,6 +1465,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     };
     const planOnly = (): void => {
       const sets = cached ? cachedPlanOnly(upTo) : readPlanOnly(upTo);
+      if (!cached) fullRead(sets.rows, sets.bytes);
       [filing, reviewed] = [sets.filing, sets.reviewed];
     };
     return {
@@ -1443,7 +1475,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         get: (step) => {
           let bucket = steps.get(step);
           if (!bucket) {
-            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : cached ? cachedStep(step, upTo) : readStep(step, upTo).rows;
+            bucket = BOARD_UNREAD_STEPS.has(step) ? [] : cached ? cachedStep(step, upTo) : fullStep(step);
             steps.set(step, bucket);
           }
           return bucket;
@@ -1580,6 +1612,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
   // Heals the oracle recorded, newest last: persisted with the lease, so a recurrence is seen across a restart.
   const heals: number[] = db.prepare("SELECT at_ms FROM board_oracle_run WHERE healed > 0 ORDER BY at_ms").all().map((r) => Number(r.at_ms));
+  const healedAt = new Map(db.prepare("SELECT task_id, at_ms FROM board_oracle_heal").all().map((r) => [String(r.task_id), Number(r.at_ms)] as const));
+  const slices = Number.isFinite(opts.oracleSlices) && opts.oracleSlices! >= 1 ? Math.floor(opts.oracleSlices!) : BOARD_ORACLE_SLICES;
+  const storedCursor = Number(db.meta(ORACLE_SLICE_META));
+  let sliceCursor = Number.isSafeInteger(storedCursor) && storedCursor >= 0 ? storedCursor : 0;
 
   function diffAgainstHeld(fresh: ReadonlyMap<string, StatusProjection>): BoardOracleResult["mismatches"] {
     const mismatches: BoardOracleResult["mismatches"] = [];
@@ -1612,10 +1648,23 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string): BoardOracleResult {
     const now = clock.now();
     const view = currentGithubView();
+    const index = sliceCursor % slices;
+    const expired = [...healedAt].filter(([, at]) => at < now - BOARD_ORACLE_RECURRENCE_MS).map(([id]) => id);
+    for (const id of expired) healedAt.delete(id);
+    const always = [...healedAt.keys()].filter((id) => plan.byId.has(id)).sort();
+    const alwaysSet = new Set(always);
+    const outside = slices === 1 ? undefined : (task: Task): StatusProjection | undefined =>
+      (boardOracleSliceOf(task.id, slices) === index || alwaysSet.has(task.id) ? undefined : held.get(task.id)?.projection);
+    const read = { projections: 0, rows: 0, bytes: 0 };
     // W1-T9604: the oracle derives from full reads the step cache never touched, and audits the cache against them.
-    const uncached = (): LedgerIndex | undefined => (fromRows ? undefined : storeIndex(rows, false));
+    const uncached = (): LedgerIndex | undefined => (fromRows ? undefined : storeIndex(rows, false, read));
+    const derive = (ledgerIndex?: LedgerIndex): ReturnType<typeof project> => {
+      read.projections++;
+      return project(plan, credit, overrides, outside, ledgerIndex ?? uncached());
+    };
     const first = uncached();
-    let pass = project(plan, credit, overrides, undefined, first);
+    let pass = derive(first);
+    const audited = [...pass.reads.keys()].filter((id) => plan.byId.has(id)).sort();
     let fresh = pass.projections;
     let mismatches = diffAgainstHeld(fresh);
     let outcome: BoardOracleOutcome = "agree";
@@ -1623,11 +1672,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     let healedCount = 0;
     const audit = first ? auditStepCache(first) : undefined;
     if (mismatches.length > 0) {
-      pass = project(plan, credit, overrides, undefined, uncached());
+      pass = derive();
       fresh = pass.projections;
       mismatches = diffAgainstHeld(fresh);
       outcome = mismatches.length > 0 ? "healed" : "transient";
     }
+    const healedNow: string[] = [];
     if (outcome === "healed") {
       keepCrossReads(pass.cross, new Set(mismatches.map((m) => m.taskId).filter((id) => fresh.has(id))));
       const healed: Array<[string, Held]> = [];
@@ -1645,7 +1695,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       }
       persist(healed, removed);
       healedCount = mismatches.length;
-      const survived = diffAgainstHeld(project(plan, credit, overrides, undefined, uncached()).projections);
+      for (const [id] of healed) if (plan.byId.has(id)) healedNow.push(id);
+      const survived = diffAgainstHeld(derive().projections);
       if (survived.length > 0) reasons.push(`${survived.length} task(s) still differ after the heal (${survived.slice(0, 5).map((m) => m.taskId).join(", ")})`);
       const prior = heals.filter((at) => at >= now - BOARD_ORACLE_RECURRENCE_MS);
       if (prior.length > 0) reasons.push(`the board drifted again within 24 h of an earlier self-heal (${prior.length} heal(s) in the window)`);
@@ -1653,12 +1704,21 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     if (reasons.length > 0) outcome = "escalated";
     lastOracleAt = now;
-    const result: BoardOracleResult = { compared: fresh.size, mismatches, outcome, escalationReasons: reasons, issueUrl: null };
+    sliceCursor++;
+    for (const id of healedNow) healedAt.set(id, now);
+    const compared = pass.reads.size + [...fresh.keys()].filter((id) => !plan.byId.has(id)).length;
+    const slice = { index, of: slices, audited, alwaysAudited: always };
+    const result: BoardOracleResult = { compared, mismatches, outcome, escalationReasons: reasons, issueUrl: null, slice };
     if (reasons.length > 0 && opts.escalation) result.issueUrl = tryEscalate(escalationFor(result), opts.escalation);
-    if (lease && outcome !== "agree") {
+    if (lease && (outcome !== "agree" || slices > 1 || expired.length > 0)) {
       withWriteTransaction(db, lease, () => {
-        db.prepare("INSERT INTO board_oracle_run(at_ms, outcome, mismatches, healed, issue_url) VALUES(?, ?, ?, ?, ?)")
-          .run(now, outcome, mismatches.length, healedCount, result.issueUrl);
+        if (outcome !== "agree") {
+          db.prepare("INSERT INTO board_oracle_run(at_ms, outcome, mismatches, healed, issue_url) VALUES(?, ?, ?, ?, ?)")
+            .run(now, outcome, mismatches.length, healedCount, result.issueUrl);
+        }
+        for (const id of healedNow) sql.upsertHeal.run(id, now);
+        for (const id of expired) sql.removeHeal.run(id);
+        if (slices > 1) sql.latest.run(ORACLE_SLICE_META, String(sliceCursor));
       });
     }
     // W1-T9604: what the step cache read and reused since the last oracle row, and its audit: the saving, measured.
@@ -1669,6 +1729,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     log("read_model.board_oracle", {
       outcome, compared: result.compared, mismatches: mismatches.length, sample: mismatches.slice(0, 5),
       ...(reasons.length > 0 ? { reasons } : {}), ...(result.issueUrl ? { issue_url: result.issueUrl } : {}), ...stepCacheRow, cross_task: crossTask,
+      slice: { index, of: slices, audited: audited.length, always_audited: always.length }, read,
     });
     return result;
   }

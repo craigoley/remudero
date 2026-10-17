@@ -69,7 +69,7 @@ test("test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts: a
 
 test("W1-T5693: the structural suites' own files, registries and plan shards start their suite", () => {
   for (const [path, suites] of [
-    [".dependency-cruiser.cjs", [[CYCLE], [SIZE]]],
+    [".dependency-cruiser.cjs", [[CYCLE], [SIZE], ["test/architecture-fitness.test.ts"]]],
     ["scripts/cycle-baseline.json", [[CYCLE]]],
     ["scripts/cycle-ratchet.mjs", [[CYCLE]]],
     ["scripts/source-size-ratchet.mjs", [[SIZE]]],
