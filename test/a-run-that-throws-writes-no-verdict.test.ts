@@ -44,7 +44,7 @@ const CENSUS_REFUSAL = [
   "  clock-signature: src/lib/serve.ts dateNow 3 > baseline 2 — move it onto the Clock port",
 ].join("\n");
 
-/** A NON-census hook refusal: since W1-T4656 a census refusal goes to the fix rung, not run.error. */
+/** A non-census hook refusal that now also goes to the bounded pre-PR fix rung. */
 const HOOK_REFUSAL = "pre-push: test-tier-manifest: ghost row test/gone.test.ts — remove the row, or restore the file";
 
 const OFFLINE_GITHUB: GitHub = {
@@ -84,7 +84,7 @@ function workerResult(over: Partial<WorkerResult>): WorkerResult {
 }
 
 /** A bare origin, a seed that carries the plan, and the clone runTask works from. */
-function buildFixture(opts: { refusingHook?: boolean } = {}): { root: string; planPath: string; config: Config; cleanup: () => void } {
+function buildFixture(opts: { refusingHook?: boolean } = {}): { root: string; planPath: string; originDir: string; config: Config; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}thrown-verdict-root-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, FIXTURE_PLAN);
@@ -117,6 +117,7 @@ function buildFixture(opts: { refusingHook?: boolean } = {}): { root: string; pl
   return {
     root,
     planPath,
+    originDir: origin.dir,
     config,
     cleanup: () => {
       origin.cleanup();
@@ -142,11 +143,10 @@ function twoStepSpawn(implement: () => Promise<WorkerResult>): typeof spawnWorke
   };
 }
 
-test("W1-T4655: a hook-refused push after implement writes one run.error verdict and the error still propagates", async () => {
+test("W1-T4655: an uncleared hook refusal after implement writes one bounded verdict without run.error", async () => {
   const fx = buildFixture({ refusingHook: true });
   try {
-    let thrown: unknown;
-    await withLiveWritesAllowed(() =>
+    const result = await withLiveWritesAllowed(() =>
       runTask(TASK_ID, {
         skipGitSync: true,
         planPath: fx.planPath,
@@ -156,30 +156,63 @@ test("W1-T4655: a hook-refused push after implement writes one run.error verdict
         containmentExec: holdingContainmentExec,
         isolationExec: cleanIsolationExec,
       }),
-    ).then(
-      () => assert.fail("a refused push must still reject runTask"),
-      (err: unknown) => {
-        thrown = err;
-      },
     );
-    assert.match(String((thrown as Error).message), /ghost row test\/gone\.test\.ts/);
+    assert.equal(result.verdict, "failed");
 
     const ledger = readLedger(fx.root);
-    assert.ok(ledger.some((row) => row.step === "implement.done"), "the implement worker returned before the throw");
+    assert.ok(ledger.some((row) => row.step === "implement.done"), "the implement worker returned before the refusal");
     const runError = ledger.filter((row) => row.step === "run.error");
-    assert.equal(runError.length, 1);
-    assert.equal(runError[0]?.error, (thrown as Error).message, "the rethrown error is the one the run ledgered");
+    assert.equal(runError.length, 0, "a gate refusal is handled by the repair rung");
+    const refusals = ledger.filter((row) => row.step === "census_push.refused");
+    assert.equal(refusals.length, 2, "the rung stops at its strike cap");
+    assert.ok(refusals.every((row) => String(row.refusal).includes(HOOK_REFUSAL)), "each strike carries the gate's text");
     const verdicts = ledger.filter((row) => row.step === "verdict");
     assert.equal(verdicts.length, 1, "exactly one terminal verdict row");
     const verdict = verdicts[0] ?? {};
     assert.equal(verdict.verdict, "failed");
-    assert.equal(verdict.stage, "run.error");
-    assert.equal(verdict.cause, "git-push-failed");
-    assert.equal(verdict.run_id, runError[0]?.run_id);
-    assert.match(String(verdict.reason), /ghost row/);
+    assert.equal(verdict.stage, "fallback_push.census");
+    assert.equal(verdict.cause, "census-refused-push");
+    assert.match(String(verdict.refusal), /ghost row/);
     assert.equal(typeof verdict.cost_usd, "number");
-    assert.equal(verdict.model, null, "no worker outcome is read off a thrown run");
-    assert.ok(ledger.indexOf(verdict) > ledger.indexOf(runError[0] ?? {}), "the verdict follows the run.error row");
+    assert.ok(ledger.indexOf(verdict) > ledger.indexOf(refusals[1] ?? {}), "the verdict follows the last strike");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("W1-T4655: a push transport failure after implement still throws and writes one run-error verdict", async () => {
+  const fx = buildFixture();
+  try {
+    let calls = 0;
+    let thrown: unknown;
+    await withLiveWritesAllowed(() =>
+      runTask(TASK_ID, {
+        skipGitSync: true,
+        planPath: fx.planPath,
+        config: fx.config,
+        github: OFFLINE_GITHUB,
+        spawn: async () => {
+          if (++calls === 1) return workerResult({ text: "RECON REPORT\nOBSERVED: fixture\n" });
+          rmSync(fx.originDir, { recursive: true, force: true });
+          return workerResult({ text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
+        },
+        containmentExec: holdingContainmentExec,
+        isolationExec: cleanIsolationExec,
+      }),
+    ).then(
+      () => assert.fail("a transport failure must reject runTask"),
+      (error: unknown) => { thrown = error; },
+    );
+    assert.match(String((thrown as Error).message), /does not appear to be a git repository/);
+    const ledger = readLedger(fx.root);
+    const runError = ledger.filter((row) => row.step === "run.error");
+    const verdicts = ledger.filter((row) => row.step === "verdict");
+    assert.equal(runError.length, 1);
+    assert.equal(runError[0]?.error, (thrown as Error).message, "the rethrown error is the one ledgered");
+    assert.equal(verdicts.length, 1);
+    assert.equal(verdicts[0]?.stage, "run.error");
+    assert.equal(verdicts[0]?.cause, "git-push-failed");
+    assert.ok(ledger.indexOf(verdicts[0]!) > ledger.indexOf(runError[0]!), "the verdict follows run.error");
   } finally {
     fx.cleanup();
   }

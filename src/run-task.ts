@@ -421,6 +421,7 @@ import {
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
 import { censusRunDirs } from "./lib/run-child-contract.js";
+import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refusal.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
@@ -19054,7 +19055,7 @@ export async function pushFixRound(
     const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
       .then((stdout) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return { fixRoundPushedHead: expectedHeadSha };
-    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
+    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err) ?? prePushGateRefusal(err), String((err as Error)?.message ?? err));
   }
 }
 
@@ -19356,7 +19357,9 @@ export async function repairCensusRefusedPush(input: {
       "",
       input.recheck
         ? "PRE-PUSH DIFF-COVERAGE (W1-T4797): no PR exists yet — CI's coverage-ratchet would refuse this head; add the tests that cover each line named above."
-        : "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
+        : censusPushRefusal(refusal.text)
+          ? "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above."
+          : "PRE-PUSH GATE: no PR exists yet — hooks/pre-push refused this branch with the gate output above; apply the remedy it names.",
       CENSUS_PUSH_NEVER_BYPASS,
     ].join("\n");
     const roundStart = head();
@@ -19414,10 +19417,11 @@ export async function repairCensusRefusedPush(input: {
       refusal = stillRefused;
       continue;
     }
+    dropTierRowsBeforePush(cwd, log);
     try {
       await gitPushRunBranchAsync(cwd);
     } catch (err) {
-      const next = censusPushRefusal(err);
+      const next = censusPushRefusal(err) ?? prePushGateRefusal(err);
       if (!next) throw err;
       refusal = next;
       for (const f of next.offeredBaselines) offered.add(f);
@@ -21407,6 +21411,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
       }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
+      dropTierRowsBeforePush(worktreePath, log);
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
       const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
@@ -21414,9 +21419,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await gitPushRunBranchAsync(worktreePath);
       } catch (err) {
-        const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err);
+        const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err) ?? prePushGateRefusal(err);
         if (!refusal) throw err;
-        const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : "census-refused";
+        const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : censusPushRefusal(err) ? "census-refused" : "pre-push-refused";
         const rung = await repairCensusRefusedPush({
           refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
           ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,

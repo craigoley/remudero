@@ -77,7 +77,7 @@ import {
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
-import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds } from "./worker-heaps.js";
+import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -252,9 +252,9 @@ export type ReadModelWorkerMessage =
   | { type: "shadow_prepared"; request: ShadowRequest }
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
   | ThreadHeapsAnswer
-  | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds };
+  | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds; observedAt?: number };
 
-export type ReadModelViewHolds = Record<string, { rows: number; keptBytes: number }>;
+export type ReadModelViewHolds = Record<string, { rows?: number; keptBytes?: number; entries?: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
 
 export interface ReadModelLaneMove {
   view?: string;
@@ -1358,7 +1358,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       letGo(unit);
       reportHeld(true);
     }
-    if (viewsOnly && opts.lane && ready && live?.heldSizes) reportHolds(opts.lane);
+    if (viewsOnly && opts.lane && ready) reportHolds(opts.lane);
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
@@ -1409,9 +1409,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const holds: ReadModelViewHolds = {};
     for (const unit of units) {
       const made = isViewFactory(unit.view) ? unit.made : unit.view;
-      if (made?.heldSizes) Object.assign(holds, made.heldSizes());
+      if (made?.heldSizes) for (const [name, size] of Object.entries(made.heldSizes())) {
+        const key = unit.slot && name.includes(":") && !name.includes("@") ? `${name}@${unit.slot.instance.name}` : name;
+        holds[key] = size;
+      }
     }
-    opts.post({ type: "view_holds", lane, holds });
+    holds[`lane:${lane}`] = { entries: units.length, unit: "units", unsized: "unit bookkeeping retains view objects, DB handles and shared scheduling state; exclusive bytes unavailable" };
+    opts.post({ type: "view_holds", lane, holds, observedAt: clock.now() });
   }
   function reportHeld(moved = false): void {
     if (!viewsOnly || !opts.lane) return;
@@ -1799,7 +1803,7 @@ export interface ReadModelViewLane {
   want(view: string, key: string): void;
   /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
   read(path: string): void;
-  holdsOf(threadId: number): ThreadHolds | undefined;
+  holdsOf(threadId: number): ThreadHoldsSnapshot | undefined;
   close(): void;
 }
 
@@ -1819,7 +1823,7 @@ export function threadViews(opts: {
   const selectedRegistryIntent = copySelectedRegistryIntent(opts.data.selectedRegistryIntent);
   const clock = opts.clock ?? systemClock;
   let closed = false;
-  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHolds }
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHoldsSnapshot }
   const fast: Lane = { name: "fast", deaths: 0 };
   const heavy: Lane = { name: "heavy", deaths: 0 };
   const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
@@ -1843,7 +1847,15 @@ export function threadViews(opts: {
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
       if (msg.type === "view_holds") {
-        lane.holds = Object.fromEntries(Object.entries(msg.holds).map(([instance, held]) => [`board:${instance}`, { entries: held.rows, bytes: held.keptBytes }]));
+        const holds: ThreadHolds = {};
+        for (const [name, held] of Object.entries(msg.holds)) {
+          const legacy = held.entries === undefined && held.rows !== undefined;
+          const key = legacy && !name.includes(":") ? `board:${name}` : name;
+          const bytes = legacy ? held.keptBytes : held.bytes;
+          holds[key] = { entries: held.entries ?? held.rows ?? 1, ...(bytes === undefined ? { unsized: held.unsized ?? "holder bytes not measured" } : { bytes }),
+            ...(held.unit ? { unit: held.unit } : {}), ...(held.bytes_basis ? { bytes_basis: held.bytes_basis } : {}) };
+        }
+        lane.holds = { holds, observedAt: msg.observedAt };
         return;
       }
       if (msg.type === "shadow_prepared") {

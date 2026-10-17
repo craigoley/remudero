@@ -306,6 +306,12 @@ prune_tsx_cache() {
     entries=$(find -P "$dir" -xdev ! -type d -print 2>/dev/null) || { report_risk 'TSX content scan unavailable' "$dir"; return 0; }
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
+      # tsx creates <pid>.pipe Unix sockets beside its transpile cache. Keep
+      # these IPC endpoints, but do not let a stale endpoint hide old cache
+      # files. Whole-cache live/open checks below still protect a live server.
+      if [ -S "$entry" ] && [ ! -L "$entry" ] && [[ "${entry##*/}" =~ ^[0-9]+\.pipe$ ]] && [ "$(owner "$entry" 2>/dev/null)" = "$ME" ]; then
+        continue
+      fi
       if [ ! -f "$entry" ] || [ -L "$entry" ] || [[ ! "${entry##*/}" =~ ^[0-9]+-[0-9a-f]{40}$ ]]; then
         report_risk 'TSX discovery contains unrecognized or special data' "$dir"; return 0
       fi
