@@ -4,22 +4,22 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { createHostView } from "../src/lib/host-view.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createNowView } from "../src/lib/now-view.js";
-import type { Plan } from "../src/lib/plan.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createHostView } from "#src/lib/host-view.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createNowView } from "#src/lib/now-view.js";
+import type { Plan } from "#src/lib/plan.js";
+import { acquireLease } from "#src/lib/read-model-db.js";
 import {
   createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage,
-} from "../src/lib/read-model-worker.js";
-import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "../src/lib/repositories-view.js";
-import type { GitHub } from "../src/lib/status.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { answerThreadHeaps, THREAD_HEAPS_REQUEST, type WorkerThread } from "../src/lib/worker-heaps.js";
-import * as heapMemory from "../src/lib/worker-heaps.js";
-import { createWorkstreamsView } from "../src/lib/workstreams-view.js";
-import { switchViewsOn } from "./helpers/read-model-switches.js";
+} from "#src/lib/read-model-worker.js";
+import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "#src/lib/repositories-view.js";
+import type { GitHub } from "#src/lib/status.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { answerThreadHeaps, THREAD_HEAPS_REQUEST, type WorkerThread } from "#src/lib/worker-heaps.js";
+import * as heapMemory from "#src/lib/worker-heaps.js";
+import { createWorkstreamsView } from "#src/lib/workstreams-view.js";
+import { switchViewsOn } from "#test/helpers/read-model-switches.js";
 
 type Hold = { entries: number; bytes?: number; unsized?: string; rows?: number; keptBytes?: number };
 type Holds = Record<string, Hold>;
