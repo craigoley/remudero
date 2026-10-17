@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { Worker } from "node:worker_threads";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { acquireLease, openReadModel, READ_MODEL_BUSY_TIMEOUT_MS } from "../src/lib/read-model-db.js";
-import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { acquireLease, openReadModel, READ_MODEL_BUSY_TIMEOUT_MS } from "#src/lib/read-model-db.js";
+import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 
 function state(t: TestContext): string {
   const path = makeTempDir("read-model-contention");

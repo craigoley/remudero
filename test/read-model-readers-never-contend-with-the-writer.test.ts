@@ -131,18 +131,19 @@ test("remaining writer locks identify the connection without changing the sqlite
   projector.exec("BEGIN IMMEDIATE");
   try {
     const errors: Error[] = [];
-    for (const write of [() => attached.exec("BEGIN IMMEDIATE"),
-      () => attached.prepare("UPDATE meta SET v = v").run()]) {
+    for (const [operation, write] of [["exec.begin-immediate", () => attached.exec("BEGIN IMMEDIATE")],
+      ["run", () => attached.prepare("UPDATE meta SET v = v").run()]] as const) {
       assert.throws(write, (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.equal((error as Error & { errcode: number }).errcode, 5);
         assert.match(error.message, /database is locked \[connection=[^ ]+\/writer pid=\d+ thread=\d+ path=/);
-        assert.ok(error.message.endsWith(`${projector.path}]`));
+        assert.ok(error.message.endsWith(`${projector.path}] [operation=${operation}]`));
         errors.push(error);
         return true;
       });
     }
-    assert.equal(errors[0].message, errors[1].message, "both operations name the same writer connection");
+    const identity = (error: Error) => error.message.replace(/ \[operation=[^\]]+\]$/, "");
+    assert.equal(identity(errors[0]), identity(errors[1]), "both operations name the same writer connection");
   } finally {
     projector.exec("ROLLBACK");
   }
