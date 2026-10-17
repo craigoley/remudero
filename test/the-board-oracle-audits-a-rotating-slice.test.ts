@@ -201,7 +201,8 @@ test("W1-T9718: a drift is healed within N passes and a recently healed task eve
 test("operator ruling 2026-10-17: by default six oracle passes audit every task, each about a sixth plus the healed", (t) => {
   assert.equal(BOARD_ORACLE_SLICES, 6, "the operator ruled six slices: every task hourly at 10-minute passes");
   const r = rig(t);
-  const board = r.board();
+  const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const board = r.board({ log: (step, extra) => void logged.push({ step, extra }) });
   board.update();
   r.askedTasks();
   const seen: string[] = [];
@@ -215,6 +216,8 @@ test("operator ruling 2026-10-17: by default six oracle passes audit every task,
     seen.push(...result.slice.audited);
   }
   assert.deepEqual([...seen].sort(), [...IDS].sort(), "six default passes audit every plan task exactly once");
+  // The ledger row production reads to verify the ruling names each slice of six and what it audited.
+  assert.deepEqual(oracleRows(logged).map((row) => row.slice), [0, 1, 2, 3, 4, 5].map((k) => ({ index: k, of: 6, audited: sliceOf(k, 6).length, always_audited: 0 })));
   // A drift is healed on its slice's pass; from then on that task rides along with every other slice.
   const victim = "W1-T7";
   r.drift(victim);
