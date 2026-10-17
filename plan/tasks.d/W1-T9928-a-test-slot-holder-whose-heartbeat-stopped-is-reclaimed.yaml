@@ -16,7 +16,7 @@
     - scripts/preflight-author.mjs
     - scripts/lib/author-step-capture.mjs
     - test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts
-  status: queued
+  status: merged
   priority: 1  # restore safe admission behind proven orphaned guards without double-booking a working holder
   attempts: 0
   rationale: |

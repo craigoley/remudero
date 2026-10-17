@@ -1,0 +1,96 @@
+- id: W1-T10055
+  title: "MEASURE FIRST: WHAT RECYCLES THE CORE DAEMON'S CONTAINER, AND WHETHER ONE RECYCLE CAN ABSORB A PENDING FRESHNESS RESTART — 36 of the 107 core daemon.boot rows of 2026-10-12..17 (34%, 3 to 11 a day) started a new container, outside the freshness mechanism; 13 of the 36 have no deploy.kickstart row, and 14 came less than 30 min after the previous boot"
+  repo: remudero
+  depends_on: []  # the 90-minute minimum lifetime hand-fix (branch fix-freshness-min-lifetime-1792255168191) changes the freshness side this measures against; see rationale
+  type: implement
+  verify: human  # the memo's tables come from the live core ledger union and a read of the host's recycle callers; a builder under the operator's builder rules runs them
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, a boot-cause classifier and an options memo; no daemon, deploy or host-script change
+  band_meaning: span
+  origin: 'coordinator brief batch1017c item 2; operator approved the freshness-restart follow-ups 2026-10-17 ~16:20Z (PLAN-box-cpu-memory.md); constants are OPERATOR DECISIONS'
+  plan_refs: [W1-T4945, W1-T6093, W1-T3694, W1-T9617, W1-T9487, W1-T9114]
+  files:
+    - scripts/core-boot-causes.mts
+    - test/every-core-boot-is-attributed-to-its-trigger.test.ts
+    - docs/research/core-container-recycles.md
+    - docs/research/README.md
+    - docs/docs-index.json
+  status: queued
+  priority: 2  # a third of core boots; each boot re-pays the first-pass reads (about 560 MB per boot on 10-17)
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-10-12T00:00Z..10-17T16:34Z: 100 gz rotations from 10-11T22 plus the live file, no
+    plain rotated files present, newest row 16:34:06Z; rows in logs-8864/batch1017c-recycle-rows.ndjson, per-boot
+    classes in batch1017c-boot-classes.txt, method: a boot is in a new container when its `host` (container id)
+    differs from the previous daemon.boot's):
+    - 107 daemon.boot rows. 71 in the same container (69 after daemon_selfrestart_for_freshness, 2 unexplained);
+      36 in a new container: 11, 7, 3, 6, 5 and 4 on 10-12 .. 10-17.
+    - 23 of the 36 follow a deploy.kickstart (backend recycle-container) by under 30 min: 11 with a
+      deploy.drain_handoff `recycle: image`, 3 `create-drift`, 9 with no handoff row.
+    - 13 have no deploy.kickstart. Eight of them (10-15 22:54Z onward, when recycle.checkout_placement rows begin)
+      have a recycle.checkout_placement row for remudero-daemon 20–60 s before the boot, written by
+      deploy/scratch-mounts.sh inside recycle-container.sh, and 7 of the 8 have a deploy.serve_policy_replace
+      within about 30 s. One (10-16 22:27Z) is a deploy-tick image recycle whose kickstart row is missing and whose
+      deploy.restart_refused (22:26:21Z, "FAILED RECLAIM … The recycle itself SUCCEEDED") stands in for it; for the
+      other seven the caller is not recorded. The other five predate the placement rows and have no recycle row.
+    - All four new containers on 10-17 (00:25, 02:33, 05:13, 07:00Z) follow a freshness restart decision in the
+      outgoing run (23:25 upper_age; 02:16 upper_age; a latch drain that completed 05:12:09, placement 05:12:31;
+      06:58:23 upper_age, placement 06:59:24), and none has a daemon.freshness_exit row. INFERRED: on those
+      lifetimes the freshness exit and a container recycle are the same event, but which one caused the other is
+      unknown. The 13:28Z and 14:52Z exits the same day stayed in-container.
+    - Back to back: 14 of the 36 came less than 30 min after the previous boot; 11 of them 1.2–14.4 min after an
+      in-container freshness self-restart (one merge restarting the process, then recycling the image). The hand-fix
+      below removes the image-input score (B1), which INFERRED removes part of that pairing.
+    - Of the 23 kickstart recycles, the outgoing run's last freshness decision was `restart` in 9 and `defer` in 2.
+      Those 9 paid a freshness drain and then a container boot.
+    - logs-8864/restartsim-results.txt: removing the recycles from the replay changes freshness restarts only from
+      18.2 to 19.2/day ("a today, no recycles"), so recycles mostly add boots rather than replace them.
+    READ at origin/main 81f49f019: deployer.ts `imageDriftOnly` arm recycles a container whose image drifts from the
+    newest published one; serve-policy-convergence.ts `runServePolicyCycle` replaces remudero-serve; recycle-container.sh
+    is also called from deploy/host-update.sh, install-host-units.sh, fleet-heartbeat.sh,
+    release-orphan-recycle-pause.sh and codex-sessions-mount.sh (git grep -l recycle-container.sh), not all of which
+    write a ledger row.
+    DEPENDS ON THE MINIMUM LIFETIME (not yet a filed id): branch fix-freshness-min-lifetime-1792255168191 (90-min
+    floor plus B1/B2), not pushed at 16:47Z. The memo measures against the freshness mechanism as it is after that
+    lands.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d (4,093 shards) and the plan diffs of all 438 remote heads
+    (ls-remote 16:46:49Z) for checkout_placement, recycle-container, container recycle and freshness_decision: 0
+    head hits; on main checkout_placement reads 0 shards, and the recycle-container shards are deploy mechanics, not
+    boot attribution.
+  design: |
+    MEASURE FIRST: no change to the daemon, the deployer or any deploy/ script.
+    1. scripts/core-boot-causes.mts: a pure `classifyCoreBoots(rows)` and a CLI over the ledger union (the existing
+       ledger-union reader, all three forms, with a per-form file count as the coverage control). Each daemon.boot
+       gets one cause: in-container after a freshness, heap or memory exit; new container after a deploy.kickstart
+       (with its drain_handoff recycle kind); new container with only a recycle.checkout_placement row; new
+       container with no recycle row. For each new container it also reports the outgoing run's last freshness
+       decision (action, reason, age) and whether a latch drain was open, and flags a boot under 30 min after the
+       previous one. Output: per-boot rows and per-day counts.
+    2. docs/research/core-container-recycles.md: the measured table (window, method, newest row), a read of every
+       caller of recycle-container.sh and whether it leaves a ledger row naming itself, the 10-17 freshness/recycle
+       coincidences resolved or left open, and "## Smallest change": options for one recycle absorbing a pending
+       freshness restart (e.g. a recycle that finds a latched freshness restart takes its drain and supersedes it; a
+       freshness restart whose advance is an image input waits for the recycle) and for naming the unledgered caller.
+       Every constant (how close a recycle must be to absorb, how long a freshness restart may wait for one) is listed
+       as an OPERATOR DECISION, not chosen.
+    3. TESTS in test/every-core-boot-is-attributed-to-its-trigger.test.ts on fixture rows, `test(` titles verbatim
+       as in the proofs.
+  acceptance:
+    - claim: "a boot in a new container after a deploy kickstart is attributed to that recycle"
+      proof: 'grep: test("W1-T10055: a boot in a new container after a deploy kickstart is attributed to that recycle" in test/every-core-boot-is-attributed-to-its-trigger.test.ts'
+    - claim: "a new container with no recycle row is reported unattributed, never folded into a freshness restart"
+      proof: 'grep: test("W1-T10055: a new container with no recycle row is reported unattributed" in test/every-core-boot-is-attributed-to-its-trigger.test.ts'
+    - claim: "a recycle that follows a latched freshness restart reports the pending restart it could have absorbed"
+      proof: 'grep: test("W1-T10055: a recycle after a latched freshness restart reports the restart it could absorb" in test/every-core-boot-is-attributed-to-its-trigger.test.ts'
+    - claim: "the memo names the smallest change and its operator decisions"
+      proof: 'grep: ## Smallest change in docs/research/core-container-recycles.md'
+  falsifier: |
+    At origin/main none of the files exist. Classifying by run_id alone (ignoring the container id) folds every
+    recycle into an in-container restart and fails the first test; defaulting an unexplained new container to
+    "freshness" fails the second; dropping the outgoing run's decision lookup fails the third. Deleting the fix gives
+    `# fail N`, restoring it `# fail 0`.
+  note: |
+    EFFECT: the operator gets a per-boot attribution and a short list of absorption options with their costs; the
+    build task that follows is filed from it. OPERATOR DECISIONS: any absorb window or wait bound, and whether an
+    unledgered recycle caller must write a row.

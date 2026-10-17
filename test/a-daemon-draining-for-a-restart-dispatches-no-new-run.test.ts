@@ -102,7 +102,7 @@ function harness(gate: "merged" | "run-branches") {
       },
       checkFreshness: () => (stale ? staleOwnCode : { stale: false }),
     } as unknown as DaemonDeps,
-    { max: 3, laneCount: 2 },
+    { freshnessMinLifetimeMs: 0, max: 3, laneCount: 2 },
   );
   return {
     steps, started, release, bothStarted, refillRead, refillReadStarted, run,

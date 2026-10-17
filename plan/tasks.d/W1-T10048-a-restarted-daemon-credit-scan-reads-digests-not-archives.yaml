@@ -1,0 +1,69 @@
+- id: W1-T10048
+  title: "A RESTARTED DAEMON'S CREDIT BACKFILL READS DURABLE DIGESTS, NOT EVERY ROTATION — readMergeCreditedTaskIdsAsync's creditScanMemo has no holder and no durable digest, so the first sweep.credit_backfill pass after each boot streams the whole archive set again (14:32:53–14:36:49Z on 2026-10-17: 275 rotations newest-first, about 309 MB) for about 60 KB of merge-credit rows; boots ran 11 times that day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, the async credit scan's rotation memo becomes durable; which tasks are credited and the scan's early stop are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 9 (rootio2 capture, 2026-10-17)'
+  plan_refs: [W1-T6263, W1-T9710, W1-T9647, W1-T3223]
+  files:
+    - src/lib/status.ts
+    - src/lib/sweep.ts
+    - test/a-restarted-daemon-credit-scan-reads-digests-not-archives.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-10-15..17, every rotation plus live, deduped; logs-8864/rootio2-* captures):
+    - 48 sweep.credit_backfill.summary rows on 10-17 (01:47–15:18Z, about 3 an hour), 68 on 10-16.
+      credit_scan_files_read is 360–365 when credit_scan_complete is true, 383–390 when false, 1 when the live
+      file satisfies it.
+    - Disk reads happen on the first pass of each daemon process only: capture 1 saw 275 distinct rotations opened
+      newest-first 14:32:53–14:36:49Z (libuv-worker 309.2 MB), the first pass after the 14:12:46Z boot; capture 2a
+      (14:45:23–14:53:49Z) saw 0 daemon .gz opens around the 14:46:31Z pass, whose row still reads files_read 390
+      (served from memory). The brief's "~150 MB per pass, 4 an hour" is therefore per boot, not per pass.
+    - The slice: 202 merge-credit rows, about 60 KB, in 10-15..17.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - sweep.ts `runCreditBackfill` → status.ts `readMergeCreditedTaskIdsAsync` →
+      ledger-union.ts `readLedgerUnionRecordsMemoized(dir, creditScanMemo, { liveFirst, newest-first, pattern /verdict/, satisfied })`.
+    - status.ts `creditScanMemo = createLedgerRotationMemo(rows => rows.filter(isMergeCreditLine), { pattern: /verdict/ })`:
+      no `holder`, no `durableDigest`, so it lives only as long as the process.
+    - The durable-digest form (W1-T6263) is already used by cost-anomaly.ts, follow-up-policy.ts, action-results.ts
+      and measurement-cadence.ts.
+    INFERRED: a durable memo turns each boot's first pass into one digest read per rotation (kilobytes each) instead
+    of decompressing about 300 MB.
+    WHY THIS IS NOT ANOTHER TASK: no shard names readMergeCreditedTaskIdsAsync or creditScanMemo's durability; the
+    credit_backfill shards are merged context (W1-T3223 and others). W1-T9647 (merged) only sized creditScanMemo in
+    the memory census. Swept origin/main plan/tasks.d and the plan diffs of every open PR head for
+    readMergeCreditedTaskIdsAsync, credit_backfill and credit backfill (2026-10-17 ~15:40Z).
+  design: |
+    1. `creditScanMemo` gains `{ holder: "status.credit-scan", durableDigest: { reducerVersion: "1" } }`. It keeps
+       `readLedgerUnionRecordsMemoized` (newest-first, live first, early stop); `createIncrementalLedgerUnion` does not
+       serve this read shape and is not used.
+    2. An exported `createCreditScanMemo()` and an `opts.memo` seam let a test build a fresh memo, standing in for a
+       restarted process.
+    3. `readMergeCreditedTaskIdsAsync` returns the call's `retention()` deltas, and sweep.credit_backfill.summary
+       gains `credit_scan_digest_hits`, `credit_scan_digest_misses` and `credit_scan_rotations_loaded`.
+    4. The sync `readMergeCreditedTaskIds` and its memo are unchanged (named here as out of scope).
+    5. TESTS in test/a-restarted-daemon-credit-scan-reads-digests-not-archives.test.ts, `test(` titles verbatim as in
+       the proofs: one memo writes digests over gzip fixtures, each archive is overwritten with same-length garbage
+       and its mtime restored, and a fresh memo must still credit the archived merge.
+  acceptance:
+    - claim: "a fresh process's credit scan reads digests, not rotations, and credits the same tasks"
+      proof: 'grep: test("W1-T10048: a fresh process credit scan reads digests, not rotations" in test/a-restarted-daemon-credit-scan-reads-digests-not-archives.test.ts'
+    - claim: "the credit summary row names its digest hits and loads"
+      proof: 'grep: test("W1-T10048: the credit summary row names its digest hits and loads" in test/a-restarted-daemon-credit-scan-reads-digests-not-archives.test.ts'
+    - claim: "the credit scan memo is a named durable holder"
+      proof: 'grep: holder: "status\.credit-scan" in src/lib/status.ts'
+  falsifier: |
+    At origin/main a fresh memo over the same-length-garbage archives fails to load them, so the archived credit is
+    missing and the first test fails; the summary row carries no digest fields, failing the second. Deleting the fix
+    gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    EFFECT, measured after merge: the first sweep.credit_backfill.summary after a daemon.boot shows
+    credit_scan_digest_hits near credit_scan_files_read and no decompressed archive walk in a capture. Healthy shape:
+    no boot-time credit burst.

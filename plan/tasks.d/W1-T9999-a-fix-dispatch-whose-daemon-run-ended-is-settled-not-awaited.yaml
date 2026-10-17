@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts
-  status: queued
+  status: merged
   priority: 1  # every restart that lands between a sweep's fix dispatch and its first fix row parks that PR's head forever under a false "awaiting its outcome"; restarts run ~17 a day (memory restarts-cost-a-quarter-of-capacity)
   attempts: 0
   rationale: |

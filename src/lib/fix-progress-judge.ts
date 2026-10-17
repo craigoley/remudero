@@ -273,6 +273,21 @@ export function parseFixProgressVerdict(text: string): FixProgressVerdict | unde
   return undefined;
 }
 
+/** W1-T10039: why a PR's first fix round was dispatched without the progress judge. */
+export const FIRST_FIX_ROUND_UNJUDGED_REASON =
+  "first fix round: no round, strike or parked wait yet, so there is no progress to judge";
+
+/**
+ * W1-T10039: an empty history carries no evidence about progress, so a verdict on it is noise. `continue` with
+ * {@link FIRST_FIX_ROUND_UNJUDGED_REASON} when the input has no round, no spent strike and no parked reason;
+ * otherwise undefined, and the caller asks the judge. PURE.
+ */
+export function firstFixRoundVerdict(input: FixProgressInput):
+  { verdict: "continue"; reason: string; judge_skipped: "first-round" } | undefined {
+  if (input.rounds.length > 0 || input.strikesSpent > 0 || input.parkedReason) return undefined;
+  return { verdict: "continue", reason: FIRST_FIX_ROUND_UNJUDGED_REASON, judge_skipped: "first-round" };
+}
+
 export async function judgeFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressResult> {
   if (!judge) return { verdict: "unavailable", reason: "fix progress judge is not wired" };
   try {

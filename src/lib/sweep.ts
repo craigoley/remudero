@@ -1,7 +1,7 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
+import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -5311,7 +5311,36 @@ export interface CiFailure {
 
 export const ARTIFACT_FINALIZE_INTERMEDIARY_403 = "artifact-finalize-intermediary-403" as const;
 
-export type CiInfrastructureFailureSignature = typeof ARTIFACT_FINALIZE_INTERMEDIARY_403;
+/** W1-T9932: a transport reset while finalizing an artifact, after the job's tests all passed (#12415). */
+export const ARTIFACT_FINALIZE_TRANSPORT_RESET = "artifact-finalize-transport-reset" as const;
+
+export type CiInfrastructureFailureSignature =
+  | typeof ARTIFACT_FINALIZE_INTERMEDIARY_403
+  | typeof ARTIFACT_FINALIZE_TRANSPORT_RESET;
+
+const FINALIZE_TRANSPORT_RESET_LINE =
+  /Failed to FinalizeArtifact: Unable to make request:\s*(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|socket hang up)\b/;
+
+/** The classified error line itself, at most 200 chars, for the requeue row. */
+export function ciInfrastructureMatchedError(logTail: string): string | undefined {
+  return logTail.split("\n").find((line) => line.includes("Failed to FinalizeArtifact"))?.trim().slice(0, 200);
+}
+
+/** The `##[group]Run …` header the region names for the failed step, at most 200 chars. */
+export function ciInfrastructureFailedStep(logTail: string): string | undefined {
+  const header = logTail.split("\n").map((line) => line.trim()).findLast((line) => line.startsWith("##[group]Run "));
+  return header?.slice("##[group]".length, "##[group]".length + 200);
+}
+
+/** W1-T9932: the reset counts only after a COMPLETE passing summary; a partial or failing one is genuine. */
+function finalizeResetAfterPassingSummary(text: string): boolean {
+  if ([...text.matchAll(/(\d+)\/(\d+) file\(s\) reported/g)].some((m) => m[1] !== m[2])) return false;
+  const tests = [...text.matchAll(/^\s*# tests (\d+)\s*$/gm)].at(-1);
+  if (!tests || Number(tests[1]) <= 0 || !/^\s*# fail 0\s*$/m.test(text)) return false;
+  const uploadedAt = text.search(/Finished uploading artifact content to blob storage!|artifact upload completed successfully/i);
+  const finalizingAt = text.search(/finalizing artifact upload/i);
+  return tests.index! < uploadedAt && uploadedAt < finalizingAt && finalizingAt < text.search(FINALIZE_TRANSPORT_RESET_LINE);
+}
 
 export function classifyCiInfrastructureFailure(
   signal: Pick<CiFailure, "conclusion" | "logTail">,
@@ -5333,7 +5362,7 @@ export function classifyCiInfrastructureFailure(
   if (uploadedAt >= 0 && finalizingAt > uploadedAt && failedAt > finalizingAt) {
     return ARTIFACT_FINALIZE_INTERMEDIARY_403;
   }
-  return undefined;
+  return finalizeResetAfterPassingSummary(text) ? ARTIFACT_FINALIZE_TRANSPORT_RESET : undefined;
 }
 
 /** W1-T5921 — BACKSTOP: consecutive ci-gate-timeout base refreshes on one PR before escalating. */
@@ -5589,6 +5618,23 @@ export function isCiHarnessPath(path: string): boolean {
   return /^(?:\.github\/workflows\/[^/]+|scripts\/[^/]+|test\/setup\/.+)$/.test(path.replaceAll("\\", "/"));
 }
 
+/** W1-T10065: the one alert shape both code-scanning fix builders write and the refresh decision reads. */
+const CODE_SCANNING_LOCATION = "location: ";
+function codeScanningAlertName(alert: Pick<ScannerAlertIdentity, "alertNumber" | "ruleId">): string {
+  return `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`;
+}
+function codeScanningLocationLine(alert: Pick<ScannerAlertIdentity, "path" | "line">): string {
+  return `${CODE_SCANNING_LOCATION}${alert.path}:${alert.line}`;
+}
+
+/** W1-T10065: the repository path a code-scanning alert failure names; undefined for any other red. */
+export function codeScanningAlertPath(failure: CiFailure): string | undefined {
+  if (!/^CodeQL alert #\d+ \(.+\)$/.test(failure.name)) return undefined;
+  const location = (failure.logTail ?? "").split("\n").find((line) => line.startsWith(CODE_SCANNING_LOCATION));
+  const path = location?.slice(CODE_SCANNING_LOCATION.length).replace(/:\d+$/, "").replaceAll("\\", "/");
+  return path ? path : undefined;
+}
+
 function redIsTimedOutOrFileless(
   failures: readonly CiFailure[],
   failingTestFiles: readonly string[],
@@ -5607,12 +5653,14 @@ export function decideRedBaseRefresh(
   facts: RedBaseRefreshFacts,
 ): RedBaseRefreshDecision {
   const failingTestFiles = failingTestFilesFromCiFailures(failures);
-  const failingSourceFiles = failingSourceFilesFromCiFailures(failures);
+  // W1-T10065: an alert names its file, so it is never fileless and refreshes only on main touching it.
+  const alertSourceFiles = failures.flatMap((failure) => codeScanningAlertPath(failure) ?? []);
+  const failingSourceFiles = [...new Set([...failingSourceFilesFromCiFailures(failures), ...alertSourceFiles])];
   // W1-T7445: a refresh merges the BASE's lines, never the PR's, so an uncovered line the PR's own
   // diff added stays uncovered whatever main does. A source path supports a refresh only while at
   // least one of its uncovered lines is NOT proven PR-added; unreadable added lines prove nothing.
   const prAddedUncovered = new Set<string>();
-  const refreshableSourceFiles = new Set<string>();
+  const refreshableSourceFiles = new Set<string>(alertSourceFiles);
   for (const pathLine of diffCoverageReport(failures)?.uncovered ?? []) {
     const match = /^(.*):(\d+)$/.exec(pathLine.replaceAll("\\", "/"));
     if (!match) continue;
@@ -5697,6 +5745,8 @@ export type CiAnnotationFallback =
   /** W1-T8038: the annotations held only the runner's own timeout or cancellation lines, which name no
    *  test, so the job log was read beside them. */
   | { outcome: "runner-timeout-only" }
+  /** W1-T9932: the annotations named only an artifact finalize failure, so the job log was read for its region. */
+  | { outcome: "artifact-finalize-only" }
   | { outcome: "skipped-limit" }
   | { outcome: "failed"; detail: string };
 
@@ -11274,12 +11324,12 @@ export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy
  *  untrusted; the instruction is a code change on this branch, never a thread or alert action. */
 export function codeqlBlockerCiFailure(alert: ScannerAlertIdentity): CiFailure {
   return {
-    name: `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`,
+    name: codeScanningAlertName(alert),
     logTail: [
       "UNTRUSTED SCANNER EVIDENCE: one unresolved CodeQL review thread is the only merge blocker on",
       "this armed, green, reviewed pull request.",
       `rule: ${alert.ruleId}`,
-      `location: ${alert.path}:${alert.line}`,
+      codeScanningLocationLine(alert),
       `message: ${alert.message}`,
       "Change this branch's code so the finding no longer applies, within the task's existing file",
       "scope. Do not resolve review threads, dismiss alerts, or add suppression comments.",
@@ -13883,12 +13933,12 @@ export function codeScanningHeadSettled(
 /** W1-T5633 — the fix worker's evidence: the alerts and the judge's reason, labelled untrusted. */
 export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], reason: string): CiFailure[] {
   return alerts.map((alert) => ({
-    name: `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`,
+    name: codeScanningAlertName(alert),
     logTail: [
       "UNTRUSTED SCANNER EVIDENCE: CodeQL reported a NEW high-severity alert on this pull request's head,",
       `and the code-scanning judge ruled it must be fixed (${reason.slice(0, 400)}).`,
       `rule: ${alert.ruleId} (severity ${alert.severity})`,
-      `location: ${alert.path}:${alert.line}`,
+      codeScanningLocationLine(alert),
       `message: ${alert.message}`,
       "Change this branch's code so the finding no longer applies, within the task's existing file",
       "scope. Do not dismiss alerts or add suppression comments.",
@@ -16004,6 +16054,7 @@ export async function runSweep(
   const planProofBlockedPrs = new Set<number>();
   const baseRedStandDownPrs = new Set<number>();
   const incidentHeldPrs = new Set<number>(); // W1-T5939: blocker reads awaiting-ci, so no stage stall escalates
+  const infrastructureBlockerByPr = new Map<number, PrBlocker>(); // W1-T9932: a plan-only infra red's re-run or escalation
   const strikeLadderRows = [...ledgerLines];
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
@@ -16068,7 +16119,7 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
-      const result = await judgeFixProgress(input, progressJudge);
+      const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
         step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
         site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
@@ -16225,6 +16276,61 @@ export async function runSweep(
   // memory across passes. See `requeuedCheckKeysFromLedger`'s own doc.
   const requeuedCheckKeys = requeuedCheckKeysFromLedger(ledgerLines);
   const checkDeferrals = checkRequeueDeferralsFromLedger(ledgerLines); // W1-T5920
+  // W1-T3194: one bounded job re-run per `<head>@<check>`, else escalation; the plan-only route shares it (W1-T9932).
+  const requeueInfrastructureFailures = async (
+    pr: OpenPrView,
+    classified: ReadonlyArray<{ failure: CiFailure; signature: CiInfrastructureFailureSignature }>,
+    rollup: RollupCheckEntry[] | undefined,
+    extra: Record<string, unknown> = {},
+  ): Promise<{ handledNames: Set<string>; outcomes: string[]; escalated: boolean }> => {
+    const handledNames = new Set<string>();
+    const outcomes: string[] = [];
+    let escalated = false;
+    for (const { failure, signature } of classified) {
+      handledNames.add(failure.name);
+      const key = `${pr.headSha}@${failure.name}`;
+      let outcome: CheckJobRequeue["kind"] | "repeated" | "missing-job-id";
+      let reason: string | undefined;
+      let note: string | undefined;
+      if (requeuedCheckKeys.has(key)) {
+        outcome = "repeated";
+        reason = "the same infrastructure signature remained after its one bounded job retry";
+      } else if (!failure.jobId) {
+        outcome = "missing-job-id";
+        reason = "the positively classified failure had no resolvable Actions job id";
+      } else {
+        const result = await requeueCheckJob(deps, pr, failure, checkDeferrals.get(key), rollup,
+          { surface: "pr", signature, outcome: "attempting", worker_strike_avoided: true });
+        ({ kind: outcome, note, escalate: reason } = result);
+        if (outcome === "dispatched" || outcome === "failed") requeuedCheckKeys.add(key);
+        if (outcome === "failed") reason = "the single-job rerun API call failed";
+      }
+      const matchedError = ciInfrastructureMatchedError(failure.logTail);
+      const failedStep = ciInfrastructureFailedStep(failure.logTail);
+      appendLine(deps.ledgerPath, {
+        run_id: deps.runId,
+        task_id: pr.taskId ?? "SWEEP",
+        step: "sweep.ci_infrastructure_requeue",
+        surface: "pr",
+        ...extra,
+        pr_number: pr.prNumber,
+        head_sha: pr.headSha,
+        check_name: failure.name,
+        signature,
+        ...(failure.jobId ? { job_id: failure.jobId } : {}),
+        ...(failedStep ? { failed_step: failedStep } : {}),
+        ...(matchedError ? { matched_error: matchedError } : {}),
+        outcome,
+        worker_strike_avoided: true,
+      });
+      outcomes.push(note ?? `${outcome} "${failure.name}"`);
+      if (reason && deps.escalateInfrastructureCheck) {
+        escalated = true;
+        await deps.escalateInfrastructureCheck(pr, failure, reason, signature);
+      }
+    }
+    return { handledNames, outcomes, escalated };
+  };
   const incidentHolds = actionsIncidentHoldsFromLedger(ledgerLines, CHECK_REQUEUE_STEP, CHECK_REQUEUE_DEFERRED_STEP); // W1-T5939
   let actionsIncident: Promise<ActionsIncident> | undefined;
   const readActionsIncident = (): Promise<ActionsIncident> => (actionsIncident ??= Promise.resolve()
@@ -17169,7 +17275,8 @@ export async function runSweep(
         ? `${reason.replace(/\bdispatching\b/g, "would dispatch")} — NOT DISPATCHED this pass: ${notDispatched}`
         : reason;
     if (dispatchHold !== undefined) extraDisposedFields = { ...extraDisposedFields, dispatch_held: dispatchHold.fields.dispatch_held };
-    const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : finalBlocker(ruleBlockerByIndex.get(index)!, {
+    const blocker: PrBlocker = incidentHeldPrs.has(pr.prNumber) ? "awaiting-ci" : infrastructureBlockerByPr.get(pr.prNumber) ??
+      finalBlocker(ruleBlockerByIndex.get(index)!, {
       baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
       baseCaused: isBlockedCi(pr) && classifyRedCause(pr, openPrs) === "base-caused",
       reviewerCodeStaleThisPass: reviewerWithheld,
@@ -17573,6 +17680,39 @@ export async function runSweep(
         `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
         `observed ${inheritedMergeState.observedAt ?? "at an undated prior pass"} for this exact head ` +
         `${pr.headSha.slice(0, 7)} (W1-T4470)`;
+    }
+    // W1-T9932: a plan-only red that is EVERY failure a classified infrastructure step takes W1-T3194's re-run,
+    // admitted as that re-run is, and never the plan route: no plan repair is due (#12415).
+    infrastructureBlockerByPr.delete(pr.prNumber);
+    if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
+      const classified = withoutDownstreamGateFailure(pr.ciFailures ?? []).map((failure) => ({
+        failure, signature: classifyCiInfrastructureFailure({ conclusion: failure.conclusion, logTail: failure.logTail }) }));
+      const infra = classified.flatMap(({ failure, signature }) => signature && failure.jobId ? [{ failure, signature }] : []);
+      if (infra.length > 0 && infra.length === classified.length) {
+        const names = infra.map(({ failure }) => failure.name).join(", ");
+        const deferred = deps.dryRun ? "dry run" : !(deps.actionable?.("blocked-fixable") ?? true)
+          ? deps.standDownReasonFor?.("blocked-fixable") ?? "deferred to full sweep (light pass)" : undefined;
+        let blocker: PrBlocker = "awaiting-ci";
+        if (deferred !== undefined) {
+          reason = `plan-only PR is red only on CI infrastructure (${names}) — infrastructure re-run deferred: ${deferred}`;
+        } else {
+          // The code path's own fresh-rollup admission: a check already green or in flight is not re-run.
+          const rollup = deps.readCiGateRollup ? await deps.readCiGateRollup(pr) : undefined;
+          const fresh = new Set(stillRedRequiredNames(infra.map(({ failure }) => failure.name), rollup));
+          const stillRed = infra.filter(({ failure }) => fresh.has(failure.name));
+          if (stillRed.length === 0) {
+            reason = `plan-only PR is red only on CI infrastructure (${names}) — fresh CI rollup: green or in flight, no requeue`;
+          } else {
+            const { outcomes, escalated } = await requeueInfrastructureFailures(pr, stillRed, rollup, { plan_only: true });
+            if (escalated) blocker = "escalated";
+            reason = `plan-only PR is red only on CI infrastructure (${names}) — ${escalated
+              ? "escalated, never re-run again or sent to a plan repair" : "re-ran the failed job, no plan repair is due"}: ` +
+              outcomes.join("; ");
+          }
+        }
+        infrastructureBlockerByPr.set(pr.prNumber, blocker);
+        disposition = "wait";
+      }
     }
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
@@ -18519,7 +18659,7 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const result = await judgeFixProgress(input, progressJudge);
+                const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
                   step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
                   site: progressParkedReason?.split(":")[0] ?? "fix-strike",
@@ -18965,45 +19105,7 @@ export async function runSweep(
                 return signature ? [{ failure, signature }] : [];
               });
               if (infrastructureFailures.length > 0) {
-                const handledNames = new Set<string>();
-                const outcomes: string[] = [];
-                for (const { failure, signature } of infrastructureFailures) {
-                  handledNames.add(failure.name);
-                  const key = `${pr.headSha}@${failure.name}`;
-                  let outcome: CheckJobRequeue["kind"] | "repeated" | "missing-job-id";
-                  let reason: string | undefined;
-                  let note: string | undefined;
-                  if (requeuedCheckKeys.has(key)) {
-                    outcome = "repeated";
-                    reason = "the same infrastructure signature remained after its one bounded job retry";
-                  } else if (!failure.jobId) {
-                    outcome = "missing-job-id";
-                    reason = "the positively classified failure had no resolvable Actions job id";
-                  } else {
-                    const result = await requeueCheckJob(deps, pr, failure, checkDeferrals.get(key), ciGateRollup,
-                      { surface: "pr", signature, outcome: "attempting", worker_strike_avoided: true });
-                    ({ kind: outcome, note, escalate: reason } = result);
-                    if (outcome === "dispatched" || outcome === "failed") requeuedCheckKeys.add(key);
-                    if (outcome === "failed") reason = "the single-job rerun API call failed";
-                  }
-                  appendLine(deps.ledgerPath, {
-                    run_id: deps.runId,
-                    task_id: pr.taskId ?? "SWEEP",
-                    step: "sweep.ci_infrastructure_requeue",
-                    surface: "pr",
-                    pr_number: pr.prNumber,
-                    head_sha: pr.headSha,
-                    check_name: failure.name,
-                    signature,
-                    ...(failure.jobId ? { job_id: failure.jobId } : {}),
-                    outcome,
-                    worker_strike_avoided: true,
-                  });
-                  outcomes.push(note ?? `${outcome} "${failure.name}"`);
-                  if (reason && deps.escalateInfrastructureCheck) {
-                    await deps.escalateInfrastructureCheck(pr, failure, reason, signature);
-                  }
-                }
+                const { handledNames, outcomes } = await requeueInfrastructureFailures(pr, infrastructureFailures, ciGateRollup);
                 ciFailuresForFix = ciFailuresForFix.filter((failure) => !handledNames.has(failure.name));
                 if (ciFailuresForFix.length === 0) {
                   acted = false;
@@ -19328,7 +19430,7 @@ export async function runSweep(
                 break;
               }
               // The plan-shard correction is not another code-fix round. Every ordinary body-fix
-              // dispatch, including one beyond its former strike ceiling, remains judge-gated.
+              // dispatch after the first (W1-T10039), including one past its former ceiling, is judge-gated.
               const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
               if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;
