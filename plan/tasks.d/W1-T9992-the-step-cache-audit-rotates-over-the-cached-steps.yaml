@@ -1,0 +1,62 @@
+- id: W1-T9992
+  title: "THE STEP-CACHE AUDIT ROTATES OVER THE CACHED STEPS — W1-T9718 made the board oracle audit one slice of the plan's tasks per pass, but W1-T9604's auditStepCache still compares every cached step bucket and both plan-only sets against a full uncached read on every pass, so each oracle pass re-reads every cached step in full; in W1-T9718's bench that is the floor of a pass, about 200 MB rchar at 12 slices"
+  repo: remudero
+  depends_on: [W1-T9718]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern, which cached steps one oracle pass audits; what an audit does on a mismatch is unchanged
+  band_meaning: span
+  origin: 'W1-T9718 build (PR #12483) follow-up named in its PR body; coordinator brief batch1017 item 3'
+  plan_refs: [W1-T9718, W1-T9604, W1-T9719]
+  files:
+    - src/lib/board-projection.ts
+    - test/the-step-cache-audit-rotates-over-the-cached-steps.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main a89ed1c86, where W1-T9718 (PR #12483) has merged. Symbols, not lines.
+    - oracleWith (src/lib/board-projection.ts) builds `first`, an uncached index over the fact store, and passes it to
+      project() and then auditStepCache(first).
+    - auditStepCache walks `[...stepCache.keys()]` and, for each one, asks `fresh.byStep.get(step)`. On the uncached
+      index that is a readStep: every row of that step up to lastSeq, read and JSON-parsed. It does the same for
+      the plan-only sets when planOnlyCache is held. The uncached index's tally counts these reads in the row's
+      `read`.
+    - W1-T9718 limits which TASKS a pass projects (boardOracleSliceOf, BOARD_ORACLE_SLICES, the cursor persisted in
+      meta `board.oracle_slice`). The audit runs in full on every pass whatever N is.
+    OBSERVED offline (W1-T9718 bench, logs-8864/9718-bench.log, head dd5c90d44, 2026-10-16 ~23:45Z; W1-T9604's
+    synthetic store with 779k fact rows and 4,085 plan tasks; /proc/self/io around each pass, warm page cache):
+    mean rchar per pass was 1,170 MB at N=1, 290 MB at N=6 and 201 MB at N=12 (body bytes read 32.7 MB at N=12),
+    with 359 tasks compared per pass at N=12.
+    INFERRED, from W1-T9718's PR body: most of the N=12 floor is this audit, plus the 20 always-audited tasks. The
+    bench did not run the audit on its own, so the split is not measured. The build measures it first (design 4).
+    Near-duplicates: swept origin/main's plan (4,061 shards) and the plan diffs of all 442 remote heads
+    (logs-8864/batch1017-sweep-item3.txt). No shard names auditStepCache or a step-cache audit rotation. W1-T9719
+    (PR #12493, open) edits oracleWith and the plan-only sets, so the second of these two to merge rebases.
+  design: |
+    1. One oracle pass audits the cached steps of ONE slice: each cached step is in slice
+       `boardOracleSliceOf(step, N)` with the same N (opts.oracleSlices ?? BOARD_ORACLE_SLICES) and the same cursor
+       index as the task slice, so N passes audit every cached step once. The two plan-only sets are one more
+       member of the rotation, under a fixed key.
+    2. A step cached since the last pass is audited on its first pass, whatever its slice. A step whose earlier
+       audit mismatched has already dropped the whole cache, as today. With N = 1 every cached step is audited
+       every pass, as before.
+    3. The row measures itself. `step_cache.audit` gains `slice: { index, of }`, `audited` (steps compared) and
+       `held_back` (cached steps not audited this pass). The pass's `read` keeps counting the audit's reads.
+    4. Measure before and after on W1-T9718's bench store (logs-8864/9718-bench/bench.mts) at N = 6 and N = 12:
+       rchar and read.bytes per pass with the audit as on main and as rotated. Put the split in the PR body.
+    No new constant: the audit uses W1-T9718's N, whose value is still the operator's pending decision.
+    Tests go in test/the-step-cache-audit-rotates-over-the-cached-steps.test.ts, titled verbatim as in the proofs.
+    Build a projection over a fact store with several cached steps (a few board builds warm the cache), run N oracle
+    passes with oracleSlices N, and count the fact rows each audit reads.
+  acceptance:
+    - claim: "N oracle passes audit every cached step once, and one pass reads only its slice of the cached steps"
+      proof: 'grep: test("W1-T9992: N oracle passes audit every cached step once and each reads only its slice" in test/the-step-cache-audit-rotates-over-the-cached-steps.test.ts'
+    - claim: "a corrupted cached step is found within N passes and drops the cache, and with N = 1 every step is audited every pass"
+      proof: 'grep: test("W1-T9992: a corrupted cached step is found within N passes and one slice audits every step" in test/the-step-cache-audit-rotates-over-the-cached-steps.test.ts'
+  falsifier: |
+    On origin/main a89ed1c86, with oracleSlices N > 1, one oracle pass still asks the uncached index for every cached
+    step. The fact rows its audit reads equal those of all cached steps, not one slice's, so the first test fails.
+    The second passes before and after; it guards against a rotation that never reaches a step.
