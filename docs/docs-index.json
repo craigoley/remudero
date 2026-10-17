@@ -832,7 +832,7 @@
     {
       "path": "docs/semgrep-native-ce.md",
       "title": "Native hash-locked Semgrep Community Edition",
-      "summary": "Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.",
+      "summary": "Scan uses an independently audited source closure, isolated native engine and bounded disposable MCP controls.",
       "grepHint": "Native hash-locked Semgrep Community Edition"
     },
     {
