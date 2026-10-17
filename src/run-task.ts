@@ -42535,7 +42535,8 @@ export function decideRegisteredFixOwnerRecovery(
   if (snapshot.attachmentState !== "exact") return { kind: "keep", reason: "branch_probe_unreadable" };
   if (snapshot.treeState === "untracked_dirty") {
     return snapshot.remoteState === "exact" && snapshot.historyState !== "unknown" &&
-      snapshot.localSha && snapshot.remoteSha && snapshot.localSha !== snapshot.remoteSha &&
+      // W1-T7998: at the PR's current head too; the dead, idle owner held #10829 and #12582 forever.
+      snapshot.localSha && snapshot.remoteSha &&
       snapshot.claimState === "clear" && snapshot.processState === "clear" &&
       snapshot.ageMs !== null && Number.isFinite(snapshot.ageMs) &&
       snapshot.idleBoundMs != null && Number.isFinite(snapshot.idleBoundMs) && snapshot.idleBoundMs > 0 &&
