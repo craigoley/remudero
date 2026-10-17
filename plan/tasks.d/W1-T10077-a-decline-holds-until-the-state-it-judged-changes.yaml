@@ -1,0 +1,68 @@
+- id: W1-T10077
+  title: "A DECLINE HOLDS UNTIL THE STATE IT WAS GIVEN ON CHANGES, AND THE VERIFY-HUMAN JUDGE'S SETTLED VERDICTS OUTLIVE ROTATION: priorVerifyHumanVerdicts reads only the live ledger, where verify_human.judged sits at the 200-row carry cap, so a settled shard is re-judged; and a decline records no observed state, so a material change cannot re-open it with a stated reason"
+  repo: remudero
+  depends_on: []  # builds on the decline receipt store (state/inbox-verdict-receipts.json) from PR run-unfiled-1792264108185; see rationale
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, when an operator's decline stops holding; the judge's prompt and decisions are unchanged
+  band_meaning: span
+  origin: "operator console end-to-end test 2026-10-17 fault (c): verify-human:W3-T7, declined 2026-10-13, came back under Needs your decision"
+  plan_refs: [W1-T3188, W1-T2604, W1-T3407, W1-T3921, W1-T9846]
+  files:
+    - src/lib/verify-human-judge.ts
+    - src/lib/panel-graph.ts
+    - src/run-task.ts
+    - test/a-decline-holds-until-the-state-it-judged-changes.test.ts
+  status: queued
+  priority: 1  # operator 2026-10-17: a declined item must stay declined until restored or materially changed
+  attempts: 0
+  rationale: |
+    OBSERVED on the fleet host (core ledger union, niced zgrep of named archives):
+    - 2026-10-13T02:56:30Z panel.proposal_declined verify-human:W3-T7, origin rmd-cli, reason "Later-wave
+      design-review skill whose dependencies (W3-T2, W1-T44) are unmerged ... reversible with rmd restore",
+      archived in ledger.2026-10-13T03-41-58-104Z.ndjson.gz; 10-13T11:14Z inbox.classified state declined;
+      10-14T01:54:18Z inbox.thread_answered action question (origin inbox-responder). The live file now holds
+      exactly 200 panel.proposal_declined rows (193 fleet-lane folds), none for W3-T7.
+    - The re-surfacing itself is fixed by the receipt store in PR run-unfiled-1792264108185 (every classifier
+      and the responder read archived declines). Two gaps remain, both this task:
+    - run-task.ts priorVerifyHumanVerdicts(rows) is fed readLedgerLines(ledgerPath), the live file only. The live
+      file holds 201 verify_human.judged rows, the cap. A settled shard whose row rotates away is due again
+      (shardsNeedingJudgement), costs a judge call, and its needs_operator verdict re-stages the proposal.
+    - A decline carries a reason and no observed state. verify-human-judge.ts observedStateKey already names the
+      facts that can change the answer (deps merged, cited in src, why-me receipts). Today a decline never lapses:
+      a dependency merging after the decline cannot bring the item back, and nothing tells the operator why it would.
+  design: |
+    1. The judge's prior verdicts come from the archive union plus the live file (the slow lane's union read already
+       collects verify_human.judged, panel-graph.ts readRetainedHumanReleases), persisted beside the decline receipts
+       and read by routeVerifyHumanBacklog's callers, so rotation never re-opens a settled observed state.
+    2. A decline of a verify-human proposal records the observed state key current at the decline in its ledger row
+       (`observed_state`) and its receipt.
+    3. A declined verify-human proposal whose CURRENT observed state key differs from the decline's lapses: it is
+       classified as before the decline, and its item carries `reopenedBecause` naming what changed in words the
+       operator reads (for example "W3-T2 and W1-T44 have merged since you declined this on 2026-10-13"). A decline
+       with no recorded state (every row before this task) never lapses. `rmd restore` still reverses any decline.
+    4. The judge does not judge a proposal while its decline holds. The lapse test is one function,
+       `declineLapse(receipt, currentObservedState)` in verify-human-judge.ts, called by panel-graph.ts's classifier;
+       the receipt store module from the PR above records `observed_state` beside each receipt.
+    5. TESTS in test/a-decline-holds-until-the-state-it-judged-changes.test.ts, test( titles verbatim as below.
+  acceptance:
+    - claim: "a settled verify-human verdict that only an archive holds is not judged again"
+      proof: 'grep: W1-T10077: a settled verify-human verdict that only an archive holds is not judged again in test/a-decline-holds-until-the-state-it-judged-changes.test.ts'
+    - claim: "a decline holds while the observed state it recorded is unchanged"
+      proof: 'grep: W1-T10077: a decline holds while the observed state it recorded is unchanged in test/a-decline-holds-until-the-state-it-judged-changes.test.ts'
+    - claim: "a dependency merging after a decline re-opens the item and says why"
+      proof: 'grep: W1-T10077: a dependency merging after a decline re-opens the item and says why in test/a-decline-holds-until-the-state-it-judged-changes.test.ts'
+    - claim: "the inbox classifier asks the judge's lapse test"
+      proof: 'grep: declineLapse( in src/lib/panel-graph.ts'
+    - claim: "a decline with no recorded state never lapses"
+      proof: 'grep: W1-T10077: a decline with no recorded state never lapses in test/a-decline-holds-until-the-state-it-judged-changes.test.ts'
+  falsifier: |
+    At origin/main a verify_human.judged row present only in an archive leaves its shard due, so the first test
+    fails; a decline row has no observed_state, so the third test finds the item still declined after its
+    dependency merges and fails.
+  note: |
+    API CONTRACT for the console (new, additive): a not-ready or ready inbox item may carry `reopenedBecause`
+    (string) when a decline lapsed on a material change. EFFECT, measured after merge: verify_human.judged rows per
+    observed state key stay at one across rotations.
