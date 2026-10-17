@@ -6290,6 +6290,8 @@ export async function runDaemon(
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
+      // A run the harness yielded before its PR is walked ahead of fresh starts, so a yield never costs its queue place.
+      resumableTaskIds: new Set(resumableHandoffs.keys()),
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
       excludeIds: new Set([
@@ -6936,6 +6938,8 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
+            resumableTaskIds: new Set(resumableHandoffs.keys()),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
@@ -7225,7 +7229,8 @@ export async function runDaemon(
       }
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts], ...latchAdmissions.get(task.id) } : {}) });
-      log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null });
+      log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null,
+        ...(resumableHandoffs.has(task.id) ? { resumes_handoff: resumableHandoffs.get(task.id)!.branch } : {}) });
       // The first wave is sampled once, by the tick (below): a refill is the lane change.
       if (isRefill) sampleLaneChange();
     };

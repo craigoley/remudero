@@ -157,8 +157,8 @@ test("the daemon's growth is measured from its own /proc status, with no daemon.
   const growth = rows[0]!.daemon_growth as Array<{ instance: string; growthMib?: number; basis?: string; own?: boolean }>;
   assert.equal(growth.length, 1, "the instance's own entries are its own: no 'not readable' second instance");
   assert.equal(growth[0]!.instance, "state2", "named as the ledger names it, not by the root's basename");
-  assert.equal(growth[0]!.growthMib, (2936012 - 2097152) / 1024, "VmHWM - VmRSS of the daemon pid");
-  assert.match(growth[0]!.basis ?? "", /^proc 777: VmHWM 2867 MiB - VmRSS 2048 MiB$/);
+  assert.equal(growth[0]!.growthMib, (2936012 - 2097152) / 1024, "one sample: VmHWM - VmRSS of the daemon pid (W1-T9972)");
+  assert.match(growth[0]!.basis ?? "", /^proc 777: VmHWM 2867 MiB - VmRSS 2048 MiB \(the lifetime peak: 1 daemon sample row/);
   const kinds = (rows[0]!.uncertainty as Uncertainty).map((u) => u.kind);
   assert.ok(!kinds.includes("daemon-growth-unmeasured"), `no growth margin is added: ${kinds.join(", ")}`);
   assert.equal(rows[0]!.instance, "state2");

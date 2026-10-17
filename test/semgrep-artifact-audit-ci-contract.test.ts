@@ -14,7 +14,8 @@ test('Semgrep policy changes require pinned audit controls before every candidat
  const flow=parse(readFileSync(workflow,'utf8')),job=flow.jobs['runtime-compatibility'];
  const scope=job.steps.find((s:any)=>s.id==='scope');
  for(const path of ['requirements.txt','build-requirements.txt','runtime-compatibility-audit.py',
-  'runtime_audit_test_fixtures.py','test_runtime_compatibility_audit.py'])assert.ok(scope.run.includes('.github/semgrep/'+path));
+  'runtime_audit_test_fixtures.py','test_runtime_compatibility_audit.py','runtime_audit_metadata_tests.py',
+  'runtime_source_recipe.py','prepare-source-build.py','source-build-policy.json'])assert.ok(scope.run.includes('.github/semgrep/'+path));
  assert.ok(scope.run.includes('.github/workflows/semgrep-runtime-compatibility.yml'));
  assert.ok(scope.run.includes('test-policy=true'));assert.ok(scope.run.includes('test-policy=false'));
  assert.equal(flow.on.pull_request.paths,undefined);assert.equal(flow.on.pull_request['paths-ignore'],undefined);
@@ -52,7 +53,7 @@ test('Semgrep Python audit has its own CodeQL language without importing candida
 
 test('Semgrep unit receipt rejects incomplete inventory source drift skips and qualification transfer',()=>{
  // Pure receipt/controller fixtures only: these claims are synthetic, NOT an
- // execution of Python 3.12.15 or of the 107 native artifact-audit controls.
+ // execution of Python 3.12.15 or of the 168 artifact-audit source controls.
  const script=String.raw`
 import ast, copy, hashlib, json, pathlib, sys, tempfile, types
 source=pathlib.Path(sys.argv[1]); raw=source.read_bytes()
@@ -65,7 +66,7 @@ expected=dict(p.AUDIT_TEST_SOURCES);expected[source.name]=p.digest(raw)
 for name, value in p.AUDIT_TEST_SOURCES.items():
     assert p.digest(source.with_name(name).read_bytes()) == value
 r={"schema":"semgrep-audit-unit-controls/v1","state":"SOURCE_MODULE_CONTROLS_PASS",
-   **{k:107 for k in ("selected","executed","pass")},
+   **{k:168 for k in ("selected","executed","pass")},
    **{k:0 for k in ("fail","error","skipped","unrun","expectedFailures","unexpectedSuccesses")},
    **{k:True for k in ("complete","successful","inventoryClosed","successfulInventoryClosed","isolated","noSite","exactTargetPatchObserved")},
    **{k:False for k in ("qualified","linuxQualification","pinnedRuntimeQualified","runnerQualified")},
@@ -111,6 +112,58 @@ print(json.dumps({"positive":1,"refusedMutants":blocked,"inventory":len(ids)}))
  const run=spawnSync('python3',['-I','-S','-',auditor.pathname,cases.pathname],
   {input:script,encoding:'utf8',timeout:10000,maxBuffer:1<<20});
  assert.equal(run.error,undefined);assert.equal(run.signal,null);assert.equal(run.status,0,run.stderr);
- const result=JSON.parse(run.stdout);assert.equal(result.positive,1);assert.equal(result.inventory,107);
+ const result=JSON.parse(run.stdout);assert.equal(result.positive,1);assert.equal(result.inventory,168);
  assert.ok(result.refusedMutants>=90);
+});
+
+test('Semgrep source recipe stages only exact committed first-party bytes within the existing bound',()=>{
+ const flow=parse(readFileSync(workflow,'utf8')),job=flow.jobs['runtime-compatibility'];
+ const unit=job.steps.find((step:any)=>step.env?.AUDIT_PHASE==='unit');
+ for(const [name,key] of [['runtime_source_recipe.py','SOURCE_RECIPE_SHA256'],
+  ['prepare-source-build.py','ASSEMBLER_SHA256'],['source-build-policy.json','SOURCE_POLICY_SHA256']] as const){
+  const raw=readFileSync(new URL('../.github/semgrep/'+name,import.meta.url));
+  assert.ok(raw.length>0&&raw.length<=65536);assert.equal(job.env[key],hash(raw));
+  assert.ok(unit.run.includes('("'+name+'"'));
+ }
+ assert.ok(readFileSync(cases).length<=65536,'move unchanged controls, never raise the staging ceiling');
+ assert.ok(unit.run.includes('assert 0 < size <= 65536'));
+ assert.ok(unit.run.includes('rb"100644 blob'));
+ const verified=unit.run.indexOf('hashlib.sha256(raw).hexdigest() == expected'),exec=unit.run.indexOf('os.execv');
+ assert.ok(verified>=0&&exec>verified);
+ assert.ok(unit.run.includes('(stage / name).open("xb")'));
+});
+
+test('Semgrep source assembly stays in the isolated parent and cannot activate Scan or bypass original audits',()=>{
+ const source=readFileSync(new URL('../.github/semgrep/runtime_source_recipe.py',import.meta.url),'utf8');
+ const code=readFileSync(auditor,'utf8');
+ assert.ok(source.includes('assembler.prepare(inputs / SOURCE_ARCHIVE[0], inputs / DONOR_ARCHIVE[0], assembled)'));
+ assert.ok(source.includes('need(sys.flags.isolated and sys.flags.no_site'));
+ const bound=source.indexOf('validate_assembly_receipt(receipt)\n    wheel =');
+ const publish=source.indexOf('once(root / "artifacts" / SOURCE_WHEEL, wheel)');
+ assert.ok(bound>=0&&publish>bound);
+ const verified=source.indexOf('verify_code_bytes(raw, policy)'),exec=source.indexOf('exec(compile(raw,');
+ assert.ok(verified>=0&&exec>verified);
+ assert.ok(source.includes('validate_source_wheel(wheel)'));
+ assert.ok(source.includes('"schema": "rmd-semgrep-source-assembly/v1"'));
+ assert.ok(source.includes('raw_release("semgrep", "1.181.0", filename, sha256, inputs / filename)'));
+ assert.ok(source.includes('excluded.add("semgrep")'));
+ assert.ok(code.includes('recipe.prepare_source_artifact(root, _raw_release, _once, _json_once)'));
+ assert.ok(code.includes('result = audit_locked_artifacts(build, runtime, artifacts, api)'));
+ assert.ok(code.includes('_require_original_audit(root, inventory)'));
+ assert.ok(code.includes('_metadata_signature(built, api) == _metadata_signature(original, api)'));
+ assert.ok(code.includes('recipe["cliVersion"]'));
+ assert.ok(source.includes("m.version('semgrep')=='1.181.0+remudero.1'"));
+ assert.ok(source.includes("semgrep-core version: 1.181.0 (0f6e09374a)"));
+ assert.ok(!source.includes('subprocess.run([sys.executable'));
+ assert.ok(!source.includes('os.environ')&&!source.includes('sys.path'));
+ assert.ok(source.includes('previous = os.umask(0o077)'));
+ assert.ok(source.includes('finally:\n        os.umask(previous)'));
+ assert.ok(source.includes('target.mkdir(mode=0o700)'));
+ assert.ok(!source.includes('os.chmod('));
+ assert.ok(code.includes('create_private_venv(root, "build-env", _run)'));
+ assert.ok(code.includes('create_private_venv(root, "runtime-env", _run)'));
+ const controls=readFileSync(new URL('../.github/semgrep/runtime_audit_metadata_tests.py',import.meta.url),'utf8');
+ assert.ok(controls.includes('def test_source_recipe_27_real_stdlib_creation(self):'));
+ assert.ok(controls.includes('r.create_private_venv(root, "runtime-env", self.p._run)'));
+ assert.ok(controls.includes('H.assert_frozen_inputs(self.c)'));
 });

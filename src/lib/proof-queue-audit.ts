@@ -31,6 +31,7 @@ import {
 } from "./review.js";
 import { proofGrepTargets } from "./status.js";
 import { zeroMatchTitleIsReportable } from "./task-linter.js";
+import { resolveTestPath } from "./test-path-resolver.js";
 
 /** The three ways a proof that parses as executable can still never resolve, plus a fourth that
  *  only exists for the credited pass (W1-T2280) — see {@link CREDITED_PROOF_QUEUE_AUDIT_CAUSES}. */
@@ -92,6 +93,8 @@ export interface ProofQueueAuditReport {
 }
 
 export interface ProofQueueAuditOpts {
+  /** Checkout for resolving a moved test; defaults to the process's current checkout. */
+  root?: string;
   /** The reviewer's own `resolveNameFilteredCandidates` (lib/review.ts), bound to a real
    *  checkout by the caller. Absent ⇒ `name-filtered-zero-match` is never reported. */
   resolveNameFilteredCandidates?: (rawName: string) => NameFilterResolution;
@@ -103,7 +106,7 @@ export interface ProofQueueAuditOpts {
    *  `isMergeCreditLine` (lib/status.ts). Absent ⇒ no task is ever treated as credited. */
   creditedIds?: ReadonlySet<string>;
   /** Does `symbol` occur in `path`'s real file contents, in the checkout the caller bound this
-   *  to? Injected so this module stays pure (no fs, no exec). Absent ⇒ a `grep-path-absent`
+   *  to? Injected so callers read their bound checkout. Absent ⇒ a `grep-path-absent`
    *  candidate is never checked for relocation and is reported as plain absence. */
   symbolFoundAt?: (symbol: string, path: string) => boolean;
   /** Does the basic-regex `pattern` match a line of `path` at the checkout? `false` covers no match AND an
@@ -139,8 +142,13 @@ function ask<A extends unknown[], R>(f: ((...a: A) => R) | undefined, ...a: A): 
 }
 
 /** Reports every proof in `tasks` that can never resolve (never a forward reference, see the module
- *  doc) and names the open tasks whose executable proofs all resolve. Pure; a throwing predicate is ignorance. */
+ *  doc) and names the open tasks whose executable proofs all resolve. A throwing predicate is ignorance. */
 export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpts = {}): ProofQueueAuditReport {
+  const resolvedPath = (path: string): string => {
+    if (ask(opts.pathExists, path) !== false) return path;
+    const resolution = resolveTestPath(path, { root: opts.root ?? process.cwd() });
+    return "path" in resolution ? resolution.path : path;
+  };
   const offenders: ProofQueueAuditOffender[] = [];
   const relocated: ProofQueueAuditOffender[] = [];
   const resolvedFully: string[] = [];
@@ -171,7 +179,7 @@ export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpt
       if (whitelisted.kind === "test") {
         // A literal path is the forward-reference shape; only a credited task has no forward left (W1-T2280).
         if (!whitelisted.nameFiltered) {
-          const exists = ask(opts.pathExists, whitelisted.label);
+          const exists = ask(opts.pathExists, resolvedPath(whitelisted.label));
           if (exists) resolved++;
           if (credited && exists === false) {
             offenders.push({ taskId: task.id, criterionIndex, cause: "credited-test-path-absent", claim, proof });
@@ -192,11 +200,12 @@ export function proofQueueAudit(tasks: readonly Task[], opts: ProofQueueAuditOpt
       const path = whitelisted.args[1] === "--" ? whitelisted.args[3] : undefined;
       const pattern = whitelisted.args[1] === "--" ? whitelisted.args[2] : undefined;
       if (path === undefined) return;
-      const exists = ask(opts.pathExists, path);
+      const target = resolvedPath(path);
+      const exists = ask(opts.pathExists, target);
       if (exists !== false) {
         // A plan record quoting its own proof would match itself; a fenced grep carries its own flags.
         const own = path.startsWith("plan/") || whitelisted.authorSelectedArgv === true;
-        if (exists && !own && pattern !== undefined && ask(opts.grepMatches, pattern, path)) resolved++;
+        if (exists && !own && pattern !== undefined && ask(opts.grepMatches, pattern, target)) resolved++;
         return;
       }
       const relocatedTo =

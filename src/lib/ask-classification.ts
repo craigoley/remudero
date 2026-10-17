@@ -85,11 +85,11 @@ export function projectClassifiedHumanGates(sources: readonly ClassifiedHumanGat
 }
 
 export function projectProposalHumanGates(
-  classifications: readonly Pick<InboxClassification, "proposalId" | "state" | "trigger">[],
+  classifications: readonly Pick<InboxClassification, "proposalId" | "state" | "trigger" | "retirement">[],
   instance = "core",
 ) {
   const gates: ClassifiedHumanGateSource["gates"] = classifications.map((item) => ({
-    classification: { kind: "proposal", state: item.state, owner: inboxOwner({ id: item.proposalId }) },
+    classification: { kind: "proposal", state: item.state, owner: item.retirement?.state === "restored_for_review" ? "operator" : inboxOwner({ id: item.proposalId }) },
     kind: "proposal", subject: item.proposalId, ownerSurface: "inbox", openedAt: null, url: null,
     reason: item.trigger?.description ?? (item.state === "ready" ? "proposal is ready to ratify" : "proposal needs reframing"),
     resolutionVerb: item.state === "ready" ? "ratify" : "reframe",

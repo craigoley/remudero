@@ -20,9 +20,9 @@
  * resident), summed, plus ONE tail allowance: the largest single remaining spike above a typical, max over trees of
  * (remaining to the p90 - remaining to the median). Both quantiles are learned (host-memory-learning.ts); a class with
  * no samples has its median equal to its estimate, so its whole claim counts and it adds no tail.
- * The daemon is one more such tail: its growth back to its peak (VmHWM - VmRSS) splits into a TYPICAL part, its median
- * rss+swap over the last hour less its latest sample, and the rest, which competes with the trees' tails for the one
- * allowance. Too few samples: its whole growth is typical. The HOST check applies the same rule across every live tree
+ * The daemon is one more such tail: its growth back to its LAST-HOUR peak rss+swap (W1-T9972: never its boot-time VmHWM)
+ * splits into a TYPICAL part, its median rss+swap over the last hour, each less its current rss+swap, and the rest,
+ * which competes with the trees' tails for the one allowance. Too few samples: VmHWM - VmRSS, all of it typical. The HOST check applies the same rule across every live tree
  * and every measured daemon: all typical parts, plus the one largest tail. An unseen start carries its class median
  * too (W1-T9762), and a live tree's typical part and tail are scaled by its class's measured survival at its age: the
  * share of the class's trees that peaked later than that (host-memory-learning.ts `survivalAt`).
@@ -294,7 +294,9 @@ export interface ShadowInputs {
    *  part of `growthMib` its median footprint accounts for; absent, the whole growth is typical and it adds no tail. */
   daemonGrowth: Array<{
     instance: string; samples: number; growthMib?: number; typicalMib?: number; reason?: string; basis?: string;
-    typicalBasis?: string; own?: boolean;
+    typicalBasis?: string; own?: boolean; currentBasis?: string;
+    /** W1-T9972: the proc's VmHWM - VmRSS and its basis, for comparison only (it sizes the growth only on too few samples). */
+    lifetimePeakGrowthMib?: number; lifetimePeakBasis?: string;
     /** What the daemon's persisted footprint held for this verdict (daemon-footprint.ts), or why it was unread. */
     footprint?: string;
   }>;
@@ -403,6 +405,10 @@ export interface ShadowVerdict {
     daemonGrowthTypicalMib: number;
     /** The largest single daemon tail: growth above its typical. */
     daemonGrowthTailMib: number;
+    /** W1-T9972: every daemon's VmHWM - VmRSS summed (null: none read), for comparison only. */
+    daemonGrowthLifetimePeakMib: number | null;
+    /** Whose tail `hostTailMib` is: "daemon:<instance>", the claim's worker class, "start", or null with no tail. */
+    hostTailOwner: string | null;
     coldStartReserveMib: number;
     marginMib: number;
     projectedAvailableMib: number | null;
@@ -471,6 +477,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let tailOwn = 0;
   let typicalAll = 0;
   let tailAll = 0;
+  let tailAllOwner: string | null = null;
   let typicalUndecayed = 0;
   let tailUndecayed = 0;
   const claims: ShadowClaim[] = [];
@@ -495,7 +502,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     const { share, typical, charged, chargedTail } = claim(entry.estimateMib, entry.typicalMib, resident, released, decay.factor ?? 1);
     unrealized += share;
     typicalAll += charged;
-    tailAll = Math.max(tailAll, chargedTail);
+    if (chargedTail > tailAll) {
+      tailAll = chargedTail;
+      tailAllOwner = entry.id === inputs.start.reservationId ? "start" : entry.workerClass;
+    }
     typicalUndecayed += typical;
     tailUndecayed = Math.max(tailUndecayed, share - typical);
     const own = entry.status === "owned";
@@ -522,7 +532,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     const own = claim(inputs.start.estimateMib, inputs.start.typicalMib, 0, false);
     unrealized += own.share;
     typicalAll += own.typical;
-    tailAll = Math.max(tailAll, own.share - own.typical);
+    if (own.share - own.typical > tailAll) {
+      tailAll = own.share - own.typical;
+      tailAllOwner = "start";
+    }
     typicalUndecayed += own.typical;
     tailUndecayed = Math.max(tailUndecayed, own.share - own.typical);
     unrealizedOwn += own.share;
@@ -541,15 +554,21 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let daemonGrowth = 0;
   let daemonTypical = 0;
   let daemonTail = 0;
+  let daemonTailOwner: string | null = null;
+  let lifetimePeak: number | null = null;
   let ownDaemonGrowth = 0;
   let ownDaemonTypical = 0;
   let ownDaemonTail = 0;
   for (const growth of inputs.daemonGrowth) {
+    if (growth.lifetimePeakGrowthMib !== undefined) lifetimePeak = (lifetimePeak ?? 0) + growth.lifetimePeakGrowthMib;
     if (growth.growthMib !== undefined) {
       const typical = Math.max(0, Math.min(growth.typicalMib ?? growth.growthMib, growth.growthMib));
       daemonGrowth += growth.growthMib;
       daemonTypical += typical;
-      daemonTail = Math.max(daemonTail, growth.growthMib - typical);
+      if (growth.growthMib - typical > daemonTail) {
+        daemonTail = growth.growthMib - typical;
+        daemonTailOwner = `daemon:${growth.instance}`;
+      }
       if (growth.own) {
         ownDaemonGrowth += growth.growthMib;
         ownDaemonTypical += typical;
@@ -561,6 +580,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   const containerTail = Math.max(tailOwn, ownDaemonTail);
   const containerClaim = inputs.jointClaim ? inputs.jointClaim.ownMib + ownDaemonTail : typicalOwn + containerTail;
   const hostTail = Math.max(tailAll, daemonTail);
+  const hostTailOwner = inputs.jointClaim || daemonTail > tailAll ? daemonTailOwner : tailAllOwner;
   const hostClaim = inputs.jointClaim ? inputs.jointClaim.hostMib + daemonTail : typicalAll + hostTail;
   const hostClaimUndecayed = inputs.jointClaim ? hostClaim : typicalUndecayed + Math.max(tailUndecayed, daemonTail);
 
@@ -650,6 +670,8 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       daemonGrowthMib: daemonGrowth,
       daemonGrowthTypicalMib: daemonTypical,
       daemonGrowthTailMib: daemonTail,
+      daemonGrowthLifetimePeakMib: lifetimePeak,
+      hostTailOwner,
       coldStartReserveMib: coldStartReserve,
       marginMib,
       projectedAvailableMib: projected,
@@ -1417,7 +1439,7 @@ export function daemonGrowthFromStatus(status: string): { growthMib: number; pea
  */
 export function daemonGrowthOf(
   rows: readonly TailRow[], now: number, minSamples: number, pid?: number,
-): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+): SeriesGrowth {
   const recent = rows.filter((r) => DAEMON_SAMPLE_STEPS.has(r.step) && r.bytes !== undefined && now - r.at <= HOUR_MS &&
     (pid === undefined || r.pid === undefined || r.pid === pid));
   return seriesGrowth(recent.map((r) => r.bytes!), minSamples, "daemon sample row(s)");
@@ -1427,21 +1449,21 @@ export function daemonGrowthOf(
  *  daemon climbs back toward the instance's footprint, so a prior pid's samples still say what is typical). */
 export function footprintGrowthOf(
   samples: readonly FootprintSample[], now: number, minSamples: number,
-): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+): SeriesGrowth {
   const recent = samples.filter((s) => s.at <= now && now - s.at <= HOUR_MS);
   return seriesGrowth(recent.map((s) => s.bytes), minSamples, "daemon footprint sample(s)");
 }
 
-function seriesGrowth(
-  bytes: readonly number[], minSamples: number, unit: string,
-): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+function seriesGrowth(bytes: readonly number[], minSamples: number, unit: string): SeriesGrowth {
   if (bytes.length < minSamples) return { samples: bytes.length, reason: `${bytes.length} ${unit} in the last hour` };
   const latest = bytes.at(-1)!;
   const sorted = [...bytes].sort((a, b) => a - b);
   const mid = sorted.length >> 1;
   const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
-  const growthMib = Math.max(0, Math.max(...bytes) - latest) / MIB;
-  return { samples: bytes.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - latest) / MIB) };
+  const peak = Math.max(...bytes);
+  const growthMib = Math.max(0, peak - latest) / MIB;
+  return { samples: bytes.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - latest) / MIB),
+    peakMib: peak / MIB, medianMib: median / MIB, latestMib: latest / MIB };
 }
 
 /**
@@ -1625,7 +1647,9 @@ function rotationOf(ports: ShadowMemoryPorts, root: string): number | undefined 
   }
 }
 
-type SeriesGrowth = { samples: number; growthMib?: number; typicalMib?: number; reason?: string };
+export type SeriesGrowth = {
+  samples: number; growthMib?: number; typicalMib?: number; reason?: string; peakMib?: number; medianMib?: number; latestMib?: number;
+};
 
 /**
  * The daemon's rss+swap series for this instance: its persisted footprint (daemon-footprint.ts), unless the ledger tail
@@ -1645,40 +1669,54 @@ function daemonSeries(
   return { series: { samples: 0, reason: `ledger tail unreadable: ${(tail as { unread: string }).unread}` }, basis: "none", footprint };
 }
 
-/** This instance's daemon growth: measured from the daemon's /proc status when its pid is known and readable, else from
- *  its sample series (above), else unmeasured with the reasons for both. */
+/** This instance's daemon growth (W1-T9972): its last-hour series' peak less its current rss+swap (the proc's VmRSS +
+ *  VmSwap when readable, else the latest sample); too few samples, the proc's VmHWM - VmRSS; else unmeasured with the
+ *  reasons for both. The proc's lifetime figure rides along for comparison. */
 function ownDaemonGrowth(
   ports: ShadowMemoryPorts,
   tail: ReturnType<typeof readTailRows>,
   now: number,
   policy: HostMemoryBudgetPolicy,
   root: string,
-): SeriesGrowth & { basis?: string; typicalBasis?: string; footprint?: string } {
-  let procReason: string;
+): Omit<ShadowInputs["daemonGrowth"][number], "instance"> {
+  let procReason = "";
   const pid = ports.daemonPid();
   const { series, basis, footprint } = daemonSeries(ports, tail, now, policy.daemonGrowthMinSamples, root, pid);
+  let proc: { growthMib: number; peakMib: number; residentMib: number; swapMib: number } | undefined;
   if (pid === undefined) procReason = "no daemon pid in this process";
   else {
     try {
-      const measured = daemonGrowthFromStatus(ports.readFile(`/proc/${pid}/status`));
-      if (measured) {
-        // The peak is the proc's; how much of the climb back to it is typical comes from the sample series.
-        const typical = series.typicalMib === undefined ? undefined : Math.min(measured.growthMib, series.typicalMib);
-        const unit = basis === "daemon footprint" ? "footprint sample(s)" : "sample row(s)";
-        return {
-          samples: 1, growthMib: measured.growthMib, ...(typical !== undefined ? { typicalMib: typical } : {}),
-          basis: `proc ${pid}: VmHWM ${Math.round(measured.peakMib)} MiB - VmRSS ${Math.round(measured.residentMib)} MiB`,
-          typicalBasis: typical !== undefined ? `median of ${series.samples} ${unit}` : `all typical: ${series.reason}`,
-          footprint,
-        };
-      }
-      procReason = `proc ${pid}: no VmHWM/VmRSS`;
+      const status = ports.readFile(`/proc/${pid}/status`);
+      const measured = daemonGrowthFromStatus(status);
+      if (measured) proc = { ...measured, swapMib: Number(/^VmSwap:\s+(\d+)\s+kB/m.exec(status)?.[1] ?? 0) / 1024 };
+      else procReason = `proc ${pid}: no VmHWM/VmRSS`;
     } catch (error) {
       // The pid exited or /proc is unreadable: named below, and the sample series is tried instead.
       procReason = `proc ${pid}: ${reasonOf(error)}`;
     }
   }
-  if (series.growthMib !== undefined) return { ...series, basis, footprint };
+  const lifetimeBasis = proc && `proc ${pid}: VmHWM ${Math.round(proc.peakMib)} MiB - VmRSS ${Math.round(proc.residentMib)} MiB`;
+  const lifetime = proc ? { lifetimePeakGrowthMib: proc.growthMib, lifetimePeakBasis: lifetimeBasis! } : {};
+  if (series.peakMib !== undefined && series.medianMib !== undefined && series.latestMib !== undefined) {
+    // The series is rss+swap, so the current reading is too: a swapped-out daemon does not raise its own tail.
+    const current = proc ? proc.residentMib + proc.swapMib : series.latestMib;
+    const growthMib = Math.max(0, series.peakMib - current);
+    const typicalMib = Math.min(growthMib, Math.max(0, series.medianMib - current));
+    const unit = basis === "daemon footprint" ? "footprint sample(s)" : "sample row(s)";
+    return {
+      samples: series.samples, growthMib, typicalMib, basis, footprint, ...lifetime,
+      currentBasis: proc
+        ? `proc ${pid}: VmRSS ${Math.round(proc.residentMib)} MiB + VmSwap ${Math.round(proc.swapMib)} MiB`
+        : "the latest sample",
+      ...(proc ? { typicalBasis: `median of ${series.samples} ${unit}` } : {}),
+    };
+  }
+  if (proc) {
+    return {
+      samples: 1, growthMib: proc.growthMib, basis: `${lifetimeBasis} (the lifetime peak: ${series.reason})`,
+      typicalBasis: `all typical: ${series.reason}`, footprint, ...lifetime,
+    };
+  }
   return { ...series, reason: `${procReason}; ${series.reason}`, footprint };
 }
 
@@ -1781,7 +1819,7 @@ function recordDiagnostics(
       workersResidentMib,
       daemonGrowthChargedMib: verdict.numbers.daemonGrowthTypicalMib,
       daemonGrowthBasis: daemonGrowthBasisOf(inputs.daemonGrowth),
-      daemonGrowthPeakMib: verdict.numbers.daemonGrowthMib,
+      daemonGrowthPeakMib: verdict.numbers.daemonGrowthLifetimePeakMib ?? verdict.numbers.daemonGrowthMib,
       coldStartReserveMib: verdict.numbers.coldStartReserveMib,
       hostReserveMib: policy.hostReserveMib,
     }, ports.priorityPolicy());

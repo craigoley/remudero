@@ -330,23 +330,37 @@ test('real isolated Python stages only digest-bound committed auditor bytes and 
  const invoke=(file:string,args:string[],input?:string)=>spawnSync(file,args,{cwd:repo,encoding:'utf8',input,timeout:10000,
   env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null'}});
  const git=(args:string[])=>fixture.git(...args);
+ const bindings=([['runtime_source_recipe.py','SOURCE_RECIPE_SHA256'],['prepare-source-build.py','ASSEMBLER_SHA256'],
+  ['source-build-policy.json','SOURCE_POLICY_SHA256']] as const).map(([name,key])=>{
+  const raw=readFileSync(new URL('../.github/semgrep/'+name,import.meta.url));
+  const expected:string=flow.jobs['runtime-compatibility'].env[key];
+  assert.equal(expected,createHash('sha256').update(raw).digest('hex'));
+  writeFileSync(join(repo,'.github','semgrep',name),raw);return {name,expected};
+ });
+ const sourceHashes=Object.fromEntries(bindings.map(({name,expected})=>[name,expected]));
  const auditor=join(repo,'.github','semgrep','runtime-compatibility-audit.py');
- const trusted='import json,sys\nprint(json.dumps({"fixture":"STAGED_AUDITOR_FIXTURE","noSite":sys.flags.no_site,"isolated":sys.flags.isolated}))\n';
+ const trusted='import hashlib,json,pathlib,sys\n'+'sources='+JSON.stringify(bindings.map(({name})=>name))+'\n'
+  +'print(json.dumps({"fixture":"STAGED_AUDITOR_FIXTURE","noSite":sys.flags.no_site,"isolated":sys.flags.isolated,'
+  +'"sourceHashes":{name:hashlib.sha256(pathlib.Path(__file__).with_name(name).read_bytes()).hexdigest() for name in sources}}))\n';
  writeFileSync(auditor,trusted);const digest=createHash('sha256').update(trusted).digest('hex');
  const marker=join(repo,'shadow-ran');writeFileSync(join(repo,'pathlib.py'),'open("shadow-ran", "w").write("not isolated")\nraise RuntimeError("PR module executed")\n');
  const commit=()=>{git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','--quiet','--allow-empty','-m','fixture']);};
  commit();
- const stage=(isolated:boolean,expected=digest)=>{const out=mkdtempSync(join(dir,'out-'));
+ const stage=(isolated:boolean,expected=digest,sourceDigests=bindings.map(({expected})=>expected))=>{const out=mkdtempSync(join(dir,'out-'));
   const current=invoke('git',['rev-parse','HEAD']).stdout.trim();
-  const r=invoke('python3',[...(isolated?['-I','-S']:[]),'-',current,expected,'download',out,repo,dir],script);return {...r,out};};
+  const r=invoke('python3',[...(isolated?['-I','-S']:[]),'-',current,expected,'download',out,repo,dir,...sourceDigests],script);return {...r,out};};
  const negative=stage(false);assert.notEqual(negative.status,0);assert.match(negative.stderr,/PR module executed/);
  assert.equal(readFileSync(marker,'utf8'),'not isolated');unlinkSync(marker);
  const positive=stage(true);assert.equal(positive.status,0,positive.stderr);
- assert.deepEqual(JSON.parse(positive.stdout),{fixture:'STAGED_AUDITOR_FIXTURE',noSite:1,isolated:1});
+ assert.deepEqual(JSON.parse(positive.stdout),{fixture:'STAGED_AUDITOR_FIXTURE',noSite:1,isolated:1,sourceHashes});
  assert.throws(()=>readFileSync(marker),/ENOENT/);
+ for(const [index,{name}] of bindings.entries()){
+  const changed=stage(true,digest,bindings.map((binding,i)=>i===index?'0'.repeat(64):binding.expected));
+  assert.notEqual(changed.status,0,name);assert.match(changed.stderr,/first-party source differs from trusted workflow literal/);
+ }
  writeFileSync(auditor,'raise RuntimeError("mutable checkout helper executed")\n');
  assert.equal(stage(true).status,0,'uncommitted checkout bytes must not execute');
- commit();const changed=stage(true);assert.notEqual(changed.status,0);assert.match(changed.stderr,/auditor differs from trusted workflow literal/);
+ commit();const changed=stage(true);assert.notEqual(changed.status,0);assert.match(changed.stderr,/first-party source differs from trusted workflow literal/);
  writeFileSync(join(repo,'outside.txt'),trusted);unlinkSync(auditor);symlinkSync('../../outside.txt',auditor);commit();
  const linked=stage(true);assert.notEqual(linked.status,0);assert.match(linked.stderr,/AssertionError/);
 });

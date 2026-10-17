@@ -51,6 +51,7 @@ import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 
 /** One operator-owned inbox item, as the thread views need it. */
 export interface InboxThreadItem {
+  requiresReview?: boolean;
   proposalId: string;
   summary: string;
   plain: PlainInboxMessage;
@@ -93,6 +94,7 @@ export type AttentionSourceState = "observed" | "partial" | "unavailable";
 export type AttentionJudgment = VerifyHumanRuling | { state?: undefined; decision: string; reason: string };
 
 export interface AttentionCensusInput {
+  retirementSource?: "observed" | "absent" | "unavailable";
   /** The completed producer's lane-visible content and owned source; never read-time clocks. */
   classificationContent?: unknown;
   dismissalAudit?: InboxDismissalAudit;
@@ -169,6 +171,8 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
       classification: classification?.state ?? "unavailable", whyMe, sourceFacts,
       ...(judgment ? { judgment } : {}),
       ...(classification?.retiredReason ? { retiredReason: classification.retiredReason } : {}),
+      ...(classification?.retirement ? { retirement: classification.retirement } : {}),
+      ...(classification?.needsTriageReason ? { needsTriageReason: classification.needsTriageReason } : {}),
     };
   }).sort((a, b) => a.proposalId.localeCompare(b.proposalId));
   const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
@@ -180,7 +184,7 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
     counts[item.attention] += 1;
     kinds[item.kind] = (kinds[item.kind] ?? 0) + 1;
     if (item.attention === "decision") {
-      if (item.proposalId.startsWith("verify-human:") && item.judgment?.state === "unclassified") decisionReadiness.needsTriage += 1;
+      if (item.needsTriageReason || item.proposalId.startsWith("verify-human:") && item.judgment?.state === "unclassified") decisionReadiness.needsTriage += 1;
       else if (item.classification === "ready") decisionReadiness.ready += 1;
       else if (item.classification === "not_ready" || item.classification === "drafting") decisionReadiness.needsPreparation += 1;
       else decisionReadiness.unknown += 1;
@@ -188,10 +192,20 @@ export function buildAttentionCensus(input: AttentionCensusInput) {
   }
   const contradictoryRelease = items.some((item) => item.taskId && item.proposalId === `verify-human:${item.taskId}` && input.releasedTaskIds.has(item.taskId) && item.attention === "decision");
   const missingReferent = items.some((item) => (item.taskId && !input.taskFacts.has(item.taskId)) || item.classification === "unavailable");
-  const state = Object.values(input.sources).every((source) => source === "observed") && !contradictoryRelease && !missingReferent ? "complete" : "partial";
+  const state = Object.values(input.sources).every((source) => source === "observed") && input.retirementSource !== "unavailable" && !contradictoryRelease && !missingReferent ? "complete" : "partial";
   const verifiedCounts = state === "complete" ? { ...counts } : { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
+  const allRetirements = input.classifications.flatMap(c => c.retirement ? [{ ...c.retirement, reason: c.retirement.reason.slice(0, 300) }] : []).sort((a, b) => a.retirementId.localeCompare(b.retirementId));
+  const retirements: typeof allRetirements = [];
+  for (const row of allRetirements) {
+    if (Buffer.byteLength(JSON.stringify([...retirements, row])) > 16 * 1024) break;
+    retirements.push(row);
+  }
+  const retirementHistory = { state: input.retirementSource ?? "absent", total: input.retirementSource === "observed" ? allRetirements.length : null,
+    returned: input.retirementSource === "observed" ? retirements.length : 0, truncated: input.retirementSource === "observed" && retirements.length < allRetirements.length,
+    countSemantics: "maintained_classification_retirements" as const };
   const result = { scope: "core" as const, state, countSemantics: "observed_snapshot_not_verified" as const,
     sources: input.sources, counts, decisionReadiness, verifiedCounts, kinds, items,
+    retirements: input.retirementSource === "observed" ? retirements : [], retirementHistory,
     ...(input.dismissalAudit ? { dismissalAudit: input.dismissalAudit } : {}), ...(contradictoryRelease ? { discrepancy: "active_human_ask_has_release_receipt" } : {}) };
   const snapshotKey = classificationSnapshotKey(input.classificationContent ?? null, result);
   return { ...result, snapshotKey };
@@ -280,6 +294,7 @@ function detailFor(item: InboxThreadItem, stored: ThreadMessage[], marks: ReadMa
 
 function attentionFor(item: InboxThreadItem, last: ThreadMessageView): ThreadSummaryView["attention"] {
   if (item.state === "retired") return "history";
+  if (item.requiresReview) return "decision";
   // A recorded decline is the end of the item's story, not a reply the daemon owes an answer to.
   if (item.state === "declined" && last.extra?.event) return "history";
   if (last.from === "operator") return "awaiting_daemon";

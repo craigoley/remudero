@@ -11,7 +11,8 @@
 # their old regenerable caches can still be cleaned.
 #
 # Also removes inactive non-Git scratch directories in the account's explicit
-# Remudero/rmd-work roots (and Craig's /private/tmp). Every descendant must be
+# Remudero/rmd-work and Mac operator-worktree roots (and Craig's /private/tmp).
+# Every descendant must be
 # idle for six hours; unversioned source/reports and persistent data are retained.
 #
 # WHAT IT NEVER DOES: it never removes unpushed commits or uncommitted source, never
@@ -228,6 +229,11 @@ done
 # scan container, never a removal target; tracked children remain protected.
 DIRECTORY_SCAN_ROOTS=("$USER_HOME/Remudero" "$USER_HOME/Remudero/lanes-wt"
   "$USER_HOME/Remudero/remudero" "$USER_HOME/rmd-work")
+if [ "$OS_NAME" = "Darwin" ]; then
+  # Operator tools use this account-local namespace outside Remudero/rmd-work.
+  # The container is never a target; each child gets the same Git/activity guards.
+  DIRECTORY_SCAN_ROOTS+=("$USER_HOME/Developer/remudero-operator-worktrees")
+fi
 if [ "$RUN_USER" = craigoley ]; then
   if [ -n "${REMUDERO_JANITOR_SCAN_ROOTS:-}" ]; then DIRECTORY_SCAN_ROOTS+=("${SCAN_ROOTS[@]}")
   else DIRECTORY_SCAN_ROOTS+=("/private/tmp")
@@ -303,7 +309,7 @@ if [ "$HAS_LSOF" = "1" ]; then
   CWD_STATUS=$?
 fi
 is_cwd_in() {
-  local root="$1" line path cwd_pid="" relative command
+  local root="$1" line path cwd_pid="" relative command fresh fresh_rc fresh_pid
   [ "$HAS_LSOF" = "1" ] && [ "$CWD_STATUS" -le 1 ] || return 2
   while IFS= read -r line; do
     case "$line" in
@@ -316,8 +322,21 @@ is_cwd_in() {
       case "$root" in "$path"/*)
         relative=${root#"${path%/}"/}
         case "$cwd_pid" in ''|*[!0-9]*) return 2 ;; esac
-        [ "${PS_COMMANDS[cwd_pid]+present}" = present ] || return 2
-        command=${PS_COMMANDS[cwd_pid]}
+        if [ "${PS_COMMANDS[cwd_pid]+present}" = present ]; then
+          command=${PS_COMMANDS[cwd_pid]}
+        else
+          # lsof runs after the ps snapshot. Its short-lived parent/probe can
+          # appear here and already be gone, holding every sibling as unknown.
+          # Only ps's empty exit-1 (no selected PID) proves that stale record
+          # gone. Warnings, unreadable commands and malformed output still hold.
+          fresh=$(ps -ww -p "$cwd_pid" -o pid=,command= 2>&1)
+          fresh_rc=$?
+          if [ "$fresh_rc" = 1 ] && [ -z "$fresh" ]; then continue; fi
+          [ "$fresh_rc" = 0 ] || return 2
+          case "$fresh" in *$'\n'*) return 2 ;; esac
+          read -r fresh_pid command <<< "$fresh"
+          [ "$fresh_pid" = "$cwd_pid" ] && [ -n "$command" ] || return 2
+        fi
         case "$command" in *"$relative"*) return 0 ;; esac
         ;;
       esac
@@ -410,7 +429,7 @@ if [ "$COVERAGE_AGE_HOURS" -lt "$MINIMUM_AGE_HOURS" ]; then
 fi
 
 log "=== janitor start: apply=$APPLY age>=${AGE_HOURS}h coverage-age>=${COVERAGE_AGE_HOURS}h free=${BEFORE}GiB ==="
-log "checkout-scan: $USER_HOME/Remudero (including remudero descendants), $USER_HOME/rmd-work; Git discovery depth<=8"
+log "checkout-scan: ${CHECKOUT_SCANNED_ROOTS[*]+${CHECKOUT_SCANNED_ROOTS[*]}}; Git discovery depth<=8"
 for failed_root in "${SCAN_FAILURES[@]+"${SCAN_FAILURES[@]}"}"; do log "SKIP repository scan failed (unknown) $failed_root"; done
 
 reclaimed_kb=0; removed=0; planned=0; estimated_kb=0
@@ -432,6 +451,11 @@ refresh_process_snapshot() {
 clean_artifact() {
   local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
+  # Unique test results/materialization receipts are durable even inside a
+  # generated dependency tree. The bounded duplicate helper preserves them.
+  if [ "${artifact##*/}" = node_modules ] && { [ -e "$artifact/.vite" ] || [ -L "$artifact/.vite" ] || [ -e "$artifact/.rmd-dependency-seed.json" ] || [ -L "$artifact/.rmd-dependency-seed.json" ]; }; then
+    log "SKIP retained-dependency-evidence $artifact"; return
+  fi
   if seed_reason=$(rmd_dependency_seed_risk "$artifact"); then log "SKIP protected $artifact ($seed_reason)"; return; fi
   found=$(find "$artifact" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null) || {
     log "SKIP content scan failed (unknown) $artifact"; return;
@@ -628,6 +652,7 @@ scratch_directory_risk() {
   # state/history, dependency seeds and coordination files. Do not follow links.
   found=$(find -P "$path" -xdev \( -name .git -o -name HEAD -o -name objects -o -name '*.bundle' -o -name '*.tar' -o -name '*.tgz' -o -name '*.zip' -o -name '*.gz' \
     -o -name '.rmd-janitor-keep' -o -name 'ledger*' -o -name '*.ndjson' -o -name '*.jsonl' -o -name '*.sqlite*' -o -name '*.lock' -o -name '*.pid' \
+    -o -iname '*.patch' -o -iname '*.diff' -o -iname '*.rej' -o -iname '*.orig' \
     -o -name '.env' -o -name '.env.*' -o -iname '*password*' -o -iname '*secret*' -o -iname '*token*' \
     -o -iname '*credential*' -o -iname '*keychain*' -o -name '*.pem' -o -name '*.p12' -o -name '*.pfx' \
     -o -name '*.keytab' -o -name 'id_rsa*' -o -name 'id_ed25519*' \) -print -quit 2>/dev/null) || {
@@ -1142,7 +1167,9 @@ fi
 # Missing worktrees can retain the only reflog of an unpublished detached
 # HEAD. Do not prune their metadata merely because the directory disappeared.
 # Report non-repository children rather than silently treating them as caches.
-for parent in "$USER_HOME/Remudero" "$USER_HOME/Remudero/remudero" "$USER_HOME/rmd-work" "$USER_HOME/Remudero/.session-scratch"; do
+REPORT_PARENT_ROOTS=("$USER_HOME/Remudero" "$USER_HOME/Remudero/remudero" "$USER_HOME/rmd-work" "$USER_HOME/Remudero/.session-scratch")
+if [ "$OS_NAME" = "Darwin" ]; then REPORT_PARENT_ROOTS+=("$USER_HOME/Developer/remudero-operator-worktrees"); fi
+for parent in "${REPORT_PARENT_ROOTS[@]}"; do
   [ -d "$parent" ] && [ ! -L "$parent" ] || continue
   for child in "$parent"/* "$parent"/.[!.]*; do
     [ -d "$child" ] && [ ! -L "$child" ] || continue
@@ -1182,6 +1209,13 @@ fi
 rmd_decision_summary "$DECISION_LOG"
 log "decision-report: $DECISION_LOG (six-hour guard; published Git workspaces only)"
 
+# This helper owns only exact ignored duplicate packages and Turbopack caches
+# below this account's artifact root. Source/Git/build outputs never retire.
+if [ -f "$SCRIPT_DIR/cache-reclaim.py" ] && command -v python3 >/dev/null 2>&1; then
+  cache_mode=()
+  [ "$APPLY" != 1 ] || cache_mode=(--apply)
+  python3 "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" >> "$LOG" 2>&1 || log "WARN generated-cache helper refused or could not verify a removal"
+fi
 AFTER=$(free_gib)
 log "=== done: removed=$removed reclaimed=$((reclaimed_kb/1024))M planned=$planned estimated=$((estimated_kb/1024))M worktrees-removed=$removed_worktrees worktrees-planned=$planned_worktrees worktrees-skipped=$skipped_worktrees live-skip=$skipped_live cwd-skip=$skipped_cwd owner-skip=$skipped_owner open-skip=$skipped_open young-skip=$skipped_young free=${BEFORE}->${AFTER}GiB ==="
 

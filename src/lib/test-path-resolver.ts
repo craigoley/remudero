@@ -51,6 +51,11 @@ export function isBasenameEligibleTestPath(path: string): boolean {
   return ELIGIBLE_TEST_PATH_RE.test(path) && !path.startsWith("test/fixtures/") && !path.split("/").includes("..");
 }
 
+/** A unique test basename survives a move; fixtures and all other paths retain exact identity. */
+export function sameTestFile(a: string, b: string): boolean {
+  return a === b || (isBasenameEligibleTestPath(a) && isBasenameEligibleTestPath(b) && posix.basename(a) === posix.basename(b));
+}
+
 const defaultGit: TestPathResolverGit = {
   treeSha: (root, rev) => hostWorktreeGit(root, ["rev-parse", "--verify", "--quiet", `${rev}^{tree}`]).trim(),
   listTestTree: (root, treeSha) =>

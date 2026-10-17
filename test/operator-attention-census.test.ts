@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,9 @@ import { test } from "node:test";
 import { buildAttentionCensus, type AttentionCensusInput, type ThreadSummaryView } from "../src/lib/inbox-responder.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { createService } from "../src/lib/service.js";
+import { classifyProposal, updateProposalRegistry } from "../src/lib/inbox.js";
+import { loadPlanFromYaml } from "../src/lib/plan.js";
+import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 
 function view(proposalId: string, attention: ThreadSummaryView["attention"]): ThreadSummaryView {
@@ -141,24 +144,50 @@ test("an alphanumeric task id still joins its plan and judge evidence", () => {
   assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "judge" && fact.detail.includes("safe drill window")));
 });
 
-test("a plan-closed W1-T1041 has a source-qualified history item instead of an operator decision", () => {
+test("a plan-closed task alone preserves an unanswered human ask with its source facts", () => {
+  const proposal = { id: "verify-human:W1-T1041", summary: "Choose a CI harness", evidenceAnchors: [] };
+  const plan = loadPlanFromYaml(`- id: W1-T1041
+  title: The duplicate CI harness
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  status: blocked
+  retirement: closed
+`, "closed-human-ask");
+  const classification = classifyProposal(proposal, undefined, { plan, isMerged: () => false, isRatified: () => false,
+    grepAnchorTrue: () => true, openProposalIds: new Set() });
+  assert.equal(classification.state, "not_ready");
   const result = buildAttentionCensus(input({
-    views: [view("verify-human:W1-T1041", "history")],
-    classifications: [{ proposalId: "verify-human:W1-T1041", state: "retired", reasons: [], retiredReason: "explicitly closed in the plan" }],
+    views: [view(proposal.id, "decision")], classifications: [classification],
     taskFacts: new Map([["W1-T1041", { verify: "human", repo: "remudero", title: "The duplicate CI harness", status: "blocked", retirement: "closed" }]]),
   }));
-  assert.equal(result.counts.decision, 0);
-  assert.equal(result.counts.history, 1);
-  assert.equal(result.items[0]?.attention, "history");
+  assert.equal(result.counts.decision, 1); assert.equal(result.counts.history, 0);
+  assert.equal(result.items[0]?.attention, "decision");
   assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "plan-lifecycle" && fact.detail.includes("retirement closed")));
 });
 
 test("W1-T4884: a stale verify-human ask remains in source-qualified history", () => {
+  const taskId = "W1-T1216", proposal = proposalFromJudgedShard({ id: taskId, title: "Autonomous maintenance", rationale: "operator release",
+    acceptance: ["a controlled check"], ageDays: 1, depsAllMerged: true, citedInSrc: false }, { decision: "needs_operator", reason: "The operator owns this release" });
+  const plan = loadPlanFromYaml(`- id: ${taskId}
+  title: Autonomous maintenance
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+`, "released-verification-history");
+  const classification = classifyProposal(proposal, undefined, { plan, isMerged: () => false, isRatified: () => false,
+    grepAnchorTrue: () => true, openProposalIds: new Set(), isReleasedHumanTask: id => id === taskId });
+  assert.equal(classification.state, "retired", "the exact typed release supplies authority");
   const result = buildAttentionCensus(input({
     views: [],
-    classifications: [{ proposalId: "verify-human:W1-T216", state: "retired", reasons: [],
-      retiredReason: "verify-human:W1-T216's current plan task is verify: auto without a dispatch hold" }],
-    taskFacts: new Map([["W1-T216", { verify: "auto", repo: "remudero", title: "Autonomous maintenance", dispatchHold: false }]]),
+    classifications: [classification],
+    taskFacts: new Map([[taskId, { verify: "auto", repo: "remudero", title: "Autonomous maintenance", dispatchHold: false }]]),
+    releasedTaskIds: new Set([taskId]),
     sources: { plan: "observed", registry: "observed", liveLedger: "observed", archiveLedger: "partial", githubProjection: "observed" },
   }));
   assert.equal(result.counts.decision, 0);
@@ -167,7 +196,7 @@ test("W1-T4884: a stale verify-human ask remains in source-qualified history", (
   assert.equal(result.verifiedCounts.history, 0);
   assert.equal(result.items[0]?.attention, "history");
   assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "plan" && fact.detail.includes("verify: auto")));
-  assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "classification" && fact.detail.includes("without a dispatch hold")));
+  assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "classification" && fact.detail.includes("was released to the fleet")));
 });
 
 test("W1-T4742: missing evidence is partial rather than a healthy zero", async () => {
@@ -217,7 +246,7 @@ test("W1-T4742: missing evidence is partial rather than a healthy zero", async (
   }
 });
 
-test("the served inbox stops asking about a positively closed W1-T1041 without deleting its history", async () => {
+test("the served inbox preserves an unanswered human ask after plan closure without deleting history", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-attention-closed-"));
   mkdirSync(join(root, "plan"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
@@ -255,10 +284,11 @@ test("the served inbox stops asking about a positively closed W1-T1041 without d
     });
     assert.equal(response.status, 200);
     const body = await response.json() as { counts: { decision: number; history: number }; items: Array<{ attention: string; retiredReason?: string; sourceFacts: Array<{ source: string; detail: string }> }> };
-    assert.equal(body.counts.decision, 0);
-    assert.equal(body.counts.history, 1);
-    assert.equal(body.items[0]?.attention, "history");
-    assert.match(body.items[0]?.retiredReason ?? "", /explicitly closed in the plan/);
+    assert.equal(body.counts.decision, 1);
+    assert.equal(body.counts.history, 0);
+    assert.equal(body.items[0]?.attention, "decision");
+    assert.equal(body.items[0]?.retiredReason, undefined);
+    assert.equal(JSON.parse(readFileSync(join(root, "state", "inbox-proposals.json"), "utf8")).proposals[0].id, "verify-human:W1-T1041");
     assert.ok(body.items[0]?.sourceFacts.some((fact) => fact.source === "plan-lifecycle" && fact.detail.includes("retirement closed")));
   } finally {
     server.close();
@@ -272,7 +302,7 @@ test("W1-T4768: archived release evidence reconciles an active ask without appro
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
   writeFileSync(planPath, `
-- id: W1-T216
+- id: W1-T1216
   title: "A controlled security drill"
   repo: remudero
   depends_on: []
@@ -286,12 +316,12 @@ test("W1-T4768: archived release evidence reconciles an active ask without appro
     - claim: "a controlled check"
       proof: "unit test: controlled check"
 `);
-  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({
-    proposals: [{ id: "verify-human:W1-T216", summary: "Controlled drill decision.", evidenceAnchors: [] }],
-  }));
+  updateProposalRegistry(join(root, "state", "inbox-proposals.json"), () => [proposalFromJudgedShard({ id: "W1-T1216",
+    title: "A controlled release", rationale: "operator release", acceptance: ["a controlled check"], ageDays: 1,
+    depsAllMerged: true, citedInSrc: false }, { decision: "needs_operator", reason: "The operator owns this release" })]);
   writeFileSync(join(root, "state", "ledger.ndjson"), "");
   writeFileSync(join(root, "state", "ledger.2026-09-28T00-00-00-000Z.ndjson"),
-    JSON.stringify({ step: "ratify.approved", task_id: "W1-T216", released: "verify-human" }) + "\n");
+    JSON.stringify({ step: "ratify.approved", task_id: "W1-T1216", released: "verify-human" }) + "\n");
   const deps: PanelGraphDeps = {
     root, inboxRoot: root, planPath, ledgerPath: join(root, "state", "ledger.ndjson"),
     github: { prView: () => null }, statusGithub: fakeGitHub(),
