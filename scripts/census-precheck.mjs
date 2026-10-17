@@ -836,6 +836,12 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
       "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
     ].includes(p)),
     remedy: "load src/lib/gate-gardener.ts through tsImport (ESM), never tsx/cjs/api" },
+  // W1-T9860: the basename-uniqueness check, asked when its rule (the resolver) or the check itself changes. A new
+  // test that takes a held basename is refused by the same suite in CI's rule-checks.
+  { testFile: "test/every-test-basename-is-unique.test.ts",
+    trigger: ({ changed }) => changed.some((p) =>
+      ["src/lib/test-path-resolver.ts", "test/every-test-basename-is-unique.test.ts"].includes(p)),
+    remedy: "rename one test of each pair: resolveTestPath (src/lib/test-path-resolver.ts) finds a moved test by its unique basename" },
 ];
 
 /**
