@@ -13,7 +13,7 @@ import { acquireLease } from "../src/lib/read-model-db.js";
 import {
   createReadModelTicker, ledgerSource, type ReadModelInstanceState, type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
-import { createRepositoriesReadModelView } from "../src/lib/repositories-view.js";
+import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "../src/lib/repositories-view.js";
 import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { answerThreadHeaps, THREAD_HEAPS_REQUEST, type WorkerThread } from "../src/lib/worker-heaps.js";
@@ -208,6 +208,19 @@ test("W1-T9983: the real now view names its state beside its boards", (t) => {
   });
   const state: ReadModelInstanceState = { instance: "core", generation: 1, lease: "held", failures: 0, tickedAt: NOW, newestTs: null };
   const context = { now: NOW, switches: { views: { now: "shadow" as const } }, instances: [{ state, db }] };
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  createRepositoriesSourcePublisher({ stateDir: join(root, "home"), instances: () => [{ instanceId: "core", options: {
+    root, ledgerPath, planPath: join(root, "plan", "tasks.yaml"), controlRoot: root, incidentsDir: ledgerDir,
+    instanceRepository: { owner: "o", repo: "r" },
+  } }] })();
+  const repositories = createRepositoriesReadModelView(ledgerSource);
+  assert.equal(repositories.materialize(context).length, 1, "the real repository view reads its private published inputs");
+  const repositoryHolds = repositories.heldSizes();
+  assert.equal(repositoryHolds["repositories:computed"]?.entries, 1, "the retained per-instance summary attempt is counted");
+  for (const name of ["sources-reader", "registry-reader", "plan-reader", "parsed-repo-rows", "shown"]) {
+    assert.match(repositoryHolds[`repositories:${name}`]?.unsized ?? "", /\S/);
+    assert.equal(repositoryHolds[`repositories:${name}`]?.bytes, undefined);
+  }
   while (!view.prepare(context, () => true)) { /* complete the private fixture build */ }
   assert.equal(view.materialize(context).length, 1, "positive control: the real now view built");
   const held = sizes(view);
