@@ -7,7 +7,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { pendingWorkerBoundaryHandoffs, runBranchStateFrom, runBranchDispatchOpts } from "../src/lib/daemon.js";
-import { PRE_RESTORE_RUN_VERDICT_STAGES, THROWN_RUN_VERDICT_STAGES } from "../src/lib/status.js";
+import { THROWN_RUN_VERDICT_STAGES } from "../src/lib/status.js";
+
+/** Every run-ending stage but run.error ends a run before its checkpoint restore can run. */
+const PRE_RESTORE = [...THROWN_RUN_VERDICT_STAGES].filter((stage) => stage !== "run.error");
 
 const TASK = "W1-T9089";
 const OLDER = `run-${TASK}-1792184599830`;
@@ -30,7 +33,8 @@ const chain = (refusal: Record<string, unknown>) => [
 test("a run refused before its restore keeps the checkpoint receipt it never consumed", () => {
   const pending = pendingWorkerBoundaryHandoffs(lines(chain({ stage: "worktree.node_modules" })));
   assert.deepEqual(pending.get(TASK), { branch: KEPT, headSha: KEPT_SHA });
-  for (const stage of PRE_RESTORE_RUN_VERDICT_STAGES) {
+  assert.ok(PRE_RESTORE.length > 0);
+  for (const stage of PRE_RESTORE) {
     assert.deepEqual(pendingWorkerBoundaryHandoffs(lines(chain({ stage }))).get(TASK), { branch: KEPT, headSha: KEPT_SHA }, stage);
   }
 });
@@ -44,7 +48,6 @@ test("a run refused before its restore leaves its task's own run branches unbloc
 
 test("a run that could have restored still consumes the receipt", () => {
   assert.ok(THROWN_RUN_VERDICT_STAGES.has("run.error"));
-  assert.equal(PRE_RESTORE_RUN_VERDICT_STAGES.has("run.error"), false);
   for (const refusal of [{ stage: "run.error" }, { reason: "tests failed" }, { stage: "fallback_push.census" }]) {
     assert.equal(pendingWorkerBoundaryHandoffs(lines(chain(refusal))).size, 0, JSON.stringify(refusal));
   }
