@@ -57,12 +57,18 @@ test("W1-T9983: each heavy-lane view names what it keeps across builds", async (
     ledgerSource, rateLimit: async () => 1234, diskFree: () => 1_000_000,
     selfMeasurement: async () => measurement,
   });
+  const workstreams = createWorkstreamsView({ instances: [], clock: CLOCK, ledgerSource });
   const views = [
     createNowView({ instances: [], clock: CLOCK }),
-    createWorkstreamsView({ instances: [], clock: CLOCK, ledgerSource }),
+    workstreams,
     createRepositoriesReadModelView(ledgerSource), host,
   ];
   for (const view of views) sizes(view);
+  assert.equal(workstreams.materialize({ now: NOW, instances: [] }).length, 1, "the real workstreams view retains its built body");
+  const workstreamHolds = workstreams.heldSizes();
+  assert.ok(workstreamHolds["workstreams:retained-body"]!.bytes! > 0);
+  assert.equal(workstreamHolds["workstreams:shown"]!.bytes, undefined);
+  assert.match(workstreamHolds["workstreams:shown"]!.unsized ?? "", /WeakMap/);
   const state: ReadModelInstanceState = { instance: "core", generation: 1, lease: "held", failures: 0, tickedAt: NOW, newestTs: null };
   const context = { now: NOW, instances: [{ state }] };
   assert.equal(host.materialize(context).length, 1, "positive control: the host retained a real materialized body");
