@@ -93,7 +93,10 @@ test("gardener lifecycle measures admission separately from execution and preser
   let now = start;
   const observed: GardenerRuntimeEvent[] = [];
   const releases: Array<(exit: number | null) => void> = [];
-  const spawn = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
+  const spawn = boundedGardenPassSpawn((_name, _args, signal) => {
+    signal.admitted?.(); // This controlled producer explicitly models a successful process start.
+    return new Promise<number | null>((resolve) => releases.push(resolve));
+  }, 1);
   const wiring = { spawnPass: spawn, log: () => {}, clock: clockFromMillisFn(() => now), observe: (row: GardenerRuntimeEvent) => observed.push(row) };
   const a = startGardenOffLoop("plan", 60_000, wiring), b = startGardenOffLoop("gate", 60_000, wiring);
   t.after(() => { a.stop(); b.stop(); });
@@ -192,7 +195,10 @@ test("gardener completion rows retain the runtime pass id and separate admission
   };
   const observe = (event: GardenerRuntimeEvent) => writer.record(event);
   const releases: Array<(exit: number | null) => void> = [];
-  const spawnPass = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
+  const spawnPass = boundedGardenPassSpawn((_name, _args, signal) => {
+    signal.admitted?.(); // Preserve the fixture's execution clock at its simulated process start.
+    return new Promise<number | null>((resolve) => releases.push(resolve));
+  }, 1);
   const plan = startGardenOffLoop("plan", 60_000, { spawnPass, clock, log, observe });
   const gate = startGardenOffLoop("gate", 60_000, { spawnPass, clock, log, observe });
   t.after(() => { plan.stop(); gate.stop(); });

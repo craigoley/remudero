@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/a-superseded-dependabot-red-is-re-run.test.ts
     - test/an-armed-dependabot-head-blocked-by-a-stale-event-is-recreated.test.ts
-  status: queued
+  status: merged
   priority: 1  # every Dependabot head whose title or body changed after its checks ran keeps a red nothing clears, #11968 today
   attempts: 0
   rationale: |
