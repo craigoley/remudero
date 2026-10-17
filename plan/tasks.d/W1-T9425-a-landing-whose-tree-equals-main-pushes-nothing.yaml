@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-14 PR-queue review: root cause of #11619 (feedback-landing, empty diff)"
   plan_refs: [W1-T243, W1-T3560, W1-T5672]
   files: [src/lib/feedback-landing.ts, test/a-landing-whose-tree-equals-main-pushes-nothing.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
