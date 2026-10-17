@@ -185,10 +185,11 @@ async function pass(pr: OpenPrView, ledger: Record<string, unknown>[], over: Par
     now: () => NOW,
     ...over,
   } as unknown as SweepDeps;
-  await sweep.runSweep([pr, greenPeer()], deps, sweep.DEFAULT_SWEEP_POLICY);
+  const summary = await sweep.runSweep([pr, greenPeer()], deps, sweep.DEFAULT_SWEEP_POLICY);
+  const action = summary.actions.find((a) => a.prNumber === pr.prNumber);
   const disposed = ledger.filter((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber).at(-1);
   const infraRows = ledger.filter((l) => l.step === "sweep.ci_infrastructure_requeue" && l.pr_number === pr.prNumber);
-  return { requeued, infraEscalated, escalated, planRounds, disposed, infraRows };
+  return { requeued, infraEscalated, escalated, planRounds, disposed, infraRows, action };
 }
 
 // The failed job's only failure annotation, as GitHub served it for check run 117156441241.
@@ -283,6 +284,17 @@ test("W1-T9932: a plan-only PR red only on an infrastructure step is re-run, not
   assert.equal(light.disposed?.blocker, "awaiting-ci");
   assert.match(String(light.disposed?.reason), /infrastructure re-run deferred: /);
   assert.doesNotMatch(String(light.disposed?.reason), /needs a plan repair/);
+  const dry = await pass(planPr({ headSha: "3".repeat(40) }), [], { dryRun: true } as Partial<SweepDeps>);
+  assert.deepEqual(dry.requeued, []);
+  assert.equal(dry.action?.disposition, "wait");
+  assert.match(String(dry.action?.reason), /infrastructure re-run deferred: dry run$/);
+
+  // The code path's fresh-rollup admission: a shard already re-run green is not re-run again.
+  const green = [{ name: SHARD, conclusion: "SUCCESS", startedAt: "2026-10-16T20:08:00Z" }];
+  const rerun = await pass(planPr({ headSha: "4".repeat(40) }), [], { readCiGateRollup: async () => green } as Partial<SweepDeps>);
+  assert.deepEqual(rerun.requeued, []);
+  assert.equal(rerun.disposed?.blocker, "awaiting-ci");
+  assert.match(String(rerun.disposed?.reason), /fresh CI rollup: green or in flight, no requeue/);
 });
 
 test("W1-T9932: a repeat infrastructure red on the same head escalates instead of re-running", async () => {
