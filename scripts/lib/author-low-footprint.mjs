@@ -85,7 +85,7 @@ function requireAdmission(root, scratch, minimumFreeBytes) {
 
 export async function runLowFootprintAuthor(argv, {root, publicationIdentity, authorEnvironment, completeTestResult,
   platform = process.platform, command = nativeAuthorCommand, makeScratch = createBoundedAuthorScratch,
-  admit = requireAdmission, capture = captureStepSync} = {}) {
+  admit = requireAdmission, capture = captureStepSync, acquire = acquireTestSlot} = {}) {
   let scratch, slot, diagnostics, judged;
   const receipt = {version: 1, assurance: 'explicit-scoped-tests-only', fullAuthorValidation: 'not-run',
     hostedFullSuiteAndCoverage: 'required-pending', verdict: 'refused', files: []};
@@ -117,8 +117,9 @@ export async function runLowFootprintAuthor(argv, {root, publicationIdentity, au
     receipt.budgets = {scratchBytes: options.scratchBytes, runtimeMs: options.runtimeMs,
       outputBytes: AUTHOR_OUTPUT_LIMIT_BYTES, minimumFreeBytes: options.minimumFreeBytes};
     receipt.entryAdmission = admit(root, tmpdir(), options.minimumFreeBytes);
-    slot = acquireTestSlot('author-low-footprint', {perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1});
-    if (!testSlotExecutionAllowed(slot)) throw new Error(`low-footprint NOT_RUN: ${slot.note}`);
+    slot = acquire('author-low-footprint', {perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1});
+    if (slot.outcome !== 'acquired' || !testSlotExecutionAllowed(slot))
+      throw new Error(`low-footprint NOT_RUN: ${slot.note}`);
     receipt.slot = {outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs};
     receipt.freshAdmission = admit(root, tmpdir(), options.minimumFreeBytes);
     mkdirSync(join(root, 'coverage'), {recursive: true});

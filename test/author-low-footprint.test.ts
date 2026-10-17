@@ -172,3 +172,18 @@ test('low-footprint portable workflow keeps native test failures and incomplete 
       kind === 'capture-threw' ? 'retained-unproven-child-closure' : 'closed-and-removed');
   }
 });
+
+test('low-footprint author never uses an unslotted fallback after capacity refusal', async t => {
+  const {makeRuntimeFixture} = await import('#test/helpers/native-runtime-fixture.js');
+  const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  const authorPath = '#scripts/preflight-author.mjs';
+  const author = await import(authorPath) as {authorPublicationIdentity: Function; authorEnvironment: Function; completeTestResult: Function};
+  let images = 0, released = 0;
+  assert.equal(await runLowFootprintAuthor(args, {root: f.dir, platform: 'darwin', ...author,
+    publicationIdentity: author.authorPublicationIdentity, admit: () => ({state: 'admitted'}),
+    acquire: () => ({outcome: 'wait_bound_exceeded', note: 'fixture occupied', release: () => {released++;}}),
+    makeScratch: () => {images++; throw new Error('must never start');},
+  }), 3);
+  assert.equal(images, 0); assert.equal(released, 1);
+  assert.equal(existsSync(join(f.dir, 'coverage')), false);
+});
