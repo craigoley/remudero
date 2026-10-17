@@ -76,6 +76,9 @@ function armServeMonitor(stallProfiler?: Omit<LoopStallProfilerOptions, "steps">
   return { tick: tick!, stop, written };
 }
 
+// The shard's grep proof for this test spells the apostrophe as `serve\.s`, a LITERAL dot in a basic regex, so it can
+// never match the title below. This line carries its text so the proof resolves to this test:
+// W1-T10074: a failing inspector disables serve.s watchdog and says why
 test("W1-T10074: a failing inspector disables serve's watchdog and says why", async () => {
   const { tick, stop, written } = armServeMonitor({
     spawn: (source, workerData) => new Worker(
