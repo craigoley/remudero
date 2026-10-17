@@ -1,0 +1,137 @@
+- id: W1-T10020
+  title: "A DEPENDENT COUNTS BY ITS OWN VALUE, NOT AS ONE UNIT — `costOfDelayContext` multiplies a task's score by (1 + openDependentFanout), a raw transitive count, so each early enabler of the 21-wave test-restructure chain (W1-T9860..W1-T9901) scored about 3.6 against about 0.5 for independent P1 fixes, and W1-T9089 and W1-T9757 (P1) sat at ranks 28 and 31 behind the family"
+  repo: remudero
+  depends_on: [W1-T9968]  # same lines of costOfDelayContext; W1-T9968's within-tier slot sort reads the term this task re-weights
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what one open dependent is worth in the score. The urgency and its tier unit (W1-T9967), the cross-tier slot assignment (W1-T9968), the validity share, the stride and compareDispatch are unchanged
+  band_meaning: span
+  origin: "operator choice 2026-10-17 on the yield-resume finding: \"Weight dependents by value\". Standing rule: no hard fixed thresholds"
+  plan_refs: [W1-T9968, W1-T9967, W1-T9323, W1-T9325, W1-T9925, W1-T4064, W1-T9089, W1-T9757, W1-T9871]
+  files:
+    - src/lib/dispatch-value.ts
+    - test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts
+    - test/new-work-is-ordered-by-cost-of-delay.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-17: "Weight dependents by value"; P1 fixes ranked 28 and 31 behind a P2 chain's enablers
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 by an offline replay of `buildDispatchValueContext` over the ledger union
+    (~/Remudero-notes/yield-resume-2026-10-17/):
+    - The test-restructure chain (W1-T9860..W1-T9901, filed 2026-10-16 in #12389) runs 21 wave tasks one after another.
+      Each early enabler had 26-34 open dependents and scored about 3.6, against about 0.5 for independent P1 fixes.
+    - W1-T9089 and W1-T9757 (both P1) sat at ranks 28 and 31 behind the family.
+    - In the 48 h to 2026-10-17 04:58Z, 9 tasks had no resume for 6-18 h, all behind the same family.
+    - #12535 (merged) resumes yielded runs first. Fresh P1 work can still be outranked by a long low-priority chain.
+    READ on origin/main 89d82ab10 (symbols, not lines):
+    - `openDependentFanout` counts every open transitive dependent, each as one unit, whatever its priority or depth.
+    - `costOfDelayContext` scores `probability * (1 + openDependentFanoutByTaskId.get(id)) * classScore * mergeProbability
+      * urgency`, then `pass = (1 + starts) / score`.
+    - So 21 P2 waves add 21 units to their enabler, where one P1 fix adds 1 to itself.
+    COUNTED on the origin/main 89d82ab10 plan (974 open tasks; script in the filing session's scratchpad, wvd-fanout.mjs):
+    - The P1 enablers W1-T9871 (26 open dependents, all P2), W1-T9861, W1-T9870 and W1-T9873 (24 each, all P2) are
+      P1 tasks. W1-T9968 keeps fan-out inside a tier, so these still multiply by 25-27 against W1-T9089 and W1-T9757
+      in the same P1 tier. That is the residual this task removes.
+    - At equal ages, the design below turns those multipliers into 1.28-1.66. W1-T9874 (P2, 29 dependents) goes from
+      30 to 3.0, because it has a fan of direct P2 dependents. Its cross-tier rank is W1-T9968's.
+    WHY DEPENDS ON W1-T9968.
+    - Both edit `costOfDelayContext`. W1-T9968 decides which tier owns each position and sorts each tier by the
+      with-fan-out pass. This task changes the value that sort reads.
+    - The two tasks are separate concerns. W1-T9968 is the scope of the fan-out term (within a tier, never across one);
+      this task is its magnitude.
+    INTERACTION WITH W1-T9925 (the queue judge, filed). The judge may re-score priorities. This task fixes the
+    formula; the judge fixes the inputs. A re-scored priority flows into the dependent value through `priorityTiers`
+    with no further change.
+    W1-T9325 (in flight on run-W1-T9325-1792241109920) also edits src/lib/dispatch-value.ts and reports
+    `open_dependents` from `openDependentFanoutByTaskId`. That field keeps its meaning, the raw count. Overlap packing
+    serializes the two builds.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main 89d82ab10 for fanout, fan-out and openDependentFanout
+    (W1-T9968, W1-T9925, W1-T9323, W1-T4064, W1-T9325, W1-T5112, W1-T4941 name the term; none weights a dependent).
+    Also swept the added lines of the 233 origin heads committed in the last five days: only run-W1-T9325-1792241109920
+    and the merged W1-T9967 head touch src/lib/dispatch-value.ts, and no head weights a dependent by value.
+  design: |
+    No fixed count, cap or weight (standing operator rule). Every weight comes from `priorityTiers`,
+    `dispatchUrgency` and the tier unit W1-T9967 measures.
+    1. LEVEL. `level(x)` is the length of the longest chain of OPEN dependencies under x, 0 when x is ready.
+       - Compute it by a memoized depth-first walk over `depends_on`, restricted to `openTaskIds`. A dependency that is
+         merged or outside the plan adds nothing.
+       - An id met again while still on the walk's stack is a cycle. Its members get no level, contribute nothing, and
+         are named (see 4). So the walk terminates on any plan, and visits each edge once.
+    2. DEPENDENT VALUE (a helper named `dependentValue`, src/lib/dispatch-value.ts).
+       - For each open task t, sum over its open transitive dependents d, each counted once (the set
+         `openDependentFanout` already walks):
+         `dispatchUrgency(tierOf(d) + level(d) - level(t), waits(d))`.
+       - `tierOf` is `priorityTiers` over the open queue, and `waits(d)` is d's age in its own tier unit, exactly as
+         d's own urgency reads them.
+       - So a dependent counts at its own priority and its own cost of delay. A dependent that cannot start until k
+         more merges land sits k tiers further from the head: `dispatchUrgency`'s own rule that each tier halves the
+         weight. A dependent 20 hops away adds about 2^-20 of its value, because it is not unblocked now.
+       - The level, not the path, sets the depth, so a dependent that also waits on a long unrelated chain is
+         discounted by that chain too. A wave that lists the enabler directly and also follows 15 earlier waves is
+         15 merges away.
+       - The sum is the recursion: d's dependents are t's dependents. A chain of P2 waves under t adds at most
+         `u(P2) * (1/2 + 1/4 + ...)`, under one P2 unit, for any length. A fan of k ready P2 dependents adds k times
+         a half P2 unit, so parallel work still counts per task.
+    3. SCORE. In `costOfDelayContext`, replace `(1 + fanout) * urgency` with `urgency + dependentValue(t)`.
+       - A task with no open dependents scores exactly as today.
+       - W1-T9968's within-tier sort reads this product in place of `(1 + fanout)`. Its slot assignment is unchanged.
+       - `openDependentFanoutByTaskId` keeps the raw count for `compareDispatch`'s tiebreak, the backlog gardener's
+         evidence and W1-T9325's `open_dependents`.
+    4. THE READY ROW. `dispatch.cost_of_delay.ready` (`costOfDelayReadyRow`) gains:
+       - `dependent_value`: one entry per open task with at least one open dependent, ordered by id:
+         `{ id, open_dependents, own_urgency, dependent_value }`. A reader sees the lift as own plus dependent value.
+       - `dependent_cycle`: the ids step 1 found on a cycle, when there are any.
+       - The row's key stays per plan tree, as W1-T9967 made it, so each tree logs it once.
+    5. Unchanged: `openDependentFanout`, `dispatchUrgency`, `priorityTiers`, the tier units, the validity share,
+       `compareDispatch`, the fallback order, eligibility and the pack.
+    6. TESTS. A new file, test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts, with `test(` titles
+       verbatim as in the proofs. It uses `buildDispatchValueContext` plus `dispatchOrder` on injected tasks and rows
+       with fixed timestamps, as the W1-T9323 file does.
+       - The 10-16 replay: a P2 enabler with 21 chained P2 waves under it, against an independent P1 of the same
+         filing age. The P1 dispatches first and its `costOfDelayByTaskId` is the larger. When the enabler is filed
+         early enough that its OWN urgency exceeds the P1's, the enabler goes first. At base the enabler multiplies
+         by 22.
+       - The within-tier residual: a fresh P1 enabler of 21 chained fresh P2 waves against a lone P1 one P1 tier
+         unit old (urgency 2). The lone P1 is first; at base the enabler scores 22 against 2.
+       - The control: a P1 enabler of P1 dependents still outranks a lone P1 of the same age.
+       - Convergence: lengthening the chain from 21 to 42 P2 waves raises the enabler's score by less than one P2
+         wave's own urgency. A plain or tier-weighted count adds 21 units or more.
+       - Fan: an enabler of three ready P1 dependents scores above an enabler of one. A max over dependents fails it.
+       - Termination: a `depends_on` cycle returns a ready context, scores the tasks outside it, and names the cycle
+         in the ready row.
+       - The ready row carries `dependent_value` with `open_dependents`, `own_urgency` and `dependent_value` for the
+         enabler, the last equal to the sum in step 2 computed from the test's own inputs.
+       - Amend test/new-work-is-ordered-by-cost-of-delay.test.ts "W1-T4064: open fanout adds impact and measured cost
+         per merge changes the share". Its exact `2 *` ratio is the one-unit count. Assert parent above peer, and the
+         parent's score equal to `urgency + dependentValue` from the test's own inputs.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts"
+    - claim: "21 chained P2 waves under an enabler do not lift it past an independent P1 unless its own value exceeds it"
+      proof: 'grep: test("W1-T10020: 21 chained P2 waves under an enabler do not lift it past an independent P1 unless its own value exceeds it" in test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts'
+    - claim: "a P1 enabler of 21 chained P2 waves yields to a lone P1 that has waited one tier unit"
+      proof: 'grep: test("W1-T10020: a P1 enabler of 21 chained P2 waves yields to a lone P1 that has waited one tier unit" in test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts'
+    - claim: "a P1 enabler of P1 dependents still outranks a lone P1"
+      proof: 'grep: test("W1-T10020: a P1 enabler of P1 dependents still outranks a lone P1" in test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts'
+    - claim: "lengthening a chain of P2 waves from 21 to 42 adds less than one P2 wave of urgency"
+      proof: 'grep: test("W1-T10020: lengthening a chain of P2 waves from 21 to 42 adds less than one P2 wave of urgency" in test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts'
+    - claim: "a fan of open dependents adds the value of each dependent"
+      proof: 'grep: test("W1-T10020: a fan of open dependents adds the value of each dependent" in test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts'
+    - claim: "a dependency cycle terminates and is named in the ready row"
+      proof: 'grep: test("W1-T10020: a dependency cycle terminates and is named in the ready row" in test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts'
+    - claim: "the ready row reports each dependent value beside its open-dependent count"
+      proof: 'grep: test("W1-T10020: the ready row reports each dependent value beside its open-dependent count" in test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts'
+    - claim: "the score reads a value-weighted dependent term"
+      proof: "grep: function dependentValue in src/lib/dispatch-value.ts"
+  falsifier: |
+    At origin/main, and after W1-T9968, the P1 enabler of 21 chained P2 waves multiplies by (1 + 21) = 22. Against a
+    lone P1 one tier unit old (urgency 2) it scores 22 to 2, sorts first, and the within-tier test fails.
+    With the fix it scores 1 + (1/2)(1/2 + 1/4 + ...), under 1.5, and the lone P1 goes first.
+    Ways to break it, and the test that catches each:
+    - Weight by tier only, with no depth discount: the chain adds 21 halves, and the convergence test fails.
+    - Take the max over dependents instead of the sum: the fan test fails.
+    - Count only dependents in the enabler's own tier: the control holds, but the ready-row test, which expects the
+      P2 waves' positive dependent value computed from the test's own inputs, fails.
+    - Walk without a cycle guard: the termination test hangs and times out.
