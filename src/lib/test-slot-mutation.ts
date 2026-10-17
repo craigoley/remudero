@@ -223,24 +223,22 @@ export function reclaimOrphanedSlotMutation(path: string, recovery: OrphanGuardR
   return "reclaimed";
 }
 
+/** O_EXCL decides ownership atomically, so the result is the descriptor itself, never a prior lookup. */
+function createGuard(guard: string): number | string {
+  try { return openSync(guard, "wx", 0o600); }
+  catch (error) { return String((error as NodeJS.ErrnoException).code ?? "unknown"); }
+}
+
 /** path is the canonical slot JSON pathname. A busy result never establishes free capacity. */
 export function acquireSlotMutation(path: string, recovery?: OrphanGuardRecovery): SlotMutation {
   const uid = process.getuid?.();
   if (uid === undefined) return { state: "busy", reason: "unavailable" };
   const guard = mutationPath(path);
-  let fd: number;
-  try { fd = openSync(guard, "wx", 0o600); }
-  catch (error) {
-    const contended = (error as NodeJS.ErrnoException).code === "EEXIST";
-    // One retry, only after a proven orphan was removed (or vanished); a live writer always wins.
-    if (!contended || recovery === undefined || reclaimOrphanedSlotMutation(path, recovery) === "kept") {
-      return { state: "busy", reason: contended ? "contended" : "unavailable" };
-    }
-    try { fd = openSync(guard, "wx", 0o600); }
-    catch (retryError) {
-      return { state: "busy", reason: (retryError as NodeJS.ErrnoException).code === "EEXIST" ? "contended" : "unavailable" };
-    }
-  }
+  let created = createGuard(guard);
+  // One retry, only after a proven orphan was removed (or vanished); a live writer always wins.
+  if (created === "EEXIST" && recovery !== undefined && reclaimOrphanedSlotMutation(path, recovery) !== "kept") created = createGuard(guard);
+  if (typeof created !== "number") return { state: "busy", reason: created === "EEXIST" ? "contended" : "unavailable" };
+  const fd = created;
   let owner: Stats;
   const privateEmpty = (st: Stats): boolean => st.isFile() && st.uid === uid && st.size === 0 && (st.mode & 0o077) === 0;
   const same = (st: Stats): boolean => privateEmpty(st) && st.dev === owner.dev && st.ino === owner.ino;
