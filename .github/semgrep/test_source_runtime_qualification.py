@@ -122,6 +122,23 @@ class SourceQualificationControls(unittest.TestCase):
                 qualifier.stage_probe(root, workspace, "a" * 40)
             with self.assertRaisesRegex(qualifier.QualificationBlocked, "INVENTORY"):
                 qualifier.committed_source(root, workspace, head, ".github/semgrep/not-declared.py")
+            real_run = qualifier.subprocess.run
+            for name, reason in (("runtime-compatibility-audit.py", "AUDIT_SOURCE_HASH"),
+                                 ("source-runtime-qualification.py", "EXECUTED_QUALIFIER")):
+                changed_reads = []
+                def changed_blob(argv, **kwargs):
+                    result = real_run(argv, **kwargs)
+                    if argv[-3:-1] == ["cat-file", "blob"]:
+                        raw = result.stdout
+                        self.assertGreater(len(raw), 0)
+                        result.stdout = bytes([raw[0] ^ 1]) + raw[1:]
+                        self.assertEqual(len(result.stdout), len(raw))
+                        changed_reads.append(name)
+                    return result
+                with patch.object(qualifier.subprocess, "run", side_effect=changed_blob):
+                    with self.assertRaisesRegex(qualifier.QualificationBlocked, reason):
+                        qualifier.committed_source(root, workspace, head, ".github/semgrep/" + name)
+                self.assertEqual(changed_reads, [name], "the same-length tampered blob was actually read")
             other = root / "different.py"
             other.write_text("not the committed qualifier")
             with patch.object(qualifier, "__file__", str(other)):
@@ -239,9 +256,12 @@ class SourceQualificationControls(unittest.TestCase):
             link.symlink_to(root, target_is_directory=True)
             with self.assertRaisesRegex(qualifier.QualificationBlocked, "PRIVATE_ROOT"):
                 qualifier.private_root(link)
-            os.chmod(root, 0o755)  # only this test's NEW private fixture
-            with self.assertRaisesRegex(qualifier.QualificationBlocked, "PRIVATE_ROOT"):
-                qualifier.private_root(root)
+            os.chmod(root, 0o710)  # non-private group traversal; no read/write grant
+            try:
+                with self.assertRaisesRegex(qualifier.QualificationBlocked, "PRIVATE_ROOT"):
+                    qualifier.private_root(root)
+            finally:
+                os.chmod(root, 0o700)
 
     def test_environment_does_not_inherit_credentials_or_injection(self):
         with patch.dict(os.environ, {"GITHUB_TOKEN": "trap", "SEMGREP_APP_TOKEN": "trap",

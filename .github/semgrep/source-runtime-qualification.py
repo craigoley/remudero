@@ -94,8 +94,14 @@ def committed_source(root, workspace, head, path):
     size = int(git("cat-file", "-s", blob))
     need(0 < size <= 65536, "AUDIT_SOURCE_BOUND")
     raw = git("cat-file", "blob", blob)
-    need(len(raw) == size and hashlib.sha1(b"blob " + str(size).encode() + b"\0" + raw).hexdigest() == blob,
-         "AUDIT_GIT_BYTES")
+    need(len(raw) == size, "AUDIT_GIT_BYTES")
+    name = path.rsplit("/", 1)[1]
+    expected = AUDIT_SOURCES.get(name)
+    if expected is None:
+        expected = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
+    need(hashlib.sha256(raw).hexdigest() == expected,
+         "EXECUTED_QUALIFIER_DIFFERS_FROM_HEAD" if name == "source-runtime-qualification.py"
+         else "AUDIT_SOURCE_HASH")
     return raw
 
 
