@@ -40520,7 +40520,11 @@ export async function daemonCommand(
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
-        ...(childMode ? { adoptRunChildren: () => adoptedChildren } : {}),
+        // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
+        ...(childMode ? {
+          adoptRunChildren: () => adoptedChildren,
+          refillRunsAsChild: () => !flagValue(rest, "--plan") && runChildModeIsOn(childPolicy, childModeTracker.evidence).on,
+        } : {}),
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
           // W1-T9087: each dispatch asks the mode; under `auto` that is the evidence's current answer, ledgered when it changes.
