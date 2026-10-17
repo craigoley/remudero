@@ -17,8 +17,8 @@
 // lower-privilege human-flagging rung (`insertPlanRepairFlag`/`dispatchPlanOnlyRepair`, W1-T3390,
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
-import { createHash } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -728,10 +728,18 @@ function scopeWorkPath(root: string, path: string): string {
 
 interface ScopeWorkEntry { path: string; data: string | null; mode: number }
 
+class MissingScopeWorkError extends Error {}
+
 function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
   const file = scopeWorkRecoveryPath(input);
-  if (!existsSync(file)) throw new Error("missing saved work from the round that asked for scope");
-  const saved = JSON.parse(readFileSync(file, "utf8"));
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new MissingScopeWorkError("missing saved work from the round that asked for scope");
+  }
+  const saved = JSON.parse(text);
   if (saved.identity !== scopeWorkIdentity(input) || typeof saved.payload !== "string" ||
       saved.digest !== createHash("sha256").update(saved.payload).digest("hex")) {
     throw new Error("scope recovery identity or digest did not verify");
@@ -750,18 +758,37 @@ function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
  *  immutable copy instead of replacing the asking round's work with an empty, later checkout. */
 export function saveScopeAmendmentWork(input: ScopeAmendmentWork): string {
   const file = scopeWorkRecoveryPath(input);
-  if (!existsSync(file)) {
-    const entries = [...new Set(input.paths)].sort().map((path): ScopeWorkEntry => {
-      const source = scopeWorkPath(input.worktreePath, path);
-      const stat = lstatSync(source, { throwIfNoEntry: false });
-      return { path, data: stat ? readFileSync(source).toString("base64") : null, mode: stat ? stat.mode & 0o777 : 0 };
-    });
-    const payload = JSON.stringify(entries);
-    const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
-      digest: createHash("sha256").update(payload).digest("hex") });
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(join(input.root, "recovery", ".rmd-scratch-keep"), "preserved scope-amendment work\n", { flush: true });
-    writeFileSync(file, text, { flag: "wx", mode: 0o600, flush: true });
+  try {
+    readScopeWork(input);
+    return file;
+  } catch (error) {
+    if (!(error instanceof MissingScopeWorkError)) throw error;
+  }
+  const entries = [...new Set(input.paths)].sort().map((path): ScopeWorkEntry => {
+    const source = scopeWorkPath(input.worktreePath, path);
+    const stat = lstatSync(source, { throwIfNoEntry: false });
+    return { path, data: stat ? readFileSync(source).toString("base64") : null, mode: stat ? stat.mode & 0o777 : 0 };
+  });
+  const payload = JSON.stringify(entries);
+  const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
+    digest: createHash("sha256").update(payload).digest("hex") });
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(join(input.root, "recovery", ".rmd-scratch-keep"), "preserved scope-amendment work\n", { flush: true });
+  // Publish a complete file in one link; a losing writer can then verify the winner's bytes.
+  const staging = join(dirname(file), `.scope-work-${randomUUID()}.tmp`);
+  let created = false;
+  try {
+    writeFileSync(staging, text, { flag: "wx", mode: 0o600, flush: true });
+    try {
+      linkSync(staging, file);
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } finally {
+    rmSync(staging, { force: true });
+  }
+  if (created) {
     if (readFileSync(file, "utf8") !== text) throw new Error("saved scope recovery bytes did not verify");
     for (const path of [dirname(file), dirname(dirname(file)), input.root]) {
       const fd = openSync(path, "r");

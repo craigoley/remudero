@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse } from "yaml";
 import { findTaskShard, requestScopeAmendment, restoreScopeAmendmentWork, saveScopeAmendmentWork,
@@ -173,7 +173,7 @@ test("scope recovery verifies content, preserves modes and deletions, and never 
   const bytes = Buffer.from([0, 1, 255, 10]);
   writeFileSync(join(f.repo.dir, path), bytes); chmodSync(join(f.repo.dir, path), 0o755);
   const saved = saveScopeAmendmentWork(input);
-  writeFileSync(join(f.repo.dir, path), "later work");
+  rmSync(join(f.repo.dir, path));
   assert.equal(saveScopeAmendmentWork(input), saved);
   writeFileSync(join(f.repo.dir, "src/deleted.ts"), "must be deleted again");
   assert.deepEqual(restoreScopeAmendmentWork(input), ["src/deleted.ts", path]);
@@ -183,12 +183,36 @@ test("scope recovery verifies content, preserves modes and deletions, and never 
   assert.throws(() => restoreScopeAmendmentWork({ ...input, prNumber: 43 }), /missing/);
   const record = JSON.parse(readFileSync(saved, "utf8"));
   writeFileSync(saved, JSON.stringify({ ...record, payload: "[]" }));
+  assert.throws(() => saveScopeAmendmentWork(input), /digest did not verify/);
   assert.throws(() => restoreScopeAmendmentWork(input), /digest did not verify/);
   assert.deepEqual(readFileSync(join(f.repo.dir, path)), bytes);
   const payload = JSON.stringify([{ path: "src/unrequested.ts", data: "", mode: 0o644 }]);
   writeFileSync(saved, JSON.stringify({ ...record, payload, digest: createHash("sha256").update(payload).digest("hex") }));
   assert.throws(() => restoreScopeAmendmentWork(input), /paths or file content did not verify/);
   assert.equal(existsSync(join(f.repo.dir, "src/unrequested.ts")), false);
+});
+
+test("scope recovery adopts a record created between its missing read and exclusive publish", (t) => {
+  const f = fixture(t);
+  const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
+    amendmentNumber: 99, paths: [path] };
+  writeFileSync(join(f.repo.dir, path), "winner's work");
+  const saved = saveScopeAmendmentWork(input);
+  const winner = readFileSync(saved, "utf8");
+  rmSync(saved);
+  writeFileSync(join(f.repo.dir, path), "loser's work");
+  let winnerPublished = 0;
+  const racingInput = { ...input, get worktreePath() {
+    winnerPublished++;
+    writeFileSync(saved, winner, { flag: "wx" });
+    return f.repo.dir;
+  } };
+  assert.equal(saveScopeAmendmentWork(racingInput), saved);
+  assert.equal(winnerPublished, 1);
+  assert.equal(readFileSync(saved, "utf8"), winner);
+  assert.deepEqual(readdirSync(dirname(saved)).filter((name) => name.endsWith(".tmp")), []);
+  assert.deepEqual(restoreScopeAmendmentWork(input), [path]);
+  assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), "winner's work");
 });
 
 test("scope recovery refuses symlinks and traversal at both save and restore", (t) => {
