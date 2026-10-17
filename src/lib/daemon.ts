@@ -121,7 +121,7 @@ import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload,
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds, closedUnmergedRunBranchTaskIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
-import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, type IndependentBlockRelease } from "./status.js";
+import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
@@ -541,7 +541,8 @@ export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
  *  a `run.freshness_handoff` row is a receipt too (W1-T7747). W1-T8676: an `implement.checkpoint_kept` row,
  *  which run-task writes right after a worker-error verdict of the run that restored the checkpoint, re-pends
- *  the exact receipt that verdict consumed. */
+ *  the exact receipt that verdict consumed. A run refused before it could restore (a stale engine's lockfile,
+ *  2026-10-17 W1-T9089) consumed nothing either; its verdict left the P1 run-branch-already-pushed for 5 h. */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
   const resumable = (taskId: string, branch: unknown, headSha: unknown): branch is string =>
@@ -564,6 +565,7 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
       : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
     if (row.step !== "verdict" && !receipt) continue;
     if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
+    if (row.step === "verdict" && typeof row.stage === "string" && PRE_RESTORE_RUN_VERDICT_STAGES.has(row.stage)) continue;
     pending.delete(row.task_id);
     if (receipt && resumable(row.task_id, row.branch, row.head_sha)) {
       pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha) });
