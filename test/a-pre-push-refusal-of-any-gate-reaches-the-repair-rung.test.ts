@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dropDeletedTestTierRows, dropTierRowsBeforePush, prePushGateRefusal, TEST_TIER_MANIFEST } from "../src/lib/pre-push-refusal.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { dropDeletedTestTierRows, dropTierRowsBeforePush, prePushGateRefusal, TEST_TIER_MANIFEST } from "#src/lib/pre-push-refusal.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 /** The run.error W1-T9089-1792234580171 wrote at 11:27:02Z, verbatim but for the engine path. */
 const TIER_REFUSAL = [
