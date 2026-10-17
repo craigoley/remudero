@@ -1222,7 +1222,8 @@ import {
   recordCiLearningAttempt,
   recordCiLearningCadenceFire,
   recordMeasurementCadenceFire,
-  readWipeTestAblationEvidence,
+  createWipeTestEvidenceReader,
+  wipeTestSlotDraw,
   recordWipeTestCadenceFire,
   scheduleWipeTestAblation,
   renderVerbCensusDigestLine,
@@ -33158,7 +33159,9 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
   now?: () => Date;
   policy?: Policy;
   learningsIndex?: () => LearningsIndex | null;
-  ledgerUnion?: typeof resolveLedgerUnion;
+  /** The evidence read; production builds one {@link createWipeTestEvidenceReader} per hooks build, so its
+   *  incremental union lives as long as the daemon. */
+  readEvidence?: ReturnType<typeof createWipeTestEvidenceReader>;
   runTaskFn?: typeof runTask;
   execFileSyncFn?: typeof execFileSync;
   targetArgs?: string[];
@@ -33170,9 +33173,13 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
-  const ledgerUnion = deps.ledgerUnion ?? resolveLedgerUnion;
+  const readEvidence = deps.readEvidence ?? createWipeTestEvidenceReader();
   const learningsIndexFor =
     deps.learningsIndex ?? (() => loadLearningsIndex(join(projectLearningsHome(repoRoot), "index.json")));
+  // The slot's skip, reused while the slot, its draw, the policy and the evidence all hold: the draw is fixed
+  // per slot, so re-deriving it (index load, subject generation, the marker re-read) on every pulse of an
+  // unablated slot reaches the same skip. A slot that fires is never reused; it records its fire instead.
+  let slotSkip: { key: string; reason: string } | undefined;
   const check =
     deps.check ??
     (() => {
@@ -33182,13 +33189,19 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       const paced = wipeTestCadenceCheck({ root: config.root, policy, now });
       if (!paced.fire) return paced;
 
-      const prior = readWipeTestAblationEvidence(join(config.root, "state"), ledgerUnion);
-      if (!prior.ok) return { fire: false, reason: prior.reason };
+      const { evidence: prior, cost } = readEvidence(join(config.root, "state"));
+      const evidence = { ...cost, reused: false };
+      if (!prior.ok) return { fire: false, reason: prior.reason, evidence };
+
+      const draw = deps.draw?.() ?? wipeTestSlotDraw(now, policy.minIntervalMinutes);
+      const slot = Math.floor(now.getTime() / (Math.max(1, policy.minIntervalMinutes) * 60_000));
+      const slotKey = JSON.stringify([config.root, slot, draw, policy, prior.pairs, prior.claimedUse]);
+      if (slotSkip?.key === slotKey) return { fire: false, reason: slotSkip.reason, evidence: { ...cost, reused: true } };
 
       const index = learningsIndexFor();
-      if (!index) return { fire: false, reason: "wipe-test cadence learnings index unavailable" };
+      if (!index) return { fire: false, reason: "wipe-test cadence learnings index unavailable", evidence };
       const shards = Object.keys(index.files).sort();
-      if (shards.length === 0) return { fire: false, reason: "wipe-test cadence learnings index has no shards" };
+      if (shards.length === 0) return { fire: false, reason: "wipe-test cadence learnings index has no shards", evidence };
 
       const seq = prior.pairs.length + 1;
       const shard = shards[(seq - 1) % shards.length]!;
@@ -33196,7 +33209,7 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
       try {
         subject = generateSandboxTask(index, [shard], seq);
       } catch (e) {
-        return { fire: false, reason: String((e as Error)?.message ?? e) };
+        return { fire: false, reason: String((e as Error)?.message ?? e), evidence };
       }
       const scheduled = scheduleWipeTestAblation({
         root: config.root,
@@ -33205,15 +33218,20 @@ export function buildWipeTestCadenceDaemonHooks(deps: {
         candidate: { id: subject.id, risk: WIPE_TEST_SANDBOX_SUBJECT_RISK },
         pairs: prior.pairs,
         claimedUse: prior.claimedUse,
-        draw: deps.draw?.(),
+        draw,
       });
-      if (!scheduled.fire) return scheduled;
+      if (!scheduled.fire) {
+        slotSkip = { key: slotKey, reason: scheduled.reason };
+        return { fire: false, reason: scheduled.reason, evidence };
+      }
+      slotSkip = undefined;
       return {
         fire: true,
         reason: scheduled.reason,
         seq,
         subject,
         factor: scheduled.factor,
+        evidence,
       };
     });
   const run =
@@ -45601,6 +45619,7 @@ export function buildSweepHook(
     let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
+    let thisPassReviewInputViews: NonNullable<SweepCycleOutcome["reviewInputViews"]> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
       const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
@@ -45613,6 +45632,8 @@ export function buildSweepHook(
         }));
       // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
       thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
+      thisPassReviewInputViews = openPrs.map(({ prNumber, prUrl, headSha, reviewInputDigest, reviewState, taskId }) =>
+        ({ prNumber, prUrl, headSha, reviewInputDigest, reviewState, taskId }));
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
@@ -45756,10 +45777,11 @@ export function buildSweepHook(
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
     await draftHook(tickRead);
-    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0
+    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0 || thisPassReviewInputViews.length > 0
       ? {
           ...(reviewerCodeStale ? { reviewerCodeStale } : {}),
           planOnlyRunBranchReceipts: thisPassPlanOnlyRunBranchReceipts,
+          reviewInputViews: thisPassReviewInputViews,
         }
       : undefined;
   };

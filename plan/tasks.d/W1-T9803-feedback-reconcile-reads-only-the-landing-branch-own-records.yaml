@@ -14,7 +14,7 @@
     - src/lib/feedback-reconcile.ts
     - test/feedback-reconcile-reads-only-the-landing-branch-own-records.test.ts
     - test/feedback-landing-reconcile.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

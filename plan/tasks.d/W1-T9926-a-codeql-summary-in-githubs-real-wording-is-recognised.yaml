@@ -13,7 +13,7 @@
   files:
     - src/lib/code-scanning-merge-policy.mjs
     - test/a-codeql-summary-in-githubs-real-wording-is-recognised.test.ts
-  status: queued
+  status: merged
   priority: 1  # every PR whose CodeQL run reports two or more quality findings of one level is held until a human intervenes; two open PRs today
   attempts: 0
   rationale: |
