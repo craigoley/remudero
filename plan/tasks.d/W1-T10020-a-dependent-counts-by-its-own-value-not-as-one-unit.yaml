@@ -44,13 +44,13 @@
     INTERACTION WITH W1-T9925 (the queue judge, filed). The judge may re-score priorities. This task fixes the
     formula; the judge fixes the inputs. A re-scored priority flows into the dependent value through `priorityTiers`
     with no further change.
-    W1-T9325 (in flight on run-W1-T9325-1792241109920) also edits src/lib/dispatch-value.ts and reports
-    `open_dependents` from `openDependentFanoutByTaskId`. That field keeps its meaning, the raw count. Overlap packing
-    serializes the two builds.
+    W1-T9325 merged in #12581 (origin/main bd256974e). Its `explainDispatchScore` pick row reports `open_dependents`
+    from `openDependentFanoutByTaskId` and reads `costOfDelayInputsByTaskId`. `open_dependents` keeps its meaning, the
+    raw count; this task adds the weighted term beside it (design step 4).
     NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main 89d82ab10 for fanout, fan-out and openDependentFanout
     (W1-T9968, W1-T9925, W1-T9323, W1-T4064, W1-T9325, W1-T5112, W1-T4941 name the term; none weights a dependent).
-    Also swept the added lines of the 233 origin heads committed in the last five days: only run-W1-T9325-1792241109920
-    and the merged W1-T9967 head touch src/lib/dispatch-value.ts, and no head weights a dependent by value.
+    Also swept the added lines of the 233 origin heads committed in the last five days: only the W1-T9325 and W1-T9967
+    heads (both merged since) touch src/lib/dispatch-value.ts, and no head weights a dependent by value.
   design: |
     No fixed count, cap or weight (standing operator rule). Every weight comes from `priorityTiers`,
     `dispatchUrgency` and the tier unit W1-T9967 measures.
@@ -70,7 +70,7 @@
          weight. A dependent 20 hops away adds about 2^-20 of its value, because it is not unblocked now.
        - The level, not the path, sets the depth, so a dependent that also waits on a long unrelated chain is
          discounted by that chain too. A wave that lists the enabler directly and also follows 15 earlier waves is
-         15 merges away.
+         at least 16 merges away.
        - The sum is the recursion: d's dependents are t's dependents. A chain of P2 waves under t adds at most
          `u(P2) * (1/2 + 1/4 + ...)`, under one P2 unit, for any length. A fan of k ready P2 dependents adds k times
          a half P2 unit, so parallel work still counts per task.
@@ -84,6 +84,8 @@
          `{ id, open_dependents, own_urgency, dependent_value }`. A reader sees the lift as own plus dependent value.
        - `dependent_cycle`: the ids step 1 found on a cycle, when there are any.
        - The row's key stays per plan tree, as W1-T9967 made it, so each tree logs it once.
+       - W1-T9325's per-pick row: `DispatchScoreInputs` gains `dependent_value`, and `explainDispatchScore` reports it
+         beside `open_dependents`, so each pick explains its lift too.
     5. Unchanged: `openDependentFanout`, `dispatchUrgency`, `priorityTiers`, the tier units, the validity share,
        `compareDispatch`, the fallback order, eligibility and the pack.
     6. TESTS. A new file, test/a-dependent-counts-by-its-own-value-not-as-one-unit.test.ts, with `test(` titles
@@ -102,7 +104,8 @@
        - Termination: a `depends_on` cycle returns a ready context, scores the tasks outside it, and names the cycle
          in the ready row.
        - The ready row carries `dependent_value` with `open_dependents`, `own_urgency` and `dependent_value` for the
-         enabler, the last equal to the sum in step 2 computed from the test's own inputs.
+         enabler, the last equal to the sum in step 2 computed from the test's own inputs. `explainDispatchScore` for
+         the enabler reports the same `dependent_value`.
        - Amend test/new-work-is-ordered-by-cost-of-delay.test.ts "W1-T4064: open fanout adds impact and measured cost
          per merge changes the share". Its exact `2 *` ratio is the one-unit count. Assert parent above peer, and the
          parent's score equal to `urgency + dependentValue` from the test's own inputs.
