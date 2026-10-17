@@ -1,0 +1,79 @@
+- id: W1-T10057
+  title: "MEASURE FIRST: A RESTART DRAIN NAMES WHAT IT WAITS ON — freshness decision to exit took p50 20.5 min (p90 40.5, max 84.4) over 68 restarts of 2026-10-12..17, and on 10-17, after W1-T9808, a latch drain still ran 65 min on three detached actions its rows do not name; each drain row and the exit row record what was awaited, admitted when, and each phase's length, so bounding or overlapping the drain is chosen from data"
+  repo: remudero
+  depends_on: []  # the 90-minute minimum lifetime hand-fix (branch fix-freshness-min-lifetime-1792255168191) lands first; see rationale
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what the restart drain and exit rows record; what the drain awaits and its bounds are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017c item 3; operator approved the freshness-restart follow-ups 2026-10-17 ~16:20Z (PLAN-box-cpu-memory.md); filed measure-first because the cause of the long drains is unclear'
+  plan_refs: [W1-T5721, W1-T8170, W1-T8172, W1-T9808, W1-T9812, W1-T9813, W1-T9924, W1-T9114, W1-T9352]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - test/a-restart-drain-names-what-it-waits-on.test.ts
+  status: queued
+  priority: 2  # every freshness restart pays it; about 11 a day remain after the minimum lifetime lands
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-10-12T00:00Z..10-17T15:26Z, logs-8864/restartsim-rows.ndjson; decomposition in
+    logs-8864/batch1017c-drain-decomp.txt; a cycle is a run_id's first restart decision to its freshness exit):
+    - 68 cycles: total p50 20.5 min, p90 40.5, max 84.4. Decision to drain start p50 16.1, p90 29.2, max 50.8;
+      drain (duration_ms) p50 5.6, p90 14.5, max 84.4.
+    - daemon.freshness_restart_waiting: 43 cycles waited on `in_flight_lanes` (3,680 restart_holdout rows,
+      3,606 of them `finish_is_cheaper` while implementing); from 10-16 ~16:30Z the rows read `in_process_work`
+      (7 cycles), after W1-T8172 (merged 10-16 03:39Z) moved the drain start to the latch.
+    - Restart cycles whose drain abandoned at least one review, by day: 10-12 1, 10-13 3, 10-14 2, 10-15 6, 10-16 3.
+    - After W1-T9808 (merged 10-16 21:03Z): on 10-17 drains still ran 1–6 review_passes each. The 01:19:58Z latch
+      drain ran 43 min, reported 4 abandoned reviews and was followed by an exit drain with 4 reviews in flight
+      (10 min). The 04:07:05Z latch drain ran 3,904,518 ms (65 min) with 3 detached sweep actions and 0 reviews,
+      and its rows name neither the actions' kinds nor their tasks. A container recycle followed it 22 s later.
+    READ at origin/main 81f49f019 (symbols, not lines): daemon.ts `beginLatchDrain` / `drainBeforeRestart` log
+    counts only (detached_sweep_actions, in_flight_reviews, abandoned_*, review_passes, duration_ms);
+    `prepareFreshnessExit` runs or awaits a pass before draining (W1-T9812 queued to overlap them). sweep.ts
+    `drainDetachedSweepActions` knows each action's actionKind, taskId, phase and startedAtMs and names only the
+    released ones; `trackInFlightReview` keeps a bare promise per review. daemon.freshness_restart_waiting names
+    lanes but not in-process work.
+    WHY MEASURE FIRST: the options differ by cause. If the time is in reviews admitted after the latch, closing
+    admission at the decision is the fix; if it is long-lived fix workers, W1-T9114 (queued: reviews and detached
+    actions as run children a booting daemon adopts) removes the wait; if it is the pre-exit pass, W1-T9812
+    (queued). Today's rows cannot tell these apart.
+    DEPENDS ON THE MINIMUM LIFETIME (not yet a filed id): branch fix-freshness-min-lifetime-1792255168191 (90-min
+    floor plus B1/B2), not pushed at 16:47Z; it edits decideFreshness beside these rows. Land after it.
+    NOT COVERED ELSEWHERE: W1-T9813 (queued) closes the drain row of an abandoned latch; W1-T9352 (queued) skips a
+    pass for unlatched exits; neither names what a drain awaits. Swept origin/main plan/tasks.d (4,093 shards) and the
+    plan diffs of all 438 remote heads (ls-remote 16:46:49Z) for freshness_drain, drainBeforeRestart, detached sweep
+    action and restart_latch_cost: 0 head hits; main hits are the merged and queued tasks named above.
+  design: |
+    MEASURE FIRST: what the drain awaits, its bounds and its admission rules are unchanged.
+    1. sweep.ts: the review registry keeps, per review, the PR and its admission time; a read-only
+       `restartDrainInventory()` returns each awaited review and detached action as {what: review | detached, kind,
+       task_id, pr, phase, admitted_at_ms}.
+    2. daemon.ts: daemon.freshness_drain.started and .completed carry `waited_on`, one entry per awaited item with
+       admitted relative to the latch (before_latch | after_latch), and on .completed settled_after_ms or abandoned.
+       The list is bounded to the items present (no cap is added; it is a handful per drain today).
+    3. daemon.freshness_exit (and the memory exit's row) gains `phases_ms`: decision_to_latch, holdouts (latch to
+       last lane settled), pre_exit_pass, drain, total, each measured on the daemon clock; an unmeasured phase is
+       absent, never 0.
+    4. No count, bound, threshold or env var is added. The follow-up (bound, overlap or adopt) is filed from a week
+       of these rows; its constants are OPERATOR DECISIONS.
+    5. TESTS in test/a-restart-drain-names-what-it-waits-on.test.ts, `test(` titles verbatim as in the proofs,
+       driving the drain with fake reviews and detached actions on an injected clock.
+  acceptance:
+    - claim: "a drain row names each review and detached action it waited on, and when each was admitted"
+      proof: 'grep: test("W1-T10057: a drain row names each review and detached action it waited on" in test/a-restart-drain-names-what-it-waits-on.test.ts'
+    - claim: "an item abandoned at the bound is named as abandoned, with its kind"
+      proof: 'grep: test("W1-T10057: an item abandoned at the bound is named as abandoned, with its kind" in test/a-restart-drain-names-what-it-waits-on.test.ts'
+    - claim: "the exit row splits the restart into its phases"
+      proof: 'grep: test("W1-T10057: the exit row splits the restart into its phases" in test/a-restart-drain-names-what-it-waits-on.test.ts'
+    - claim: "the drain rows carry the inventory"
+      proof: 'grep: waited_on in src/lib/daemon.ts'
+  falsifier: |
+    At origin/main the drain rows carry counts only, so the first two tests find no `waited_on` entries and the
+    exit row has no `phases_ms`. Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    EFFECT, measured after merge: every daemon.freshness_drain.completed row names its items; a week of rows answers
+    which kind holds a drain longest and how much of decision-to-exit each phase takes. Healthy shape: the follow-up
+    task cites these rows. OPERATOR DECISIONS: none here; the follow-up's bound or overlap is one.
