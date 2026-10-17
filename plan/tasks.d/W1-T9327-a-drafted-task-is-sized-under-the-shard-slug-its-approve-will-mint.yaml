@@ -12,7 +12,7 @@
   files:
     - src/lib/inbox.ts
     - test/a-drafted-task-is-sized-under-the-shard-slug-its-approve-will-mint.test.ts
-  status: queued
+  status: merged
   priority: 1  # 7 approve pushes refused over the slug exit 2026-10-13T05:50Z..10-14T11:44Z, 12 task ids minted and orphaned; amended 2026-10-14
   attempts: 0
   rationale: |

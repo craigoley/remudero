@@ -17,7 +17,7 @@
     - src/lib/worker.ts
     - src/run-task.ts
     - test/an-abandoned-fix-dispatch-releases-its-fix-key.test.ts
-  status: queued
+  status: merged
   priority: 1  # a fix dispatch held in memory admission blocks its PR's fix lane for the whole wait (59 min on #12413) under a false reason
   attempts: 0
   rationale: |
