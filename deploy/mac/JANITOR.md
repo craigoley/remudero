@@ -16,6 +16,28 @@ the identical layout under an alternate absolute root for testing.
 
 Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 
+## Preventing new validation growth
+
+The `scripts/preflight-author.mjs` CLI checks Mac workspace and TMPDIR capacity
+before starting author work, then checks freshly after slot waiting and before
+each static/test phase. Both volumes must retain the existing 20-GiB local
+coverage reserve, and a bounded native pressure read must report normal. Warning,
+critical, unknown or unavailable readings return **NOT_RUN / exit 3**, not a test
+pass. Help and dry-run remain available. Linux/hosted admission is unchanged.
+This is a fresh pre-start observation, not a cross-account capacity reservation
+or a guarantee against other jobs starting concurrently. It never kills jobs,
+changes Janitor retention, deletes swap or dependencies, or weakens hosted gates.
+Older author receipts are not proof of a refused invocation. Existing running
+jobs and older checkouts are not modified; use the updated checkout for new runs.
+
+Apple's public XNU source maps its internal pressure enum to userspace dispatch
+flags for `kern.memorystatus_vm_pressure_level`: 1 is normal, 2 warning and 4
+critical. Do not confuse these with the internal 0-through-4 enum:
+<https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus_notify.c>.
+RSS alone also omits compressed memory; use Activity Monitor's pressure and swap
+observations when investigating a capacity refusal:
+<https://support.apple.com/guide/activity-monitor/view-memory-usage-actmntr1004/mac>.
+
 The installer also installs `cache-reclaim.py` and `retire-legacy-sweeper.py` in
 both layouts. `--retire-legacy-sweeper` is an explicit additional installer option,
 composable with `--shared`. It disables future launch admission only for the
