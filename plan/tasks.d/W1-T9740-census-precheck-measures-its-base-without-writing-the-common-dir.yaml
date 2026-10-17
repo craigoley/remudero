@@ -13,7 +13,7 @@
   files:
     - scripts/census-precheck.mjs
     - test/the-merge-base-tree-is-built-without-writing-the-common-dir.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

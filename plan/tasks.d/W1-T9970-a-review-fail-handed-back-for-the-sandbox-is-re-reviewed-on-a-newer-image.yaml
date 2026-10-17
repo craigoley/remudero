@@ -1,0 +1,87 @@
+- id: W1-T9970
+  title: "A REVIEW FAIL THE FIX LANE HANDED BACK AS UNEXECUTABLE IN THE REVIEW SANDBOX IS RE-REVIEWED ONCE A NEWER IMAGE IS RUNNING — #12409 and #12411 failed review because their proofs spawn python3, which the reviewer image lacked; #12431 added python3 and the image carrying it was running on all three daemons by 00:24Z on 2026-10-17, but nothing re-reviews an unchanged head, so both PRs stayed review-failed and #12411 kept spending fix rounds"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, when the sweep re-reviews a review-failed head whose fix lane handed back. The review engine, the W1-T7837 host-gap route and the strike ladder are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 PR-queue fixer E33 (Craig: \"get them green, make sure things merge, fix the root causes\"): #12409 and #12411 held review-failed after the python3 image shipped"
+  plan_refs: [W1-T7837, W1-T9792, W1-T9955, W1-T496, W1-T3240, W1-T100, W1-T9748]
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/a-review-fail-handed-back-for-the-sandbox-is-re-reviewed-on-a-newer-image.test.ts
+  status: queued
+  priority: 1  # every PR whose proofs need a binary the reviewer image lacks stays review-failed forever after the image is fixed, and spends fix rounds that cannot help
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 ~01:30Z, core ledger on the Azure host (live ledger.ndjson, read-only, niced, streamed to the Mac).
+    Container state from `docker inspect` and one `which python3` exec.
+    - THE IMAGE SHIPPED. #12431 (a8f760d76, 21:48:47Z) added python3 to deploy/Dockerfile. Its own acr-build run was
+      cancelled, but the next baked-path push 895d73f2a (#12443, 21:52Z) contains it and built (tag
+      image/20261016-895d73f). remudero-site-daemon and remudero-console-daemon were recreated at 22:27-22:28Z and
+      remudero-daemon at 00:24:18Z. All three run sha256:b436bc1a…, /etc/rmd-build-sha reads
+      895d73f2af93d2cdbc92cf261f1aabcea14aa1ad, and `which python3` gives /usr/bin/python3.
+    - #12409 (codex/semgrep-source-build-20261016, head e7926e54, taskless). `review.posted` failure at 20:01:03Z.
+      `fix.needs_design` at 20:37:13Z: "Both proofs spawn python3, which is missing in the reviewer sandbox (ENOENT
+      before any assertion)". `refusal_amendment.drafted` at 22:54Z ended `task_closed` (no plan record to amend).
+      From then to 01:28Z every `sweep.disposed` is blocked-fixable / review-failed / owner fix-lane. There was no
+      second review of e7926e54. (The "awaiting its outcome" dedup on it is W1-T9955's.)
+    - #12411 (run-unfiled-1792161817235, head 0b0e8e59). `review.posted` failure at 21:46:52Z, before #12431 merged.
+      The proofs executed and failed with `null !== 0`, the status of a spawnSync whose binary is absent. The finding
+      says "The reviewer sandbox had no python3". The fix lane then ran rounds that could not help:
+      - two `fix.scope_needed` deploy/Dockerfile rounds, ending in escalation #12469;
+      - `refused-twice` parking;
+      - another round prepared at 01:02Z.
+      `fix.progress_judged` at 01:25:56Z gave verdict change-approach, approach "re-review the current head in a
+      fresh sandbox". No row ever acted on that approach.
+    READ at origin/main 0209f6837 (symbols, not lines):
+    - `isHostGapCriterion` (src/lib/sweep.ts) knows only proof_exec exec_error/base_unreadable and the runner-absent,
+      cwd-missing, incomplete-run, runtime-broken and no-exec-context skips. A binary missing INSIDE the test process
+      grades `executed_fail`, so the W1-T7837 `planHostGapRereview` route never sees it.
+    - The review key (`reviewOutcomeKeyForPr`, review_key `input:[task, url, head, input digest]`) and
+      `REVIEW_ENGINE_REVISION` (src/lib/review.ts) carry nothing about the image the reviewer ran in, and the
+      `review.posted` row (run-task.ts `reviewPostedRow`) does not record it. `IMAGE_BUILD_SHA_PATH`
+      (src/lib/deployer.ts, /etc/rmd-build-sha) is the existing, already-tested reading of that image.
+    - So a FAIL caused by the reviewer environment is final at its head. Only a push moves it, and the fix lane
+      correctly refuses to push for a defect that is not in the diff.
+    NOT COVERED ELSEWHERE. Swept plan/tasks.d on origin/main and every open PR head's plan/ diff at 01:35Z for
+    image_build_sha, reviewer image, re-review and proof-unexecutable. W1-T9955 fixes the taskless fix key, not the
+    re-review. W1-T9792 turns a categorized refusal into a plan amendment, which ends `task_closed` for an unfiled PR.
+    W1-T7837 re-reviews host-gap grades only. W1-T9124 (#12385) re-reviews a body edited with no push. None re-reviews
+    because the reviewer's own image changed. W1-T100 (the ci-log fix route) and W1-T9748 (tracing declared files to
+    staging) share only the two hot files, src/run-task.ts and src/lib/sweep.ts, not this surface.
+  design: |
+    1. The `review.posted` row records `runtime_image_sha`, read once per review from `IMAGE_BUILD_SHA_PATH`
+       through the existing deployer reader. It is absent off-container, and absent means unknown, never "unchanged".
+    2. In the sweep's blocked-fixable arm, a PR is due one re-review of its unchanged head when all three hold:
+       - its newest delivered review at this head is a failure;
+       - its fix lane at this head has handed back: a `fix.needs_design`, a `fix.stood_down` at site
+         rung.unfiled_scope, or a fix report carrying the proof-unexecutable-at-head refusal class, read under the
+         PR's fix key (PR-<n> for a taskless PR);
+       - the running image sha differs from that failure's `runtime_image_sha`, or the failure has none.
+    3. The re-review uses the W1-T7837 primitive: delete the delivered review key and set disposition post-review. It
+       writes a `sweep.review_requeued` row with reason reviewer-image-changed, the old and new image shas, and the
+       hand-off row it read. It fires once per (head, running image sha). That is an identity key, not a count, so a
+       later image earns its own re-review and the same image never repeats one.
+    4. Nothing else changes. A failure with no hand-off keeps today's fix route. A re-review that fails again on the
+       new image is an ordinary failure, and the fix lane and progress judge take it from there.
+    No new numeric bound and no new LLM call.
+  acceptance:
+    - claim: "a review-failed head whose fix lane handed back is re-reviewed once when the running image differs from the one the failure ran under"
+      proof: 'grep: test("W1-T9970: a handed-back review failure is re-reviewed on a newer reviewer image" in test/a-review-fail-handed-back-for-the-sandbox-is-re-reviewed-on-a-newer-image.test.ts'
+    - claim: "the same head on the same image is never re-reviewed twice, and a failure with no hand-off keeps the fix route"
+      proof: 'grep: test("W1-T9970: the same image never re-reviews twice and an un-handed-back failure keeps its fix route" in test/a-review-fail-handed-back-for-the-sandbox-is-re-reviewed-on-a-newer-image.test.ts'
+    - claim: "the review.posted row records the image the reviewer ran in"
+      proof: 'grep: runtime_image_sha in src/run-task.ts'
+  falsifier: |
+    At origin/main, a sweep over the #12409-shaped ledger (review failure, fix.needs_design naming the sandbox, a
+    running image sha newer than the failure's) disposes the PR blocked-fixable with no re-review. Remove the image
+    comparison and the same-image test reds, because the head is re-reviewed on every pass.
+  note: |
+    EFFECT, measured after merge from the core ledger: count `sweep.review_requeued` rows with reason
+    reviewer-image-changed, and the review.posted that follows each one. Healthy shape: one per (head, image), with
+    the follow-up review differing from the failure it replaced.
