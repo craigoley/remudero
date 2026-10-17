@@ -183,3 +183,27 @@ test("W1-T9864: the codemod writes a file in place, and --folder degrades when t
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("W1-T9864: --folder selects the tests the placement table maps to that folder", () => {
+  const root = mkdtempSync(join(ROOT, "state", "codemod-root-"));
+  const out = process.stdout.write.bind(process.stdout);
+  let stdout = "";
+  try {
+    mkdirSync(join(root, "test", "nested"), { recursive: true });
+    mkdirSync(join(root, "scripts", "test-placement"), { recursive: true });
+    const mapped = join(root, "test", "nested", "a.test.ts");
+    const other = join(root, "test", "nested", "b.test.ts");
+    writeFileSync(mapped, `${imp("../../src/lib/x.js")}\n`);
+    writeFileSync(other, `${imp("../../src/lib/y.js")}\n`);
+    writeFileSync(join(root, "scripts", "test-placement", "test-folders.tsv"),
+      "test/nested/a.test.ts\tunit\ntest/nested/b.test.ts\tintegration\n\n");
+    process.stdout.write = ((chunk: string) => ((stdout += chunk), true)) as typeof process.stdout.write;
+    assert.equal(codemodMain(["--write", "--folder", "unit"], root), 0);
+    assert.equal(readFileSync(mapped, "utf8"), `${imp("#src/lib/x.js")}\n`, "the mapped test is rewritten");
+    assert.equal(readFileSync(other, "utf8"), `${imp("../../src/lib/y.js")}\n`, "a test mapped to another folder is untouched");
+    assert.match(stdout, /1 of 1 file\(s\) rewritten/);
+  } finally {
+    process.stdout.write = out;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
