@@ -78,7 +78,8 @@ function world(t: TestCtx): World {
     append,
     board: (over = {}, persist = true) => createBoardProjection({
       db, ...(persist ? { lease: got.lease } : {}), ledgerPath: join(dir, "ledger.ndjson"), clock, readPlan: () => PLAN, github: GITHUB, githubGeneration: () => "g1",
-      readCreditStore: () => ({}), readCreditOverrideFile: () => "", ...over,
+      // Its oracle is the full re-derive each test holds the board against: every task, not one slice.
+      readCreditStore: () => ({}), readCreditOverrideFile: () => "", oracleSlices: 1, ...over,
     }),
     persistedReads: () => new Map(db.prepare("SELECT task_id, keys FROM task_cross_read").all().map((r) => [String(r.task_id), JSON.parse(String(r.keys)) as string[]])),
   };
