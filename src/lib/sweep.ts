@@ -14252,6 +14252,48 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
   return stalled || !dispatched;
 }
 
+/** W1-T9999 — the ledger row a pass writes when it settles a fix seed whose daemon run ended before any rung row. */
+export const FIX_SEED_ORPHANED_STEP = "sweep.fix.seed_orphaned";
+
+export interface FixSeed { ts?: string; runId?: string }
+/** `orphaned`: seeded by an earlier daemon run and no rung row followed, so its detached dispatch died with that process. */
+export type FixSeedRead = { kind: "live" | "ended" | "orphaned"; seed: FixSeed };
+
+/** W1-T9999 — WHICH RUNG SPEAKS FOR THIS HEAD'S FIX SEED, and is it still live? The seed is the newest acted
+ *  `sweep.disposed` blocked-fixable/conflicted row at the head. Its rung is the task's `fix.*` rows after the PR's
+ *  previous `sweep.disposed` row, since a synchronous dispatch writes its rung before the seed, so an earlier rung
+ *  never speaks for it. A seed with no rung row is an orphan when an earlier run wrote it; this run's keeps the task-wide
+ *  read. Liveness is read from process identity and ledger order, never from elapsed time. */
+export function fixSeedRead(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "taskId">,
+  runId: string,
+): FixSeedRead | undefined {
+  const taskId = fixLedgerTaskIdFor(pr);
+  const disposed = (line: Record<string, unknown>) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber;
+  const seedAt = lines.findLastIndex((line) => disposed(line) && line.acted === true && line.head_sha === pr.headSha &&
+    (line.disposition === "blocked-fixable" || line.disposition === "conflicted") && typeof line.progress_escalated_key !== "string");
+  if (seedAt < 0 || !taskId) return undefined;
+  const row = lines[seedAt];
+  const seed: FixSeed = { ...(typeof row.ts === "string" ? { ts: row.ts } : {}), ...(typeof row.run_id === "string" ? { runId: row.run_id } : {}) };
+  let from = seedAt;
+  while (from > 0 && !disposed(lines[from - 1])) from -= 1;
+  const window = lines.slice(from);
+  const rung = (line: Record<string, unknown>) => line.task_id === taskId && String(line.step).startsWith("fix.");
+  if (!window.some(rung)) {
+    // An earlier run's detached dispatch died with its process; this run's is owned by the in-process claim.
+    if (seed.runId !== undefined && seed.runId !== runId) return { kind: "orphaned", seed };
+    return { kind: fixRungStalledWithoutNewHead([...lines], taskId) ? "ended" : "live", seed };
+  }
+  if (fixRungStalledWithoutNewHead([...window], taskId)) return { kind: "ended", seed };
+  // A hand-off to the sweep is a live wait only until the sweep has disposed the same head after it.
+  const handoffAt = window.findLastIndex((line) => rung(line) && line.step === "fix.stood_down" && line.outcome === "handed_off");
+  const after = handoffAt < 0 ? [] : window.slice(handoffAt + 1);
+  const received = handoffAt >= 0 && (window[handoffAt].sha === undefined || window[handoffAt].sha === pr.headSha) &&
+    !after.some(rung) && after.some((line) => disposed(line) && line.head_sha === pr.headSha);
+  return { kind: received ? "ended" : "live", seed };
+}
+
 export function flakeClaimsForHead(lines: readonly Record<string, unknown>[], taskId: string | undefined,
   headSha: string | undefined, prNumber?: number): Record<string, unknown>[] {
   if (!taskId || !headSha) return [];
@@ -17933,13 +17975,23 @@ export async function runSweep(
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
         const metadataRed = disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined &&
           !metadataRedRuledOut(ledgerLines, pr);
+        // W1-T9999: the seed's own rung decides, never an earlier rung's; an earlier run's seed with no rung row is settled.
+        const seedRead = dispatchedThisHead ? fixSeedRead(ledgerLines, pr, deps.runId) : undefined;
         alreadyDone = metadataRed || emptyDiffReviewFailure(pr)
           ? false
-          : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, fixLedgerTaskIdFor(pr));
+          : dispatchedThisHead && (seedRead === undefined
+            ? !fixRungStalledWithoutNewHead(ledgerLines, fixLedgerTaskIdFor(pr))
+            : seedRead.kind === "live");
+        if (seedRead?.kind === "orphaned" && !deps.dryRun) {
+          appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: FIX_SEED_ORPHANED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, seed_ts: seedRead.seed.ts, seed_run_id: seedRead.seed.runId });
+        }
         if (alreadyDone) {
+          const seed = seedRead?.seed;
           dedupStandDownReason =
-            `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
-            `before spending another strike`;
+            `fix already dispatched for this head (${pr.headSha.slice(0, 7)})` +
+            (seed?.ts && seed.runId ? ` at ${seed.ts} by ${seed.runId}` : "") +
+            ` — awaiting its outcome before spending another strike`;
         }
         break;
       }
