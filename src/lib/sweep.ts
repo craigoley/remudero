@@ -1902,6 +1902,7 @@ export const SWEEP_EFFECT_SURFACE = [
   // spent and the caller has wired it (see planCappedRepair, classify.ts).
   "dispatchPlanOnlyRepair",
   "escalate",
+  "fixOwnerReclaimableAtHold", // W1-T7998
   "readLiveState",
   "terminalFixStandDown",
   "readRedBaseRefreshFacts",
@@ -2047,6 +2048,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "dispatchFix"
   | "dispatchPlanOnlyRepair"
   | "escalate"
+  | "fixOwnerReclaimableAtHold"
   | "strikeLadder"
   | "readLiveState"
   | "terminalFixStandDown"
@@ -3198,6 +3200,23 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return { outcome: "opened", reason: "strike ladder digest: opened one cause issue", issueUrl: url, assignee: owner };
       },
     },
+    // W1-T7998: the claim path's own capture and decision, local only; the head is the one this pass listed.
+    fixOwnerReclaimableAtHold: (pr, decline) => {
+      const { worktree_path: ownerPath, branch, task_id: taskId } = decline;
+      if (typeof ownerPath !== "string" || typeof branch !== "string" || typeof taskId !== "string") return false;
+      try {
+        return decideRegisteredFixOwnerRecovery(registeredOwnerRecovery.capture({
+          repoDir, worktreesRoot: worktreesDir(config), ownerPath, taskId, branch,
+          expectedRemoteSha: pr.headSha, observedRemoteSha: pr.headSha, inflightDir,
+          claimKey: fixBranchClaimKey(owner, repo, branch),
+          claimRoundEnded: (claimRunId: string) => fixRoundClaimEnded(ledgerPath, claimRunId),
+          idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
+        })).kind !== "keep";
+      } catch {
+        // An unreadable owner has the remedy a kept one has: the hold and its single escalation stand.
+        return false;
+      }
+    },
     escalate: (pr, reason, question) => {
       const logged = appendQuestion(repoRoot, toQuestionEntry(question, new Date().toISOString()));
       log(logged ? "sweep.question.logged" : "sweep.question.log_failed", {
@@ -3507,7 +3526,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               inflightDir,
               claimKey: fixBranchClaimKey(owner, repo, realBranch),
               claimRoundEnded: roundEnded,
-              idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath)), // ledger-read-intent: live
+              idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
             });
           } catch (e) {
             return declineClaim({
@@ -3533,6 +3552,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             return declineClaim({
               reason: "registered_worktree_owner",
               owner_recovery_reason: recovery.reason,
+              owner_recovery_decision: "keep",
               pr_number: pr.prNumber,
               task_id: task.id,
               branch: realBranch,
@@ -3548,6 +3568,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             const fields = {
               pr_number: pr.prNumber, task_id: task.id, branch: realBranch,
               worktree_path: snapshot.path, local_sha_prefix: localSha.slice(0, 12), head_sha: pr.headSha,
+              at_current_head: localSha === snapshot.remoteSha,
             };
             try {
               preservedPath = (registeredOwnerRecovery.preserveStaleDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveStaleDirty"))(
@@ -11909,8 +11930,12 @@ export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): bool
   return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
 }
 
-/** W1-T7719: nearest-rank p95 of live-ledger claim-to-end spans; no history means no reclaim. */
-export function registeredFixOwnerIdleBoundMs(lines: ReadonlyArray<Record<string, unknown>>): number | null {
+/** W1-T7719: nearest-rank p95 of live-ledger claim-to-end spans. W1-T7998: with no history it is
+ *  `noHistoryFallbackMs` (the claim path passes the fix worker's enforced `fixSpawnWallClockBoundMs`). */
+export function registeredFixOwnerIdleBoundMs(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  noHistoryFallbackMs?: number,
+): number | null {
   const spans: number[] = [];
   for (const row of lines) {
     if (row.step !== "fix.done" || typeof row.branch_claim_run_id !== "string" || typeof row.ts !== "string") continue;
@@ -11920,7 +11945,10 @@ export function registeredFixOwnerIdleBoundMs(lines: ReadonlyArray<Record<string
     if (Number.isFinite(span) && span > 0) spans.push(span);
   }
   spans.sort((a, b) => a - b);
-  return spans.length === 0 ? null : spans[Math.ceil(spans.length * 0.95) - 1]!;
+  if (spans.length > 0) return spans[Math.ceil(spans.length * 0.95) - 1]!;
+  return noHistoryFallbackMs !== undefined && Number.isFinite(noHistoryFallbackMs) && noHistoryFallbackMs > 0
+    ? noHistoryFallbackMs
+    : null;
 }
 
 /** W1-T6434 — the diff excerpt a next fix round is shown from a preserved patch, in characters.
@@ -12736,16 +12764,19 @@ export interface FixDispatchHold {
  *  declined owner worktree still exists: once an operator or the janitor removes it, the next pass
  *  re-attempts the claim, so clearing the cause never also needs a hand-pushed head (#10551, 2026-10-10:
  *  a dirty `sweep-` owner held a conflicted PR at one head with nothing able to lift it). A decline
- *  that named no path cannot be re-probed and keeps holding. */
+ *  that named no path cannot be re-probed and keeps holding. W1-T7998: a decline the owner DECISION
+ *  kept is re-asked through `ownerReclaimable`; once it admits recovery the hold lifts this pass. */
 export function fixDispatchHoldAtHead(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
   ownerWorktreeExists: (path: string) => boolean = existsSync,
+  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
 ): FixDispatchHold | undefined {
   const declines = lines.filter((l) => isOwnerClaimDecline(l) && l.pr_number === pr.prNumber && l.head_sha === pr.headSha);
   const last = declines[declines.length - 1];
   const ownerPath = typeof last?.worktree_path === "string" ? last.worktree_path : undefined;
-  if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath))) {
+  if (declines.length >= FIX_CLAIM_DECLINE_BACKSTOP && (ownerPath === undefined || ownerWorktreeExists(ownerPath)) &&
+      !(ownerPath !== undefined && last.owner_recovery_decision === "keep" && ownerReclaimable?.(pr, last) === true)) {
     const why = String(last.owner_recovery_reason);
     // W1-T5974: a staged-only refusal names the paths an operator must inspect before clearing it.
     const staged = Array.isArray(last.staged_paths) && last.staged_paths.length > 0
@@ -12780,8 +12811,9 @@ async function holdRepeatedFixClaimDecline(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
   escalate: SweepDeps["escalate"],
+  ownerReclaimable?: SweepDeps["fixOwnerReclaimableAtHold"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
-  const hold = fixDispatchHoldAtHead(pr, lines);
+  const hold = fixDispatchHoldAtHead(pr, lines, existsSync, ownerReclaimable);
   if (hold === undefined) return undefined;
   if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
   return { reason: hold.reason, fields: hold.fields };
@@ -12998,6 +13030,8 @@ export interface SweepDeps {
    *  {@link ClarificationQuestion}: the real wiring logs it to the §2 backlog AND uses `escalate()`
    *  as the notification transport, carrying the same two resolutions as its options. */
   escalate: (pr: OpenPrView, reason: string, question: ClarificationQuestion) => void | Promise<void>;
+  /** W1-T7998: re-asks the claim path's local owner decision for a held decline; true = recoverable now. */
+  fixOwnerReclaimableAtHold?: (pr: OpenPrView, decline: Record<string, unknown>) => boolean;
   /** W1-T1223 — re-queue ONE cancelled required check's JOB
    *  (`POST .../actions/jobs/{job_id}/rerun`), NEVER the workflow run: a whole-run re-run would
    *  re-spend an already-green sibling sharing that run. AT MOST ONCE per `${headSha}@${checkName}`.
@@ -19369,7 +19403,7 @@ export async function runSweep(
                 standDownReason = reason;
                 break;
               }
-              const declineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate);
+              const declineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
               if (declineHold) {
                 extraDisposedFields = { ...extraDisposedFields, ...declineHold.fields };
                 acted = false;
@@ -19484,7 +19518,7 @@ export async function runSweep(
                 standDownReason = stackHold.reason;
                 break;
               }
-              const conflictedDeclineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate);
+              const conflictedDeclineHold = await holdRepeatedFixClaimDecline(pr, ledgerLines, deps.escalate, deps.fixOwnerReclaimableAtHold);
               if (conflictedDeclineHold) {
                 extraDisposedFields = { ...extraDisposedFields, ...conflictedDeclineHold.fields };
                 acted = false;

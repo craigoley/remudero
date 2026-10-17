@@ -1,0 +1,91 @@
+- id: W1-T10054
+  title: "A FRESHNESS RESTART CAN TAKE AN IDLE MOMENT: BUSY COUNTS ONLY WORK THE RESTART WOULD INTERRUPT, NOT THE DAEMON'S OWN BACKGROUND PASSES — every one of the 1,488 daemon.freshness_decision rows of 2026-10-12..17 read busy true, so W1-T4945's idle arm (restart at once, no drain) never fired and every freshness restart paid a drain: decision to exit p50 20.5 min, p90 40.5, max 84.4"
+  repo: remudero
+  depends_on: []  # the 90-minute minimum lifetime hand-fix (branch fix-freshness-min-lifetime-1792255168191) must land first; see rationale
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what makes the freshness decision busy; the scoring, the threshold, the window and the drain are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017c item 1; operator approved the freshness-restart follow-ups 2026-10-17 ~16:20Z (PLAN-box-cpu-memory.md); the new busy boundary below is an OPERATOR DECISION'
+  plan_refs: [W1-T4945, W1-T5721, W1-T5083, W1-T5366, W1-T6093, W1-T9808, W1-T9114]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/sweep.ts
+    - test/a-freshness-restart-can-take-an-idle-moment.test.ts
+  status: queued
+  priority: 2  # every freshness restart pays a drain today; about 11 a day remain after the minimum lifetime lands
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-10-12T00:00Z..10-17T15:26Z, gz rotations plus live, extracted in
+    logs-8864/restartsim-rows.ndjson; measured by logs-8864 batch1017c scripts):
+    - 1,488 daemon.freshness_decision rows: busy true 1,488, busy false 0 (190 restart, 1,298 defer).
+    - 68 restart cycles (first restart decision to daemon.freshness_exit or daemon_selfrestart_for_freshness, same
+      run_id): p50 20.5 min, p90 40.5, max 84.4.
+    - 67 daemon.freshness_drain.completed rows: duration p50 8.4 min, p90 30.4, max 86.0; 18 abandoned 1 to 4
+      in-flight reviews.
+    - 16 daemon.restart_latch_cost rows: idle_lane_ms p50 12.2 min, waited_ms p50 22.5 min. (The brief's 8.9 min
+      idle-lane p50 came from a different cut; same rows, same order of size.)
+    READ at origin/main 81f49f019 (symbols, not lines):
+    - daemon.ts `scoreFreshness`: busy = siblingInFlight || backgroundSweep !== undefined || sweepLiveness.inFlight
+      || detachedSweepActionCount() > 0 || inFlightReviewCount() > 0.
+    - Two of the three `decideFreshness` call sites (the lane refill and `actOnDispatchFreshness`) pass
+      siblingInFlight = true unconditionally ("a sibling in flight makes it busy"), whatever the lanes hold.
+    - `backgroundSweep` is set for the length of every full pass (F5 census 10-16: p50 18.7 min, p90 49.7), and
+      `sweepLiveness.inFlight` for the light pass. INFERRED: one of the two is set at almost every top-of-tick
+      decision. The row does not say which input was true, so the builder's first test pins it.
+    - sweep.ts `detachedSweepActionCount()` counts every registered action, including the best-effort cadences
+      (retro, auto-triage, measurement-cadence, ci-learning, benchmark-cohort) and pushed-fix CI waits that W1-T5721's
+      drain releases at once because a restart loses nothing by them.
+    - W1-T4945 (merged) designed the idle arm as "no worker, no in-flight review, no detached sweep action". The
+      sweep pass, the light pass and the release-at-once actions were added to busy later; they are the daemon's own
+      work, which a restart redoes, not work it interrupts.
+    DEPENDS ON THE MINIMUM LIFETIME (not yet a filed id): the operator ruled FRESHNESS_MIN_LIFETIME_MS = 90 min on
+    2026-10-17 ~16:20Z. The hand-fix branch fix-freshness-min-lifetime-1792255168191 (wt-min-lifetime, not pushed at
+    16:47Z) makes coalesceFreshnessRestart hold every release except install inputs, withheld reviews and an
+    unreadable advance until the lifetime is 90 min old, the idle trigger included. Without that floor a live idle
+    arm restarts on any material advance at the first idle tick, so this task must not merge before it.
+    NOT COVERED ELSEWHERE: W1-T9114 (queued) moves reviews and detached actions into run children so a restart
+    stops draining them; it does not change what busy reads. Swept origin/main plan/tasks.d (4,093 shards) and the
+    plan diffs of all 438 remote heads (ls-remote 16:46:49Z) for freshness_decision, scoreFreshness, siblingInFlight,
+    idle moment and busy: the only hits are W1-T4945/W1-T5476/W1-T6273/W1-T5083 (merged) and an unrelated scout
+    read-model shard.
+  design: |
+    1. sweep.ts gains `restartInterruptibleDetachedActionCount()`: the detached actions whose phase is "worker" or
+       "admission", the same set W1-T5721's freshness drain awaits (one predicate, shared by both, so busy and the
+       drain cannot disagree about what a restart loses).
+    2. daemon.ts `scoreFreshness` computes busy = live dispatch lanes (inFlightTasks at the refill sites, the
+       in-flight run count at the top of tick) > 0 || inFlightReviewCount() > 0 ||
+       restartInterruptibleDetachedActionCount() > 0. The two refill call sites pass the real sibling count, never
+       a literal true.
+    3. A running full or light pass, and release-at-once detached actions, are NOT busy. The decision row keeps
+       `busy` and gains `busy_reasons` (the inputs that were true: lanes, reviews, detached_work) and
+       `background` (sweep_pass, light_pass, released_actions: N), so the boundary is auditable and a later task can
+       tune from data. The exit path is unchanged: a pass in flight at an idle restart is handled by the existing
+       pre-exit pass logic (W1-T8170/W1-T9812), and its work is redone by the next process.
+    4. No count, bound, threshold or env var is added. The idle restart still passes the minimum-lifetime floor of
+       the hand-fix above; whether the idle trigger should also wait for the W1-T6093 quiet window is an OPERATOR
+       DECISION (today it does not).
+    5. TESTS in test/a-freshness-restart-can-take-an-idle-moment.test.ts, `test(` titles verbatim as in the proofs,
+       driving runDaemon with fakes for the pass, the registries and the clock.
+  acceptance:
+    - claim: "a stale daemon whose only work is a background sweep pass restarts as idle"
+      proof: 'grep: test("W1-T10054: a stale daemon whose only work is a background sweep pass restarts as idle" in test/a-freshness-restart-can-take-an-idle-moment.test.ts'
+    - claim: "a lane refill with no sibling in flight reads idle"
+      proof: 'grep: test("W1-T10054: a lane refill with no sibling in flight reads idle" in test/a-freshness-restart-can-take-an-idle-moment.test.ts'
+    - claim: "an in-flight review or a live fix worker still makes the daemon busy"
+      proof: 'grep: test("W1-T10054: an in-flight review or a live fix worker still makes the daemon busy" in test/a-freshness-restart-can-take-an-idle-moment.test.ts'
+    - claim: "the decision row names what made the daemon busy"
+      proof: 'grep: busy_reasons in src/lib/daemon.ts'
+  falsifier: |
+    At origin/main a stale daemon past its lifetime floor with a background pass in flight and nothing else logs
+    busy true and defers, so the first test fails; the refill site passes true, so the second fails. Restoring
+    `backgroundSweep !== undefined` in busy (deleting the fix) gives `# fail N`, the fix `# fail 0`.
+  note: |
+    EFFECT, measured after merge: daemon.freshness_decision rows with busy false appear, and their restarts have no
+    daemon.freshness_drain.started row. Healthy shape: some restarts are idle; decision-to-exit for those is under a
+    minute. INFERRED risk: idle restarts come sooner after the 90-minute floor than an upper_age release would, so
+    restarts/day may rise toward one per (90 min + stale lag); watch daemon.boot per day against the 10.9/day the
+    sim gave for the floor alone. OPERATOR DECISIONS: the busy boundary in design 2-3, and whether the idle trigger
+    waits for the quiet window.

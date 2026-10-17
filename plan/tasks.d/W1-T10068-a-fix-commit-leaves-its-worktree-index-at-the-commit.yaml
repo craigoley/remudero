@@ -1,0 +1,67 @@
+- id: W1-T10068
+  title: "A FIX ROUND'S HARNESS COMMIT LEAVES ITS WORKTREE'S INDEX AT THE PRIOR HEAD — `commitWorkerEdits` builds the round's tree in a private index and moves the branch with `commit-tree` + `update-ref`, and refreshes the worktree's own index only after a merge, so on 2026-10-17 #12582 round 1's worktree (HEAD b0f219bfb, index written 15:23:08Z, file written 15:35Z, committed 15:38:02Z) read the committed file as a staged delete plus an untracked copy and the next fix claim at that head (16:34:12Z) was declined as dirty_worktree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, the worktree's own index after the private-index commit moves the branch; what is committed, the compare-and-swap, the merge path and the owner-recovery decision (W1-T7998) are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 filing agent F17 item 6, from the hand fix of #12582 (X3, 16:40-17:18Z)"
+  plan_refs: [W1-T4072, W1-T7998, W1-T7719, W1-T6362, W1-T9043]
+  files:
+    - src/run-task.ts
+    - test/a-fix-commit-leaves-its-worktree-index-at-the-commit.test.ts
+  status: queued
+  priority: 1  # every non-merge fix commit makes its own worktree read dirty, which W1-T7998's recovery then keeps forever
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 (core ledger 17:04Z archive, read-only, niced, streamed to the Mac, and X3's read of the worktree):
+    - Worktree /home/node/Remudero/worktrees/sweep-W1-T9043-1792250550466 (#12582, W1-T9043) created 15:22:30Z; its index
+      was written 15:23:08Z. The worker (codex) ran 15:30:20Z-15:37:40Z and wrote the new test file at 15:35Z.
+    - 15:38:02Z `implement.harness_commit` sha b0f219bfb, subject_source worker-authored, admitted_tests
+      [test/an-unanswered-machine-filing-is-resurfaced-then-retired.test.ts]; 15:38:06Z fix.dispatch; 15:38:24Z fix.done
+      success. b0f219bfb became the PR head.
+    - The worktree's HEAD was b0f219bfb and its index still held the 15:23Z tree, so `git status` read the committed
+      file as `D ` (staged delete) plus `??` (untracked copy). captureRegisteredFixOwnerSnapshot reads that as
+      untracked_dirty with localSha === remoteSha, and `decideRegisteredFixOwnerRecovery` keeps it (W1-T7998): 16:34:12Z
+      sweep.fix.dirty_recovery_untracked_refused and sweep.fix.checkout_claim_declined owner_recovery_reason
+      dirty_worktree at head b0f219bfb. X3 then hand-pushed d3735e055 (17:18Z).
+    READ at origin/main 70b15edf7 (symbols, not lines), src/run-task.ts `commitWorkerEdits`:
+    - With `priorHeadSha` set (every fix round), the tree is built by `temporaryIndexTree(...)` in a private index, the
+      commit is `commit-tree <tree> -p <priorHeadSha>` and the branch moves by `update-ref <roundRef> <sha>
+      <priorHeadSha>` (W1-T4072, #9108, so a stale shared index never enters the tree).
+    - Only `if (mergeHead !== undefined) { merge --quit; read-tree <sha> }` refreshes the worktree's own index. The
+      non-merge path, the common one, leaves it at the prior head.
+    WHY THIS IS NOT ANOTHER TASK: W1-T7998 (P1, filed 2026-10-11, claimed refs/rmd-dispatch/W1-T7998 at 18:16:37Z
+    2026-10-17, unbuilt at filing) changes the RECOVERY decision for a dead dirty owner at the current head; it does
+    not stop the commit making the owner dirty. W1-T4072 (merged) built the private-index commit and is kept. Swept
+    origin/main plan/tasks.d for temporaryIndexTree, read-tree, stale index and commit-tree, and the 3 open PR heads
+    (18:26Z): none names the worktree index after the commit.
+  design: |
+    1. In `commitWorkerEdits`, after `update-ref` succeeds on the non-merge path, set the worktree's own index to the
+       new commit's tree, as the merge path already does (`read-tree <sha>`, index only; the working tree is not
+       touched). Undeclared worker edits stay as unstaged or untracked changes, exactly as the worker left them.
+    2. A refused `update-ref` (branch moved) leaves the index alone, as today.
+    3. W1-T4072's guarantee is unchanged: the tree is still built from the private index on the prior head; the
+       refresh happens only after the commit exists.
+    4. TESTS in test/a-fix-commit-leaves-its-worktree-index-at-the-commit.test.ts, `test(` titles verbatim as in the
+       proofs, over a temp repo built with the gitRepo() fixture (local identity set in the fixture): a round with
+       priorHeadSha that adds one declared file and edits another leaves `git status --porcelain` empty for both; an
+       undeclared edit beside them still reads as an unstaged change; a branch that moved under the round leaves the
+       index as it was (control).
+  acceptance:
+    - claim: "after a fix round's commit the worktree's index matches the commit for every committed path"
+      proof: 'grep: test("W1-T10068: a fix commit leaves its worktree index at the commit" in test/a-fix-commit-leaves-its-worktree-index-at-the-commit.test.ts'
+    - claim: "an undeclared edit is still an unstaged change after the commit"
+      proof: 'grep: test("W1-T10068: an undeclared edit stays unstaged after the commit" in test/a-fix-commit-leaves-its-worktree-index-at-the-commit.test.ts'
+  falsifier: |
+    At origin/main a temp-repo round (priorHeadSha set, no merge) that adds test/new.test.ts and commits it leaves
+    `git status --porcelain` reading `D  test/new.test.ts` and `?? test/new.test.ts`, so the first test fails.
+    Resetting the working tree as well loses the undeclared edit and fails the second. Deleting the fix gives
+    `# fail N`, restoring it `# fail 0`.
+  note: |
+    W1-T7998 still matters after this: a round that dies before its commit leaves real residue. EFFECT, measured after
+    merge: sweep.fix.checkout_claim_declined rows with owner_recovery_reason dirty_worktree whose worktree HEAD equals
+    its last implement.harness_commit sha. Healthy shape: none.

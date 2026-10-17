@@ -1,0 +1,85 @@
+- id: W1-T10069
+  title: "THE ENFORCED MEMORY ADMISSION HOLDS A FIX START ON ITS OWN LEARNED TAIL WHEN NOTHING ELSE IS CHARGED — after W1-T9972 the host tail a fix start is charged is its own (hostTailOwner \"start\"): learned estimate 3,788 MiB = typical 1,169 + tail 2,619, with every other reservation decayed to 0-101 MiB, so a fix fits only at MemAvailable >= 5,836 MiB; on 2026-10-17 16:35-17:16Z three fix starts (#12607, #12601, #12575) waited 27.6, 37.5 and 38.7 min (30, 39, 40 attempts) while MemAvailable read 4.0-6.2 GB, and W1-T9679's typical rung exists only in the sweep's admission, not here"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, the enforced admission's answer when the shortfall is the start's own tail alone; the estimates, the decay, the daemon tail (W1-T9972), the host reserve and the sweep's admission (W1-T9679) are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 filing agent F17 item 7, measured on the core ledger for the fix lanes the 16:40-18:15Z hand fixes replaced (#12601, #12575, #12607)"
+  plan_refs: [W1-T9972, W1-T9679, W1-T9762, W1-T9981, W1-T9982, W1-T10000]
+  files:
+    - src/lib/host-memory-admission.ts
+    - test/a-fix-start-is-not-held-on-its-own-tail-alone.test.ts
+  status: queued
+  priority: 1  # every fix lane on the host waited 28-39 min in one hour with nothing else charged; the fix rounds the hand fixes replaced were starved here
+  attempts: 0
+  rationale: |
+    MEASURED on the core ledger (17:04Z archive and the live file, read-only, niced, streamed to the Mac; rows
+    memory_budget.enforce_wait, enforce_admit and shadow, 16:20-17:29Z):
+    - worker_class fix, three starts: W1-T10038 (#12607) wait logged 16:55:05Z, admitted 17:02:44Z tier fits waited_ms
+      1,657,436 (30 attempts); W1-T10025 (#12601) admitted 17:12:42Z waited_ms 2,248,637 (39); W1-T9877 (#12575)
+      admitted 17:16:43Z waited_ms 2,322,081 (40). Wait reasons ["psi","unrealized-reservations"]; admit reasons [].
+    - THE DOMINANT TERM. Every wait row reads hostTailOwner "start", hostTailMib 2,619, hostClaimMib 3,788-4,834 of
+      which the start's own claim is 3,788 (estimateMib 3,788, typicalMib 1,169, decay factor 1 "survival at 0s over 24
+      time-to-peak samples"). The other claims in the matching memory_budget.shadow rows (2-6 advisory and fix
+      reservations aged 241-2,398 s) are charged 0-101 MiB. daemonGrowthTailMib was 0-750 MiB, below the start's tail,
+      so W1-T9972's daemon term no longer decides. hostReserveMib 2,048.
+    - So `evaluateShadowMemory` (src/lib/host-memory-shadow.ts) reads base - hostClaim < hostReserve
+      ("unrealized-reservations") until MemAvailable >= 3,788 + 2,048 = 5,836 MiB: 16:55:05Z MemAvailable 4,028
+      (projected 158); 17:02:44Z 6,184 (2,396, fits); 17:12:42Z 5,851 (2,063, fits); 17:16:43Z 6,858 (fits).
+    - THE OTHER LEG IS PSI. All three fix waits also named psi (fullAvg10 2.13-12.07 against plan/policy.yaml
+      psiFullAvg10Max 2). The light-pass actions that precede a fix dispatch (worker_class advisory, task
+      MEMORY-BUDGET; `sweep.light_pass.memory_wait_detached` for #12600, #12601, #12604, #12607, #12575 and #12582
+      between 16:23Z and 16:40Z) waited on psi ALONE in 12 of 14 wait rows (16:20-17:30Z), their claims fitting (hostClaimMib
+      621-1,728). Only the first wait row and the admit are ledgered for a wait-mode start, so the split of the
+      waiting time between psi and the own tail is not measurable from the ledger today.
+    READ at origin/main 70b15edf7 (symbols, not lines), src/lib/host-memory-admission.ts `awaitMemoryAdmission`:
+    - shortfall admits as "nothing-to-wait-for" only when `!reservedWorkRunning(inputs)`, and any live reservation
+      (even one charged 0) keeps that false.
+    - the aged rung needs `request.deferral`; the fix worker's spawn (src/lib/worker.ts) asks in wait mode with none,
+      so `agedRungBlock` returns "no-cadence" and a fix start can only wait for "fits".
+    - W1-T9679 (merged) admits one fix when the class's TYPICAL peak fits and nothing else is charged, but in the
+      sweep's `createSweepFixAdmissionController`; the spawn's enforced gate re-imposes the full learned estimate.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9972 (merged) is the daemon's tail; W1-T9982 (queued) a fresh daemon's tail;
+    W1-T9981 (queued) the reader-agreement spike; W1-T10000 (queued) a latched restart held by a waiting run;
+    W1-T9762 (merged) decays worker claims. None changes what a start is charged when its own tail is the whole
+    shortfall. Swept origin/main plan/tasks.d for start-unrecorded, estimateMib, hostTailOwner, jointClaim and
+    "the start's own", and the 3 open PR heads (18:26Z): none.
+  design: |
+    Operator rulings honoured: no hard threshold, no raise of core memory.max, the 2,048 MiB host reserve unchanged.
+    1. A SHORTFALL THAT IS THE START'S OWN TAIL. In `awaitMemoryAdmission`, a shortfall where the verdict's hostTail is
+       owned by the start, every other claim is charged at most its decayed share (no other start is inside its own
+       time-to-peak), and MemAvailable less the daemons' typical growth less the start's TYPICAL claim still clears the
+       host reserve, admits the start on a named tier `own-tail`.
+    2. ONE AT A TIME. At most one `own-tail` start may be inside its time-to-peak at once (as `agedRunning` guards the
+       aged rung); a second waits for fits as today, and the first is charged its full learned estimate once admitted,
+       so the next admission sees the real charge (W1-T9679's rule).
+    3. THE HARD STOPS STAY. memory-available, container-ceiling with containerSighted, and psi still refuse.
+    4. `memory_budget.enforce_admit` rows on this tier carry the start's typical and tail and the other claims' total,
+       so the next re-measure can tell a starving bound from a full host.
+    5. TESTS in test/a-fix-start-is-not-held-on-its-own-tail-alone.test.ts, `test(` titles verbatim as in the proofs,
+       driving `awaitMemoryAdmission` with fake ports: the 16:55Z shape (MemAvailable 4,028, start 3,788/1,169, others
+       charged 0, psi clear) admits on own-tail; a second start while the first is inside its time-to-peak waits
+       (control); the same shape with memory-available or psi refuses.
+  acceptance:
+    - claim: "a fix start whose shortfall is its own tail alone is admitted when its typical peak clears the reserve"
+      proof: 'grep: test("W1-T10069: a start short only by its own tail is admitted on the own-tail tier" in test/a-fix-start-is-not-held-on-its-own-tail-alone.test.ts'
+    - claim: "only one own-tail start runs inside its time-to-peak at a time"
+      proof: 'grep: test("W1-T10069: a second own-tail start waits while the first is inside its time-to-peak" in test/a-fix-start-is-not-held-on-its-own-tail-alone.test.ts'
+    - claim: "psi and memory-available still refuse the own-tail tier"
+      proof: 'grep: test("W1-T10069: psi or memory-available still refuse an own-tail start" in test/a-fix-start-is-not-held-on-its-own-tail-alone.test.ts'
+  falsifier: |
+    At origin/main `awaitMemoryAdmission` over the 16:55Z inputs, with one other live reservation charged 0, returns no
+    admission and keeps waiting, so the first test fails. Admitting every shortfall fails the second and third. Deleting
+    the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: this lets one fix start into the host reserve by up to its learned tail (2,619 MiB on
+    10-17) while nothing else is mid-growth. The alternative is to leave the gate and reduce what holds MemAvailable
+    down (Craig's 10-10 ruling: reduce usage). The measurement is stated so either can be chosen. Both psi and
+    unrealized-reservations were named on the waits; the rows do not say which attempt each reason stopped, so the PR
+    must ledger the per-attempt reason before claiming which one dominated the waiting time. EFFECT, measured after
+    merge: fix-class enforce_admit waited_ms over the same hours. Healthy shape: no fix start waits past one pass while
+    the only tail charged is its own.

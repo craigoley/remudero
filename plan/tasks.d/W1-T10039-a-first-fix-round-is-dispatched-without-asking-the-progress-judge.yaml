@@ -51,6 +51,20 @@
     two must not be built at once (see note). W1-T9502 (queued) caches an unchanged input's verdict, complementary.
     W1-T7096/W1-T7243 (merged) built the judge gate. Swept origin/main plan/tasks.d and the plan diffs of every open PR
     head for progress_judged, round_count, progress judge and former_ceiling (2026-10-17 ~15:40Z).
+    AMENDED 2026-10-17 by filing agent F17 (item 4, a judge asked before the stand-down discards its answer), filed
+    here instead of as a new task because this task's skip already removes every observed case:
+    - #12582 (W1-T9043), head e110b5ef7, 13:40-15:18Z: 16 `fix.stood_down` site rung.strike "a needs-human escalation
+      for this exact (task, PR, head ..., cause) is ALREADY OPEN" (#12584), each 15-60 s after a fix.progress_judged
+      at site fix-strike with round_count 0 (14 continue, 2 unavailable, then escalate 15:18:34Z). Every verdict was
+      discarded by the stand-down `openEscalationStandDownReason` (src/run-task.ts) applies inside the rung, which runs
+      only after the sweep has asked the judge.
+    - Core ledger 10-10..17 (52 gz archives plus the live file, deduped): 75 rung.strike stand-downs on an
+      already-open escalation; 31 had a judge call for the same task in the 3 min before, ALL at round_count 0 and
+      ALL `continue` (PRs 11559, 11619, 11629, 11735, 11821, 11951, 12044, 12526, 12582). None was at round_count > 0,
+      so moving the stand-down check ahead of the judge would save nothing this skip does not already save.
+    - One residue this skip keeps on purpose: #12582's parked metadata site ("metadata red already escalated at this
+      head and red set ...") was judged at 13:40:16Z and 15:27-15:43Z while the same escalation was open. Step 4 keeps
+      parked waits judged; see the note's EFFECT line.
   design: |
     1. src/lib/fix-progress-judge.ts gains a pure `firstFixRoundVerdict(input)` and a named
        `FIRST_FIX_ROUND_UNJUDGED_REASON`. It returns a `continue` verdict carrying that reason exactly when the input has
@@ -85,4 +99,7 @@
     build it before or after W1-T9297, never beside it (same files). (2) Whether the skip also releases a PR already
     latched by a round-0 escalation; the default above leaves the latch alone. (3) The wording of
     FIRST_FIX_ROUND_UNJUDGED_REASON. EFFECT, measured after merge from the core ledger: fix.progress_judged rows at
-    round_count 0 on the unparked fix-strike site with a verdict other than continue. Healthy shape: none.
+    round_count 0 on the unparked fix-strike site with a verdict other than continue. Healthy shape: none. SECOND
+    EFFECT (F17 amendment): fix.progress_judged rows followed within 3 min, for the same task, by a rung.strike
+    fix.stood_down on an already-open escalation. Healthy shape: none at the unparked site; if parked-site rows remain
+    common, file the stand-down-before-judge ordering as its own task.
