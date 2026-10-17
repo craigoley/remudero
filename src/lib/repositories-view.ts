@@ -13,6 +13,7 @@
  * `read-model/repositories-sources.json`, since the worker cannot resolve them from the registry itself.
  */
 import { readFileSync, statSync } from "node:fs";
+import { observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -302,7 +303,7 @@ function planReader(): { read: (path: string) => Plan; held: (path: string) => P
 }
 
 /** `repositories` materialized by the read-model worker; `ledgerSource` is the worker's own, passed in. */
-export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number; catchUp?: unknown }>(ledgerSource: (state: S, now: number) => ViewSource): {
+export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number; catchUp?: unknown }>(ledgerSource: (state: S, now: number) => ViewSource, selectedRegistryObserver?: SelectedRegistryObserver): {
   name: string;
   version: number;
   prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
@@ -393,7 +394,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       }
       return true;
     },
-    materialize: ({ now, instances }) => {
+    materialize: ({ now, instances }) => observeSelectedRegistrySync(selectedRegistryObserver, "repositories-view",
+      { instanceName: instances.length === 1 ? instances[0]!.state.instance : undefined }, () => {
       const at = published(instances);
       if (at === undefined) return [];
       if (at.sources === undefined) return [{ key: "", data: { instances: [], projects: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
@@ -417,7 +419,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       Object.assign(data, repositoriesPortfolio(at.sources, data, (path) => (pair.registry = { read: registryFile(path) }).read));
       shown.set(data, pair);
       return [{ key: "", data, sources }];
-    },
+    }),
   };
 }
 
