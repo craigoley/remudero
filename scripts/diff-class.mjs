@@ -538,7 +538,7 @@ export function importedWalkerWalksArea(content, testDir, root, areas) {
 /**
  * The suites a diff joins that name none of its symbols — enumerated from the tree at run time,
  * never a registry. Listed when relevant to the changed areas: enumerates a population and names
- * a touched area, declares itself a rule suite, or reads a specific changed file as text. The first arm is deliberately loose
+ * a touched area, declares itself a rule suite (source diffs only), or reads a specific changed file as text. The first arm is deliberately loose
  * (over-listing costs one suite; under-listing is the silent miss this verb exists to end); the
  * second is exact. An empty changed-file set yields an empty list, unlike `classify()`'s SOURCE.
  */
@@ -548,6 +548,7 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
   if (files.length === 0) return [];
   const areas = changedAreas(files);
   const changed = new Set(files);
+  const rulesJoin = classify(files).class === CLASSES.SOURCE;
   const testDir = join(root, "test");
   const out = [];
   for (const abs of suiteFiles(testDir)) {
@@ -577,7 +578,7 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
       (enumeratesPopulation(content) && namesAreaLoosely(content, areas)) ||
       importedWalkerWalksArea(content, dirname(abs), root, areas);
     const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
-    if (isRuleSuitePath(rel, content) || walksAnArea || readsAChangedFile) out.push(rel);
+    if ((rulesJoin && isRuleSuitePath(rel, content)) || walksAnArea || readsAChangedFile) out.push(rel);
   }
   out.sort();
   return out;

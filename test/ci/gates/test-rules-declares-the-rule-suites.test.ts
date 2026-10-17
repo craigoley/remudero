@@ -102,6 +102,7 @@ test("W1-T9877: diff classification includes declared rules and preserves struct
     "test/ci/gates/x-census.test.ts", "test/rules/x.test.ts", "test/unit/walker.test.ts",
   ]);
   assert.ok(!censusSuiteFiles(["test/rules/x.test.ts"], dir).includes("test/rules/x.test.ts"));
+  assert.deepEqual(censusSuiteFiles(["CLAUDE.md", "doctrine/x/y.md"], dir), [], "a docs-only diff joins no rule suite");
 });
 
 test("W1-T9877: census drift resolves moved roster paths with the shared resolver", (t) => {
