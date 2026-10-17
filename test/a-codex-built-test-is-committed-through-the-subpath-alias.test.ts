@@ -18,7 +18,7 @@ const RELATIVE = `import { x } from "${UP}/src/lib/x.js";\n`;
 const ALIASED = 'import { x } from "#src/lib/x.js";\n';
 
 /** A worktree the harness cut and recorded, the only shape `commitCodexWriterEdits` commits in. */
-function harnessWorktree(existing?: { path: string; text: string }) {
+function codexCut(existing?: { path: string; text: string }) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t10084-`));
   const seed = gitRepo({ kind: "t10084-seed" });
   seed.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
@@ -36,7 +36,7 @@ function harnessWorktree(existing?: { path: string; text: string }) {
 }
 
 test("W1-T10084: a Codex-built test is committed through the subpath alias", async () => {
-  const { wt, cleanup } = harnessWorktree();
+  const { wt, cleanup } = codexCut();
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t10084-home-`));
   try {
     const stdout = new PassThrough();
@@ -71,7 +71,7 @@ test("W1-T10084: a Codex-built test is committed through the subpath alias", asy
 });
 
 test("W1-T10084: the Codex harness commit never rewrites an existing test", () => {
-  const { wt, cleanup } = harnessWorktree({ path: "test/old.test.ts", text: RELATIVE });
+  const { wt, cleanup } = codexCut({ path: "test/old.test.ts", text: RELATIVE });
   try {
     const left = `${RELATIVE}import { y } from "${UP}/src/lib/y.js";\n`;
     writeFileSync(join(wt.dir, "test/old.test.ts"), left);
@@ -85,7 +85,7 @@ test("W1-T10084: the Codex harness commit never rewrites an existing test", () =
 });
 
 test("W1-T10084: a Codex harness commit with nothing changed is still nothing-to-commit", () => {
-  const { wt, cleanup } = harnessWorktree();
+  const { wt, cleanup } = codexCut();
   try {
     assert.deepEqual(commitCodexWriterEdits(wt.dir, "done"), { outcome: "nothing-to-commit" });
   } finally { cleanup(); }

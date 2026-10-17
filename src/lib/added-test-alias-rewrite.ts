@@ -1,8 +1,7 @@
 // W1-T10084: the one added-test alias rewrite both harness commits share, `commitWorkerEdits` (run-task.ts) and the
 // Codex writer's `commitCodexWriterEdits` (worker-provider.ts), which cannot import the CLI module.
-// @ts-expect-error W1-T10064: the daemon's own copy of the W1-T9864 codemod, which has no declaration file.
-import { rewriteSource as codemodRewriteSource } from "../../scripts/test-location-codemod.mjs";
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 
 type AliasGitRunner = (args: string[]) => string;
@@ -16,6 +15,10 @@ export interface AddedTestAliasRewrite {
   readonly unresolved: { path: string; specifier: string }[];
   readonly failed: { path: string; error: string }[];
 }
+
+// Loaded on first use, so a src/-only sandbox that imports worker-provider.ts never needs scripts/ (ledger-rotation's W1-T964).
+const codemodRewriteSource: TestAliasRewriter = (text, file) =>
+  (createRequire(import.meta.url)("../../scripts/test-location-codemod.mjs") as { rewriteSource: TestAliasRewriter }).rewriteSource(text, file);
 
 /** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
 export function mergeHeadPresent(runGit: AliasGitRunner): boolean {
