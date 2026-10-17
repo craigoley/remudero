@@ -110,6 +110,7 @@ import {
   detachedActionInFlight,
   detachedSweepActionCount,
   drainDetachedSweepActions,
+  abandonDetachedSweepAction,
   drainInFlightReviews,
   inFlightReviewCount,
   inFlightReviewRunsNow,
@@ -4457,7 +4458,9 @@ export async function runDaemon(
         abandonedReviews = await drainInFlightReviews({ boundMs: Math.max(0, deadlineMs - daemonClock.now()) });
       }
       for (const action of abandoned) {
+        const release = await abandonDetachedSweepAction(action);
         log("daemon.detached_action_abandoned", {
+          ...release,
           action_kind: action.actionKind,
           task_id: action.taskId,
           age_ms: action.ageMs,

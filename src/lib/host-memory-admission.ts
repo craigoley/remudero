@@ -30,6 +30,7 @@
  */
 
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { fixedClock } from "./clock.js";
 
@@ -81,6 +82,8 @@ export function reservedWorkRunning(inputs: Pick<ShadowInputs, "entries">): bool
 
 export interface AdmissionRequest {
   workerClass: WorkerClass;
+  signal?: AbortSignal;
+  sinceMs?: number;
   /** The state root, or how to read it: resolved only under "enforce", so the shipped mode pays nothing for it. */
   root: string | (() => string);
   runId?: string;
@@ -96,6 +99,7 @@ export interface AdmissionRequest {
 }
 
 export type AdmissionOutcome =
+  | { kind: "abandoned"; reason: "admission-abandoned"; waitedMs: number; attempts: number }
   | { kind: "not-enforced"; why: string }
   | { kind: "deferred"; reasons: ShadowVerdict["reasons"] }
   | { kind: "admitted"; tier: AdmissionTier | "nothing-to-wait-for" | "aged"; waitedMs: number; attempts: number; reservation?: LearnedReservation;
@@ -104,7 +108,7 @@ export type AdmissionOutcome =
   | { kind: "error"; reason: string; reservation?: LearnedReservation; reservationAttempted?: true };
 
 export interface AdmissionPorts extends ShadowMemoryPorts {
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   random: () => number;
   /** Only the daemon and the processes it starts share the ledger the budget reads; anything else is never held. */
   enforceHere: () => boolean;
@@ -171,7 +175,7 @@ export function waitingStarts(): ReadonlyArray<Readonly<Waiter>> {
 function defaultAdmissionPorts(): AdmissionPorts {
   return {
     ...defaultShadowMemoryPorts(),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    sleep: (ms, signal) => delay(ms, undefined, { signal }),
     random: Math.random,
     enforceHere: () => daemonOwnedProcess(),
     withLock: withMemoryAdmissionLock,
@@ -206,7 +210,12 @@ export async function awaitMemoryAdmission(
   let reservation: LearnedReservation | undefined;
   let reservationAttempted = false;
   let streakKey: string | undefined;
+  let startedAt: number | undefined;
+  let attempt = 0;
+  const abandoned = (): AdmissionOutcome => ({ kind: "abandoned", reason: "admission-abandoned",
+    waitedMs: startedAt === undefined ? 0 : Math.max(0, ports.clock.now() - startedAt), attempts: attempt });
   try {
+    if (request.signal?.aborted) return abandoned();
     const policy = ports.policy();
     const mode = hostMemoryBudgetModeFor(policy, request.workerClass);
     const defers = request.onShortfall === "defer";
@@ -218,20 +227,20 @@ export async function awaitMemoryAdmission(
     const root = typeof request.root === "string" ? request.root : request.root();
     ledgerPath = join(root, "state", LEDGER_FILENAME);
     const clock = ports.clock;
-    const startedAt = clock.now();
+    startedAt = clock.now();
     const runId = request.runId ?? request.workerClass;
     const key = streakKey = `${root}\u0000${runId}`;
     const due = request.deferral?.dueSinceMs;
     const open = defers ? streaks.get(key) : undefined;
     // A restart seed waits for this process to observe a deferral: it joins the streak when one opens, below.
-    const since = open?.waitingSinceMs ?? startedAt;
+    const since = open?.waitingSinceMs ?? Math.min(startedAt, request.sinceMs ?? startedAt);
     const askedSince = open?.askedSinceMs ?? startedAt;
     const seededSince = open === undefined && due !== undefined ? Math.min(startedAt, due) : undefined;
     waiter = { instance: root, workerClass: request.workerClass, waitingSinceMs: since };
     waiting.push(waiter);
-    let attempt = 0;
     let noted = false;
     for (;;) {
+      if (request.signal?.aborted) return abandoned();
       const now = clock.now();
       const head = rankDemand(waiting, ports.priorityPolicy(), now)[0];
       if (head === waiter) {
@@ -307,10 +316,23 @@ export async function awaitMemoryAdmission(
           }
         }
       }
-      await ports.sleep(backoffMs(attempt, ports.random()));
+      const ms = backoffMs(attempt, ports.random());
       attempt += 1;
+      const signal = request.signal;
+      if (!signal) await ports.sleep(ms);
+      else {
+        let wake!: () => void;
+        const cancelled = new Promise<void>(resolve => { wake = resolve; });
+        signal.addEventListener("abort", wake, { once: true });
+        try {
+          if (!signal.aborted) await Promise.race([ports.sleep(ms, signal), cancelled]);
+        } finally {
+          signal.removeEventListener("abort", wake);
+        }
+      }
     }
   } catch (error) {
+    if (request.signal?.aborted) return abandoned();
     const reason = reasonOf(error);
     if (streakKey !== undefined && request.onShortfall === "defer") streaks.delete(streakKey); // fail-open is an admission
     write({ step: ENFORCE_ERROR_STEP, worker_class: request.workerClass, reason, admitted: true });
