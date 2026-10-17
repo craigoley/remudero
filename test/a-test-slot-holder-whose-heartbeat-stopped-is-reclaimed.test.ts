@@ -362,11 +362,20 @@ test("W1-T9928: preflight-author keeps beating its slot while a step runs", asyn
   const { main } = await import(pathToFileURL(join(process.cwd(), "scripts/preflight-author.mjs")).href) as {
     main: (argv: string[], deps: { root: string; select: () => { fullRun: boolean; suites: string[]; reasons: string[] } }) => number;
   };
-  const prior = process.env[TEST_SLOT_DIR_ENV];
+  // This nested author owns the fixture's slot, not the real admitted parent running this test file.
+  const privateSlotKeys = [TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV, TEST_SLOT_RUN_ENV] as const;
+  const prior = new Map(privateSlotKeys.map(key => [key, process.env[key]]));
   process.env[TEST_SLOT_DIR_ENV] = slots;
+  delete process.env[TEST_SLOT_PARENT_ENV];
+  delete process.env[TEST_SLOT_RUN_ENV];
   try {
     assert.equal(main([], { root: f.dir, select: () => ({ fullRun: false, suites: ["test/a.test.ts"], reasons: ["beat witness"] }) }), 0);
-  } finally { if (prior === undefined) delete process.env[TEST_SLOT_DIR_ENV]; else process.env[TEST_SLOT_DIR_ENV] = prior; }
+  } finally {
+    for (const key of privateSlotKeys) {
+      const value = prior.get(key);
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
   const observed = JSON.parse(readFileSync(witness, "utf8")) as { record: TestSlotHolder; marker: string | null };
   assert.equal(observed.record.label, "preflight-author:static-and-affected");
   assert.equal(observed.record.heartbeatIntervalMs, TEST_SLOT_HEARTBEAT_MS, "the author's test step ran under a beating record");
@@ -460,7 +469,11 @@ test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept"
   } finally { closeSync(fd); }
   const closed = defaultGuardHolderProbe(guard, lstatSync(guard));
   assert.notEqual(closed.state, "open");
-  if (closed.state === "unknown") assert.match(closed.reason, /incomplete|no open-file probe|lsof/);
+  if (process.platform === "darwin") {
+    assert.deepEqual([closed.state, closed.probe], ["unknown", "lsof"],
+      "the direct default never invents a completed Darwin open-file observation");
+    assert.match(closed.reason, /polling.*observer/i, "unknown says which observation is missing without fixing the diagnostic's wording");
+  } else if (closed.state === "unknown") assert.match(closed.reason, /incomplete|no open-file probe|lsof/);
   assert.equal(defaultGuardHolderProbe(guard, { ...st, uid: (process.getuid?.() ?? 0) + 1 } as Stats).state, "unknown");
   // Darwin's lsof path: pids are open, a silent exit 1 is closed, any diagnostic is unknown.
   const lsof = (outcome: string | { status: number; stdout: string; stderr: string }) => () => {
