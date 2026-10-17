@@ -457,6 +457,10 @@ function isScoutDraftShape(task: Task): boolean {
   return task.origin?.startsWith("scout:") === true && files.length > 0 && SCOUT_TEST_FILE.test(files[files.length - 1]!);
 }
 
+function isCiLearningLessonPath(path: string): boolean {
+  return /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(path);
+}
+
 function isParkedMachineProposal(task: Task): boolean {
   if (isFlowBlockerRemedyProposal(task)) return true;
   if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" &&
@@ -470,7 +474,7 @@ function isParkedMachineProposal(task: Task): boolean {
     (task.depends_on ?? []).length === 0 &&
     (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
       (task.files?.length === 1 &&
-        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(task.files[0]!))) ||
+        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || isCiLearningLessonPath(task.files[0]!))) ||
           (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
           (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
@@ -1425,7 +1429,9 @@ export function machineFilingAdmissionViolations(
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
   const declared = task.files ?? [];
   const scoutNew = isScoutDraftShape(task) ? declared[declared.length - 1] : undefined;
-  const missing = missingDeclaredPaths(task, context, (path) => (newTestAllowed && created(path)) || path === scoutNew);
+  const newLessonAllowed = task.origin?.startsWith("ci-learning:") === true && declared.length === 1 && isParkedMachineProposal(task);
+  const missing = missingDeclaredPaths(task, context, (path) =>
+    (newTestAllowed && created(path)) || path === scoutNew || (newLessonAllowed && isCiLearningLessonPath(path)));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +
