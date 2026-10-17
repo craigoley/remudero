@@ -65,6 +65,36 @@ instance draining; incompatible shared state, claims, credentials or config
 requires an approved full affected-writer stop, all workers only if all are
 affected. No scheduler, deployment or admission activation is included.
 
+### Serve and discovery observations
+
+W1-T9793 carries the same explicit `mode: shadow` intent through the maintained
+serve, gateway, readiness, proposal, liveness, dashboard and repositories-view
+composition. The observer uses the bounded asynchronous selected reader, retains
+its original digest and rechecks before reporting. It does not change a legacy
+response, cached portfolio, owner decision, error or effect, and does not wait
+for selected IO before starting that effect. Failed or stale selected evidence
+cannot borrow healthy legacy or cached authority. Publication permission remains
+`not-granted`; private paths, state roots and bytes are not observation fields or
+public response material.
+
+Synchronous benchmark, inbox, lint and ratification reads remain synchronous and
+report unknown fresh authority. Aggregate discovery has no invented single-instance
+target. The CLI reuses its existing invocation configuration read; offline readers
+do not load or create configuration to find opt-in. Daemon drafting and actual
+single/batch filing use invocation-owned contexts. Nested no-config calls mask an
+outer opt-in, concurrent calls stay isolated, and completion deactivates escaped
+callbacks. Delayed draft evaluation snapshots intent before dispatch. The additive,
+versioned intent travels only over trusted projector/view-worker data; unsupported
+transport remains unknown and absent older data does not enable observations.
+
+Observation shutdown is not an effect-drain or activation barrier. `settled()`
+waits for observations already queued by completed operations, not arbitrary
+in-flight effects. No live selection, worker restart, scanner, schedule, new
+mandatory reviewer or private staging is included. Isolated source/tests need no
+worker stop. The separate human-approved drain/full affected-writer-stop contract
+below still governs any later live migration; owner/admin override and the complete
+public Apache core remain intact.
+
 ### Carried lifecycle fields
 
 W1-T9559 gives the selected reader and proposal writer one frozen field vocabulary

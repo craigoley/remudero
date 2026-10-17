@@ -45,7 +45,7 @@ raw: "FOUR MEASURED SESSION TRAPS, landed here at discovery per the 2026-09-16
   lines read as uncovered, which sent this session chasing lines that were
   already covered."
 origin: operator-session#shift-left-audit-2026-09-16
-status: proposed
+status: accepted
 attachments: []
 proposal_pr: https://github.com/craigoley/remudero/pull/12466
 summary:
