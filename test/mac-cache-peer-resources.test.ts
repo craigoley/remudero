@@ -73,7 +73,12 @@ try:
  g['MAX_SECONDS']=5;started=time.monotonic()
  class ReadyBudget(ns['Budget']):
   def check(self,*args,**kwargs):
-   if (home/'leader-ready').exists():self.started=min(self.started,time.monotonic()-6)
+   ready=(home/'leader-ready').exists()
+   if ready and mode=='exited':
+    try:os.kill(int((home/'leader-ready').read_text()),0)
+    except ProcessLookupError:pass
+    else:ready=False
+   if ready:self.started=min(self.started,time.monotonic()-6)
    return super().check(*args,**kwargs)
  try:ns['peer_exchange']([sys.executable,'-c',body,mode],{},ReadyBudget())
  except ns['Hold'] as error:reason=str(error);cause=repr(error.__cause__)

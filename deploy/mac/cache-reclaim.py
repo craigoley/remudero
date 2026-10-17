@@ -123,6 +123,10 @@ def checked_directory(path, budget, parent_fd=None, name=None, expected=None):
         os.close(fd)
 
 
+def reference_directory_identity(s):
+    return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+
+
 @contextmanager
 def pinned_reference_directory(path, budget, parent_fd=None, name=None, expected=None):
     """Pin one known path edge, not an enumerated directory namespace.
@@ -132,23 +136,20 @@ def pinned_reference_directory(path, budget, parent_fd=None, name=None, expected
     including type, permissions and ownership. Namespace scans continue using
     checked_directory's full identity; symlink edges are sealed separately.
     """
-    def edge(s):
-        return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
-
     budget.check(entries=1)
     operand = path if parent_fd is None else name
     before = os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)
     if not stat.S_ISDIR(before.st_mode) or expected is not None and identity(before)[:4] != expected[:4]:
         raise Hold("scan-directory-changed")
-    sealed = edge(before)
+    sealed = reference_directory_identity(before)
     fd = os.open(operand, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
-        if edge(os.fstat(fd)) != sealed:
+        if reference_directory_identity(os.fstat(fd)) != sealed:
             raise Hold("scan-directory-changed")
         yield fd
         budget.check()
-        if (edge(os.fstat(fd)) != sealed
-                or edge(os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)) != sealed):
+        if (reference_directory_identity(os.fstat(fd)) != sealed
+                or reference_directory_identity(os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)) != sealed):
             raise Hold("scan-directory-changed")
     finally:
         os.close(fd)
@@ -898,10 +899,18 @@ def resolved_reference(parent, raw, budget):
     # not: aliases must compare against the same single-root candidate paths.
     remaining = [(part, True) for part in parent.parts[1:]] if not absolute else []
     remaining += [(part, False) for part in (operand.parts[1:] if absolute else operand.parts)]
-    links, seals = 0, {}
+    links, seals, directory_seals = 0, {}, {}
     anchors = {}
 
     def recheck_reference_edges(fd):
+        for name, expected in directory_seals.get(fd, []):
+            budget.check()
+            try:
+                after = reference_directory_identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            except FileNotFoundError:
+                after = None
+            if after != expected:
+                raise Hold("scan-directory-changed")
         for name, expected in seals.get(fd, []):
             budget.check()
             try:
@@ -940,6 +949,9 @@ def resolved_reference(parent, raw, budget):
             if physical_start and not stat.S_ISDIR(before.st_mode):
                 raise Hold("reference-start-not-physical")
             if stat.S_ISDIR(before.st_mode):
+                # Keep each child binding under its parent descriptor until
+                # that parent's teardown, including after the child closes.
+                directory_seals.setdefault(fd, []).append((part, reference_directory_identity(before)))
                 if str(child) not in anchors:
                     # A lexical continuation owns each descriptor in an
                     # ordinary with-block. Only the final Path escapes; raw
@@ -971,7 +983,7 @@ def resolved_reference(parent, raw, budget):
             else:
                 seals.setdefault(fd, []).append((part, observed))
                 resolved = child
-        for fd in seals:
+        for fd in dict.fromkeys([*directory_seals, *seals]):
             recheck_reference_edges(fd)
         return resolved
     try:

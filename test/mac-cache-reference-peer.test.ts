@@ -270,3 +270,29 @@ finally:os.close=original_close
     assert.ok(existsSync(f.target));
   } finally { f.clean(); }
 });
+
+test("cache reference resolver seals a directory binding after its child descriptor closes", () => {
+  const f = fixture();
+  try {
+    const r = f.run(String.raw`pivot=home/'tmp/pivot';pivot.mkdir()
+elsewhere=home/'retained-elsewhere';elsewhere.mkdir()
+(pivot/'alias').symlink_to(elsewhere,target_is_directory=True)
+other_inode=pivot.stat().st_ino;original_close=os.close;changed=[False]
+def closing(fd):
+ swap=os.fstat(fd).st_ino==other_inode and not changed[0]
+ original_close(fd)
+ if swap:
+  changed[0]=True;pivot.rename(pivot.with_name('retained-pivot'));pivot.mkdir()
+  (pivot/'alias').symlink_to(target,target_is_directory=True)
+os.close=closing
+try:
+ try:g['resolved_reference'](root,str(pivot/'alias'),budget)
+ except ns['Hold'] as error:assert str(error)=='scan-directory-changed',error
+ else:raise AssertionError('directory rebound after descriptor teardown was accepted')
+ assert changed[0]
+finally:os.close=original_close
+`);
+    assert.deepEqual(r.shared, [f.target], JSON.stringify(r));
+    assert.ok(existsSync(f.target));
+  } finally { f.clean(); }
+});
