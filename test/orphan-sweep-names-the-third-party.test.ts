@@ -20,7 +20,8 @@
 // that the diagnostic itself is correct, pure, and total (including the empty case).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
@@ -31,6 +32,24 @@ import {
 } from "../src/lib/worker-containment.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: TEST_DIR, encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 
 function fakeDeps(overrides: Partial<OrphanSweepDeps> = {}): OrphanSweepDeps {
   return {
@@ -136,13 +155,14 @@ test("every fixture that spawns an ended-run stray into a real machine-wide swee
   const SELF = "orphan-sweep-names-the-third-party.test.ts"; // excluded: this file's OWN prose
   // names `withRealSweepLock` repeatedly while explaining the check below, which would otherwise
   // self-match the very pattern it is computing — this file spawns nothing and holds no lock.
-  const files = readdirSync(TEST_DIR).filter((f) => f.endsWith(".test.ts") && f !== SELF);
+  const { dir, files: corpus } = testCorpus();
+  const files = corpus.filter((f) => f.split("/").at(-1) !== SELF);
   assert.ok(files.length > 10, "precondition: this really scanned the test directory, not an empty one");
 
   const spawnsEndedRunStrayIntoRealSweep = new Set<string>();
   const holdsTheRealSweepLock = new Set<string>();
   for (const file of files) {
-    const src = readFileSync(join(TEST_DIR, file), "utf8");
+    const src = readFileSync(join(dir, file), "utf8");
     if (/\[RUN_ID_ENV\]:\s*"run-ended/.test(src)) spawnsEndedRunStrayIntoRealSweep.add(file);
     if (/withRealSweepLock/.test(src)) holdsTheRealSweepLock.add(file);
   }

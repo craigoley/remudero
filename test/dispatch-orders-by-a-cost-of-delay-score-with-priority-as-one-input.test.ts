@@ -39,10 +39,30 @@ test("W1-T9323: a lower-priority task that has waited past the median wait outra
   const waited = task("W1-T7001", { priority: 2 });
   const fresh = task("W1-T7002", { priority: 1 });
   const context = calibrate([fresh, waited], { [waited.id]: 5 * HOUR, [fresh.id]: 0 });
-  // Urgency 1 + 5h/2h + 0 = 3.5 against 1 + 0 + 1/2: the waiting task's pass is the smaller.
+  // W1-T9967: neither tier has events of its own, so both borrow the pooled 2 h wait. The P2 ages in that
+  // unit: 2^-1 * (1 + log2(1 + 5h/2h)) = 1.40 against the fresh P1's 1, so its pass is the smaller.
   assert.ok(context.stridePassByTaskId!.get(waited.id)! < context.stridePassByTaskId!.get(fresh.id)!);
   assert.deepEqual(dispatchOrder([fresh, waited], context).map(t => t.id), [waited.id, fresh.id]);
   assert.deepEqual(dispatchOrder([waited, fresh], context).map(t => t.id), [waited.id, fresh.id]);
+  // W1-T9967: give the P1 tier its own history, an 8 h wait. The P2 now ages in that unit:
+  // 2^-1 * (1 + log2(1 + 5h/8h)) = 0.85 < 1 at 5 h, and 2^-1 * (1 + log2(1 + 12h/8h)) = 1.16 > 1 at 12 h.
+  const p1History = [0, 1, 2].map(i => task(`W1-T710${i}`, { priority: 1 }));
+  const rows = [...history, ...p1History.flatMap(t => [
+    { step: "run.start", task_id: t.id, run_id: t.id, task_class: "src", ts: new Date(NOW - 10 * HOUR).toISOString() },
+    { step: "verdict", task_id: t.id, run_id: t.id, verdict: "merged", cost_usd: 2, ts: new Date(NOW - 9 * HOUR).toISOString() },
+  ])];
+  const ownWait = (ago: number) => {
+    const dates = new Map([...historyDates, ...p1History.map(t => [t.id, NOW - 18 * HOUR] as const), [waited.id, NOW - ago], [fresh.id, NOW]]);
+    const result = buildDispatchValueContext([...p1History, fresh, waited], rows, new Set([fresh.id, waited.id]), NOW, true, "seed", {
+      planTreeSha: "tree-sha", filedAtByTaskId: dates,
+    });
+    assert.equal(result.kind, "ready");
+    return result.context;
+  };
+  assert.deepEqual(dispatchOrder([waited, fresh], ownWait(5 * HOUR)).map(t => t.id), [fresh.id, waited.id],
+    "W1-T9967: inside the higher tier measured wait the fresh task still leads");
+  assert.deepEqual(dispatchOrder([fresh, waited], ownWait(12 * HOUR)).map(t => t.id), [waited.id, fresh.id],
+    "past the higher tier measured wait the old task leads again");
 });
 
 test("W1-T9323: between equally old tasks the higher priority dispatches first", () => {
@@ -80,9 +100,13 @@ test("W1-T9323: an undatable open task is scored at age zero and named as impute
   assert.ok(context.costOfDelayByTaskId!.has(undatable.id));
   // It sorts by its own pass at age zero: behind the stale task, ahead of the equally fresh one it outranks.
   assert.deepEqual(dispatchOrder(tasks, context).map(t => t.id), [stale.id, undatable.id, fresh.id]);
-  // The ready row names it, once per plan tree.
-  assert.deepEqual(costOfDelayReadyRow("tree-sha", context), { key: "ready:tree-sha", plan_tree_sha: "tree-sha", imputed: [undatable.id] });
-  assert.deepEqual(costOfDelayReadyRow("tree-sha", calibrate([stale, fresh], { [stale.id]: HOUR, [fresh.id]: 0 })), { key: "ready", plan_tree_sha: "tree-sha" });
+  // The ready row names it, once per plan tree. W1-T9967: the row also carries every tier's wait.
+  const { tier_waits: waits, ...named } = costOfDelayReadyRow("tree-sha", context);
+  assert.deepEqual(named, { key: "ready:tree-sha", plan_tree_sha: "tree-sha", imputed: [undatable.id] });
+  assert.deepEqual(waits?.map(w => w.priority), [1, 2, 3]);
+  const { tier_waits: plainWaits, ...plain } = costOfDelayReadyRow("tree-sha", calibrate([stale, fresh], { [stale.id]: HOUR, [fresh.id]: 0 }));
+  assert.deepEqual(plain, { key: "ready:tree-sha", plan_tree_sha: "tree-sha" });
+  assert.deepEqual(plainWaits?.map(w => w.priority), [2, 3]);
 });
 
 test("W1-T9323: without a ready cost-of-delay context the order stays priority first", () => {

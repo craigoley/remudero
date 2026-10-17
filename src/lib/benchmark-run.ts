@@ -82,6 +82,11 @@ const nonDispatchWorkerStack: BenchmarkStackEvidence = {
   harnessRevision: executingHarnessRevision(fileURLToPath(import.meta.url)),
 };
 
+/** The code identity captured at module load, unaffected by later checkout movement. */
+export function loadedHarnessRevision(): BenchmarkStackEvidence["harnessRevision"] {
+  return nonDispatchWorkerStack.harnessRevision;
+}
+
 export function compareBenchmarkStacks(
   left: ReturnType<typeof benchmarkRunAssignmentReceipt>, right: ReturnType<typeof benchmarkRunAssignmentReceipt>,
 ) {

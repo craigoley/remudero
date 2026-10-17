@@ -12,7 +12,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -443,19 +444,21 @@ test("an unchanged input fingerprint reuses the previous classification without 
   assert.equal(classifyAllProposalsMemo(w.deps, () => w.plan).classifications, a.classifications, "the sliced result is the memo entry");
 });
 
-test("GET /v1/inbox classifies through the memo", async () => {
+test("GET /v1/inbox classifies through the memo", async (t) => {
   const w = makeWorld();
-  const stamped: string[] = [];
-  const deps: PanelGraphDeps = {
-    ...w.deps,
-    inboxStatFile: (path) => (stamped.push(path), `${readFileSync(path, "utf8").length}`),
-  };
+  const stat = t.mock.method(fs, "statSync");
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const deps: PanelGraphDeps = { ...w.deps };
   const route = buildPanelGraphRoutes(deps, () => w.plan).find((r) => r.method === "GET" && r.path === "/v1/inbox");
   assert.ok(route);
   const bodies: string[] = [];
   const res = { writeHead: () => undefined, end: (body: string) => bodies.push(body) };
   await route.handler({ url: "/v1/inbox", headers: {} } as never, res as never, { params: {} });
+  const stamped = stat.mock.calls.map(call => String(call.arguments[0]));
   assert.ok(stamped.includes(join(w.stateDir, "inbox-proposals.json")), "the route stamped its inputs — it went through the memo");
+  assert.ok(stamped.includes(join(w.stateDir, "inbox-gardener.json")), "the real default stamp observes the optional lifecycle input");
+  assert.equal(fs.existsSync(join(w.stateDir, "inbox-gardener.json")), false, "a missing lifecycle input is absent, not a fixture error");
   const entry = classifyAllProposalsMemo(deps, () => w.plan);
   await route.handler({ url: "/v1/inbox", headers: {} } as never, res as never, { params: {} });
   assert.equal(classifyAllProposalsMemo(deps, () => w.plan).classifications, entry.classifications, "the second read reused the memo entry");

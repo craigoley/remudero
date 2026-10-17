@@ -441,6 +441,8 @@ function reclaimPrivateTestSlot(path: string, expected: { dev: number; ino: numb
 
 /** Seams for {@link acquireTestSlot}; every field defaults to the real host. */
 export interface TestSlotOptions {
+  /** Explicit ceiling; it only lowers CPU/memory-derived capacity. */
+  maxConcurrency?: number;
   dir?: string;
   /** Source-only opt-in. Default writers remain legacy until reader-first fleet qualification. */
   ownershipProtocol?: "private-capacity-v1";
@@ -522,6 +524,8 @@ function testSlotHolderStale(held: TestSlotHolder, now: number, opts: Required<P
 
 /**
  * Take one of the host-wide slots for a test-suite run, waiting (bounded) while all are live.
+ * Ordinary acquisition runs at its named concurrency. Invalid explicit ceilings and
+ * wider inherited owners refuse before work; they never edit another owner or raise capacity.
  * Legacy-only outcomes retain fallback. Private-required failures are explicit NOT_RUN;
  * callers must honor executionAllowed before starting work or recording admission.
  */
@@ -550,6 +554,8 @@ export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOpt
 }
 
 function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<number, TestSlotLease> {
+  const maximum = opts.maxConcurrency ?? Number.MAX_SAFE_INTEGER;
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new RangeError("test worker ceiling must be a positive safe integer");
   const clock = opts.clock ?? systemClock;
   const host = opts.hostname ?? hostname;
   const bootId = opts.bootId ?? (() => readBootId());
@@ -602,7 +608,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const basisNote = files ? `; file peaks ${[...new Set(files.map((f) => f.basis))].join(", ")}` : "";
   /** The CPU-derived concurrency, lowered to what the headroom less `reservedBytes` holds when the run names a per-file peak. */
   const sized = (reservedBytes = 0): number => {
-    const cpu = testRunConcurrency(load(), slots);
+    const cpu = Math.min(maximum, testRunConcurrency(load(), slots));
     if (perFile === undefined) return cpu;
     const headroom = headroomOf();
     return Math.min(cpu, peaks?.length ?? cpu, memoryTestConcurrency(headroom === undefined ? undefined : headroom - reservedBytes, perFile) ?? cpu);
@@ -619,7 +625,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     if (parent.state !== "SAFE") return unslotted("slot_unavailable", 1, `parent entry protection ${parent.state}: ${parent.reason}`);
   }
   const inherited = inheritedTestSlot(dir, parentPolicy);
-  if (inherited.lease) return inherited.lease;
+  if (inherited.lease) {
+    if (inherited.lease.concurrency > maximum) throw new Error("inherited test slot exceeds explicit worker ceiling");
+    return inherited.lease;
+  }
   if (inherited.rejected) log(JSON.stringify({ step: "test_slot.parent_rejected", label, reason: inherited.rejected }));
   try {
     if (!parentPolicy) {
@@ -746,7 +755,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
           let createdRecord: TestSlotHolder | undefined;
           let writeOwnedRecord: ((body: string) => void) | undefined;
           try {
-            concurrency = perFile === undefined ? testRunConcurrency(load(), slots) : sized(namedPeaks(othersThan(i)));
+            concurrency = perFile === undefined ? Math.min(maximum, testRunConcurrency(load(), slots)) : sized(namedPeaks(othersThan(i)));
             const ownedRecord = structuredClone(record()), body = JSON.stringify(ownedRecord);
             if (privateWriter && (Buffer.byteLength(body) > 1024 * 1024 ||
               [concurrency, ownPeak() ?? 0].some(n => !Number.isSafeInteger(n) || n < 0))) throw new Error("private slot record or capacity exceeds its bound");

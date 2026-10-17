@@ -22,6 +22,7 @@ fi
 mkdir -p "$DEST" "$(dirname "$LOG")"
 install -m 755 "$HERE/../dependency-seed-guard.sh" "$DEST/dependency-seed-guard.sh"
 install -m 755 "$HERE/tmp-reclaim.sh" "$DEST/tmp-reclaim.sh"
+install -m 755 "$HERE/cache-reclaim.py" "$DEST/cache-reclaim.py"
 LINE="17 * * * * /bin/bash \"$DEST/tmp-reclaim.sh\" --apply >> \"$LOG\" 2>&1 $TAG"
 # Read the current table in full BEFORE writing, so the write can never truncate what is being read.
 CURRENT=$(printf '%s\n' "$CURRENT" | awk -v tag="$TAG" 'index($0,tag)==0')

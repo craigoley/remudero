@@ -1,10 +1,28 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: fileURLToPath(new URL(".", import.meta.url)), encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 
 /**
  * MASTER-PLAN §5 TIER 3 (W1-T26): "src/lib imports nothing from spike/CLI" is
@@ -85,10 +103,10 @@ test("depcruise over remudero's OWN src tree is clean today (the rule is live, n
 // across the browser-driven serve suites so the class cannot silently regress.
 
 test("no serve test returns a bare (un-awaited) page.<method>(...) — the teardown-race anti-pattern is forbidden fleet-wide", () => {
-  const testDir = join(fileURLToPath(new URL("..", import.meta.url)), "test");
+  const { dir: testDir, files } = testCorpus();
   const offenders: string[] = [];
-  for (const file of readdirSync(testDir)) {
-    if (!/^serve.*\.test\.ts$/.test(file)) continue;
+  for (const file of files) {
+    if (!/(^|\/)serve[^/]*\.test\.ts$/.test(file)) continue;
     const lines = readFileSync(join(testDir, file), "utf8").split("\n");
     lines.forEach((line, i) => {
       // a `return page.<something>(` that is NOT `return await page.` — the un-awaited return.
@@ -151,7 +169,7 @@ test("no test imports a mutated module copy from outside the project root — th
     "a tmpdir holding fixture DATA is not this anti-pattern",
   );
 
-  const testDir = join(fileURLToPath(new URL("..", import.meta.url)), "test");
+  const { dir: testDir, files } = testCorpus();
   // THIS FILE IS SKIPPED, and the reason is not convenience: the controls above are the offending
   // shape written out as string literals, so a sweep including this file matches its own fixtures
   // and reports a defect that does not exist — the self-match failure mode CLAUDE.md names for
@@ -159,8 +177,8 @@ test("no test imports a mutated module copy from outside the project root — th
   // file itself, which is the one file in the repo whose whole purpose is to contain no such thing.
   const SELF = "architecture-fitness.test.ts";
   const offenders: string[] = [];
-  for (const file of readdirSync(testDir)) {
-    if (!/\.test\.ts$/.test(file) || file === SELF) continue;
+  for (const file of files) {
+    if (file.split("/").at(-1) === SELF) continue;
     for (const id of tmpdirModuleImports(readFileSync(join(testDir, file), "utf8"))) {
       offenders.push(`${file}: a mutant module imported from ${id}`);
     }
@@ -221,14 +239,14 @@ test("no test compiles the real src graph as CommonJS through a generated module
     "a generated test importing no real src module is not this shape",
   );
 
-  const testDir = join(repoRoot, "test");
+  const { dir: testDir, files } = testCorpus();
   // SKIPPED: this file, whose controls above are the offending shape as literals, and the one suite that builds
   // the shape ON PURPOSE to prove the mechanism — it points its probe child's NODE_V8_COVERAGE at its own temp
   // dir, so the record it makes never reaches a shard's lcov.
   const SKIP = new Set(["architecture-fitness.test.ts", "a-define-import-meta-coverage-record-names-its-commonjs-cause.test.ts"]);
   const offenders: string[] = [];
-  for (const file of readdirSync(testDir)) {
-    if (!/\.test\.ts$/.test(file) || SKIP.has(file)) continue;
+  for (const file of files) {
+    if (SKIP.has(file.split("/").at(-1)!)) continue;
     for (const hit of cjsScopeSourceWrappers(readFileSync(join(testDir, file), "utf8"))) offenders.push(`${file}: ${hit}`);
   }
   assert.deepEqual(

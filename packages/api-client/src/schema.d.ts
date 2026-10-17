@@ -4632,6 +4632,8 @@ export interface components {
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      retirement?: InboxRetirement;
+      needsTriageReason?: string;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4746,6 +4748,10 @@ export interface components {
     };
     /** A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`). */
     InboxThreadMessageExtra: {
+      event?: {
+        key: string;
+        kind: "reframed" | "declined" | "restored" | "approved" | "released" | "redrafted" | "task_filed" | "released_to_fleet" | "refused" | "retired" | "retirement_outcome";
+      };
       did?: InboxThreadActionTaken;
       suggestedAction?: InboxThreadAction;
       /** The message is one of the responder's bounded clarifying questions. */
@@ -4798,6 +4804,8 @@ export interface components {
       detail: string;
     };
     InboxAttentionCensusItem: {
+      retirement?: InboxRetirement;
+      needsTriageReason?: string;
       threadId: string;
       proposalId: string;
       taskId?: string;
@@ -4885,6 +4893,9 @@ export interface components {
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      /** At most 16 KiB of serialized retirement views; completeness is retirementHistory. */
+      retirements?: (InboxRetirement)[];
+      retirementHistory?: InboxRetirementHistory;
       whyMeFeedback?: InboxWhyMeFeedback;
       dismissalAudit?: InboxDismissalAudit;
       planSource?: PlanSource;
@@ -5001,6 +5012,66 @@ export interface components {
         tier: "low";
         path: string;
       })[];
+    };
+    InboxRetirementScope: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      taskId: string | null;
+    };
+    InboxRetirement: {
+      retirementId: string;
+      /** Immutable original retirement snapshot anchor. */
+      snapshotKey: string;
+      scope: InboxRetirementScope;
+      proofId: string;
+      proofKind: "merged-task" | "plan-retirement" | "handoff" | "successor";
+      reason: string;
+      state: "retired" | "restored_for_review";
+    };
+    /** Byte-bounded maintained classification projection, separate from the full audit denominator. */
+    InboxRetirementHistory: {
+      state: "observed" | "absent" | "unavailable";
+      /** Null when absent or unavailable; observed empty is zero. */
+      total: number | null;
+      returned: number;
+      truncated: boolean;
+      countSemantics: "maintained_classification_retirements";
+    };
+    InboxRetirementRestoreRequest: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      /** Exactly thread:<proposalId>::inbox::-::-. */
+      threadId: string;
+      intentId: string;
+      retirementId: string;
+      snapshotKey: string;
+      taskId: string | null;
+      /** Nonblank */
+      reason: string;
+    };
+    InboxRetirementRestoreReceipt: {
+      id: string;
+      kind: "restore";
+      scope: InboxRetirementScope;
+      snapshotKey: string;
+      retirementId: string;
+      at: string;
+      authority: "operator";
+      operator: string;
+      intentId: string;
+    };
+    InboxRetirementRestoreResult: {
+      repository: string;
+      instance: string;
+      ok: true;
+      accepted: true;
+      delivery: "delivered";
+      audit: "journal_recorded";
+      materialization: "pending_refresh";
+      replayed?: true;
+      receipt: InboxRetirementRestoreReceipt;
     };
     InboxWhyMeCorrectionRequest: {
       repository: string;
@@ -7138,6 +7209,17 @@ export interface paths {
       responses: {
           "200": InstanceInboxProposal;
           "404": undefined;
+          "409": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/retirement-restore": {
+    post: {
+      responses: {
+          "200": InboxRetirementRestoreResult;
+          "400": undefined;
+          "403": undefined;
           "409": undefined;
           "503": undefined;
         };
