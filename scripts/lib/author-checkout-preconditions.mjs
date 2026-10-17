@@ -54,7 +54,8 @@ export function checkAuthorCheckout(root, {head, upstream, bundles = [], budgetM
     root = realpathSync(root);
     const actual = git(['rev-parse', 'HEAD']).text;
     if (actual !== head) refuse('head-mismatch');
-    if (git(['status', '--porcelain', '--untracked-files=all']).text) refuse('checkout-not-clean');
+    const initialStatus = git(['status', '--porcelain', '--untracked-files=all']).text;
+    if (initialStatus) refuse('checkout-not-clean');
     const origin = git(['remote', 'get-url', 'origin'], [0, 2]);
     // Do not disclose a wrong origin, which might contain credentials.
     if (origin.status !== 0 || origin.text !== upstream) refuse('wrong-or-missing-upstream');
@@ -82,7 +83,7 @@ export function checkAuthorCheckout(root, {head, upstream, bundles = [], budgetM
     const dependency = (deps.dependency ?? authorDependencyProvenance)(root);
     observations.push({kind: 'dependency', ...dependency});
     if (dependency.state !== 'present') refuse('dependency-metadata-or-tools-unavailable', 'unknown');
-    if (git(['rev-parse', 'HEAD']).text !== actual || git(['status', '--porcelain', '--untracked-files=all']).text) refuse('source-changed-during-observation', 'unknown');
+    if (git(['rev-parse', 'HEAD']).text !== actual || git(['status', '--porcelain', '--untracked-files=all']).text !== initialStatus) refuse('source-changed-during-observation', 'unknown');
   } catch { refuse('local-observation-unavailable', 'unknown'); }
   return result();
 }
