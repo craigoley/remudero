@@ -88,7 +88,7 @@ function harness(externalWait = false, lightPass = false, max?: number, backgrou
       finished.push(id);
       return result(id, externalWait);
     },
-  }, { laneCount: 2, pollIntervalMs: 10, max });
+  }, { freshnessMinLifetimeMs: 0, laneCount: 2, pollIntervalMs: 10, max });
   void run.then(() => { complete = true; });
   return {
     logs, started, finished, run, ready: ready.promise,

@@ -57,7 +57,7 @@ function phase(history = true, extra: Partial<DaemonDeps> = {}, startingMinute =
     },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
     ...extra,
-  } as DaemonDeps, { laneCount: 3, max: 12 });
+  } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 3, max: 12 });
   return {
     run, started, rows, boundaries,
     boundary: (id: string, waitingOn?: string) => {
