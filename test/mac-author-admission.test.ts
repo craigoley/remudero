@@ -9,8 +9,9 @@ type AdmissionOptions = {platform?: string; scratch?: string; statfs?: Function;
 type AuthorEntryOptions = {root: string; readAdmission: () => {state: string};
   runAuthor: (argv: string[], deps: {admitHost: (stage: string) => unknown}) => number;
   reportRefusal?: () => void};
+const admissionModule = '#scripts/lib/mac-author-admission.mjs';
 const {guardedAuthorEntry, MAC_AUTHOR_FREE_RESERVE_BYTES, MacAuthorCapacityRefusal,
-  macPressureState, readMacAuthorAdmission} = await import(new URL('../scripts/lib/mac-author-admission.mjs', import.meta.url).href) as {
+  macPressureState, readMacAuthorAdmission} = await import(admissionModule) as {
   MAC_AUTHOR_FREE_RESERVE_BYTES: number;
   macPressureState: (text: string) => string;
   readMacAuthorAdmission: (root: string, options?: AdmissionOptions) => Admission;
@@ -97,12 +98,13 @@ test('Mac admission is freshly checked after slot waiting and before a later hea
 });
 
 test('Mac author phase refusals save OVER-CAPACITY, start no refused phase, and release the slot', async (t) => {
-  const {makeRuntimeFixture} = await import('./helpers/native-runtime-fixture.js');
-  const {main} = await import(new URL('../scripts/preflight-author.mjs', import.meta.url).href) as {
+  const {makeRuntimeFixture} = await import('#test/helpers/native-runtime-fixture.js');
+  const authorModule = '#scripts/preflight-author.mjs';
+  const {main} = await import(authorModule) as {
     main: (argv: string[], options: {root: string; select: () => {fullRun: boolean; suites: string[]; reasons: string[]};
       admitHost: (stage: string) => {stage: string; state: string}}) => number;
   };
-  const {resolveTestSlotDir} = await import('../src/lib/test-slot.js');
+  const {resolveTestSlotDir} = await import('#src/lib/test-slot.js');
   for (const refusedStage of ['static-preflight', 'affected-tests']) {
     const fixture = makeRuntimeFixture(); t.after(() => fixture.cleanup());
     const status = main([], {root: fixture.dir,
