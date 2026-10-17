@@ -9,7 +9,7 @@ import {
   runSweep,
   type StaleBodyPrView,
 } from "./helpers/sweep-test.js";
-import { staleBodyFindingsForTick } from "../src/lib/daemon.js";
+import { runDaemon, staleBodyFindingsForTick } from "../src/lib/daemon.js";
 import type { OpenPrView } from "../src/lib/sweep.js";
 
 const URL = "https://github.com/o/r/pull/9124";
@@ -65,6 +65,59 @@ test("sweep stale body: the daemon tick helper reads the ledger and skips torn l
   assert.deepEqual(staleBodyFindingsForTick(undefined, () => lines), []);
   assert.deepEqual(staleBodyFindingsForTick([view()], undefined), []);
   assert.deepEqual(staleBodyFindingsForTick([], () => lines), []);
+});
+
+test("sweep stale body: daemon reports pending input once per pr, head and digest", async () => {
+  const otherHead = "bbbb222";
+  const otherUrl = "https://github.com/o/r/pull/9125";
+  const nextDigest = "v2:newer";
+  const passes = [
+    [view({ reviewInputDigest: OLD })],
+    [view()],
+    [view()],
+    [view({ reviewInputDigest: nextDigest })],
+    [view({ headSha: otherHead, reviewInputDigest: nextDigest })],
+    [view({ prNumber: 9125, prUrl: otherUrl, headSha: otherHead, reviewInputDigest: nextDigest })],
+  ];
+  const ledger = [
+    posted(OLD),
+    posted(OLD, { head_sha: otherHead }),
+    posted(OLD, { pr_url: otherUrl, head_sha: otherHead }),
+    { step: STALE_BODY_REREVIEW_STEP, pr_url: URL, head_sha: HEAD, review_input_digest: NEW },
+  ].map((row) => JSON.stringify(row));
+  let tick = 0;
+  let sweeps = 0;
+  const reported: Array<{ tick: number; extra: Record<string, unknown> }> = [];
+  const summary = await runDaemon({ tasks: [], byId: new Map() }, {
+    refreshMerged: () => () => false,
+    runOne: async () => assert.fail("quiet hours must prevent dispatch"),
+    readLedgerLines: () => ledger,
+    sweep: async () => {
+      sweeps++;
+      return { reviewInputViews: passes[tick] };
+    },
+    checkQuietHours: () => ({ deferred: true, detail: "fixture dispatch hold" }),
+    checkStop: () => tick >= passes.length ? "all fixture passes consumed" : undefined,
+    sleep: async () => { tick++; },
+    log: (step, extra = {}) => {
+      if (step === "review.stale_body_pending") reported.push({ tick, extra });
+    },
+  });
+  assert.equal(summary.stopReason, "stopped");
+  assert.equal(sweeps, passes.length, "each tick consumed a completed sweep");
+  const expected = (tick: number, prNumber: number, headSha: string, digest: string, queued: boolean) => ({
+    tick,
+    extra: {
+      pr_number: prNumber, head_sha: headSha, review_input_digest: digest,
+      reviewed_input_digest: OLD, queued,
+    },
+  });
+  assert.deepEqual(reported, [
+    expected(1, 9124, HEAD, NEW, true),
+    expected(3, 9124, HEAD, nextDigest, false),
+    expected(4, 9124, otherHead, nextDigest, false),
+    expected(5, 9125, otherHead, nextDigest, false),
+  ], "unchanged input stays silent, repeated input is deduped, and each changed identity reports");
 });
 
 test("sweep stale body: runSweep ledgers one re-review request for an edited body", async () => {
