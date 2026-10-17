@@ -32,6 +32,7 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, loopAvailableDeadline, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
+import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite } from "./added-test-alias-rewrite.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
@@ -2545,7 +2546,7 @@ export function codexCommitSubject(text: string): string {
 }
 
 export type CodexHarnessCommit =
-  | { outcome: "committed"; sha: string }
+  | { outcome: "committed"; sha: string; aliasRewrite?: AddedTestAliasRewrite }
   | { outcome: "nothing-to-commit" | "not-a-harness-worktree" }
   | { outcome: "refused"; reason: string };
 
@@ -2554,10 +2555,14 @@ export type CodexHarnessCommit =
 export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessCommit {
   if (recordedWorktreeGitDir(cwd) === null) return { outcome: "not-a-harness-worktree" };
   try {
-    if (hostWorktreeGit(cwd, ["status", "--porcelain"]).trim() === "") return { outcome: "nothing-to-commit" };
+    const status = hostWorktreeGit(cwd, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+    if (status.trim() === "") return { outcome: "nothing-to-commit" };
+    const changed = status.split("\0").filter((entry) => entry.length > 3).map((entry) => entry.slice(3));
+    const aliasRewrite = rewriteAddedTestImports(cwd, status, changed, (args) => hostWorktreeGit(cwd, args));
     hostWorktreeGit(cwd, ["add", "-A"]);
     hostWorktreeGit(cwd, ["commit", "-q", "-m", codexCommitSubject(text)]);
-    return { outcome: "committed", sha: hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim() };
+    const sha = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
+    return Object.keys(aliasRewriteFields(aliasRewrite)).length > 0 ? { outcome: "committed", sha, aliasRewrite } : { outcome: "committed", sha };
   } catch (error) {
     // Not a success: the edits stay uncommitted and the reason is the row the caller's no-commit verdict cites.
     const reason = error instanceof Error ? error.message : String(error);
@@ -5156,6 +5161,14 @@ async function spawnCodexWorkerInPrivateTemp(
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
+    if (harnessCommit && args.runId) appendLedger(ledgerPathFor(config), {
+      run_id: args.runId,
+      task_id: args.taskId ?? "unattributed",
+      step: "codex.harness_commit",
+      outcome: harnessCommit.outcome,
+      ...(harnessCommit.outcome === "committed" ? { sha: harnessCommit.sha, ...aliasRewriteFields(harnessCommit.aliasRewrite) } : {}),
+      ...(harnessCommit.outcome === "refused" ? { reason: harnessCommit.reason } : {}),
+    });
     return {
       ...(harnessCommit === undefined ? {} : { harnessCommit }),
       sessionId: parsed.sessionId || args.resumeSessionId || "",

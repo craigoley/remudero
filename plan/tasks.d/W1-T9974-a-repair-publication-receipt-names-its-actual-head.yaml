@@ -27,31 +27,52 @@
     form and runs only in body-coverage mode. It does not recognize arbitrary human prose
     such as twelve changed paths, and expanding it into an NLP truth oracle is not the remedy.
     W9124 watches body changes to invalidate review inputs; it does not publish repair receipts.
+    QUALIFIED CONTRACT CORRECTION: GitHub's documented conditional requests protect GET;
+    unsafe writes require endpoint-specific support. The REST pull update parameters and
+    GraphQL UpdatePullRequestInput expose no expected body revision or head/body compare-and-swap.
+    A read/write/readback cannot establish the original never-overwrite-human promise.
+    See https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests
+    and https://docs.github.com/en/graphql/reference/pulls#updatepullrequestinput .
+    Append-only below is a machine write-once policy, not physical immutability against
+    an authorized human/admin edit. Existing W307 body-coverage behavior remains separate;
+    this task neither expands it nor certifies it race-free.
   design: |
     1. Add a small versioned, bounded repair-publication receipt at the maintained parent
        runFixRung publication boundary. A pure renderer consumes the already-observed
        repository/PR, actual head/base, current repo-relative changed paths and admission
        classes. It labels inherited author/native/scoped evidence with its ORIGINAL SHA,
        never upgrades it to the new head, and names new checks as pending/unknown until
-       current-head receipts actually exist. Reuse the existing body read/write seams.
+       current-head receipts actually exist. Persist a content-addressed manifest before
+       any optional external receipt. Reuse the existing exclusive parent repair owner,
+       durable evidence and bounded async transport rather than a new owner service.
        Wire reconcileFixPublication from the real ci-log/conflict/review repair paths in
        src/run-task.ts, not a fixture-only caller or dummy production text.
-    2. Own ONLY an explicitly delimited machine-managed section. Preserve the canonical
-       task trailer, Acceptance/claim/proof bytes, human rationale and historical receipts.
-       The section explicitly warns that preceding author narrative may predate this repair;
-       do not silently rewrite or certify free-form prose, introduce replacement grep proofs,
-       guess discrimination, invent review/merge results or amend the task to fit the diff.
-       No section is injected on a no-change pass. Repeated same-input repair is byte-idempotent.
-    3. Bind body update to the PR/head/body observation actually read. A moved head/body,
-       unreadable scope or failed write/readback remains an explicit bounded unknown with
-       retained evidence, not a successful publication receipt. Never overwrite a newer human
-       edit. No private absolute paths, tokens, registry bytes or state roots enter the public
-       section. A bounded manifest does not grant scope/publication authority; W9973 separately
-       checks newly introduced scope. No extra reviewer, global hold or gate waiver.
+    2. The new reconciler NEVER updates a PR body. Preserve the canonical task trailer,
+       Acceptance/claim/proof bytes, human rationale and historical receipts. Default to an
+       opt-in SHADOW would-publish observation and durable manifest. Any separately authorized
+       public sink is a NEW machine-owned PR conversation comment, not a replacement body or
+       an edit to an existing comment. Label preceding author narrative as potentially historical;
+       never certify it, replace behavioral proofs with grep, guess discrimination or invent
+       review/merge success. No receipt write on a no-change pass; rendering is byte-idempotent.
+    3. Bind manifest schema/digest, numeric repository/PR/actor/receipt identity, exact head/base,
+       scope and as-of observations. Keep original-SHA lineage even when the head moves.
+       Before a public write/reuse, refresh current ownership, head, scope and a complete bounded
+       receipt corpus with positive controls. Moved/unreadable input, a human-edited receipt,
+       duplicates or ambiguous writes remain durable stale/unknown, never certified publication.
+       An uncertain POST is not blindly retried: reconcile through the existing owner with a
+       bounded disposition. Promise logical dedupe, NOT unsupported global exactly-once creation.
+       Bot write-once does not remove owner/admin editing authority. No private absolute roots,
+       tokens, registry/config bytes or private source material enter the public projection.
+       Actor admission is NOT private-source publication permission. A manifest grants no scope
+       or publication authority; W9973 independently checks the actual first parent push.
+       No extra reviewer, blanket trusted-PR hold or gate waiver.
     4. Drive actual runFixRung ci-log and conflict repairs with recording transports and
        disposable Git defaults/catches. Use the real12-to14path shape and a different-size
        positive control, plus unchanged-head/no-edit, stale native failure, skipped/unknown
-       checks, unsupported/malformed managed sections, sink failure and concurrent human edits.
+       checks, unsupported/malformed receipts, sink failure, concurrent human edits and changed
+       heads. Trap body-update effects, lost-ack POST success, edited bot comments and private
+       publication independently. Test immutable argument snapshots, real bounded async defaults
+       and every catch; missing evidence stays unknown without globally holding trusted flow.
        Remove actual receipt forwarding to fail then restore to pass. Prove the stored body
        still resolves unchanged canonical criteria with zero empty proofs; parsing is not proof
        execution, hosted CI, review, merge, deployment or live uptake.
@@ -61,7 +82,9 @@
        compared on that run's actual unchanged base. Preserve all failures/unknowns.
        Workers continue for isolated source/tests. No new schedule, live config/settings,
        credential/access change, deployment, closure, scheduler activation or worker stop.
-       Keep registry/admission opt-in SHADOW ONLY, public Apache core and owner/admin override.
+       Keep new registry/admission/publication behavior opt-in SHADOW ONLY, public Apache core
+       and independent owner/admin override. This plan amendment activates no external sink.
+       Confirm its actual normal merge before implementing this changed publication contract.
   acceptance:
     - claim: The maintained parent repair path invokes the new publication reconciler
       proof: 'grep: reconcileFixPublication( in src/run-task.ts'
@@ -69,7 +92,7 @@
       proof: 'unit test: real repair publication forwards a head-bound evidence manifest'
     - claim: Old native and scoped receipts keep their original SHA and cannot become repaired-head passes
       proof: 'unit test: repair manifests never relabel historical validation as current-head success'
-    - claim: Canonical proof and human text bytes survive an idempotent machine-section update
+    - claim: Canonical proof and human body bytes stay untouched by idempotent receipt publication
       proof: 'unit test: repair manifests preserve canonical proofs human text and idempotence'
     - claim: Moved human input and failed or unreadable writes stay unknown rather than certified
       proof: 'unit test: repair manifest races and unreadable sinks never certify publication'
