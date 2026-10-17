@@ -57,7 +57,7 @@ interface Rig {
   projector: LedgerProjector;
   clock: Clock & { set(ms: number): void };
   append(...rows: Array<Record<string, unknown>>): void;
-  board(opts?: { plan?: () => Plan; rules?: Partial<BoardDirtRules>; github?: GitHub; lease?: boolean }): BoardProjection;
+  board(opts?: { plan?: () => Plan; rules?: Partial<BoardDirtRules>; github?: GitHub; lease?: boolean; oracleSlices?: number }): BoardProjection;
 }
 
 function rig(t: TestCtx): Rig {
@@ -82,6 +82,7 @@ function rig(t: TestCtx): Rig {
       db, ...(opts.lease === false ? {} : { lease }), ledgerPath: join(dir, "ledger.ndjson"), clock,
       readPlan: opts.plan ?? (() => defaultPlan), github: opts.github ?? fakeGithub(), githubGeneration: () => "g1",
       readCreditStore: () => ({}), readCreditOverrideFile: () => "", ...(opts.rules ? { rules: opts.rules } : {}),
+      ...(opts.oracleSlices === undefined ? {} : { oracleSlices: opts.oracleSlices }),
     }),
   };
 }
@@ -130,7 +131,7 @@ test("a ledger row dirties exactly the tasks it affects", (t) => {
 test("the no-reuse oracle catches a deliberately stale reuse", (t) => {
   const r = rig(t);
   r.append(blockRow("W1-T1"));
-  const board = r.board();
+  const board = r.board({ oracleSlices: 1 });
   board.update();
   assert.equal(board.oracle().mismatches.length, 0, "a board derived from scratch agrees with itself");
   const held = board.projections().get("W1-T1")!;
@@ -138,7 +139,7 @@ test("the no-reuse oracle catches a deliberately stale reuse", (t) => {
   // Corrupt the persisted projection under its own (still valid) stamp: a restart reuses it as is.
   r.db.prepare("UPDATE task_projection SET json = ? WHERE task_id = 'W1-T1'").run(JSON.stringify({ ...held, status: "queued", independentFailureBlocked: undefined }));
   r.db.prepare("INSERT INTO task_projection(task_id, stamp, json) VALUES('GHOST', 'x', '{\"taskId\":\"GHOST\"}')").run();
-  const restarted = r.board();
+  const restarted = r.board({ oracleSlices: 1 });
   assert.equal(restarted.projections().get("W1-T1")?.status, "queued", "the stale projection is what the restart holds");
   const found = restarted.oracle();
   assert.deepEqual(found.mismatches.map((m) => m.taskId), ["GHOST", "W1-T1"]);
@@ -147,7 +148,7 @@ test("the no-reuse oracle catches a deliberately stale reuse", (t) => {
   assert.equal(restarted.projections().get("W1-T1")?.status, "blocked", "the oracle heals what it finds");
   assert.equal(restarted.projections().has("GHOST"), false);
   assert.equal(r.db.prepare("SELECT count(*) AS n FROM task_projection WHERE task_id = 'GHOST'").get()?.n, 0);
-  assert.equal(r.board().oracle().mismatches.length, 0, "the heal is persisted");
+  assert.equal(r.board({ oracleSlices: 1 }).oracle().mismatches.length, 0, "the heal is persisted");
 });
 
 test("the periodic oracle measures a gap each dirty-set rule closes", (t) => {
@@ -156,9 +157,9 @@ test("the periodic oracle measures a gap each dirty-set rule closes", (t) => {
   const gapped = createBoardProjection({
     db: r.db, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1"), task("W1-T2")]),
     github: fakeGithub(), githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "",
-    rules: { alias: false }, log: (step, extra) => logged.push({ step, ...extra }),
+    rules: { alias: false }, oracleSlices: 1, log: (step, extra) => logged.push({ step, ...extra }),
   });
-  const closed = r.board();
+  const closed = r.board({ oracleSlices: 1 });
   assert.equal(gapped.update().oracle, undefined, "the first derive only starts the oracle's clock");
   closed.update();
   later(r);
@@ -179,7 +180,7 @@ test("an environmental block clears on the clock re-derive without a new row", (
   r.append(blockRow("W1-T1", { verdict: "blocked_transient" }), { step: "run.start", task_id: "W1-T2", run_id: "r2" });
   const board = r.board();
   const frozen = r.board();
-  const noClock = r.board({ rules: { clock: false }, lease: false });
+  const noClock = r.board({ rules: { clock: false }, lease: false, oracleSlices: 1 });
   board.update();
   frozen.update();
   noClock.update();
@@ -388,7 +389,7 @@ test("a board drift that recurs within 24 h of a self-heal escalates through try
   const escalation = { issues, ledgerPath: join(r.dir, "ledger.ndjson"), runId: "board-oracle" };
   const withEscalation = (): BoardProjection => createBoardProjection({
     db: r.db, lease: r.lease, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1"), task("W1-T2")]),
-    github: fakeGithub(), githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "", escalation, instance: "console",
+    github: fakeGithub(), githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "", escalation, instance: "console", oracleSlices: 1,
   });
   const first = withEscalation();
   first.update();
@@ -422,7 +423,7 @@ test("a board drift that survives its heal escalates and a transient one does no
   const board = createBoardProjection({
     db: r.db, lease: r.lease, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1")]),
     github, githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "",
-    escalation: { issues, ledgerPath: join(r.dir, "ledger.ndjson"), runId: "board-oracle" }, log: (step, extra) => logged.push({ step, ...extra }),
+    escalation: { issues, ledgerPath: join(r.dir, "ledger.ndjson"), runId: "board-oracle" }, oracleSlices: 1, log: (step, extra) => logged.push({ step, ...extra }),
   });
   states.push("OPEN");
   board.update();
@@ -439,7 +440,7 @@ test("a board drift that survives its heal escalates and a transient one does no
   const quiet = createBoardProjection({
     db: r.db, ledgerPath: join(r.dir, "ledger.ndjson"), clock: r.clock, readPlan: () => planOf([task("W1-T1")]),
     github: fakeGithub({ issueByUrl: () => ({ state: states.shift() ?? "CLOSED", title: "stuck" }) }), githubGeneration: () => "g1",
-    readCreditStore: () => ({}), readCreditOverrideFile: () => "",
+    readCreditStore: () => ({}), readCreditOverrideFile: () => "", oracleSlices: 1,
   });
   assert.equal(quiet.projections().get("W1-T1")?.needsHuman, undefined, "it restarts on the healed projection");
   states.push("OPEN", "OPEN", "CLOSED");

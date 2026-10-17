@@ -160,7 +160,7 @@ test("readers and the board's identity-keyed plan hash agree for frozen reused T
   } as GitHub;
   const board = createBoardProjection({
     db, clock, ledgerPath: join(root, "ledger.ndjson"), readPlan: () => plan, github,
-    readCreditStore: () => ({}), readCreditOverrideFile: () => "",
+    readCreditStore: () => ({}), readCreditOverrideFile: () => "", oracleSlices: 1,
   });
   assert.deepEqual(board.update().rederived, ["A", "B"], "the hash cache is populated");
   plan = read(blobs, cache, 0, 2).plan;
