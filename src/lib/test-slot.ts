@@ -32,7 +32,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "./test-slot-capacity.js";
-import { acquireSlotMutation, defaultGuardHolderProbe, slotMutationPending, type GuardHolderEvidence, type OrphanGuardRecovery } from "./test-slot-mutation.js";
+import { acquireSlotMutation, createGuardHolderProbe, slotMutationPending, type GuardHolderEvidence, type OrphanGuardRecovery } from "./test-slot-mutation.js";
 import { observeTestSlotParent } from "./test-slot-parent.js";
 
 /** Names the slot directory every container and the host share (the scratch mount's bind). */
@@ -55,8 +55,8 @@ export const TEST_SLOT_WAIT_BOUND_MS = 45 * 60_000;
  *  every shard boundary, so a record this stale names a holder that died without releasing. */
 export const TEST_SLOT_LEASE_MS = 90 * 60_000;
 const TEST_SLOT_POLL_MS = 5_000;
-/** The marker every covered step descendant inherits; its value is the reservation's ownerNonce (W1-T9928). */
-export const TEST_SLOT_RUN_ENV = "RMD_TEST_SLOT_RUN";
+/** Covered descendants inherit the existing parent claim, including the reservation nonce and process start. */
+export const TEST_SLOT_RUN_ENV = TEST_SLOT_PARENT_ENV;
 /** A beating lease's cadence. A record names it only while a live event loop really beats it. */
 export const TEST_SLOT_HEARTBEAT_MS = 60_000;
 /** Missed recorded beats before a waiter logs one silence observation. Silence is never quiescence. */
@@ -273,6 +273,30 @@ export interface TestSlotHolder {
   releaseRequestedAt?: string;
   /** Present only while a live event loop beats this record at this cadence; absent keeps the pid judgment. */
   heartbeatIntervalMs?: number;
+  /** The OS owner of this reservation; missing ownership never authorizes tree-based recovery. */
+  ownerUid?: number;
+  /** Sticky once work uses a marker: withdrawing a cadence must not restore parent-pid-only recovery. */
+  workIdentity?: "reservation-marker-v1";
+}
+
+/** Identity a complete run monitor must name in its terminal evidence. */
+export interface TestSlotReservationIdentity {
+  host: string;
+  bootId: string;
+  pidNs: string;
+  ownerUid: number;
+  pid: number;
+  processStart: string;
+  ownerNonce: string;
+  startedAt: string;
+}
+
+export function testSlotReservationIdentity(held: TestSlotHolder): TestSlotReservationIdentity | undefined {
+  if (!held.ownerNonce || !held.processStart || !held.bootId || !held.pidNs ||
+      !Number.isSafeInteger(held.ownerUid) || held.ownerUid! < 0 || !Number.isSafeInteger(held.pid) || held.pid < 1 ||
+      !Number.isFinite(Date.parse(held.startedAt))) return undefined;
+  return { host: held.host, bootId: held.bootId, pidNs: held.pidNs, ownerUid: held.ownerUid!, pid: held.pid,
+    processStart: held.processStart, ownerNonce: held.ownerNonce, startedAt: held.startedAt };
 }
 
 /** Whether the reserved process tree ended. Only `ended` frees capacity; `unknown` names what it could not see. */
@@ -280,6 +304,26 @@ export interface ReservedTreeEvidence {
   state: "ended" | "live" | "unknown";
   coverage: string;
   reason: string;
+  /** Positive coverage of the entire run, including reparented/detached work, bound to this generation. */
+  complete?: boolean;
+  reservation?: TestSlotReservationIdentity;
+}
+
+function verifiedTerminalEvidence(held: TestSlotHolder, evidence: ReservedTreeEvidence): boolean {
+  const identity = testSlotReservationIdentity(held);
+  return evidence.state === "ended" && evidence.complete === true && identity !== undefined &&
+    evidence.reservation !== undefined && Object.entries(identity).every(([key, value]) =>
+      evidence.reservation![key as keyof TestSlotReservationIdentity] === value);
+}
+
+function observeReservedTree(held: TestSlotHolder, probe: (held: TestSlotHolder) => ReservedTreeEvidence): ReservedTreeEvidence {
+  try {
+    const evidence = probe(structuredClone(held));
+    if (evidence.state !== "ended" || verifiedTerminalEvidence(held, evidence)) return evidence;
+    return { state: "unknown", coverage: evidence.coverage, reason: "terminal evidence has incomplete coverage or a different reservation identity" };
+  } catch (error) {
+    return { state: "unknown", coverage: "none", reason: `process-tree probe failed: ${String(error)}` };
+  }
 }
 
 /** Seams for {@link probeReservedTree}; every field defaults to this host. */
@@ -287,6 +331,7 @@ export interface ReservedTreeProbeHost {
   platform?: NodeJS.Platform;
   bootId?: string;
   pidNs?: string;
+  hostname?: () => string;
   list?: () => string[];
   read?: (path: string) => string;
 }
@@ -295,35 +340,43 @@ const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(St
 
 /**
  * Exact-tree evidence for one reservation (W1-T9928). The tree is the recorded owner (pid + kernel start)
- * plus every process carrying `RMD_TEST_SLOT_RUN=<ownerNonce>`, which reparented and detached descendants
- * inherit. A process that started before the owner cannot descend from it. Any later process this probe
- * cannot read, another boot or pid namespace, missing identity, or a host with no /proc is `unknown`.
+ * plus every process carrying this reservation's parent claim, which reparented and detached descendants
+ * inherit. Seeing a marker proves live work; its absence cannot prove complete coverage: exec can
+ * replace an environment, and a process can fork during a scan. Without an independent complete run
+ * monitor this probe therefore returns `unknown`, never terminal evidence, when it sees no live work.
  */
 export function probeReservedTree(held: TestSlotHolder, host: ReservedTreeProbeHost = {}): ReservedTreeEvidence {
   const platform = host.platform ?? process.platform;
   const unknown = (reason: string, coverage = "none"): ReservedTreeEvidence => ({ state: "unknown", coverage, reason });
   if (platform !== "linux") return unknown(`no exact-tree probe on ${platform}`);
-  if (!held.ownerNonce || !held.processStart?.startsWith("proc:")) return unknown("owner identity unknown: no reservation nonce or kernel process start");
+  if (!testSlotReservationIdentity(held) || !/^proc:[0-9]+$/.test(held.processStart ?? "")) return unknown("owner identity unknown: no complete reservation identity or kernel process start");
+  if (!sameHost(held.host, (host.hostname ?? hostname)()) || held.ownerUid !== process.getuid?.()) return unknown("host or owner uid differs");
   const bootId = "bootId" in host ? host.bootId : readBootId();
   const pidNs = "pidNs" in host ? host.pidNs : readPidNamespace();
   if (held.bootId === undefined || held.bootId !== bootId) return unknown("boot identity unproven");
   if (held.pidNs === undefined || held.pidNs !== pidNs) return unknown("pid namespace differs or is unrecorded");
-  const ownerStart = Number(held.processStart.slice("proc:".length));
+  const ownerStart = Number(held.processStart!.slice("proc:".length));
+  if (!Number.isSafeInteger(ownerStart) || ownerStart < 1) return unknown("invalid kernel process start");
   const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
   let pids: string[];
   try { pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name)); }
   catch (error) { return unknown(`process table unreadable: ${String(error)}`); }
-  const marker = `${TEST_SLOT_RUN_ENV}=${held.ownerNonce}`;
+  const markerPrefix = `${TEST_SLOT_RUN_ENV}=`;
   const unreadable: string[] = [];
+  const deadline = performance.now() + 2_000;
   let scanned = 0;
   for (const pid of pids) {
+    if (performance.now() >= deadline) return unknown("incomplete: process-tree observation exceeded its bound", "proc-environ (incomplete)");
     let start: number;
     try {
       const raw = read(`/proc/${pid}/stat`);
       start = Number(raw.slice(raw.lastIndexOf(") ") + 2).trim().split(/\s+/)[19]);
       if (!raw.includes(") ") || !Number.isSafeInteger(start)) throw new Error("unparseable stat");
     } catch (error) {
-      if (!goneProcess(error)) unreadable.push(pid);
+      if (!goneProcess(error)) {
+        const reason = `${pid}: process identity unreadable (${String(error)})`;
+        unreadable.push(reason);
+      }
       continue;
     }
     if (Number(pid) === held.pid && start === ownerStart) return { state: "live", coverage: "proc-environ", reason: `owner pid ${pid} is alive with its recorded start` };
@@ -331,14 +384,28 @@ export function probeReservedTree(held: TestSlotHolder, host: ReservedTreeProbeH
     let environ: string;
     try { environ = read(`/proc/${pid}/environ`); }
     catch (error) {
-      if (!goneProcess(error)) unreadable.push(pid);
+      if (!goneProcess(error)) {
+        const reason = `${pid}: environment unreadable (${String(error)})`;
+        unreadable.push(reason);
+      }
       continue;
     }
-    if (environ.split("\0").includes(marker)) return { state: "live", coverage: "proc-environ", reason: `covered descendant pid ${pid} still carries the reservation marker` };
+    const marker = environ.split("\0").find(entry => entry.startsWith(markerPrefix));
+    if (marker !== undefined) {
+      try {
+        const claim = JSON.parse(marker.slice(markerPrefix.length));
+        if (claim?.nonce === held.ownerNonce && claim.pid === held.pid && claim.start === held.processStart) {
+          return { state: "live", coverage: "proc-environ", reason: `covered descendant pid ${pid} still carries the reservation marker` };
+        }
+      } catch (error) {
+        const reason = `${pid}: malformed reservation marker (${String(error)})`;
+        unreadable.push(reason);
+      }
+    }
     scanned += 1;
   }
   if (unreadable.length > 0) return unknown(`incomplete: ${unreadable.length} process(es) started since the owner could not be read (pid ${unreadable.slice(0, 5).join(",")})`, "proc-environ (incomplete)");
-  return { state: "ended", coverage: "proc-environ", reason: `owner gone; none of ${scanned} process(es) started since the owner carries ${TEST_SLOT_RUN_ENV}` };
+  return unknown(`none of ${scanned} process(es) carries the marker; marker absence does not prove complete process-tree quiescence`, "proc-environ (incomplete)");
 }
 
 /** What a beating process needs to rewrite exactly one reservation; the lease's own identity, never a new one. */
@@ -349,6 +416,9 @@ export interface TestSlotHeartbeatHandle {
   processStart: string;
   host: string;
   intervalMs: number;
+  bootId?: string;
+  pidNs?: string;
+  ownerUid?: number;
   /** Every covered step descendant inherits this, so {@link probeReservedTree} can see it after its parent dies. */
   coverageEnvironment: Record<string, string>;
 }
@@ -357,7 +427,8 @@ export interface TestSlotHeartbeatHandle {
  * One beat under the slot's mutation guard: rewrites heartbeatAt (and states the cadence, or withdraws it)
  * in place, only while the record still names this exact owner. A busy guard defers; drift is `lost`.
  */
-export function beatTestSlot(handle: TestSlotHeartbeatHandle, opts: { withdraw?: boolean; now?: () => Date } = {}): "beat" | "withdrawn" | "deferred" | "lost" {
+export function beatTestSlot(handle: TestSlotHeartbeatHandle, opts: { withdraw?: boolean; clock?: Clock } = {}): "beat" | "withdrawn" | "deferred" | "lost" {
+  if (!Number.isSafeInteger(handle.intervalMs) || handle.intervalMs < 1) throw new Error("heartbeat cadence must be a positive safe integer");
   const mutation = acquireSlotMutation(handle.path);
   if (mutation.state !== "acquired") return "deferred";
   try {
@@ -374,9 +445,11 @@ export function beatTestSlot(handle: TestSlotHeartbeatHandle, opts: { withdraw?:
       if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return "lost";
       const held = parseTestSlotHolder(bytes.toString("utf8"));
       if (!held || held.ownerNonce !== handle.ownerNonce || held.pid !== handle.pid || held.processStart !== handle.processStart ||
+          held.bootId !== handle.bootId || held.pidNs !== handle.pidNs || held.ownerUid !== handle.ownerUid ||
+          st.uid !== process.getuid?.() || held.ownerUid !== st.uid ||
           !sameHost(held.host, handle.host) || held.releaseRequestedAt !== undefined || held.ownershipProtocol !== undefined) return "lost";
-      const when = (opts.now ?? (() => new Date()))();
-      const next: TestSlotHolder = { ...held, heartbeatAt: when.toISOString() };
+      const when = (opts.clock ?? systemClock).date();
+      const next: TestSlotHolder = { ...held, heartbeatAt: when.toISOString(), workIdentity: "reservation-marker-v1" };
       delete next.heartbeatIntervalMs;
       if (!opts.withdraw) next.heartbeatIntervalMs = handle.intervalMs;
       const body = Buffer.from(JSON.stringify(next));
@@ -395,11 +468,14 @@ export function beatTestSlot(handle: TestSlotHeartbeatHandle, opts: { withdraw?:
 
 /**
  * Beat a reservation on an unref'd interval of THIS process's live event loop (W1-T9928). `stop(true)`
- * withdraws the cadence once the covered work has ended; `stop(false)` leaves it, so a waiter must find
- * exact-tree evidence before reclaiming. A failed or deferred beat is a diagnostic, never a release.
+ * withdraws the cadence once the step ends; the permanent work identity still requires exact-tree
+ * evidence before reclaiming. A failed or deferred beat is a diagnostic, never a release.
  */
 export function startTestSlotHeartbeat(handle: TestSlotHeartbeatHandle,
   log: (row: Record<string, unknown>) => void = row => void process.stderr.write(`${JSON.stringify(row)}\n`)): { stop(coveredWorkEnded: boolean): void } {
+  // Publish the protected identity before any child can start. A deferred or lost first beat is NOT admission.
+  const initial = beatTestSlot(handle);
+  if (initial !== "beat") throw new Error(`cannot start covered work: initial heartbeat ${initial}`);
   let stopped = false;
   const tick = (): void => {
     if (stopped) return;
@@ -414,7 +490,6 @@ export function startTestSlotHeartbeat(handle: TestSlotHeartbeatHandle,
   };
   const timer = setInterval(tick, handle.intervalMs);
   timer.unref?.();
-  tick();
   return {
     stop(coveredWorkEnded: boolean): void {
       if (stopped) return;
@@ -551,6 +626,17 @@ function readTestSlotHolder(path: string, expected?: { dev: number; ino: number 
   } finally { closeSync(fd); }
 }
 
+/** Recheck after the audit callback too: telemetry cannot give a replacement or late beat deletion authority. */
+function unlinkObservedTestSlot(path: string, expected: Stats, held: TestSlotHolder): void {
+  const current = lstatSync(path);
+  if (!current.isFile() || (current.mode & 0o077) === 0 || current.uid !== expected.uid ||
+      current.dev !== expected.dev || current.ino !== expected.ino ||
+      JSON.stringify(readTestSlotHolder(path, expected)) !== JSON.stringify(held)) {
+    throw new Error("reservation identity or heartbeat changed before release; re-observe");
+  }
+  unlinkSync(path);
+}
+
 /** Harden EVERY reopen in the shared identity/bytes reclaimer, not just a prior inspection.
  * A private replacement never inherits the old inode's deletion authority, even with identical JSON.
  */
@@ -624,6 +710,9 @@ export type OwnerReleaseResult =
 export function releaseTestSlotForOwner(path: string, request: OwnerReleaseRequest, opts: {
   treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
   isPidAlive?: (pid: number) => boolean;
+  hostname?: () => string;
+  bootId?: () => string | undefined;
+  pidNamespace?: () => string | undefined;
   log?: (line: string) => void;
 } = {}): OwnerReleaseResult {
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
@@ -633,7 +722,12 @@ export function releaseTestSlotForOwner(path: string, request: OwnerReleaseReque
     const st = lstatSync(path);
     if (!st.isFile() || (st.mode & 0o077) === 0) return { outcome: "refused", reason: "private or non-file reservation: owner-lane release required" };
     const held = readTestSlotHolder(path, st);
-    if (!held?.ownerNonce || !held.processStart) return { outcome: "refused", reason: "owner identity unknown" };
+    if (!held || !testSlotReservationIdentity(held)) return { outcome: "refused", reason: "owner identity unknown" };
+    if (held.ownerUid !== st.uid || held.ownerUid !== process.getuid?.() ||
+        !sameHost(held.host, (opts.hostname ?? hostname)()) || held.bootId !== (opts.bootId ?? readBootId)() ||
+        held.pidNs !== (opts.pidNamespace ?? readPidNamespace)() || held.ownershipProtocol !== undefined) {
+      return { outcome: "refused", reason: "reservation host, boot, namespace or owner identity is unproven" };
+    }
     if (held.ownerNonce !== request.ownerNonce || held.pid !== request.pid || held.processStart !== request.processStart) {
       return { outcome: "refused", reason: "reservation identity differs from the request: PID reuse or a replaced reservation" };
     }
@@ -641,21 +735,25 @@ export function releaseTestSlotForOwner(path: string, request: OwnerReleaseReque
     if (facts?.start === held.processStart || (facts === undefined && (opts.isPidAlive ?? defaultIsPidAlive)(held.pid))) {
       return { outcome: "refused", reason: `owner pid ${held.pid} is alive` };
     }
-    const evidence = (opts.treeProbe ?? probeReservedTree)(held);
-    if (evidence.state === "live") return { outcome: "refused", reason: `covered work still live: ${evidence.reason}` };
+    const evidence = observeReservedTree(held, opts.treeProbe ?? probeReservedTree);
+    if (!verifiedTerminalEvidence(held, evidence)) return { outcome: "refused", reason: `covered work is not proven ended: ${evidence.reason}` };
     const result = reclaimStaleLock(path, {
-      parseHolder: parseTestSlotHolder,
-      isStale: current => JSON.stringify(current) === JSON.stringify(held),
+      parseHolder: raw => ({ holder: parseTestSlotHolder(raw) }),
+      isStale: current => current.holder !== null && JSON.stringify(current.holder) === JSON.stringify(held),
       onReclaim: () => log(JSON.stringify({ step: "test_slot.owner_release", path, pid: held.pid, label: held.label,
         ownerNonce: held.ownerNonce, processStart: held.processStart, bootId: held.bootId, pidNs: held.pidNs,
+        reservation: testSlotReservationIdentity(held),
         evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason })),
       onLostReclaim: () => {},
+    }, {
+      openSync, readFileSync, closeSync, fstatSync, statSync: lstatSync,
+      unlinkSync: () => unlinkObservedTestSlot(path, st, held),
     });
     if (result.outcome === "reclaimed") return { outcome: "released", evidence };
     return { outcome: "held", reason: "reservation changed during release; re-observe" };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { outcome: "refused", reason: "no reservation at this path" };
-    throw error;
+    return { outcome: "held", reason: `release could not verify the reservation: ${String(error)}` };
   } finally { mutation.release(); }
 }
 
@@ -721,7 +819,7 @@ export interface TestSlotLease {
   release(): void;
 }
 
-/** Legacy never-refusing leases are compatible; an explicit private NOT_RUN must survive every launch boundary. */
+/** Explicit NOT_RUN for private coordination or unproven covered work survives every launch boundary. */
 export function testSlotExecutionAllowed(lease: TestSlotLease): boolean {
   return lease.executionAllowed !== false;
 }
@@ -782,6 +880,13 @@ export async function acquireTestSlotAsync(label: string, opts: Omit<TestSlotOpt
 function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<number, TestSlotLease> {
   const maximum = opts.maxConcurrency ?? Number.MAX_SAFE_INTEGER;
   if (!Number.isSafeInteger(maximum) || maximum < 1) throw new RangeError("test worker ceiling must be a positive safe integer");
+  const guardHolder = createGuardHolderProbe();
+  try { return yield* testSlotPolls(label, opts, maximum, opts.guardProbe ?? guardHolder.probe); }
+  finally { guardHolder.dispose(); }
+}
+
+function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
+  guardProbe: OrphanGuardRecovery["probe"]): Generator<number, TestSlotLease> {
   const clock = opts.clock ?? systemClock;
   const host = opts.hostname ?? hostname;
   const bootId = opts.bootId ?? (() => readBootId());
@@ -793,6 +898,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   // Re-derived at every poll from what that poll observes (W1-T9928); only incomplete cleanup is sticky.
   let cleanupIncomplete = false;
   let privateRequired = basePrivate;
+  let reservedWorkUnproven = false;
   const privateStale = (held: TestSlotHolder): boolean => {
     if (held.ownershipProtocol !== "private-capacity-v1") return false;
     if (held.releaseRequestedAt !== undefined && Number.isFinite(Date.parse(held.releaseRequestedAt)) && Date.parse(held.releaseRequestedAt) <= clock.now()) return true;
@@ -822,7 +928,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
       return false;
     }
   };
-  const treeProbe = opts.treeProbe ?? ((held: TestSlotHolder) => probeReservedTree(held, { platform: opts.platform, bootId: bootId(), pidNs: pidNamespace() }));
+  const treeProbe = opts.treeProbe ?? ((held: TestSlotHolder) => probeReservedTree(held, { platform: opts.platform, hostname: host, bootId: bootId(), pidNs: pidNamespace() }));
   const observed = new Set<string>();
   /** One row per distinct observation: a bounded diagnostic, not one per poll. */
   const observeOnce = (key: string, row: Record<string, unknown>): void => {
@@ -841,8 +947,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
       if (first === undefined || first === poll || guardHolds.length === 0) return undefined;
       return MUTATION_GUARD_HOLD_FACTOR * Math.max(...guardHolds);
     },
-    now: () => Date.now(),
-    probe: opts.guardProbe ?? ((guardPath, guard) => defaultGuardHolderProbe(guardPath, guard)),
+    now: () => systemClock.now(),
+    probe: guardProbe,
     log: row => observeOnce(`${String(row.step)}:${String(row.path)}:${String(row.mtime)}:${String(row.reason)}`, { ...row, label }),
   };
   /** The waiter's own guard acquisitions, each acquire→release duration kept for this acquisition only. */
@@ -875,8 +981,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     return Math.min(cpu, peaks?.length ?? cpu, memoryTestConcurrency(headroom === undefined ? undefined : headroom - reservedBytes, perFile) ?? cpu);
   };
   const unslotted = (outcome: TestSlotLease["outcome"], concurrency: number, note: string): TestSlotLease => ({
-    outcome, concurrency, executionAllowed: !privateRequired, waitedMs: clock.now() - startedAt,
-    note: (privateRequired ? `NOT_RUN: private coordination requires an admitted lease (${outcome}); ${note.replace(/; ran unslotted.*$/i, "")}` : note) + basisNote,
+    outcome, concurrency, executionAllowed: !privateRequired && !reservedWorkUnproven, waitedMs: clock.now() - startedAt,
+    note: (privateRequired || reservedWorkUnproven ? `NOT_RUN: ${reservedWorkUnproven ? "covered work has not been proven ended" : "private coordination requires an admitted lease"} (${outcome}); ${note.replace(/; ran unslotted.*$/i, "")}` : note) + basisNote,
     refresh: () => {}, release: () => {},
   });
   if (parentPolicy) {
@@ -911,7 +1017,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     : typeof perFile === "number" ? concurrency * perFile : undefined);
   const record = (): TestSlotHolder => ({
     pid: opts.pid ?? process.pid, host: host(), bootId: bootId(), startedAt: startedIso,
-    heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency, pidNs: pidNamespace(),
+    heartbeatAt: clock.iso(), label, ownerNonce, processStart, concurrency, pidNs: pidNamespace(), ownerUid: process.getuid?.(),
     ...(ownPeak() === undefined ? {} : { memoryBytes: ownPeak() }),
     ...(files ? { filePeaks: files } : {}), ...(privateWriter ? { ownershipProtocol: "private-capacity-v1" as const } : {}),
   });
@@ -978,6 +1084,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
     for (;;) {
       poll += 1;
       privateRequired = basePrivate || cleanupIncomplete;
+      reservedWorkUnproven = false;
       // Recover only our own, privately inspected dead holders BEFORE calculating memory.
       // Otherwise a dead peer closes the free slot beside it, or its old projection collides
       // with the replacement. Public metadata alone never authorizes foreign recovery.
@@ -986,6 +1093,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
         try {
           const st = lstatSync(path);
           if (st.isFile() && (st.mode & 0o077) === 0) privateRequired = true;
+          else if (st.isFile()) {
+            const held = readTestSlotHolder(path, st);
+            if (held?.heartbeatIntervalMs !== undefined || held?.workIdentity !== undefined) reservedWorkUnproven = true;
+          }
           if (!privateWriter) continue;
           const mutation = takeMutation(path);
           if (mutation.state !== "acquired") continue;
@@ -1057,13 +1168,15 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
               const holder = parseTestSlotHolder(bytes.toString("utf8"));
               return holder?.ownerNonce === ownerNonce && holder.pid === (opts.pid ?? process.pid) && sameHost(holder.host, host());
             };
+            const parentClaim = JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency });
             return admittedLease = {
               outcome: "acquired", executionAllowed: true, concurrency, waitedMs,
               ...((opts.pid ?? process.pid) === process.pid && sameHost(host(), hostname()) && processStart ? {
-                childEnvironment: { [TEST_SLOT_PARENT_ENV]: JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency }),
+                childEnvironment: { [TEST_SLOT_PARENT_ENV]: parentClaim,
                   [TEST_SLOT_DIR_ENV]: dir },
                 ...(privateWriter ? {} : { heartbeat: { path, ownerNonce, pid: process.pid, processStart, host: host(),
-                  intervalMs: TEST_SLOT_HEARTBEAT_MS, coverageEnvironment: { [TEST_SLOT_RUN_ENV]: ownerNonce } } }),
+                  bootId: ownedRecord.bootId, pidNs: ownedRecord.pidNs, ownerUid: ownedRecord.ownerUid,
+                  intervalMs: TEST_SLOT_HEARTBEAT_MS, coverageEnvironment: { [TEST_SLOT_RUN_ENV]: parentClaim } } }),
               } : {}),
               note: `host-wide test slot ${i}/${slots} (${scope}: ${dir})` +
                 `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced${basisNote}`,
@@ -1075,7 +1188,9 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
                 }
                 try {
                   if (!stillOwnsRecord()) { held = false; close(); cleanupLog({ step: "test_slot.refresh_lost", label, path }); return; }
-                  writeRecord(JSON.stringify({ ...ownedRecord, heartbeatAt: clock.iso() }));
+                  const current = readTestSlotHolder(path, fstatSync(fd));
+                  if (!current) throw new Error("owned reservation became unreadable during refresh");
+                  writeRecord(JSON.stringify({ ...current, heartbeatAt: clock.iso() }));
                 } catch (error) {
                   held = false; close(); cleanupLog({ step: "test_slot.refresh_failed", label, path, error: String(error) });
                 } finally { finishMutation(refreshMutation); }
@@ -1174,15 +1289,20 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
               const cadence = held.heartbeatIntervalMs, myNs = pidNamespace();
               const local = sameHost(held.host, host()) && !(held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs);
               // A cadence-less or foreign record keeps today's judgment exactly (pid probe; boot id, then lease).
-              if (cadence === undefined || !Number.isSafeInteger(cadence) || cadence < 1 || !local) return pidStale;
+              const recordedCadence = cadence !== undefined && Number.isSafeInteger(cadence) && cadence > 0;
+              if ((!recordedCadence && held.workIdentity === undefined) || !local) return pidStale;
+              reservedWorkUnproven = true;
               const silentMs = clock.now() - Date.parse(held.heartbeatAt);
-              if (silentMs > TEST_SLOT_SILENT_BEATS * cadence) {
+              if (recordedCadence && silentMs > TEST_SLOT_SILENT_BEATS * cadence!) {
                 observeOnce(`silent:${i}:${held.ownerNonce}`, { step: "test_slot.heartbeat_silent", label, slot: i, pid: held.pid, holder: held.label,
                   heartbeatAt: held.heartbeatAt, heartbeatIntervalMs: cadence, silentMs, decision: "retained: a missed beat is diagnostic, never quiescence" });
               }
               if (!pidStale) return false;
               // The owner pid is gone or reused: only exact-tree terminal evidence frees its capacity.
-              const evidence = treeProbe(held);
+              const evidence = held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
+                held.bootId === bootId() && held.pidNs === myNs && testSlotReservationIdentity(held) !== undefined
+                ? observeReservedTree(held, treeProbe)
+                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" };
               if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
               observeOnce(`withheld:${i}:${held.ownerNonce}:${evidence.state}:${evidence.reason}`, { step: "test_slot.reclaim_withheld", label, slot: i,
                 pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
@@ -1197,9 +1317,16 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
               const { held, evidence } = quiescent;
               log(JSON.stringify({ step: "test_slot.reclaimed_quiescent", label, slot: i, pid: held.pid, holder: held.label,
                 ownerNonce: held.ownerNonce, processStart: held.processStart, bootId: held.bootId, pidNs: held.pidNs,
+                reservation: testSlotReservationIdentity(held),
                 coverage: evidence.coverage, reason: evidence.reason, silentMs: clock.now() - Date.parse(held.heartbeatAt) }));
             },
             onLostReclaim: () => {},
+          }, {
+            openSync, readFileSync, closeSync, fstatSync, statSync: lstatSync,
+            unlinkSync: name => {
+              if (quiescent && currentStat) unlinkObservedTestSlot(path, currentStat, quiescent.held);
+              else unlinkSync(name);
+            },
           });
           if (reclaim.outcome === "live") {
             holders.push(`slot ${i}: pid ${reclaim.holder.pid} on ${reclaim.holder.host} (${reclaim.holder.label})`);

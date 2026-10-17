@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync, type Stats } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,8 +8,9 @@ import { pathToFileURL } from "node:url";
 import {
   acquireTestSlot, beatTestSlot, probeReservedTree, releaseTestSlotForOwner, TEST_SLOT_DIR_ENV, TEST_SLOT_HEARTBEAT_MS,
   TEST_SLOT_PARENT_ENV, TEST_SLOT_RUN_ENV, type ReservedTreeEvidence, type TestSlotHolder, type TestSlotOptions,
+  testSlotReservationIdentity,
 } from "../src/lib/test-slot.js";
-import { acquireSlotMutation, defaultGuardHolderProbe, type GuardHolderEvidence } from "../src/lib/test-slot-mutation.js";
+import { acquireSlotMutation, createGuardHolderProbe, defaultGuardHolderProbe, type GuardHolderEvidence } from "../src/lib/test-slot-mutation.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
 
@@ -50,7 +51,12 @@ function deadPid(): number {
 function holder(fields: Partial<TestSlotHolder>): TestSlotHolder {
   const at = new Date().toISOString();
   return { pid: deadPid(), host: hostname(), bootId: "boot-1", pidNs: "ns-1", startedAt: at, heartbeatAt: at,
-    label: "fixture owner", ownerNonce: "nonce-a", processStart: "proc:4242", concurrency: 1, ...fields };
+    label: "fixture owner", ownerNonce: "nonce-a", processStart: "proc:4242", ownerUid: process.getuid?.(), concurrency: 1, ...fields };
+}
+
+function terminal(held: TestSlotHolder): ReservedTreeEvidence {
+  return { state: "ended", coverage: "fixture complete run monitor", reason: "all covered work ended",
+    reservation: testSlotReservationIdentity(held), complete: true };
 }
 
 function writeHolder(path: string, held: TestSlotHolder | Record<string, unknown>, mode = 0o644): void {
@@ -100,6 +106,7 @@ test("W1-T9928: a silent holder with a live validation child cannot be double ad
   const second = acquireTestSlot("second waiter", { dir, slots: 1, load: IDLE, clock: time.clock, sleep: time.sleep,
     waitBoundMs: 30_000, log: line => lines.push(line) });
   assert.equal(second.outcome, "wait_bound_exceeded", second.note);
+  assert.equal(second.executionAllowed, false, "the bound cannot turn unproven live work into unslotted capacity");
   assert.equal(JSON.parse(readFileSync(join(dir, "slot-1.json"), "utf8")).ownerNonce, fixture.nonce, "the live child's reservation is intact");
   const silence = rows(lines, "test_slot.heartbeat_silent");
   assert.equal(silence.length, 1, "missed beats are observed once, as a diagnostic");
@@ -124,7 +131,7 @@ test("W1-T9928: only proven quiescence or an identity-checked owner release free
   // Exact-tree probe: identity, namespace and coverage must all be positive before `ended`.
   const owner = holder({ pid: 10, processStart: "proc:500" });
   const proc = (table: Record<string, { start: number; environ?: string | Error }>) => ({
-    platform: "linux" as const, bootId: "boot-1", pidNs: "ns-1", list: () => Object.keys(table),
+    platform: "linux" as const, hostname, bootId: "boot-1", pidNs: "ns-1", list: () => Object.keys(table),
     read: (path: string) => {
       const [, , pid, file] = path.split("/");
       const entry = table[pid!];
@@ -136,15 +143,19 @@ test("W1-T9928: only proven quiescence or an identity-checked owner release free
   });
   const eacces = Object.assign(new Error("denied"), { code: "EACCES" });
   assert.equal(probeReservedTree(owner, proc({ 10: { start: 500 } })).state, "live", "the owner itself is alive");
-  const marked = probeReservedTree(owner, proc({ 10: { start: 900 }, 11: { start: 600, environ: `HOME=/h\0${TEST_SLOT_RUN_ENV}=nonce-a\0` } }));
+  const marked = probeReservedTree(owner, proc({ 10: { start: 900 }, 11: { start: 600,
+    environ: `HOME=/h\0${TEST_SLOT_RUN_ENV}=${JSON.stringify({ nonce: owner.ownerNonce, pid: owner.pid, start: owner.processStart })}\0` } }));
   assert.deepEqual([marked.state, /pid 11/.test(marked.reason)], ["live", true], "a reparented descendant keeps it after its parent died");
   const partial = probeReservedTree(owner, proc({ 11: { start: 600, environ: eacces } }));
   assert.equal(partial.state, "unknown", "an unreadable later process is incomplete evidence");
   assert.match(partial.reason, /incomplete/);
-  assert.equal(probeReservedTree(owner, proc({ 3: { start: 1, environ: eacces }, 10: { start: 900 }, 12: { start: 700 } })).state, "ended",
-    "positive control: the pid now names a newer process and no later process carries the marker");
+  assert.equal(probeReservedTree(owner, proc({ 3: { start: 1, environ: eacces }, 10: { start: 900 }, 12: { start: 700 } })).state, "unknown",
+    "marker absence cannot prove that a detached descendant did not replace its environment or fork during the scan");
   assert.equal(probeReservedTree({ ...owner, pidNs: "ns-other" }, proc({})).state, "unknown", "a foreign namespace is unprobeable");
   assert.equal(probeReservedTree({ ...owner, ownerNonce: undefined }, proc({})).state, "unknown", "unknown ownership");
+  assert.equal(probeReservedTree({ ...owner, ownerUid: undefined }, proc({})).state, "unknown", "unknown uid");
+  assert.equal(probeReservedTree({ ...owner, processStart: "proc:NaN" }, proc({})).state, "unknown", "invalid process start");
+  assert.equal(probeReservedTree({ ...owner, host: "another-host" }, proc({})).state, "unknown", "another host");
   assert.equal(probeReservedTree(owner, { ...proc({}), platform: "darwin" }).state, "unknown", "no darwin tree probe: reserved");
 
   const dir = slotDir(t, "quiescence"), path = join(dir, "slot-1.json");
@@ -156,13 +167,24 @@ test("W1-T9928: only proven quiescence or an identity-checked owner release free
   const silentOwner = holder({ heartbeatIntervalMs: 1000, heartbeatAt: new Date(Date.now() - 600_000).toISOString() });
   // Silence plus a dead pid is not quiescence: unknown/incomplete and live evidence both retain the slot.
   for (const evidence of [{ state: "unknown", coverage: "proc-environ (incomplete)", reason: "incomplete: 1 process unreadable" },
-    { state: "live", coverage: "proc-environ", reason: "covered descendant pid 77 still carries the reservation marker" }] as const) {
+    { state: "live", coverage: "proc-environ", reason: "covered descendant pid 77 still carries the reservation marker" },
+    { state: "ended", coverage: "partial monitor", reason: "missing complete reservation evidence" }] as const) {
     writeHolder(path, silentOwner);
     const { lease, lines } = attempt(() => evidence);
     assert.equal(lease.outcome, "wait_bound_exceeded", evidence.state);
+    assert.equal(lease.executionAllowed, false, "unproven protected capacity never permits an unslotted run");
     assert.equal(JSON.parse(readFileSync(path, "utf8")).ownerNonce, "nonce-a");
-    assert.equal(rows(lines, "test_slot.reclaim_withheld")[0]?.reason, evidence.reason);
+    assert.match(String(rows(lines, "test_slot.reclaim_withheld")[0]?.reason), evidence.state === "ended" ? /incomplete|identity/ : new RegExp(evidence.reason));
   }
+  writeHolder(path, { ...silentOwner, heartbeatIntervalMs: undefined, workIdentity: "reservation-marker-v1" });
+  const withdrawn = attempt(() => ({ state: "unknown", coverage: "none", reason: "no complete monitor" }));
+  assert.equal(withdrawn.lease.outcome, "wait_bound_exceeded", "withdrawing a cadence never authorizes parent-only recovery");
+  assert.equal(withdrawn.lease.executionAllowed, false);
+  writeHolder(path, silentOwner);
+  const failed = attempt(() => { throw new Error("monitor failed"); });
+  assert.equal(failed.lease.outcome, "wait_bound_exceeded");
+  assert.equal(failed.lease.executionAllowed, false);
+  assert.match(String(rows(failed.lines, "test_slot.reclaim_withheld")[0]?.reason), /monitor failed/);
   // Unknown owner identity, judged by the REAL default probe (identity is checked before any scan).
   writeHolder(path, { ...silentOwner, ownerNonce: undefined, processStart: undefined });
   const anonymous = attempt(undefined as never, { treeProbe: undefined, platform: "linux" });
@@ -184,20 +206,31 @@ test("W1-T9928: only proven quiescence or an identity-checked owner release free
   assert.equal(JSON.parse(readFileSync(path, "utf8")).ownerNonce, "nonce-b", "the replacement survives");
   // Positive control: exact-tree terminal evidence admits exactly one waiter, logged with its identity.
   writeHolder(path, silentOwner);
-  const freed = attempt(() => ({ state: "ended", coverage: "proc-environ", reason: "owner gone; none of 3 process(es) carries the marker" }));
+  const freed = attempt(terminal);
   assert.equal(freed.lease.outcome, "acquired", freed.lease.note);
   const reclaimed = rows(freed.lines, "test_slot.reclaimed_quiescent");
   assert.equal(reclaimed.length, 1);
-  assert.deepEqual([reclaimed[0]!.ownerNonce, reclaimed[0]!.processStart, reclaimed[0]!.coverage], ["nonce-a", "proc:4242", "proc-environ"]);
+  assert.deepEqual([reclaimed[0]!.ownerNonce, reclaimed[0]!.processStart, reclaimed[0]!.coverage], ["nonce-a", "proc:4242", "fixture complete run monitor"]);
   freed.lease.release();
 
   // Owner-assisted release: identity-checked, refused while covered work lives, held on a late refresh.
   const request = { ownerNonce: "nonce-a", pid: silentOwner.pid, processStart: "proc:4242" };
   const release = (probe: (held: TestSlotHolder) => ReservedTreeEvidence, req = request) =>
-    releaseTestSlotForOwner(path, req, { treeProbe: probe, isPidAlive: () => false, log: () => {} });
-  const ended = (): ReservedTreeEvidence => ({ state: "ended", coverage: "proc-environ", reason: "work ended" });
+    releaseTestSlotForOwner(path, req, { treeProbe: probe, isPidAlive: () => false, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1", log: () => {} });
+  const ended = (): ReservedTreeEvidence => terminal(silentOwner);
   writeHolder(path, silentOwner);
   assert.equal(release(() => ({ state: "live", coverage: "proc-environ", reason: "child alive" })).outcome, "refused");
+  assert.equal(release(() => ({ state: "unknown", coverage: "none", reason: "permission denied" })).outcome, "refused", "unknown never means work ended");
+  assert.equal(release(() => ({ ...ended(), complete: false })).outcome, "refused", "partial evidence");
+  assert.equal(release(() => ({ ...ended(), reservation: testSlotReservationIdentity({ ...silentOwner, ownerNonce: "nonce-z" }) })).outcome,
+    "refused", "evidence for a different generation");
+  assert.equal(release(() => { throw new Error("probe failed"); }).outcome, "refused", "failed probe retains capacity");
+  for (const drift of [{ host: "another-host" }, { bootId: "another-boot" }, { pidNs: "another-ns" }, { ownerUid: undefined },
+    { ownerUid: (process.getuid?.() ?? 0) + 1 }]) {
+    writeHolder(path, { ...silentOwner, ...drift });
+    assert.equal(release(ended).outcome, "refused", `identity boundary ${JSON.stringify(drift)}`);
+  }
+  writeHolder(path, silentOwner);
   assert.equal(release(ended, { ...request, processStart: "proc:9" }).outcome, "refused", "PID reuse");
   assert.equal(release(ended, { ...request, ownerNonce: "nonce-z" }).outcome, "refused", "a replaced reservation");
   assert.equal(release(() => { writeHolder(path, { ...silentOwner, heartbeatAt: new Date().toISOString() }); return ended(); }).outcome,
@@ -264,9 +297,12 @@ test("W1-T9928: preflight-author keeps beating its slot while a step runs", asyn
   assert.equal(seen.first.heartbeatIntervalMs, 100, "the record states the cadence while the step runs");
   assert.ok(Date.parse(seen.second.heartbeatAt) > Date.parse(seen.first.heartbeatAt), "it kept beating while the author was blocked");
   assert.ok(Date.parse(seen.first.heartbeatAt) >= Date.parse(before.heartbeatAt));
-  assert.equal(seen.marker, lease.heartbeat.ownerNonce, "every covered descendant carries the reservation marker");
+  assert.equal(JSON.parse(seen.marker).nonce, lease.heartbeat.ownerNonce, "every covered descendant carries the reservation marker");
   const after = JSON.parse(readFileSync(path, "utf8")) as TestSlotHolder;
   assert.equal(after.heartbeatIntervalMs, undefined, "the cadence is withdrawn once the step's process group ended");
+  assert.equal(after.workIdentity, "reservation-marker-v1", "withdrawal never restores parent-only recovery");
+  lease.refresh();
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).workIdentity, "reservation-marker-v1", "an owner refresh preserves work identity");
   assert.equal(after.ownerNonce, before.ownerNonce);
   // A delayed beat is diagnostic only: far past three intervals, a live owner keeps its slot.
   assert.equal(beatTestSlot({ ...lease.heartbeat, intervalMs: 100 }), "beat");
@@ -275,6 +311,18 @@ test("W1-T9928: preflight-author keeps beating its slot while a step runs", asyn
   assert.equal(late.outcome, "wait_bound_exceeded");
   assert.equal(rows(lines, "test_slot.heartbeat_silent").length, 1);
   assert.equal(JSON.parse(readFileSync(path, "utf8")).ownerNonce, before.ownerNonce);
+
+  // A blocked initial beat must not start work against an unprotected reservation.
+  const guard = join(dir, ".slot-1.json.mutation"), shouldNotRun = join(logs, "unexpected-child");
+  const guardFd = openSync(guard, "wx", 0o600);
+  try {
+    const refused = capture.captureStepSync(process.execPath, ["-e", `require("node:fs").writeFileSync(${JSON.stringify(shouldNotRun)}, "ran")`],
+      { cwd: process.cwd(), env: process.env, stdoutPath: join(logs, "blocked-out"), stderrPath: join(logs, "blocked-err"),
+        resultPath: join(logs, "blocked-result"), heartbeat: lease.heartbeat });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /initial heartbeat deferred/);
+    assert.equal(existsSync(shouldNotRun), false);
+  } finally { closeSync(guardFd); unlinkSync(guard); }
 
   // The shipped author wires the beat into its slotted test step.
   const f = makeRuntimeFixture(); t.after(() => f.cleanup());
@@ -294,7 +342,7 @@ test("W1-T9928: preflight-author keeps beating its slot while a step runs", asyn
   const observed = JSON.parse(readFileSync(witness, "utf8")) as { record: TestSlotHolder; marker: string | null };
   assert.equal(observed.record.label, "preflight-author:static-and-affected");
   assert.equal(observed.record.heartbeatIntervalMs, TEST_SLOT_HEARTBEAT_MS, "the author's test step ran under a beating record");
-  assert.equal(observed.marker, observed.record.ownerNonce);
+  assert.equal(JSON.parse(observed.marker!).nonce, observed.record.ownerNonce);
 });
 
 test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept", t => {
@@ -349,6 +397,25 @@ test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept"
   assert.equal(defaultGuardHolderProbe(guard, st, "darwin", lsof({ status: 1, stdout: "", stderr: "lsof: WARNING: can't stat()" })).state, "unknown");
   unlinkSync(guard);
 
+  // A failed probe and a non-private guard cannot be mistaken for a proven orphan.
+  orphan();
+  const failedRows: Record<string, unknown>[] = [];
+  assert.equal(acquireSlotMutation(path, { ...recovery("closed", 10, failedRows), probe: () => { throw new Error("probe denied"); } }).state, "busy");
+  assert.match(String(failedRows[0]?.reason), /probe denied/);
+  chmodSync(guard, 0o644);
+  assert.equal(acquireSlotMutation(path, recovery("closed", 10, failedRows)).state, "busy");
+  assert.equal(existsSync(guard), true);
+  unlinkSync(guard);
+
+  // The real Linux probe sees an open hard-link alias by inode, even when the named guard is closed.
+  if (process.platform === "linux") {
+    orphan();
+    const alias = join(dir, "guard-alias"); linkSync(guard, alias);
+    const aliasFd = openSync(alias, "r");
+    try { assert.equal(defaultGuardHolderProbe(guard, lstatSync(guard)).state, "open"); }
+    finally { closeSync(aliasFd); unlinkSync(alias); unlinkSync(guard); }
+  }
+
   // A waiter measures its own holds on slot 2, meets slot 1's orphan on an earlier poll, then reclaims it.
   for (const state of ["closed", "open"] as const) {
     orphan();
@@ -366,6 +433,70 @@ test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept"
       unlinkSync(guard);
     }
   }
+});
+
+test("W1-T9928: the darwin guard observer reads terminal receipts while its caller's loop is blocked", t => {
+  const dir = slotDir(t, "lsof-receipt"), path = join(dir, "slot-1.json"), guard = join(dir, ".slot-1.json.mutation");
+  writeFileSync(guard, "", { mode: 0o600 });
+  const priorPath = process.env.PATH;
+  process.env.PATH = `${dir}:${priorPath ?? ""}`;
+  t.after(() => { if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath; });
+  const observer = createGuardHolderProbe();
+  t.after(() => observer.dispose());
+  for (const [status, stdout, stderr, state] of [[0, "812\n", "", "open"], [1, "", "", "closed"],
+    [1, "", "lsof: permission denied", "unknown"], [0, "", "", "unknown"], [2, "", "", "unknown"]] as const) {
+    // A real executable owns the lsof exit status and streams, independent of the host's installed tools.
+    writeFileSync(join(dir, "lsof"), `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(stdout)});\n` +
+      `process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = ${status};\n`, { mode: 0o700 });
+    const first = observer.probe(guard, lstatSync(guard), "darwin");
+    assert.equal(first.state, "unknown", "launching a probe never claims closed capacity");
+    assert.match(first.reason, /pending/);
+    let result = first;
+    const deadline = Date.now() + 10_000;
+    while (/pending/.test(result.reason) && Date.now() < deadline) {
+      // No callback can run in this process: synchronous legacy acquisition must still receive the result.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      result = observer.probe(guard, lstatSync(guard), "darwin");
+    }
+    assert.equal(result.state, state, result.reason);
+    assert.doesNotMatch(result.reason, /pending/);
+    assert.equal(existsSync(guard), true, "observing never unlinks a guard");
+  }
+  // A receipt belongs to one guard generation, even when its pathname is reused before the next poll.
+  const witnessed = join(dir, "lsof-finished");
+  writeFileSync(join(dir, "lsof"), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(witnessed)}, 'done'); process.exitCode = 1;\n`, { mode: 0o700 });
+  assert.equal(observer.probe(guard, lstatSync(guard), "darwin").state, "unknown");
+  const witnessDeadline = Date.now() + 10_000;
+  while (!existsSync(witnessed) && Date.now() < witnessDeadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  assert.equal(existsSync(witnessed), true);
+  unlinkSync(guard);
+  writeFileSync(guard, "", { mode: 0o600 });
+  writeFileSync(join(dir, "lsof"), `#!${process.execPath}\nprocess.stdout.write('812');\n`, { mode: 0o700 });
+  let replacement = observer.probe(guard, lstatSync(guard), "darwin");
+  assert.equal(replacement.state, "unknown", "the old terminal receipt cannot judge a replacement");
+  const replacementDeadline = Date.now() + 10_000;
+  while (/pending/.test(replacement.reason) && Date.now() < replacementDeadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    replacement = observer.probe(guard, lstatSync(guard), "darwin");
+  }
+  assert.equal(replacement.state, "open", replacement.reason);
+  // A positive silent-1 receipt reaches the real reclaim path only after it has completed.
+  writeFileSync(join(dir, "lsof"), `#!${process.execPath}\nprocess.exitCode = 1;\n`, { mode: 0o700 });
+  const logged: Record<string, unknown>[] = [];
+  const recovery = { boundMs: () => 0, now: () => Date.now() + 10_000,
+    probe: (name: string, st: Stats) => observer.probe(name, st, "darwin"), log: (row: Record<string, unknown>) => logged.push(row) };
+  let mutation = acquireSlotMutation(path, recovery);
+  assert.equal(mutation.state, "busy");
+  const deadline = Date.now() + 10_000;
+  while (mutation.state === "busy" && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    mutation = acquireSlotMutation(path, recovery);
+  }
+  assert.equal(mutation.state, "acquired", JSON.stringify(logged));
+  if (mutation.state === "acquired") mutation.release();
+  assert.equal(logged.filter(row => row.step === "test_slot.mutation_guard_reclaimed").length, 1);
+  observer.dispose();
+  observer.dispose();
 });
 
 test("W1-T9928: a waiter that met a busy guard acquires once it is gone", t => {

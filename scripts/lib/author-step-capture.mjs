@@ -57,6 +57,9 @@ async function spool(config) {
   try { err = openSync(config.stderrPath, 'wx', 0o600); }
   catch (error) { closeSync(out); throw error; }
   let storedBytes = 0, observedBytes = 0, error, closed = false, escalation, spawnFailed = false;
+  // Publish the protected reservation before spawning: the author may exit as soon as its child starts.
+  // This subprocess's event loop stays live while the author blocks in spawnSync.
+  const heartbeat = slotModule?.startTestSlotHeartbeat(config.heartbeat, (row) => record(err, Buffer.from(`${JSON.stringify(row)}\n`)));
   const child = spawn(config.file, config.args, { cwd: config.cwd, env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   const kill = (signal) => {
@@ -71,7 +74,7 @@ async function spool(config) {
     kill('SIGTERM');
     escalation ??= setTimeout(() => kill('SIGKILL'), 2000).unref();
   };
-  const record = (fd, chunk) => {
+  function record(fd, chunk) {
     observedBytes += chunk.length;
     const kept = chunk.subarray(0, Math.max(0, config.maxBytes - storedBytes));
     try {
@@ -84,12 +87,10 @@ async function spool(config) {
       }
     } catch (cause) { stop(cause.message, cause.code ?? 'ERR_AUTHOR_LOG_WRITE'); }
     if (observedBytes > config.maxBytes) stop(`native output exceeded ${config.maxBytes} total bytes`, 'ERR_AUTHOR_OUTPUT_LIMIT');
-  };
+  }
   child.stdout.on('data', (chunk) => record(out, chunk));
   child.stderr.on('data', (chunk) => record(err, chunk));
   child.on('error', (cause) => { spawnFailed = true; error ??= { message: cause.message, code: cause.code }; });
-  // The author blocks in spawnSync; this loop is the live one, so it beats the author's reservation.
-  const heartbeat = slotModule?.startTestSlotHeartbeat(config.heartbeat, (row) => record(err, Buffer.from(`${JSON.stringify(row)}\n`)));
   const interrupted = () => stop('capture interrupted before completion', 'ERR_AUTHOR_CAPTURE_INTERRUPTED');
   process.on('SIGTERM', interrupted);
   process.on('SIGINT', interrupted);
