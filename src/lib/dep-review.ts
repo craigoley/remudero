@@ -745,14 +745,33 @@ const RED_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_RE
  */
 export const LANE_OWNED_STATUS_CONTEXT = REVIEW_CONTEXT;
 
-export function redChecks(checks: DepReviewCheck[]): string[] {
-  return checks
+export function redChecks(checks: DepReviewCheck[], required?: DepReviewRequired): string[] {
+  return splitRedChecks(checks, required).holding;
+}
+
+export type DepReviewRequired = { kind: "required"; names: readonly string[] } | { kind: "all-checks"; fallback: string }; // W1-T9929
+
+export function splitRedChecks(checks: DepReviewCheck[], required?: DepReviewRequired): { holding: string[]; advisory: string[] } { // W1-T9929
+  const red = checks
     .filter((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "").toUpperCase()))
     .map((c) => c.name ?? c.context ?? "unknown")
     // EXACTLY ONE NAME, never a relaxation. Every OTHER red check must keep holding — that is the
     // entire value of the hold, and a fix that widened into "ignore red checks" would arm
     // auto-merge over a genuinely broken bump, which is worse than the deadlock.
     .filter((name) => name !== LANE_OWNED_STATUS_CONTEXT);
+  if (required?.kind !== "required") return { holding: red, advisory: [] };
+  const names = new Set(required.names);
+  return { holding: red.filter((name) => names.has(name)), advisory: [...new Set(red.filter((name) => !names.has(name)))].sort() };
+}
+
+export function depReviewRequiredSet( // W1-T9929: protection's contexts ∪ ci-gate's REQUIRED; unreadable ⇒ every check
+  protection: { kind: "contexts"; contexts: readonly string[] } | { kind: "none" } | { kind: "unreadable"; reason: string },
+  ciGateRequired: readonly string[],
+): DepReviewRequired {
+  if (protection.kind === "unreadable") return { kind: "all-checks", fallback: `protection-unreadable:${protection.reason}` };
+  if (protection.kind === "none") return { kind: "all-checks", fallback: "protection-none" };
+  if (protection.contexts.includes("ci-gate") && ciGateRequired.length === 0) return { kind: "all-checks", fallback: "ci-gate-required-empty" };
+  return { kind: "required", names: [...new Set([...protection.contexts, ...ciGateRequired])].sort() };
 }
 
 // ── The five-way verdict ─────────────────────────────────────────────────
@@ -765,6 +784,7 @@ export interface DepReviewInput {
   body: string;
   diff: string;
   checks: DepReviewCheck[];
+  required?: DepReviewRequired;
 }
 
 export interface DepReviewResult {
@@ -776,6 +796,9 @@ export interface DepReviewResult {
   redChecks: string[];
   migrationBumps: DepReviewBumpFact[];
   reason: string;
+  advisoryRed?: string[]; // W1-T9929: reds outside the required set, on every verdict decideDepReview returns
+  judgedAgainst?: "required" | "all-checks";
+  requiredFallback?: string;
 }
 
 /**
@@ -788,7 +811,10 @@ export interface DepReviewResult {
 export function decideDepReview(input: DepReviewInput): DepReviewResult {
   const semverLevel = overallSemverLevel(input.title, input.body);
   const offending = offendingFiles(input.diff);
-  const red = redChecks(input.checks);
+  const { holding: red, advisory: advisoryRed } = splitRedChecks(input.checks, input.required);
+  const judged: Pick<DepReviewResult, "advisoryRed" | "judgedAgainst" | "requiredFallback"> = input.required?.kind === "required"
+    ? { advisoryRed, judgedAgainst: "required" }
+    : { advisoryRed, judgedAgainst: "all-checks", ...(input.required ? { requiredFallback: input.required.fallback } : {}) };
   const migrationBumps = majorMigrationBumps(input.title, input.body);
   const dependabot = isDependabotAuthor(input.author);
   const pinOnly = dependabot && offending.length === 0 && semverLevel === "unknown" &&
@@ -802,6 +828,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `author '${input.author.login}' is not dependabot[bot] — this lane reviews Dependabot PRs only`,
     };
   }
@@ -813,6 +840,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `diff touches file(s) outside the manifest/lockfile allowlist: ${offending.join(", ")}`,
     };
   }
@@ -824,6 +852,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `MAJOR dependency proposal requires rmd-owned migration: ${migrationBumps
         .map((b) => `${b.dependency} ${b.fromVersion}->${b.toVersion}`)
         .join(", ")}`,
@@ -837,6 +866,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason:
         semverLevel === "major"
           ? "MAJOR version bump parsed without a stable dependency identity — fail closed, treated like unparseable"
@@ -851,6 +881,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `required check(s) not green: ${red.join(", ")}`,
     };
   }
@@ -861,9 +892,11 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     offendingFiles: offending,
     redChecks: red,
     migrationBumps,
-    reason: pinOnly
+    ...judged,
+    reason: (pinOnly
       ? "pin-only GitHub Actions SHA refresh, release annotations unchanged, gates green — safe to auto-merge"
-      : `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`,
+      : `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`) +
+      (advisoryRed.length > 0 ? `; advisory red, not holding: ${advisoryRed.join(", ")}` : ""),
   };
 }
 
@@ -941,7 +974,7 @@ export function buildDepReviewEscalation(args: {
   title: string;
   body: string;
   semverLevel: SemverLevel;
-  hold?: { headSha: string; redChecks: string[]; refresh?: DependabotRefreshRecord };
+  hold?: { headSha: string; redChecks: string[]; advisoryRed?: string[]; refresh?: DependabotRefreshRecord };
 }): Escalation {
   if (args.hold) {
     const refresh = args.hold.refresh;
@@ -954,6 +987,7 @@ export function buildDepReviewEscalation(args: {
       detail: [
         `Dependabot PR ${args.prUrl} is held on head ${args.hold.headSha}.`,
         `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
+        ...(args.hold.advisoryRed?.length ? [`Advisory red, not holding (still visible on the PR): ${args.hold.advisoryRed.join(", ")}.`] : []),
         ...(refresh === undefined ? [] : [
           `Refresh requested: \`${refresh.command}\` was posted for this head at ` +
             `${fixedClock(refresh.requestedAtMs).iso()} (${refresh.cause}), and Dependabot has not produced a new head.`,
@@ -1057,7 +1091,7 @@ export function reconcileDepReviewHold(args: {
   const issueUrl = escalate(buildDepReviewEscalation({
     ...args,
     semverLevel: args.result.semverLevel,
-    hold: { headSha: args.headSha, redChecks: args.result.redChecks, ...refreshFor(state, args.headSha) },
+    hold: { headSha: args.headSha, redChecks: args.result.redChecks, advisoryRed: args.result.advisoryRed, ...refreshFor(state, args.headSha) },
   }), args.escalationDeps());
   if (!issueUrl) throw new Error("dependency hold escalation not delivered; retry after the issue read recovers");
   state.asks.push({ headSha: args.headSha, issueUrl, retired: false });

@@ -20,6 +20,7 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ANALYTICS_REFRESH_INTERVAL_MS, ANALYTICS_REFRESH_TIMEOUT_MS, type AnalyticsSnapshot } from "./analytics-route.js";
 import { systemClock, type Clock } from "./clock.js";
+import { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
 import { classificationSnapshotPath, readClassificationSnapshot } from "./fleet-lane.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { inboxOwner } from "./inbox-owner.js";
@@ -51,8 +52,7 @@ const THRESHOLDS = { minimumRuns: 5, highTokensPerRun: 50_000, queuedTasks: 5, s
 /** An analytics snapshot older than two refresh cycles plus a timed-out scan has missed a refresh. */
 const ANALYTICS_STALE_AFTER_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANALYTICS_REFRESH_TIMEOUT_MS;
 
-/** Serve's slow lane rewrites the classification at least every half of this, with or without a reader (inbox-view.ts). */
-export const INBOX_STALE_AFTER_MS = 10 * 60_000;
+export { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
 
 /** How many visible proposal ids ride with the agent count. */
 const MAX_PROPOSAL_IDS = 20;
