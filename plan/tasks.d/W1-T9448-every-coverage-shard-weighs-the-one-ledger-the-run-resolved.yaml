@@ -1,0 +1,53 @@
+- id: W1-T9448
+  title: "ONE COVERAGE SHARD THAT CANNOT FETCH THE LEDGER SNAPSHOT SPLITS THE PARTITION — each of the eight coverage shards resolves the CI ledger artifact on its own, best-effort; on 2026-10-14 #11559's shard 6 fell back to the committed ledger while shards 1-5,7,8 weighed artifact 89186d61660d0462, and coverage-ratchet failed with 730 partition problems on a head whose tests all passed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the coverage split is computed from one ledger per run (ci.yml step + its manifest reader)
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 PR-queue review: #11559 (W1-T3956) coverage-ratchet red at f5db336"
+  plan_refs: [W1-T4071, W1-T5923, W1-T7810]
+  files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14, read-only, CI run 38564150952 (#11559, head f5db336):
+      - coverage-shard (6/8), job 115852452179, 12:29:49Z: "W1-T4071: no CI ledger snapshot resolved; the
+        committed instrumented ledger is weighed." The other seven shards weighed artifact digest
+        89186d61660d0462.
+      - coverage-ratchet, job 115860958034: "test-tier-manifest: partition: shards weighed different ledgers:
+        89186d61660d0462, committed", then "the coverage shards do NOT partition the 3432 test file(s): 730
+        problem(s)", exit 1. Every coverage shard itself passed. The PR's own tests were green.
+    READ on origin/main 18eb9c6e1, .github/workflows/ci.yml step "Resolve the CI ledger snapshot the coverage
+    split weighs (W1-T4071)": every shard runs three `gh api` calls (run created_at, the artifact list, the
+    zip) with stderr sent to /dev/null, and on any failure silently falls back to the committed ledger.
+    scripts/test-tier-manifest.mjs loadInstrumentedLedger says "Every shard of a run reads the same bytes",
+    but nothing makes that true: eight independent network reads decide it. partitionProblems then
+    correctly refuses the mixed split, and that turns one runner's transient API failure into a red required
+    check with no test failure behind it.
+  design: |
+    1. Resolve the snapshot ONCE per run, in the job the coverage matrix already depends on, and hand every
+       shard the same artifact id (and its digest) through job outputs. A shard downloads exactly that id.
+    2. A shard that cannot download the named artifact retries it, then fails its OWN step with a message
+       naming the artifact. It never falls back to a different ledger on its own. The run-level step alone
+       may choose "committed", and then every shard weighs "committed".
+    3. Keep partitionProblems as the backstop. Add the resolved digest to its "different ledgers" message
+       so a future split names which shard diverged.
+    Tests go in the new file, titled verbatim as in the proofs. Parse ci.yml as the existing workflow tests
+    do, and drive loadInstrumentedLedger and partitionProblems directly.
+  acceptance:
+    - claim: "the coverage matrix weighs one snapshot id resolved once per run"
+      proof: 'grep: test("W1-T9448: every coverage shard weighs the snapshot id its run resolved once" in test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts'
+    - claim: "a shard that cannot fetch the named snapshot fails by name instead of weighing another ledger"
+      proof: 'grep: test("W1-T9448: a shard that cannot fetch the named snapshot fails instead of falling back" in test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts'
+    - claim: "a split across ledgers names the shard that diverged"
+      proof: 'grep: test("W1-T9448: a split across ledgers names the diverging shard" in test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts'
+  falsifier: |
+    On main, the resolve step in ci.yml sits inside the coverage-shard matrix job and ends in an `else` that
+    removes coverage/ledger-snapshot.manifest and weighs the committed ledger. Make one shard's `gh api`
+    call fail: that shard weighs "committed", the others weigh the artifact, and partitionProblems reports
+    "shards weighed different ledgers".

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { components } from "../packages/api-client/src/schema.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { GardenerRuntimeEvent } from "../src/lib/gardener-runtime.js";
@@ -23,6 +24,7 @@ import { OVERSEER_MIN_INTERVAL_MS } from "../src/lib/gardener-overseer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildRegisteredGarden, daemonCommand, gardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { declaredBody, SPEC, violations } from "./helpers/openapi-strict.js";
 
 // MEASURED 2026-10-01: eleven daemon ticks spent 4,344 s reaching admission; ~1,620 s of the silent-loop gaps ended
 // in a gardener's scorecard, because every garden starter ran its synchronous pass on the daemon's event loop.
@@ -106,6 +108,69 @@ test("gardener lifecycle measures admission separately from execution and preser
   assert.equal(gate.queueMs, 100); assert.equal(gate.executionMs, 200);
   assert.equal(gate.reason, "signal-or-cancelled");
   assert.ok(observed.some((r) => r.name === "gate" && r.phase === "running"));
+});
+
+test("gardener memory deferral is not a cancelled or completed process", async (t) => {
+  const { createGardenerRuntimeWriter, readGardenerRuntime } = await import("../src/lib/gardener-runtime.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-deferred-runtime-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  let now = Date.now();
+  const clock = clockFromMillisFn(() => now);
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "deferred-fixture", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {} });
+  const earlier = clock.iso();
+  const prior = { name: "plan", observedAt: earlier, passId: "previous", nextDueAt: null, queueMs: 0, executionMs: 57, exit: 0 };
+  writer.record({ ...prior, phase: "queued", reason: null });
+  writer.record({ ...prior, phase: "completed", reason: "process-completed" });
+  await writer.flush();
+  now += 1000;
+  const run = startGardenOffLoop("plan", 60_000, { clock, log: (step, extra) => logs.push({ step, extra }),
+    observe: event => writer.record(event),
+    spawnPass: boundedGardenPassSpawn(async () => ({ kind: "deferred", reason: "memory-budget-shortfall" }) as never, 1) });
+  t.after(() => run.stop());
+  await wait(0); await writer.flush();
+  const entry = (await readGardenerRuntime(stateDir)).gardens[0]!;
+  assert.equal(entry.phase, "idle");
+  assert.equal(entry.reason, "memory-budget-shortfall");
+  assert.equal(entry.attempts, 2);
+  assert.equal(entry.completions, 1);
+  assert.equal(entry.failures, 0);
+  assert.equal(entry.executionMs, null, "a deferred start cannot borrow the preceding child's execution time");
+  assert.equal(entry.exit, null);
+  assert.equal(entry.lastCompletedAt, earlier);
+  assert.equal(entry.lastSuccessAt, earlier);
+  assert.notEqual(entry.passId, "previous");
+  assert.ok(entry.nextDueAt);
+  const row = logs.find(row => row.step === GARDEN_PASS_STEP)!;
+  assert.equal(row.extra?.passId, entry.passId);
+  assert.equal(row.extra?.reason, "memory-budget-shortfall");
+  assert.equal(row.extra?.executionMs, null);
+});
+
+test("gardener admission deferral conforms to the published generated service contract", async (t) => {
+  const { createGardenerRuntimeWriter } = await import("../src/lib/gardener-runtime.js");
+  const { buildGardenersRoute } = await import("../src/lib/gardeners-route.js");
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-deferral-contract-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const now = Date.now();
+  const clock = clockFromMillisFn(() => now);
+  const reason: components["schemas"]["GardenerRuntimeEntry"]["reason"] = "memory-budget-shortfall";
+  const writer = createGardenerRuntimeWriter({ stateDir, repository: "acme/app", daemonRunId: "contract-fixture", clock,
+    gardens: [{ name: "plan", enabled: true, cadenceMs: 60_000, scope: "repository" }], log: () => {} });
+  const event = { name: "plan", observedAt: clock.iso(), passId: "held-before-spawn", nextDueAt: clock.iso(),
+    queueMs: null, executionMs: null, exit: null };
+  writer.record({ ...event, phase: "queued", reason: null });
+  writer.record({ ...event, phase: "idle", reason });
+  await writer.flush();
+  const result = await invokeGardenerRoute(buildGardenersRoute({ stateDir, clock }));
+  assert.equal(result.status, 200);
+  assert.equal(result.body.gardens[0].reason, reason);
+  assert.deepEqual(violations(result.body, declaredBody("/v1/gardeners", "get", 200)), [],
+    "the actual gardener route must declare its no-process deferral receipt");
+  assert.ok(violations({ ...result.body.gardens[0], reason: "not-a-runtime-reason" },
+    SPEC.components.schemas.GardenerRuntimeEntry!).some(problem => problem.includes("not in enum")),
+    "adding one known reason must not accept arbitrary reason strings");
 });
 
 test("gardener completion rows retain the runtime pass id and separate admission timings", async (t) => {
@@ -232,6 +297,9 @@ function rows() {
 }
 
 test("an admitted daemon records its gardener inventory while dry runs and telemetry failures preserve authority", async (t) => {
+  const oldInboxMode = process.env.RMD_INBOX_GARDENER_MODE;
+  delete process.env.RMD_INBOX_GARDENER_MODE;
+  t.after(() => { if (oldInboxMode === undefined) delete process.env.RMD_INBOX_GARDENER_MODE; else process.env.RMD_INBOX_GARDENER_MODE = oldInboxMode; });
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-inventory-home-`));
   const root = join(home, "Remudero"), state = join(root, "state");
   // Review deliberately masks the checkout's credential-bearing Git config.
@@ -257,7 +325,8 @@ test("an admitted daemon records its gardener inventory while dry runs and telem
   const manifest = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.equal(manifest.version, 1);
   assert.deepEqual(manifest.gardens.map((g: { name: string }) => g.name), REGISTERED_GARDEN_NAMES);
-  assert.ok(manifest.gardens.every((g: { enabled: boolean }) => g.enabled));
+  assert.ok(manifest.gardens.every((g: { name: string; enabled: boolean }) => g.enabled === (g.name !== "inbox")));
+  assert.equal(manifest.gardens.find((g: { name: string }) => g.name === "inbox")?.enabled, false, "unactivated Inbox garden is explicit in the real daemon inventory");
   assert.match(manifest.codeSha, /^[a-f0-9]{40}$/);
   const saved = JSON.stringify({ ...manifest, testSentinel: "preserve this recorded authority" });
   writeFileSync(inventoryPath, saved);

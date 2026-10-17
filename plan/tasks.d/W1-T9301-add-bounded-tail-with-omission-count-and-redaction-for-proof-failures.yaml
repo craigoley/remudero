@@ -8,8 +8,8 @@
   risk: high
   band_meaning: span
   priority: 2
-  status: queued
-  # backlog gardener: band=2 evidence=0d9f3aa9ba1062a9
+  status: merged
+  # backlog gardener: band=2 evidence=daf79eb7a1ba6878
   attempts: 0
   files:
     - src/lib/proofExecutor.ts

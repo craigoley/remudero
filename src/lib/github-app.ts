@@ -9,32 +9,21 @@
  * boot. No secret — the private key or the minted token — ever reaches a log line or a ledger
  * row; only the installation id, the token's `expires_at`, and a fixed reason string do.
  *
- * Trap: a worker's copy of `GH_TOKEN` is fixed at spawn and can outlive the one-hour token on a
- * long run. That gap is accepted, not fixed, here.
+ * A run child owns a separate refresh loop; model workers still inherit a snapshot at spawn.
  */
 // Why: docs/forensics/github-app.md#module-header
 
 // ── W1-T2311 DECISION RECORD: THE BOOT ENV CARRIED THE PAT, NOT THIS MODULE ─────────────────────
-//
-// A container's boot env used to carry a personal token under GH_TOKEN, which this module's
-// refresh (a per-process `process.env` write) could never reach or displace — the root cause was
-// one layer out, in how a recycle captured and forwarded that env. See the forensics page for the
-// measurement.
-//
-// REMEDY (a) TAKEN: the boot env now carries no GH_TOKEN at all (deploy/recycle-container.sh); an
-// operator reads a container's live token with `docker exec` instead of the fleet holding one on
-// their behalf. REMEDY (b) — refusing on a failed exchange instead of degrading — was NOT taken:
-// this module never introduced the personal token to refuse around, and refusing would break the
-// retry loop's own degrade-never-refuse contract (W1-T1068, REFRESH_MARGIN_MS below). A timed-out
-// exchange still leaves the previous value untouched.
-//
-// UNINVESTIGATED: why roughly one exchange in three used to time out when the same container
-// reached GitHub's API in milliseconds unauthenticated. See the forensics page; closing W1-T2311
-// does not explain it.
+// A recycle forwarded a personal GH_TOKEN this per-process refresh could never displace (forensics).
+// REMEDY (a) TAKEN: the boot env carries no GH_TOKEN (deploy/recycle-container.sh). REMEDY (b),
+// refusing on a failed exchange, was NOT taken: it would break W1-T1068's degrade-never-refuse loop.
+// A timed-out exchange still leaves the previous value untouched. The one-in-three timeouts, long
+// UNINVESTIGATED, were the daemon's own stalled loop (2026-10-15); see exchangeDeadline.
 // Why: docs/forensics/github-app.md#the-w1-t2311-decision-record
 
 import { readFileSync } from "node:fs";
 import { sign as cryptoSign } from "node:crypto";
+import { clockFromMillisFn, fixedClock, loopAvailableDeadline, type Clock } from "./clock.js";
 
 /** Env var names, not values — mirrors `GH_TOKEN`'s own shape. `GH_APP_PRIVATE_KEY_PATH_ENV`
  *  names a path to the mounted key file, never the key material itself. */
@@ -61,12 +50,8 @@ const REFRESH_FAILURE_RETRY_GUARD_MS = 1000;
 const JWT_BACKDATE_SEC = 60;
 const JWT_TTL_SEC = 9 * 60;
 
-/** Node's `fetch` has no default timeout; W1-T2896 leaves this App-JWT exchange outside CLI transport, so a hung connection would await forever and — since
- *  {@link startInstallationTokenRefresh}'s loop only arms its next timer after this promise
- *  settles — permanently kill the refresh loop. 20s is a generous multiple of a normal exchange's
- *  cost and a reasoned bound rather than a fitted measurement (see the forensics page). Failed
- *  scheduled refreshes keep enough retained-token life for another full bounded exchange. Exported
- *  so a test can advance a mocked clock by exactly this amount. */
+/** `fetch` has no default timeout, so a hung exchange would stall the refresh loop forever; 20 s of
+ *  loop-available time (exchangeDeadline) is a reasoned bound, not a fit (forensics). Exported for tests. */
 // Why: docs/forensics/github-app.md#exchange_timeout_ms
 export const EXCHANGE_TIMEOUT_MS = 20 * 1000;
 
@@ -198,6 +183,13 @@ function describeExchangeCatch(err: unknown, timeoutController: AbortController)
   return "exchange request failed: unknown";
 }
 
+// Aborts after EXCHANGE_TIMEOUT_MS of LOOP-AVAILABLE time: timers run before I/O when a stalled loop
+// resumes, so on 2026-10-15 a plain timer aborted 17 delivered exchanges while serve and the socket
+// thread minted at once. A timer that fires late (a stall, not a spent budget) re-arms instead.
+function exchangeDeadline(controller: AbortController, clock: Clock, reason: string): () => void {
+  return loopAvailableDeadline(clock, EXCHANGE_TIMEOUT_MS, () => controller.abort(new Error(reason)));
+}
+
 /**
  * Mints a fresh installation token and, on success, writes it to `opts.env.GH_TOKEN` (see the
  * file header). On any failure — missing config, an unreadable key, a signing failure, a network
@@ -241,10 +233,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
   // is armed before the fetch is issued; only how the catch below names a failure changed here.
   let res: Response;
   const timeoutController = new AbortController();
-  const timeoutTimer = setTimeout(
-    () => timeoutController.abort(new Error("token exchange timed out")),
-    EXCHANGE_TIMEOUT_MS,
-  );
+  const cancelDeadline = exchangeDeadline(timeoutController, clockFromMillisFn(now), "token exchange timed out");
   try {
     res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
       method: "POST",
@@ -263,7 +252,7 @@ export async function refreshInstallationToken(opts: RefreshOptions = {}): Promi
     log(TOKEN_REFRESH_FAILED_STEP, { reason });
     return { ok: false, reason };
   } finally {
-    clearTimeout(timeoutTimer);
+    cancelDeadline();
   }
 
   if (!res.ok) {
@@ -361,10 +350,7 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
   const body = { repositories: [name], permissions: { contents: "write", pull_requests: "write" } };
 
   const timeoutController = new AbortController();
-  const timeoutTimer = setTimeout(
-    () => timeoutController.abort(new Error("scoped token exchange timed out")),
-    EXCHANGE_TIMEOUT_MS,
-  );
+  const cancelDeadline = exchangeDeadline(timeoutController, clockFromMillisFn(now), "scoped token exchange timed out");
   let res: Response;
   try {
     res = await fetchFn(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
@@ -383,7 +369,7 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
     log(SCOPED_TOKEN_MINT_FAILED_STEP, { reason });
     return { ok: false, reason };
   } finally {
-    clearTimeout(timeoutTimer);
+    cancelDeadline();
   }
 
   if (!res.ok) {
@@ -416,8 +402,20 @@ export async function mintScopedToken(repo: string, ttlMs: number, opts: Refresh
  * never at or past its expiry. Clamped at zero so a stale `expiresAtMs` (e.g. a clock jump)
  * schedules an immediate retry rather than a negative delay.
  */
-export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()): number {
-  return Math.max(0, expiresAtMs - REFRESH_MARGIN_MS - now);
+export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now(), leadMs: number = REFRESH_MARGIN_MS): number {
+  return Math.max(0, expiresAtMs - leadMs - now);
+}
+
+/** Once per retained token: a failed refresh has spent half its lead, and the token has expired. */
+export const TOKEN_EXPIRING_STEP = "github_app.token_expiring";
+export const TOKEN_EXPIRED_STEP = "github_app.token_expired";
+const ATTEMPT_CYCLE_SAMPLES = 8;
+
+/** The margin's attempt count at the measured cycle (timer lateness plus exchange), up to half a life. */
+export function refreshLeadMs(attemptCycleMs: readonly number[]): number {
+  const attempts = REFRESH_MARGIN_MS / (EXCHANGE_TIMEOUT_MS + REFRESH_FAILURE_RETRY_MS);
+  const worst = attemptCycleMs.length > 0 ? Math.max(...attemptCycleMs) : 0;
+  return Math.min(INSTALLATION_TOKEN_LIFETIME_MS / 2, Math.max(REFRESH_MARGIN_MS, attempts * (worst + REFRESH_FAILURE_RETRY_MS)));
 }
 
 function nextFailedRefreshDelayMs(expiresAtMs: number | undefined, now: number): number {
@@ -429,13 +427,14 @@ function nextFailedRefreshDelayMs(expiresAtMs: number | undefined, now: number):
 }
 
 /**
- * Starts the daemon's own installation-token refresh loop and reports whether it armed.
+ * Starts this process's installation-token refresh loop and reports whether it armed.
  *
  * Gated on config presence: with no `GH_APP_*` names set this is byte-identical to before this
  * loop existed, and `armed: false` says so explicitly. `ready` settles once the first mint
  * resolves (or fails and is logged), so a caller can wait for a real token before its first
  * GitHub call, and never rejects — a failed mint is caught, logged and rescheduled like every
  * later tick.
+ * `firstResult` reports that mint's outcome; `stop` cancels renewal when a run child finishes.
  *
  * Every seam is injectable, so a test drives the reschedule arithmetic with no network call and
  * no live timer. `setTimer` returns the timer so the caller can `unref` it.
@@ -446,8 +445,9 @@ export function startInstallationTokenRefresh(opts: {
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   refresh?: (o: RefreshOptions) => Promise<RefreshResult>;
   setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
+  clearTimer?: (timer: { unref?: () => void }) => void;
   now?: () => number;
-}): { armed: boolean; ready?: Promise<void> } {
+}): { armed: boolean; ready?: Promise<void>; firstResult?: Promise<RefreshResult>; stop?: () => void } {
   const env = opts.env ?? process.env;
   if (!env[GH_APP_ID_ENV] || !env[GH_APP_INSTALLATION_ID_ENV] || !env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
     return { armed: false };
@@ -456,24 +456,54 @@ export function startInstallationTokenRefresh(opts: {
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const now = opts.now ?? Date.now;
   let lastSuccessfulExpiresAtMs: number | undefined;
+  let stopped = false;
+  let timer: { unref?: () => void } | undefined;
+  let dueAt = now();
+  const cycles: number[] = [];
+  let failures = 0;
+  const warned = new Set<string>();
   // Arming the next timer must never depend on anything that can itself throw — `setTimer`
   // returning is the only thing this loop's survival rides on.
   const rearm = (delay: number): void => {
-    const timer = setTimer(tick, delay);
+    if (stopped) return;
+    dueAt = now() + delay;
+    timer = setTimer(tick, delay);
     timer.unref?.();
+  };
+  const settled = (): void => {
+    cycles.push(Math.max(0, now() - dueAt));
+    if (cycles.length > ATTEMPT_CYCLE_SAMPLES) cycles.shift();
+  };
+  // A dead token fails every consumer with a 401 that names no cause; these rows name it.
+  const warnIfNearExpiry = (reason: string | undefined): void => {
+    failures += 1;
+    if (lastSuccessfulExpiresAtMs === undefined) return;
+    const remaining = lastSuccessfulExpiresAtMs - now();
+    const lead = refreshLeadMs(cycles);
+    const step = remaining <= 0 ? TOKEN_EXPIRED_STEP : remaining < lead / 2 ? TOKEN_EXPIRING_STEP : undefined;
+    if (step === undefined || warned.has(`${step}:${lastSuccessfulExpiresAtMs}`)) return;
+    warned.add(`${step}:${lastSuccessfulExpiresAtMs}`);
+    opts.log?.(step, {
+      expires_at: fixedClock(lastSuccessfulExpiresAtMs).iso(), remaining_ms: remaining, failed_attempts: failures,
+      refresh_lead_ms: Math.round(lead), attempt_cycle_ms: Math.max(0, ...cycles), last_reason: reason,
+    });
   };
   // The mint-and-rearm body, factored out of `tick` so its promise can be returned to the first
   // caller via `ready`, while every later tick stays fire-and-forget as before.
-  const runOnce = (): Promise<void> =>
-    refresh({ log: opts.log }).then(
+  const runOnce = (): Promise<RefreshResult> =>
+    Promise.resolve().then(() => refresh({ log: opts.log, env })).then(
       (result) => {
+        settled();
         if (result.ok && result.expiresAtMs !== undefined) {
           lastSuccessfulExpiresAtMs = result.expiresAtMs;
-          rearm(nextRefreshDelayMs(result.expiresAtMs, now()));
-          return;
+          failures = 0;
+          rearm(nextRefreshDelayMs(result.expiresAtMs, now(), refreshLeadMs(cycles)));
+          return result;
         }
         // Once the loop has a retained expiry, failure retries must leave room for one full exchange.
         rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
+        warnIfNearExpiry(result.reason);
+        return result;
       },
       (err) => {
         // The promise itself rejected — a throw, not a `{ ok: false }` result. Only `refresh`'s
@@ -481,19 +511,27 @@ export function startInstallationTokenRefresh(opts: {
         // the next timer is armed FIRST, before explaining why — the loop's survival must never
         // depend on a second write to the filesystem that just failed. The explanatory write
         // below is best-effort and guarded: if it throws too, that is swallowed.
+        settled();
         rearm(nextFailedRefreshDelayMs(lastSuccessfulExpiresAtMs, now()));
         try {
           opts.log?.(TOKEN_REFRESH_FAILED_STEP, {
             reason: `refresh threw: ${err instanceof Error ? err.message : String(err)}`,
           });
+          warnIfNearExpiry("refresh threw");
         } catch {
           // Swallowed on purpose — see comment above.
         }
+        return { ok: false, reason: "refresh threw" };
       },
     );
   const tick = (): void => {
-    void runOnce();
+    if (!stopped) void runOnce();
   };
-  const ready = runOnce();
-  return { armed: true, ready };
+  const firstResult = runOnce();
+  const ready = firstResult.then(() => undefined);
+  const stop = (): void => {
+    stopped = true;
+    if (timer) (opts.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout)))(timer);
+  };
+  return { armed: true, ready, firstResult, stop };
 }

@@ -1,0 +1,68 @@
+- id: W1-T10001
+  title: "A RUN CHILD LOST TO A CONTAINER STOP ENDS ONLY ITS LANE, AND NO CHILD SPAWNS PAST A RECYCLE HOLD — on 2026-10-17 W1-T9757's resume child waited 29 min in memory admission, spawned at 02:31:02Z under a container-recycle PAUSE, died with the container at 02:32Z, and its loss closed refill for every lane until the pass ended in error at 03:16:29Z"
+  repo: remudero
+  depends_on: [W1-T10000]  # W1-T10000 (filed 2026-10-17, same run-child.ts/daemon.ts surface) creates the run dir only after the reservation; serialize, never parallel
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern, how a run child that never ran (or died with its container) settles; the contract, adoption and mode tracker are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17, yielded-builds-never-resumed investigation (W1-T9089 / W1-T9757), filed by its agent"
+  plan_refs: [W1-T9085, W1-T9086, W1-T9087, W1-T9910, W1-T5083, W1-T5344, W1-T9680, W1-T9089]
+  files:
+    - src/lib/daemon.ts
+    - src/lib/run-child.ts
+    - test/a-run-child-lost-to-a-container-stop-ends-only-its-lane.test.ts
+  status: queued
+  priority: 1  # a lost child idled a lane 42 min, forced a pass-error restart, and spent a priority-1 resume
+  attempts: 0
+  rationale: |
+    MEASURED from the core ledger (~/rmd-state2/state, live file plus the 10-16T21:23Z..10-17T03:10Z archives), 2026-10-17:
+    - 02:01:44Z: lane 0 refilled with W1-T9757 (`dispatch.lane_refilled`, restart_pending). The run id
+      run-W1-T9757-1792202503754-7f2c was minted at once, and its directory under state/runs/ was created then.
+    - 02:02:28Z and 02:22:43Z: `engine.prune_deferred` "run ... is unreadable and names no engine (unreadable: missing:
+      ENOENT ... spec.json)". The directory held nothing for 29 min, because `spawnRunChild` (src/lib/run-child.ts)
+      runs `mkdirSync(dir)` BEFORE the awaited `reserve` (memory admission) and writes spec.json only after it.
+    - 02:16:39Z and 02:23:22Z: `dispatch.lane_refill_held` "fleet PAUSE hold: PAUSE requested: container recycle".
+    - 02:31:02Z: the sibling children settled (handed_off), memory freed, and the reservation admitted.
+      `run_child.spawned` (pid 560684) followed in the SAME second. Nothing re-read the recycle hold after the wait.
+    - About 02:32Z the container was recreated (e061cc4bb7f2 to dd9d5b7c1fc4). 02:33:14Z: `run_child.lost` "status names
+      container e061cc4bb7f2@proc:267906399, this is dd9d5b7c1fc4@proc:268674953".
+      `classifyRunChildLoss` (src/lib/run-child-mode.ts) names that a container_stop, an outside kill.
+    - 02:34:46Z: `dispatch.lane_refill_held` "a lane rejected". 03:13:27Z: the same for W1-T9869's lane. 03:16:29Z:
+      `run_child.settled` rejected, then `daemon.summary` stopReason "error" naming the lost child. The daemon re-booted
+      at 03:19:27Z.
+    READ on origin/main 2f93023e5:
+    - src/lib/daemon.ts `refillLane`: a rejected outcome that is not a TaskAdmissionError and not
+      `refillLaneLocalRejection` sets `refillClosed ??= "a lane rejected"`, which holds EVERY lane's refill for the
+      rest of the pass. A lost child's rejection matches neither arm. W1-T9085 design 3 routes a loss "through the path
+      a crashed in-process run takes", which was right for an unknown crash and is wrong for a loss the run-child
+      classifier already names as an outside kill.
+    - src/lib/run-child.ts `spawnRunChild`: `mkdirSync(dir)` comes before the awaited `reserve`, and no fleet hold is
+      read between the admission and `spawn`.
+    No task data was lost: no claim ref was taken (the child never reached `dispatch.claim`), and the 22:09Z
+    `run.freshness_handoff` receipt stayed pending. But a lane sat idle 42 min, the pass ended in error, and a
+    priority-1 resume was spent.
+  design: |
+    1. src/lib/daemon.ts: a rejection from a run child whose loss `classifyRunChildLoss` names `container_stop` or
+       `oom_kill` is lane-local. It joins `refillLaneLocalRejection`'s answer, so refill stays open and the pass
+       continues, and the task is not excluded by `passIds`. It is offered again on the next selection, in its own
+       dispatch order. Ledger it under the existing settle row with `loss: <kind>`. A loss with no outside kill named
+       keeps today's crashed-run path.
+    2. src/lib/run-child.ts `spawnRunChild`: after `reserve` resolves and before `spawn`, read the same fleet
+       worker-admission hold the daemon's `holdWorkerAdmission` reads (the PAUSE/recycle hold, passed in as a port).
+       When it is held, release the reservation, remove the empty run directory, ledger `run_child.spawn_withheld`
+       {task_id, run_id, hold}, and return `unavailable`. The caller then treats the task as not started: no run.start
+       and no strike.
+    3. The empty pre-admission run directory (the two `engine.prune_deferred` rows above) is W1-T10000's design 1,
+       which this task depends on; it is not rebuilt here.
+    There are no fixed numbers: every decision reads the classifier, the hold or the reservation that already exists.
+  acceptance:
+    - claim: "a child lost to a container stop ends only its lane: refill stays open, the pass does not end in error, and its task is offered again"
+      proof: 'grep: test("W1-T10001: a child lost to a container stop ends only its lane" in test/a-run-child-lost-to-a-container-stop-ends-only-its-lane.test.ts'
+    - claim: "a reservation that admits under a recycle hold spawns no child and releases its reservation"
+      proof: 'grep: test("W1-T10001: no child spawns past a recycle hold" in test/a-run-child-lost-to-a-container-stop-ends-only-its-lane.test.ts'
+  falsifier: |
+    Keep the crashed-run path for a container_stop loss: the first test's second lane is held "a lane rejected" and
+    the pass stops with "error". Drop the hold read after `reserve`: the second test sees `run_child.spawned`.

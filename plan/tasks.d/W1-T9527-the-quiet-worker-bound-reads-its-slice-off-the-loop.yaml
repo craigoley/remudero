@@ -1,0 +1,97 @@
+- id: W1-T9527
+  title: "THE QUIET-WORKER BOUND READS ITS LEDGER SLICE OFF THE LOOP, INCREMENTALLY — watchDispatchSpawn's `history` gunzips and parses every rotation through readLedgerUnionRecordsSync on the daemon loop the first time each worker spawn goes quiet, and on 2026-10-14 two of those reads froze core 1,447 s and 965 s back to back, most of the 45.7-minute loop block that ended at 05:35:46Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — where the quiet-worker watchdog's bound history comes from; it runs on the daemon loop for every dispatch spawn
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: diagnose the 04:50-05:35Z core loop block and file each still-present, uncovered synchronous caller (coordinator brief); standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T7807, W1-T9390, W1-T9406, W1-T9443, W1-T9361, W1-T9085, W1-T9516, W1-T8621]
+  files: [src/run-task.ts, src/lib/quiet-worker-watchdog.ts, test/the-quiet-worker-bound-reads-its-slice-off-the-loop.test.ts]
+  status: merged
+  priority: 1  # P1: the largest single cause of 2026-10-14's worst core freeze (and of the false STALLED recycle W1-T9516 files); it still runs on the loop on main
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 on the core ledger (Azure host ~/rmd-state2/state, read-only; rows streamed to
+    ~/Remudero-notes/loopblock-0450/). Daemon pid 3182622 booted 04:45:50Z on 13ff74893, before W1-T9390 (#11608,
+    08:36Z) and W1-T9406 (#11650, 12:09Z) merged.
+      - The block: `daemon.loop_lag` 05:35:46.293Z {lag_ms 2,742,587, last_step_before_block github.wake.check_settled,
+        sync_spawn_ms 300,579, top spawn 182,282 ms `git -C … diff` under lintPlanCommand}. `daemon.loop_stall_profile`
+        {unattributed_ms 2,458,733; top frames node:buffer concat 40,430 ms and ledger-union.ts parseObject 30,872 ms}.
+      - The rows pid 3182622 wrote during it, and nothing else: 04:55:04 `worker.state` W1-T3083 quiet, 05:19:11
+        `worker.quiet_bound` W1-T3083 (samples 4,208), the same second `worker.state` W1-T2858 quiet, 05:35:16
+        `worker.quiet_bound` W1-T2858, `worker.state` W1-T2947 quiet, 05:35:30 `worker.quiet_bound` W1-T2947. So three
+        bound derivations ran back to back with no other row between them: 1,447 s, 965 s and 14 s, 2,426 s in all,
+        against 2,458 s unattributed. The 300 s of sync spawn (04:50:03 to 04:55:04) is the rest of the lag.
+      - The same read sat in the 12:04-12:41Z freeze (pid 114, head ce329e86d): 12:25:24 `worker.state` W1-T8041 quiet,
+        12:33:56 `worker.quiet_bound` W1-T8041, 512 s with no row between.
+      - Routine cost, today's 72 `worker.quiet_bound` rows: the gap from the spawn's `worker.state quiet` row to its
+        bound row is 12-38 s on every daemon since 13:00Z. The watchdog polls every 5 s and both rows key on the same
+        30 s quiet floor, so most of that gap is the read. A pulse-phase `daemon.loop_lag` row needs a lag over the
+        60 s interval (`reportLoopLag`), so these reads write no lag row. `daemon.alive` loop_delay_max_ms is 20 s or more
+        in 26 of the 31 intervals from 15:38Z to 19:39Z (other callers block too), and the two largest (62.7 s at
+        18:46Z, 64.2 s at 19:08Z) each contain a bound derivation.
+    READ on origin/main abbee334d (symbols, not lines):
+      - src/run-task.ts `watchDispatchSpawn` builds the watchdog's `history` as
+        `readLedgerUnionRecordsSync(dirname(watch.ledgerPath), { step: ["worker.state", "worker.assignment"] })`: no
+        pattern, so every line of every rotation (401 on the host now, about 9.5 MB decompressed each) is gunzipped and
+        JSON-parsed synchronously before the step filter drops all but about 120 rows per rotation.
+      - src/lib/quiet-worker-watchdog.ts `runQuietWorkerWatchdog`'s `tick` calls `deriveQuietBound(opts.history(), …)`
+        on the first tick past the quiet floor of each spawn, then caches the bound for that spawn. `tick` is already
+        async; `history` is typed synchronous.
+      - The off-loop reader exists: src/lib/sweep.ts `createEscalationTriageHistoryReader({ slice })` (W1-T9390,
+        generalised by W1-T9406 to any holder and step list) loads unseen rotations off the loop into a durable step
+        digest, then answers from `createIncrementalLedgerUnion`, parsing only lines that name a slice step.
+    THE OTHER CALLERS IN THE 04:50 BLOCK, NOT THIS TASK:
+      - The 182 s `git diff` is `lintPlanForReview` inside `runReview`, which runs in the daemon process. W1-T9114
+        (queued, P1.5) moves reviews into run children.
+      - `github.wake.check_settled` is only the last row before the block. `finishCheckBurst` logs it and calls
+        `void mainHealthRung()`, whose GitHub reads are async.
+    OVERLAP: W1-T8621 (queued) keeps worker.state rows through rotation and calls this reader "fine as it is" for
+    retention; it does not change where or how it reads. W1-T9085 (queued) runs a build in a detached child under
+    sweep.runChild.mode, which would move this read off the daemon loop when that mode is on. Each child would still
+    parse the whole union on every spawn, so this task is needed either way. W1-T9361 (queued) makes stall rows name
+    their callers. W1-T9516 (#11775) stops the watchdog recycling a daemon whose loop resumed. It treats the symptom
+    this read caused at 05:35:56Z.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main abbee334d and all 382 origin heads (2026-10-14 19:50Z) for
+    deriveQuietBound, quiet_bound, quietGapsByProvider, watchDispatchSpawn, quiet-worker-watchdog, QUIET_BASIS and
+    "observed quiet gap". Control: main reads 11 shards (W1-T7807 and W1-T8621 among them); one head reads 12, and its
+    extra shard is W1-T9516. None moves the bound's history read off the loop or makes it incremental.
+  design: |
+    No time window and no cap. The bound stays the same quantile over every quiet episode the ledger holds.
+    1. ONE SLICE READER PER DAEMON START. src/run-task.ts declares the slice `{ holder: "run-task.quiet-worker-bound",
+       steps: ["worker.state", "worker.assignment"] }` and builds one `createEscalationTriageHistoryReader({ slice })`
+       at module scope or daemon start, shared by every `watchDispatchSpawn`. Its durable digest means a restart or a
+       run child (W1-T9085) loads only rotations it has not seen.
+    2. THE HISTORY IS AWAITED. `QuietWatchdogOptions.history` returns rows or a promise of rows, and `tick` awaits it
+       before `deriveQuietBound`. `watchDispatchSpawn`'s default awaits the reader (unseen rotations load off the
+       loop) and returns its rows. The `busy` flag already keeps a second tick out while it waits.
+    3. SAME ANSWER. An unreadable slice (`ok: false`) gives the empty history it gives today, so the bound falls back
+       to the policy row and says `no_history_fallback`. A fixture corpus gives the same provider gaps, quantile and
+       samples through the reader as through the whole-union read.
+    4. NO SYNC UNION READ ON THE TICK. The default path never calls readLedgerUnionRecordsSync. The `readRows` seam
+       stays for tests only.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Inject the reader's readFile as a
+    deferred promise and spy the sync union read.
+  acceptance:
+    - claim: "a bound derivation whose rotation load has not resolved yet does not block a concurrent timer, and makes no synchronous union read"
+      proof: 'grep: test("W1-T9527: a slow quiet-bound history read does not block a concurrent timer" in test/the-quiet-worker-bound-reads-its-slice-off-the-loop.test.ts'
+    - claim: "the slice reader yields the same bound, source and samples as the whole-union read over a fixture corpus, and an unreadable slice still falls back"
+      proof: 'grep: test("W1-T9527: the slice gives the same quiet bound as the whole union" in test/the-quiet-worker-bound-reads-its-slice-off-the-loop.test.ts'
+    - claim: "a second spawn's bound loads no rotation the first already loaded"
+      proof: 'grep: test("W1-T9527: a second spawn reloads no rotation" in test/the-quiet-worker-bound-reads-its-slice-off-the-loop.test.ts'
+    - claim: "watchDispatchSpawn reads through the named slice"
+      proof: 'grep: run-task\.quiet-worker-bound in src/run-task.ts'
+  falsifier: |
+    Restore the default `history` to readLedgerUnionRecordsSync: the first test's timer fires only after the deferred
+    load and its spy counts one sync union read. Drop the durable digest by building a reader per spawn: the third
+    test counts every rotation loaded twice. Let the reader keep a step the bound does not read, or drop
+    `worker.assignment`: the second test's samples or provider differ from the whole-union read.
+  note: |
+    EFFECT, measured after deploy from the core ledger with no fixed pass mark: the gap from each spawn's `worker.state quiet`
+    row to its `worker.quiet_bound` row falls from today's 12-38 s toward the 5 s poll. No stall row names parseObject
+    or concat with a bound derivation inside its block, and `daemon.alive` loop_delay_max_ms in intervals holding a
+    bound derivation is no larger than in intervals without one.

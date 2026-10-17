@@ -1,0 +1,51 @@
+- id: W1-T9484
+  title: "A FIX ROUND'S SNAPSHOT CENSUS CHECK MEASURES ONLY THE REACH RATCHET — runSnapshotReach throws 'git-free snapshot reader unavailable' for every other suite a diff joins, so every fix.census_check row on 2026-10-14 reads partially-measured and a census a round breaks is learned from CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium  # Rule 19: one concern — the fix round's snapshot census check runs the joined suites that need no git
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: root cause of #11677 (W1-T9077) needing two fix rounds"
+  plan_refs: [W1-T7182, W1-T5617, W1-T5692, W1-T5693]
+  files: [scripts/census-precheck.mjs, test/a-fix-round-snapshot-check-runs-the-git-free-joined-suites.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14, read-only (core ledger, origin/main 456decf7):
+      - All four fix.census_check rows in the live ledger read outcome "partially-measured". Two are #11677's
+        rounds (14:00:48Z and 14:47:24Z), with the reason "census suites NOT MEASURED - git-free snapshot reader
+        unavailable for test/bound-kind-declared.test.ts, test/ledger-literal-census.test.ts,
+        test/catch-erasure-ratchet.test.ts, test/negative-reachability-ratchet.test.ts, test/authority-ratchet.test.ts,
+        test/no-shallowing-of-the-canonical-checkout.test.ts, test/no-draft-pull-request-ever-sits-on-the-board.test.ts,
+        test/ledger-rotation.test.ts, test/a-union-read-of-an-unretained-step-is-refused.test.ts,
+        test/spend-is-counted-once-at-its-producer.test.ts; ... test/cycle-ratchet.test.ts".
+      - scripts/census-precheck.mjs runSnapshotReach throws for any file other than the reach ratchet. W1-T7182
+        built the snapshot seam for the reach ratchet only. So in snapshot mode, every admitted (W1-T5617) and
+        triggered (W1-T5692, W1-T5693) suite is skipped, with only a log line to say so. The outcome is
+        non-blocking (exit 2).
+      - Many of these suites read only the working tree. test/worktree-creation-census.test.ts, for example,
+        walks src/ with readdirSync and spawns no git, so it could run in the round's sandbox unchanged. The
+        run-unfiled hand PR that joined it to the pre-push precheck (the #11677 follow-up) helps the worker's
+        own push, but not a fix round.
+  design: |
+    1. Each admitted or triggered census row in scripts/census-precheck.mjs declares `gitFree: true` when its suite
+       spawns no git and reads only the working tree. Declare it only after reading the suite: for example, the
+       worktree-creation census does qualify.
+    2. In snapshot mode, runSnapshotReach runs the joined gitFree suites in the same child it runs the reach
+       ratchet in, with git absent from PATH. Only the suites that need git stay NOT MEASURED, and the reason
+       names each one.
+    3. A test runs every row declared gitFree with git removed from PATH and fails if any spawns git. This keeps
+       the declaration honest instead of trusting it.
+  acceptance:
+    - claim: "in snapshot mode a joined git-free census suite runs and its failure refuses the round's push"
+      proof: 'grep: test("W1-T9484: a joined git-free suite runs from the snapshot and its red refuses the push" in test/a-fix-round-snapshot-check-runs-the-git-free-joined-suites.test.ts'
+    - claim: "every suite declared gitFree passes or fails with git absent from PATH, never spawn-ENOENT"
+      proof: 'grep: test("W1-T9484: every suite declared gitFree runs with git absent from PATH" in test/a-fix-round-snapshot-check-runs-the-git-free-joined-suites.test.ts'
+  falsifier: |
+    On main, set RMD_CENSUS_SNAPSHOT for a worktree whose diff adds an unregistered raw `git worktree add` in src/
+    and run census-precheck. It exits 2 with "git-free snapshot reader unavailable for
+    test/worktree-creation-census.test.ts". With the change it exits 1 and names the census row.

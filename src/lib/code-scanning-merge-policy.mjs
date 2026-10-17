@@ -9,6 +9,12 @@ const path = value => typeof value === 'string' && value.length > 0 && value.len
 // Matches the existing CodeQL workflow's ignored surface; rename predecessors are checked too.
 const ignored = value => value.endsWith('.md') || ['plan/', 'docs/', 'learnings/'].some(prefix => value.startsWith(prefix));
 const unknown = reason => ({state:'unknown',mergeAllowed:false,reason});
+// GitHub's real wording: a plural level above 1, 'Other Alerts:', and one exact optional 'too large' paragraph.
+const HEAD = String.raw`^### New alerts in code changed by this pull request\n\n`, QUALITY_ROW = String.raw` \* [1-9][0-9]* (?:error|warning|note)s?\n`;
+const TOO_LARGE = String.raw`_Alerts not introduced by this pull request might have been detected because the code changes were too large\._\n\n`;
+const TAIL = String.raw`See annotations below for details\.\n\n(\[View all branch alerts\].*)$`;
+const QUALITY_ONLY = new RegExp(String.raw`${HEAD}((?:${QUALITY_ROW})+)\n(?:${TOO_LARGE})?${TAIL}`);
+const SECTIONED = new RegExp(String.raw`${HEAD}(?:(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n)?(?:((?:Other|Non-security) Alerts:\n(?:${QUALITY_ROW})+)\n)?(?:\n|${TOO_LARGE})?${TAIL}`);
 
 export function classifyCodeScanningMergePolicy(input) {
   if (!input || !sha(input.headSha) || input.observedHeadSha !== input.headSha) return unknown('head-unavailable-or-changed');
@@ -40,9 +46,21 @@ export function classifyCodeScanningMergePolicy(input) {
   if (latest.conclusion === 'success' && latest.output.title === 'No new alerts in code changed by this pull request' && summary === link) {
     return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-no-new-alerts'};
   }
+  // GitHub omits the section heading for quality-only findings. Bind the exact layout,
+  // PR link and total to the trusted check rather than treating any successful prose as safe.
+  const qualityOnly = summary.match(QUALITY_ONLY);
+  const total = /^([1-9][0-9]*) new alerts?$/.exec(latest.output.title ?? '')?.[1];
+  if (['success','failure'].includes(latest.conclusion) && qualityOnly?.[2] === link && total !== undefined) {
+    const rows = [...qualityOnly[1].matchAll(/ \* ([1-9][0-9]*) (error|warning|note)(s?)\n/g)];
+    if (Number.isSafeInteger(Number(total)) && rows.every(row => Number.isSafeInteger(Number(row[1])) && (row[3] !== 's' || Number(row[1]) > 1)) &&
+        new Set(rows.map(row => row[2])).size === rows.length &&
+        rows.reduce((sum,row) => sum + Number(row[1]),0) === Number(total)) {
+      return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};
+    }
+  }
   // Security policy is not a quality ratchet: positively enumerated low/medium or
   // quality-only findings do not become an unbounded hold. Unknown formats stay UNKNOWN.
-  const sections = summary.match(/^### New alerts in code changed by this pull request\n\n(?:(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n)?(?:(Non-security Alerts:\n(?: \* [1-9][0-9]* (?:error|warning|note)\n)+)\n)?\nSee annotations below for details\.\n\n(\[View all branch alerts\].*)$/);
+  const sections = summary.match(SECTIONED);
   if (['success','failure'].includes(latest.conclusion) && sections && (sections[1] || sections[2]) && sections[3] === link &&
       /^[1-9][0-9]* new alerts?(?: including .+)?$/.test(latest.output.title ?? '')) {
     return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};

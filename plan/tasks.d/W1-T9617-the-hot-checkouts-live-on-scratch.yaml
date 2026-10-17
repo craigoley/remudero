@@ -1,0 +1,114 @@
+- id: W1-T9617
+  title: "THE HOT CHECKOUTS LIVE ON SCRATCH: scratch_plan already binds worktrees, tmp, coverage, managed repos, the read model and worker homes to the local NVMe, but each daemon's own checkout (<state-dir>/remudero, with its node_modules) stays on the /mnt/rmd data disk and serve's code checkout (~/rmd-serve-repo, with its node_modules) on the root OS disk, where page-cache refaults wait 26-271 ms; behind its own switch, place those checkouts under the scratch root, rebuild them on a cold boot with an empty /mnt/scratch, and keep the ledger and every state file on durable disk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — where the daemons' and serve's own code checkouts live on the host; high for blast radius: every container's launch, mounts and cold boot
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: host I/O investigation 02:25-03:00Z; operator approved filing on 2026-10-15"
+  plan_refs: [W1-T6364, W1-T6110, W1-T6125, W1-T5669, W1-T4229, W1-T9601]
+  files: [deploy/scratch-mounts.sh, deploy/recycle-container.sh, deploy/serve-container.sh, deploy/install-host-units.sh, deploy/host-update.sh, deploy/rmd-host-cleanup.sh, docs/operator-guide.md, test/scratch-mounts.test.ts, test/the-hot-checkouts-live-on-scratch.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED by the coordinator session on the Azure host, 2026-10-15 about 02:25-03:00Z (cited, not re-measured
+    in this filing):
+    - io pressure "full" avg300 about 12 %.
+    - Memory overcommit evicts the page cache every 60-100 s. The refaults land on root (P4 disk, about 120 IOPS)
+      and /mnt/rmd (E10, about 500 IOPS), with awaits of 26-271 ms. /mnt/scratch is local NVMe, and the swapfile
+      already lives there.
+    OBSERVED in this filing, 2026-10-15 about 10:30Z (findmnt -T, docker inspect mount lists, ls):
+    - remudero-daemon binds /home/craigoleyagent/rmd-state2 (on /dev/nvme0n1p1, the /mnt/rmd data disk) at
+      /home/node/Remudero. Its own checkout and node_modules are inside it, at rmd-state2/remudero. The site daemon
+      (rmd-site-state/remudero) and the console daemon (/mnt/rmd/remudero-console-state/remudero) are the same,
+      also on /dev/nvme0n1p1.
+    - remudero-serve binds /home/craigoleyagent/rmd-serve-repo (on /dev/nvme0n2p1, the root disk) at
+      /home/node/Remudero/remudero. It has its own node_modules.
+    - Already on /mnt/scratch (/dev/nvme1n1), under /mnt/scratch/rmd/<state-key>/ for all three daemons: worktrees,
+      tmp, remudero-coverage, repos, repos-coverage, read-model, worker-homes, each container's /tmp, and the shared
+      test-slots. serve-gens is there for serve. The switch /etc/remudero/scratch-mounts.on is present.
+    READ at origin/main:
+    - deploy/scratch-mounts.sh scratch_plan builds SCRATCH_BINDS (the list above) under
+      $(scratch_root)/rmd/<key>. Its INVARIANT: only rebuildable paths move, and the ledger, lanes, plan and every
+      state file stay put. scratch_prepare records each dir in <state-dir>/.scratch-mounts. scratch_restore,
+      docker.service's ExecStartPre, re-creates those dirs after a deallocate wipes scratch. Neither the daemon's
+      own checkout nor serve's code dir is in the plan.
+    - deploy/entrypoint.sh clones $CONFIG_ROOT/remudero when "$TREE/.git" is missing, then runs npm ci when
+      node_modules/.bin/tsx is missing. So an empty checkout dir already rebuilds inside the container.
+    - deploy/serve-container.sh SERVE_REPO_DIR defaults to ${HOME}/rmd-serve-repo, mkdir -p's it, and requires it to
+      be writable, because the serve container clones and updates its own checkout there.
+    - deploy/recycle-container.sh refuses to launch unless STATE_DIR_REPO_MARKER ("${STATE_DIR}/remudero/.git")
+      exists (only --first-boot lifts that). DAEMON_TREE="${STATE_DIR}/remudero" is the shared-checkout guard's tree.
+    - Host-side consumers of "${STATE_DIR}/remudero": deploy/install-host-units.sh runs the live-edits ladder, the
+      progress watchdog and the head checks from $STATE_DIR/remudero/bin/rmd. deploy/host-update.sh section 4a's
+      git object reclaim reads RMD_GIT_RECLAIM_DIRS, default "${STATE_DIR}/remudero:${RMD_OP_DIR}".
+      deploy/rmd-host-cleanup.sh protects $CLEAN_HOME/rmd-serve-repo (PROTECTED_WORKTREE_ROOTS) and sweeps idle
+      scratch units under /mnt/scratch (SCRATCH_ROOTS).
+    - W1-T6110 and W1-T6125 recreate a container whose binds differ from scratch_plan. So a change to the bind list
+      that is not behind a switch recycles every container when the host updater installs the merge.
+    - deploy/resource-policy.sh sets memory and CPU only. It notes --blkio-weight is a no-op on these disks, so I/O
+      placement is the lever left, and this task does not change it.
+    INFERRED: on every refault, the daemons' and serve's own code reads (node_modules, the bundled entries, git
+    objects of the checkout itself) queue behind the IOPS cap of the disk they sit on. On the local NVMe they would
+    not.
+    RELATED: W1-T6364 (merged) moved the managed repos, not the daemon's own checkout. W1-T5669 (merged) moved hand
+    worktrees. W1-T9601 (queued) builds the child-entry store for the daemon's own tree "when that checkout
+    moves", so it composes with this task. No open PR head carries a shard on this subject (swept 2026-10-15
+    10:35Z over 404 heads against main's count).
+    OPERATOR-VISIBLE: the placement change and the boot rebuild are deploy changes. Merging is inert while the new
+    switch is off. Shipping means the operator turns the switch on and approves a recycle of each container.
+  design: |
+    1. A NEW SWITCH, OFF BY DEFAULT. RMD_SCRATCH_CHECKOUTS=on|off|auto, default auto, reads a switch file such as
+       /etc/remudero/scratch-checkouts.on (a seam like RMD_SCRATCH_SWITCH). It applies only where scratch_plan
+       already returns 0. With it off, scratch_plan's SCRATCH_ARGS, SCRATCH_BINDS and manifest are byte-identical to
+       today. So the W1-T6110/W1-T6125 drift check sees no drift and nothing recycles when this merges.
+    2. With it on, scratch_plan adds the daemon's own checkout: $(scratch_root)/rmd/<key>/remudero ->
+       /home/node/Remudero/remudero, ordered like the other nested binds. serve-container.sh's SERVE_REPO_DIR default
+       becomes $(scratch_root)/rmd/<key>/serve-repo. An explicit RMD_SERVE_REPO_DIR still wins, and the existing
+       refusals (symlink, not a dir, equals the daemon checkout) still apply. scratch_prepare records both dirs in the
+       manifest, so scratch_restore re-creates them at docker start.
+    3. COLD BOOT WITH AN EMPTY /mnt/scratch. scratch_restore re-creates the empty dirs. entrypoint.sh's existing
+       clone-when-missing and npm-ci-when-tsx-missing path rebuilds the daemon checkout, and the serve container
+       clones its own. Do NOT edit deploy/entrypoint.sh: it is a baked path, so a merge would ship itself by image
+       build and recycle. A test proves its existing path fills an empty bind. recycle-container.sh's repo-marker
+       refusal must not fire for a state dir whose checkout is a recorded scratch placement that is empty or missing.
+       That is a re-clone. A STATE_DIR with no state/ dir still refuses exactly as today.
+    4. ONE RESOLVER FOR THE LIVE CHECKOUT. Every host consumer of "${STATE_DIR}/remudero" reads the live checkout,
+       never the stale copy left on the data disk: recycle-container.sh (marker and DAEMON_TREE),
+       install-host-units.sh (live-edits, progress watchdog, head checks) and host-update.sh's reclaim default.
+       Either all of them call one scratch-mounts.sh function that resolves it, or a host bind mounts the scratch dir
+       at the same "${STATE_DIR}/remudero" path, which docker's recursive bind carries into the container. The
+       builder picks one and names the other as rejected. While the checkout is empty after a cold boot, a host unit
+       that runs bin/rmd from it skips with a named reason and does not fail.
+    5. CLEANUP NEVER SWEEPS A LIVE CHECKOUT. rmd-host-cleanup.sh protects the scratch checkout dirs the way it
+       protects $CLEAN_HOME/rmd-serve-repo today.
+    6. NOTHING DURABLE MOVES. The state/ dir, ledgers, lanes, plan, .scratch-mounts, recovery/live-edits patches and
+       credentials stay where they are. The old checkouts stay on their disks as the rollback. Turning the switch off
+       and recycling returns every container to today's binds.
+    7. docs/operator-guide.md "Scratch-disk mounts" documents the switch, the cold-boot rebuild, the rollback and
+       the recycle the operator must approve.
+  acceptance:
+    - claim: "with the checkout switch on, the daemon's checkout bind source is under the scratch root"
+      proof: 'grep: test("W1-T9617: with the switch on the daemon checkout mount source is under the scratch root" in test/the-hot-checkouts-live-on-scratch.test.ts'
+    - claim: "with the checkout switch on, serve's code directory defaults under the scratch root and an explicit RMD_SERVE_REPO_DIR still wins"
+      proof: 'grep: test("W1-T9617: with the switch on serve code directory defaults under the scratch root" in test/the-hot-checkouts-live-on-scratch.test.ts'
+    - claim: "with the checkout switch off, the scratch plan's binds and manifest are unchanged, so no mount drift recycles a container on merge"
+      proof: 'grep: test("W1-T9617: with the switch off the scratch plan is unchanged" in test/the-hot-checkouts-live-on-scratch.test.ts'
+    - claim: "a boot with the scratch checkout dir missing re-creates it, the entrypoint clones into the empty bind, and the recycle does not refuse on the repo marker"
+      proof: 'grep: test("W1-T9617: a boot with the scratch checkout missing re-creates it and the recycle does not refuse" in test/the-hot-checkouts-live-on-scratch.test.ts'
+    - claim: "the host units, the reclaim and the cleanup resolve the live checkout on scratch, and the cleanup never sweeps it"
+      proof: 'grep: test("W1-T9617: host consumers resolve the live checkout and the cleanup protects it" in test/the-hot-checkouts-live-on-scratch.test.ts'
+    - claim: "the state dir, ledger and scratch manifest stay on the durable state disk with the switch on"
+      proof: 'grep: test("W1-T9617: the ledger and state files stay on the state disk" in test/the-hot-checkouts-live-on-scratch.test.ts'
+    - claim: "the new suite passes"
+      proof: 'unit test: test/the-hot-checkouts-live-on-scratch.test.ts'
+  falsifier: |
+    Leave scratch_plan's bind list unchanged. The first test's rendered -v list has no
+    <scratch>/rmd/<key>/remudero source, and it fails. Add the bind unconditionally instead, and the third test's
+    switch-off plan differs from today's and fails. Keep recycle-container.sh's STATE_DIR_REPO_MARKER check as it is,
+    and the fourth test's empty-scratch launch refuses and fails. Leave install-host-units.sh on the literal
+    "$STATE_DIR/remudero", and the fifth test's resolved path is the stale data-disk copy and fails.

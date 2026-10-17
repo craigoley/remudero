@@ -2,6 +2,7 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { startLoopStallProfiler, type LoopLagReading, type LoopStallProfiler, type LoopStallProfilerOptions,
   type StallLog } from "./loop-stall-profiler.js";
@@ -20,12 +21,27 @@ export interface SyncSpawnEntry {
   leaf?: string;
   /** True when no frame outside the leaves was on the stack, so `caller` is the leaf itself. */
   caller_is_leaf?: true;
+  /** W1-T9577: for an anonymous `caller`, the named functions that reached it (`callerChain`), so it is named. */
+  caller_chain?: string[];
+}
+
+/** W1-T9577: one caller's share of a window — EVERY sync spawn it made, whatever each one's length. */
+export interface SyncSpawnCallerTotal {
+  caller?: string;
+  caller_chain?: string[];
+  leaf?: string;
+  caller_is_leaf?: true;
+  total_ms: number;
+  calls: number;
 }
 
 /** What one `daemon.loop_lag` row reads about its own interval: the longest spawn and the total sync-spawn time. */
 export interface LagIntervalReading {
   top: SyncSpawnEntry | undefined;
   sync_spawn_ms: number;
+  /** W1-T9577: present once the interval spawned — its callers by total, and the time none of them holds. */
+  by_caller?: SyncSpawnCallerTotal[];
+  unnamed_ms?: number;
 }
 
 export interface ReadPlaneSample {
@@ -33,6 +49,8 @@ export interface ReadPlaneSample {
   loop_delay_p99_ms: number;
   sync_spawn_ms: number;
   sync_spawn_top: SyncSpawnEntry[];
+  sync_spawn_by_caller: SyncSpawnCallerTotal[];
+  sync_spawn_unnamed_ms: number;
 }
 
 /** The sampler is handed to the daemon unbound. Calling it closes the `daemon.alive` window. `takeLagInterval`
@@ -62,21 +80,102 @@ function frameName(line: string): string {
   return (named?.[1] ?? line.trim()).slice(0, 200);
 }
 
+/** W1-T9577: the one frame field the chain reads that the stack text cannot give — the function's OWN name. The
+ *  text prints a nameless function by its call (`Object.value` for git-push's `next.value()`); this prints "". */
+type CallSite = { functionName: string; scriptName: string };
+
+function siteModule(path: string): string {
+  return (path.split(/[/\\]/).pop() ?? "").replace(/\.[cm]?[jt]s$/, "");
+}
+
+/** W1-T9577: an anonymous caller (by its text site), then the named functions outward, deduplicated. A closure
+ *  defined where it runs ends at the first named one. One driven from another module (escalate.ts's gateway
+ *  through git-push's `runStepsSync`) runs on back through its own module to the first named function beyond
+ *  it: the call site. `node:` and builtin frames only forward the call, so neither is ever the name. */
+function callerChain(callerLine: string, sites: readonly CallSite[]): string[] | undefined {
+  const caller = sites[0];
+  if (caller === undefined || caller.functionName !== "") return undefined;
+  const home = caller.scriptName;
+  // Reason: the text and the call sites are two captures; a caller in another module means they disagree.
+  if (siteModule(/\(?([^\s()]+):\d+:\d+\)?\s*$/.exec(callerLine)?.[1] ?? "") !== siteModule(home)) return undefined;
+  const lastHome = sites.findLastIndex((site) => site.scriptName === home);
+  const chain = [`<anonymous>@${/([^/\\\s(]+:\d+):\d+\)?\s*$/.exec(callerLine)?.[1] ?? "?"}`];
+  let left = false;
+  for (const [index, site] of sites.entries()) {
+    if (index === 0 || site.scriptName === "" || site.scriptName.startsWith("node:")) continue;
+    const atHome = site.scriptName === home;
+    left ||= !atHome;
+    if (site.functionName === "") continue;
+    if (chain[chain.length - 1] !== site.functionName) chain.push(site.functionName.slice(0, 120));
+    if (atHome ? !left : index > lastHome) break;
+  }
+  return chain;
+}
+
+/** W1-T9720: this frame's callers as V8's raw call sites. A scoped `Error.prepareStackTrace` hands them over
+ *  unformatted, so Node never applies a source map: with maps on (tsx turns them on), formatting `.stack` parses
+ *  each frame's module map and keeps it for the life of the isolate (+134.5 MiB for 587 maps, W1-T9091). */
+function rawCallSites(): NodeJS.CallSite[] {
+  const prepare = Error.prepareStackTrace;
+  const limit = Error.stackTraceLimit;
+  Error.prepareStackTrace = (_error, sites) => sites;
+  Error.stackTraceLimit = 50;
+  let sites: NodeJS.CallSite[];
+  try { sites = new Error().stack as unknown as NodeJS.CallSite[]; }
+  finally { Error.prepareStackTrace = prepare; Error.stackTraceLimit = limit; }
+  return sites.slice(1); // this helper's own frame: the list begins at callerFrame, as `.stack` did
+}
+
+/** W1-T9720: one call site in the source-mapped formatter's shape (`Object.fn (/abs/path.ts:L:C)`, `<anonymous>`
+ *  for a nameless function) at the position node RUNS, not the TypeScript line: reading a mapped line would parse
+ *  the map. A site with no file (native, `Promise.all`) keeps V8's own text. */
+function siteText(site: NodeJS.CallSite): string {
+  const file = site.getFileName();
+  if (!file) return String(site);
+  const type = site.getTypeName();
+  const name = `${type !== null && type !== "global" ? `${type}.` : ""}${site.getFunctionName() ?? "<anonymous>"}`;
+  const path = file.startsWith("file:") ? fileURLToPath(file) : file;
+  return `${site.isAsync() ? "async " : ""}${site.isConstructor() ? "new " : ""}${name} `
+    + `(${path}:${site.getLineNumber()}:${site.getColumnNumber()})`;
+}
+
 /** The first frame outside read-plane, `node:` and the shared leaves; `leaf` is the OUTERMOST leaf frame, the one
  *  the caller called. With no frame outside the leaves the caller is that leaf and `callerIsLeaf` says so. */
-export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: true } {
-  const limit = Error.stackTraceLimit;
-  Error.stackTraceLimit = 50;
-  let stack: string;
-  try { stack = new Error().stack ?? ""; } finally { Error.stackTraceLimit = limit; }
+export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: true; chain?: string[] } {
+  const raw = rawCallSites();
+  const sites = raw.map((site) => ({ functionName: site.getFunctionName() ?? "", scriptName: site.getFileName() ?? "" }));
   let leafLine: string | undefined;
-  for (const line of stack.split("\n").slice(1)) {
+  const lines = raw.map((site) => `    at ${siteText(site)}`); // W1-T9577: index-aligned with `sites`: one capture
+  for (const [index, line] of lines.entries()) {
     if (/read-plane\.[cm]?[jt]s/.test(line) || /node:/.test(line)) continue;
     if (SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
-    return { caller: line.trim().slice(0, 200), ...(leafLine === undefined ? {} : { leaf: frameName(leafLine) }) };
+    const chain = callerChain(line, sites.slice(index));
+    return { caller: line.trim().slice(0, 200), ...(leafLine === undefined ? {} : { leaf: frameName(leafLine) }),
+      ...(chain === undefined ? {} : { chain }) };
   }
   return leafLine === undefined ? {}
     : { caller: leafLine.trim().slice(0, 200), leaf: frameName(leafLine), callerIsLeaf: true };
+}
+
+/** W1-T9577: a window's spawn time by caller, in a map bounded by the distinct callers that spawned in it. */
+type CallerTotals = Map<string, SyncSpawnCallerTotal>;
+
+/** Longest total first, until the named share reaches what the window holds in whole milliseconds; the cut is the
+ *  window's own total, so no count or minimum drops a caller. Each share is the step of the ROUNDED running sum, so
+ *  the shares never outgrow the rounded window, and what no caller holds is `unnamed_ms`. */
+function namedShare(totals: CallerTotals, windowMs: number): { by_caller: SyncSpawnCallerTotal[]; unnamed_ms: number } {
+  const whole = Math.round(windowMs);
+  const by_caller: SyncSpawnCallerTotal[] = [];
+  let running = 0;
+  let named = 0;
+  for (const total of [...totals.values()].sort((a, b) => b.total_ms - a.total_ms)) {
+    running += total.total_ms;
+    const ms = Math.min(whole, Math.round(running)) - named;
+    if (ms <= 0) break;
+    by_caller.push({ ...total, total_ms: ms });
+    named += ms;
+  }
+  return { by_caller, unnamed_ms: whole - named };
 }
 
 export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?: LoopStallProfilerOptions } = {}): {
@@ -90,10 +189,11 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
   let syncMs = 0;
   let depth = 0;
   let top: SyncSpawnEntry[] = [];
+  let callers: CallerTotals = new Map();
   // One window per lag consumer: what was spawned since its last reading, or since the sampler started for
   // a consumer's first. `sinceStart` is that first reading's window; it is in the set until a consumer claims it.
-  const lagWindows = new Map<string, { ms: number; top: SyncSpawnEntry[] }>();
-  const sinceStart = { ms: 0, top: [] as SyncSpawnEntry[] };
+  const lagWindows = new Map<string, { ms: number; top: SyncSpawnEntry[]; callers: CallerTotals }>();
+  const sinceStart = { ms: 0, top: [] as SyncSpawnEntry[], callers: new Map() as CallerTotals };
   const names = ["execFileSync", "execSync", "spawnSync"] as const;
   const originals = names.map((name) => childProcess[name]);
   const record = (via: string, args: unknown[], durationMs: number): void => {
@@ -104,10 +204,22 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
       const rest = args[1];
       const first = via === "execSync" || !Array.isArray(rest) || rest.length === 0 ? undefined
         : String(rest[0]).slice(0, ARG_MAX_CHARS);
-      const { caller, leaf, callerIsLeaf } = callerFrame();
-      const entry: SyncSpawnEntry = { via, command, duration_ms: Math.round(durationMs), caller };
-      if (leaf !== undefined) entry.leaf = leaf;
-      if (callerIsLeaf) entry.caller_is_leaf = true;
+      const { caller, leaf, callerIsLeaf, chain } = callerFrame();
+      const who: Omit<SyncSpawnCallerTotal, "total_ms" | "calls"> = { caller };
+      if (chain !== undefined) who.caller_chain = chain;
+      if (leaf !== undefined) who.leaf = leaf;
+      if (callerIsLeaf) who.caller_is_leaf = true;
+      if (caller !== undefined) {
+        const key = JSON.stringify([caller, chain, leaf]);
+        for (const totals of [callers, sinceStart.callers, ...[...lagWindows.values()].map((w) => w.callers)]) {
+          const total = totals.get(key) ?? { ...who, total_ms: 0, calls: 0 };
+          total.total_ms += durationMs;
+          total.calls++;
+          totals.set(key, total);
+        }
+      }
+      if (durationMs < SYNC_SPAWN_RECORD_MIN_MS) return;
+      const entry: SyncSpawnEntry = { via, command, duration_ms: Math.round(durationMs), ...who };
       if (first !== undefined) entry.first_arg = first;
       const keep = (list: SyncSpawnEntry[]): SyncSpawnEntry[] =>
         [...list, entry].sort((a, b) => b.duration_ms - a.duration_ms).slice(0, SYNC_SPAWN_TOP_N);
@@ -128,7 +240,7 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
           const took = now() - began;
           syncMs += took;
           for (const window of [sinceStart, ...lagWindows.values()]) window.ms += took;
-          if (took >= SYNC_SPAWN_RECORD_MIN_MS) record(name, args, took);
+          record(name, args, took); // W1-T9577: every spawn reaches the caller totals; `record` gates the top list.
         }
       }
     };
@@ -137,18 +249,21 @@ export function startReadPlaneTelemetry(options: { clock?: Clock; stallProfiler?
   syncBuiltinESMExports();
   let stopped = false;
   const sample = Object.assign((): ReadPlaneSample => {
+    const share = namedShare(callers, syncMs);
     const out: ReadPlaneSample = { loop_delay_max_ms: histogram.max / 1e6,
       loop_delay_p99_ms: histogram.count ? histogram.percentile(99) / 1e6 : 0, sync_spawn_ms: syncMs,
-      sync_spawn_top: top };
+      sync_spawn_top: top, sync_spawn_by_caller: share.by_caller, sync_spawn_unnamed_ms: share.unnamed_ms };
     histogram.reset();
     syncMs = 0;
     top = [];
+    callers = new Map();
     return out;
   }, {
     takeLagInterval: (consumer = ""): LagIntervalReading => {
       const window = lagWindows.get(consumer) ?? sinceStart;
-      lagWindows.set(consumer, { ms: 0, top: [] });
-      return { top: window.top[0], sync_spawn_ms: Math.round(window.ms) };
+      lagWindows.set(consumer, { ms: 0, top: [], callers: new Map() });
+      const reading: LagIntervalReading = { top: window.top[0], sync_spawn_ms: Math.round(window.ms) };
+      return window.ms > 0 ? { ...reading, ...namedShare(window.callers, window.ms) } : reading;
     },
     observeLoopLag: (reading: LoopLagReading, log: StallLog): void => stallProfiler.observe(reading, log),
   });
@@ -190,6 +305,8 @@ export interface ReadGeneration<T> {
   source: "worker" | "inline";
   /** When the read that produced `facts` began, from the plane's injected clock (W1-T5762). */
   publishedAtMs: number;
+  /** W1-T9704: when that read's facts arrived. A served generation is aged from here, so a slow read is not born stale. */
+  settledAtMs?: number;
   facts: T;
 }
 
@@ -213,7 +330,7 @@ export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined,
   ReadGeneration<T> | undefined {
   if (!published) return undefined;
   const maxAgeMs = bound.maxAgeMs ?? TICK_READ_MAX_AGE_MS;
-  const ageMs = (bound.clock ?? systemClock).now() - published.publishedAtMs;
+  const ageMs = (bound.clock ?? systemClock).now() - (published.settledAtMs ?? published.publishedAtMs);
   if (ageMs <= maxAgeMs) return published;
   if (bound.log) {
     let latest = staleRefusals.get(bound.log);
@@ -221,10 +338,49 @@ export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined,
     if (latest.get(bound.consumer) !== published.generation) {
       latest.set(bound.consumer, published.generation);
       bound.log("tick_read.stale_refused", { consumer: bound.consumer, generation: published.generation,
-        age_ms: ageMs, max_age_ms: maxAgeMs });
+        age_ms: ageMs, max_age_ms: maxAgeMs,
+        ...(published.settledAtMs === undefined ? {} : { read_ms: published.settledAtMs - published.publishedAtMs }) });
     }
   }
   return undefined;
+}
+
+/** W1-T9763: what a revisioned read posts: the request, with its plan replaced by that plan's revision. */
+export type RevisionedRequest<I, R> = Omit<I, "plan"> & { planRevision: R };
+
+/**
+ * W1-T9763 — A TICK READ NEVER POSTS ITS PLAN. {@link startReadPlane} structured-clones every request and posts it,
+ * and the worker's answer is cloned back: with the plan in both, one read carried two whole copies (a clone is
+ * 37.7 MiB at 4,112 tasks, W1-T9647's census), and the answer's copy stayed published until the next tick. A plan that
+ * `revisionOf` names is posted as its revision, and the answer gets the caller's own instance back. Any other plan is
+ * posted as before.
+ */
+export function revisionedRead<P extends object, R, I extends { plan: P }, T extends { plan?: P }>(
+  read: (input: I | RevisionedRequest<I, R>) => Promise<ReadGeneration<T>>,
+  revisionOf: (plan: P) => R | undefined,
+): (input: I) => Promise<ReadGeneration<T>> {
+  return async (input) => {
+    const planRevision = revisionOf(input.plan);
+    if (planRevision === undefined) return read(input);
+    const { plan, ...rest } = input;
+    const answered = await read({ ...rest, planRevision });
+    return Object.freeze({ ...answered, facts: Object.freeze({ ...answered.facts, plan }) });
+  };
+}
+
+/** The worker's half of {@link revisionedRead}: a revision resolves to this side's own plan, and the answer never
+ *  carries a plan back. A request that carries its plan is produced as it always was. */
+export function revisionedProducer<P, R, I extends { plan: P }, O extends { plan?: P }>(
+  produce: (input: I) => O | Promise<O>,
+  resolve: (revision: R) => P | Promise<P>,
+): (input: I | RevisionedRequest<I, R>) => Promise<O> {
+  return async (input) => {
+    if (!("planRevision" in input)) return produce(input);
+    const { planRevision, ...rest } = input;
+    const answer = { ...await produce({ ...rest, plan: await resolve(planRevision) } as unknown as I) };
+    delete answer.plan;
+    return answer;
+  };
 }
 
 /** A published generation answers ONE consumer pass. The daemon publishes one only at the top of
@@ -308,13 +464,14 @@ export function startReadPlane<I, O>(options: {
             pending.set(id, { resolve, reject });
             held.postMessage({ generation: id, input: captured });
           });
-          return freezeReadGeneration({ generation: id, source: "worker", publishedAtMs, facts });
+          return freezeReadGeneration({ generation: id, source: "worker", publishedAtMs, settledAtMs: now(), facts });
         } catch (error) {
           pending.delete(id);
           if (stopped) throw error;
           options.log("read_plane.inline", { generation: id, reason: String(error) });
           publishedAtMs = now();
-          return freezeReadGeneration({ generation: id, source: "inline", publishedAtMs, facts: await options.inline(captured) });
+          const facts = await options.inline(captured);
+          return freezeReadGeneration({ generation: id, source: "inline", publishedAtMs, settledAtMs: now(), facts });
         }
       };
       const result = tail.then(run);

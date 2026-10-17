@@ -1,4 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
+import { observeSelectedRegistrySync, selectedRegistryObserverInContext, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
+import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
+import { hostWorktreeGit } from "./worktree-git.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -9,7 +12,7 @@ import fs from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
-import { parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
+import { missingDeclaredPaths, parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask, MINTED_TASK_ID_RE, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
@@ -19,15 +22,16 @@ import { isGhRateLimitError } from "./status.js";
 /** A draft-lint finding: the linter's own `LintViolation`s plus this rung's `draft-parse` finding. Structurally typed
  *  so both flow through one path without widening the linter's closed union. */
 export type DraftLintViolation = RelintViolation;
-import { MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
+import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type RelintViolation } from "./relint.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadEvent, type ThreadEvent, type ThreadEventKind, type ThreadStoreDeps } from "./inbox-thread.js";
 import { inboxKind } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { isHolderStale, reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
+import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
@@ -38,6 +42,8 @@ import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stri
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
+import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
+import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
 
 /**
  * `rmd inbox` — the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110).
@@ -76,6 +82,9 @@ export interface ReframeRecord {
 
 /** One ACTIVE (not-yet-ratified) proposal the inbox tiers. */
 export interface Proposal {
+  /** Explicit mechanical producer purpose; never backfilled from human wording or verify mode. */
+  automaticRetirement?: MechanicalAskPurpose;
+  verificationAsk?: { producer: "verify-human-judge-v1" | "machine-filing-judge-v1"; taskId: string; proposalDigest: string };
   /** e.g. "P25" */
   id: string;
   summary: string;
@@ -308,7 +317,7 @@ export function proposalFromUnderstoodRequest(request: UnderstoodRequest, interp
  *  because board-review.ts imports from this module and the cycle would close. */
 export interface BoardReferentState {
   status: "open" | "merged" | "dead";
-  unhandledEscalations: number;
+  unhandledEscalations?: number;
 }
 
 /** The ONE batched read of every board-review referent's state this pass. A referent id absent from `states` is
@@ -395,6 +404,7 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
   if (!read || read.kind === "unreadable") return { kind: "unreadable" };
   const state = read.states.get(referentId);
   if (!state) return { kind: "unreadable" };
+  if (state.status === "open" && proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === undefined) return { kind: "unreadable" };
   const referentResolved = boardReferentResolved(proposal, state);
   return referentResolved ? { kind: "resolved", referentId } : { kind: "live" };
 }
@@ -404,6 +414,7 @@ function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | unde
 /** The Architect's draft for one proposal: a `plan/tasks.yaml` fragment + the MASTER-PLAN.md ratification stamp line,
  *  cached STATE-SIDE (never committed — `<config.root>/state/inbox-drafts.json`, never a repo path). */
 export interface DraftedCandidate {
+  releaseTaskId?: string;
   proposalId: string;
   /** YAML text of the new task(s), parseable by {@link "./plan.js".loadPlanFromYaml}. */
   fragmentYaml: string;
@@ -752,6 +763,9 @@ export interface PredicateFailure {
 export type InboxState = "ready" | "not_ready" | "deferred_with_trigger" | "ratified" | "drafting" | "retired" | "declined";
 
 export interface InboxClassification {
+  retirement?: InboxRetirementView;
+  needsTriageReason?: string;
+  releaseTaskId?: string;
   proposalId: string;
   state: InboxState;
   /** Empty iff state === "ready". Every failing AND-clause, named — never a bare "not ready". */
@@ -783,6 +797,7 @@ export interface InboxClassification {
 }
 
 export interface ReadinessContext {
+  retirement?: (proposal: Proposal) => InboxRetirementView | { unknown: string } | undefined;
   clock?: Clock;
   /** The CURRENT plan (plan/tasks.yaml on main) the drafted tasks would land into — resolves depends_on ids the
    *  fragment cites that already exist. */
@@ -951,6 +966,7 @@ export interface ThreadEventDraft {
 export const THREAD_EVENT_STEPS: readonly string[] = [
   "ratify.reframed", "panel.proposal_declined", "panel.proposal_restored", "ratify.approved",
   "ratify.approve_refused", "approve.shards_written", "inbox.drafted",
+  "inbox.gardener_retired", "inbox.gardener_restored", "inbox.gardener_outcome",
 ];
 
 /** The tasks a shards path names: `plan/tasks.d/W1-T123-slug.yaml` → `W1-T123`. */
@@ -983,6 +999,14 @@ export function threadEventsForRow(
   const taskId = typeof row.task_id === "string" ? row.task_id : undefined;
   const clip = (value: unknown, fallback: string) => (typeof value === "string" && value.trim() ? value.trim().slice(0, 500) : fallback);
   switch (step) {
+    case "inbox.gardener_retired":
+    case "inbox.gardener_restored":
+    case "inbox.gardener_outcome": {
+      const receipt = inboxDismissalReceipt(row.dismissalAuditReceipt);
+      if (!receipt || receipt.scope.proposalId !== taskId) return [];
+      return draft(taskId!, step === "inbox.gardener_retired" ? "retired" : step === "inbox.gardener_restored" ? "restored" : "retirement_outcome",
+        clip(row.reason, "Inbox lifecycle evidence updated."));
+    }
     case "ratify.reframed":
       return taskId ? draft(taskId, "reframed", clip(row.feedback, "Asked for a different draft.")) : [];
     case "panel.proposal_declined":
@@ -1234,6 +1258,7 @@ export function blockingLintMessages(
   const results = lint(merged, () => filingOpts, fragmentIds);
   const out: string[] = [];
   for (const task of fragmentPlan.tasks) {
+    for (const v of draftMissingPathViolations(task, facts ?? HARNESS_FACTS)) out.push(`${task.id}: [${v.check}] ${v.message}`);
     const baseTask = basePlan.tasks.find((t) => t.id === task.id);
     const violations = filingBlockers(
       results.get(task.id)?.violations ?? [],
@@ -1328,10 +1353,50 @@ export function classifyProposal(
   if (declinedReason !== undefined) {
     return { proposalId: proposal.id, state: "declined", reasons: [], declinedReason };
   }
+  const taskIdForProtection = deriveTaskReferent(proposal.id) ?? mechanicalAskPurpose(proposal)?.taskId;
+  const held = taskIdForProtection === "W1-T216" || (taskIdForProtection && ctx.plan.byId.get(taskIdForProtection)?.dispatch_hold === true);
+  const purpose = mechanicalAskPurpose(proposal), purposeTask = purpose && ctx.plan.byId.get(purpose.taskId);
+  if (proposal.automaticRetirement && !purpose || purpose && (!purposeTask || purpose.taskDigest !== inboxMechanicalTaskDigest(purposeTask)))
+    return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: mechanical producer task facts changed" }], needsTriageReason: "Mechanical purpose no longer matches current task ownership or criteria" };
+  const lifecycle = ctx.retirement?.(proposal);
+  if (held) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: current task dispatch hold requires operator review" }], needsTriageReason: "Current security or dispatch hold preserves this ask for operator review" };
+
+  if (lifecycle && !held) {
+    if ("unknown" in lifecycle) return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: lifecycle evidence unavailable" }], needsTriageReason: lifecycle.unknown };
+    if (lifecycle.state === "retired" && lifecycle.proofKind === "merged-task" &&
+      (!lifecycle.scope.taskId || !ctx.plan.byId.has(lifecycle.scope.taskId) || ctx.depsUnobservable?.(lifecycle.scope.taskId) !== undefined || !ctx.isMerged(ctx.plan.byId.get(lifecycle.scope.taskId)!))) {
+      return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "deps_observable", detail: "needs-triage: current merge credit no longer confirms the retirement" }],
+        needsTriageReason: "The retained retirement is history; current source no longer confirms its proof", retirement: { ...lifecycle, state: "restored_for_review" } };
+    }
+    if (lifecycle.state === "retired") return { proposalId: proposal.id, state: "retired", reasons: [], retiredReason: lifecycle.reason, retirement: lifecycle };
+    return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: restored ask requires operator review" }], needsTriageReason: lifecycle.reason, retirement: lifecycle };
+  }
+  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
+  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
+  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
+  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const verifiedFamily = proposal.verificationAsk?.producer === "verify-human-judge-v1" ? `verify-human:${releasedTaskId}`
+    : proposal.verificationAsk?.producer === "machine-filing-judge-v1" ? `machine-judge:${releasedTaskId}` : undefined;
+  if (!held && releasedTaskId && proposal.verificationAsk?.taskId === releasedTaskId &&
+    proposal.verificationAsk.proposalDigest === inboxMechanicalProposalDigest(proposal) && proposal.id === verifiedFamily && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
+    return {
+      proposalId: proposal.id,
+      state: "retired",
+      reasons: [],
+      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
+    };
+  }
+  const currentTaskReferent = taskIdForProtection ? ctx.plan.byId.get(taskIdForProtection) : undefined;
+  if (currentTaskReferent && ((currentTaskReferent.status === "blocked" && currentTaskReferent.retirement) ||
+    ctx.depsUnobservable?.(currentTaskReferent.id) === undefined && ctx.isMerged(currentTaskReferent)))
+    return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: terminal task facts require an exact reversible ask receipt" }], needsTriageReason: "A task's terminal state alone does not answer an unqualified operator ask; source revalidation is required" };
+  // Typed mechanical asks retire through the reversible journal. Untyped human asks never gain
+  // terminal authority from their ID, changed verification mode, or a related task's merge.
+  const automaticTerminal = !held && !proposal.automaticRetirement && !taskIdForProtection;
   // W1-T2451: RESOLVED is a terminal override — such a proposal has no live referent to be ABOUT. UNREADABLE never
   // short-circuits: it only sets a flag, so a failed read never blocks a READY.
   const referent = resolveBoardReferent(proposal, ctx.boardReferents);
-  if (referent.kind === "resolved") {
+  if (automaticTerminal && referent.kind === "resolved" && proposal.id.startsWith("board-review:")) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1349,7 +1414,7 @@ export function classifyProposal(
   // judgement and needs an operator to reverse it; this restates a live measurement. If the
   // mechanism loses its adopter again, the next scan reports the finding again and the proposal
   // stops being retired on its own — no restore, no re-mint, nothing for anyone to notice.
-  if (proposal.id.startsWith("adoption:") && ctx.adoptionFindingGone?.(proposal.id) === true) {
+  if (automaticTerminal && proposal.id.startsWith("adoption:") && ctx.adoptionFindingGone?.(proposal.id) === true) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1369,7 +1434,7 @@ export function classifyProposal(
   // other terminal overrides, and gated on the successor being genuinely open — `openProposalIds`
   // is every registry id, so a DECLINED successor must not retire the finding it was meant to carry.
   const successor = supersedingProposalId(proposal.id);
-  if (successor !== undefined && ctx.openProposalIds.has(successor) && ctx.isDeclined?.(successor) === undefined) {
+  if (automaticTerminal && successor !== undefined && ctx.openProposalIds.has(successor) && ctx.isDeclined?.(successor) === undefined) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1382,7 +1447,7 @@ export function classifyProposal(
   }
   const taskAskId = deriveTaskReferent(proposal.id);
   const taskAsk = taskAskId ? ctx.plan.byId.get(taskAskId) : undefined;
-  if (taskAsk?.status === "blocked" && taskAsk.retirement) {
+  if (automaticTerminal && taskAsk?.status === "blocked" && taskAsk.retirement) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1392,21 +1457,8 @@ export function classifyProposal(
   }
   // A risk-judge escalation is not cleared by verify: auto alone: only the exact
   // task's explicit retirement or authoritative merge credit resolves that ask.
-  const humanTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
-  const humanTask = humanTaskId ? ctx.plan.byId.get(humanTaskId) : undefined;
-  // A current plan task that no longer requires human verification makes its old
-  // verify-human proposal obsolete. Derive this only from a present, unheld task:
-  // missing plan evidence or an explicit hold must leave the ask visible.
-  if (humanTask?.verify === "auto" && humanTask.dispatch_hold !== true) {
-    return {
-      proposalId: proposal.id,
-      state: "retired",
-      reasons: [],
-      retiredReason: `${proposal.id}'s current plan task ${humanTaskId} is verify: auto without a dispatch hold; its prior operator ask remains in history`,
-    };
-  }
   const mergedTaskReferent = taskReferentMerged(proposal, ctx);
-  if (mergedTaskReferent !== undefined) {
+  if (automaticTerminal && mergedTaskReferent !== undefined) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1415,18 +1467,6 @@ export function classifyProposal(
         `${proposal.id}'s task ${mergedTaskReferent} has merged, so this proposal is about finished ` +
         `work and can never render READY again; it stays in the registry as a record of the finding, ` +
         `never deleted`,
-    };
-  }
-  // A release moves this parked task to the fleet BEFORE it merges, so its ask (a machine-judge ask
-  // requests exactly this `rmd approve <task>`) is now history. Never apply this to another proposal
-  // kind (proof-debt, verify-human-automate) or to an id the current plan does not hold.
-  const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
-  if (releasedTaskId && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
-    return {
-      proposalId: proposal.id,
-      state: "retired",
-      reasons: [],
-      retiredReason: `${proposal.id}'s task ${releasedTaskId} was released to the fleet; its prior operator ask remains in history`,
     };
   }
   const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};
@@ -1472,6 +1512,21 @@ export function classifyProposal(
 
   const draftStale = isDraftStale(draft, proposal.evidenceAnchors);
 
+  if (draft.releaseTaskId !== undefined) {
+    const task = ctx.plan.byId.get(draft.releaseTaskId);
+    const valid = parkedProposalTaskId(proposal.id) === draft.releaseTaskId && isReleasableTask(task);
+    if (!valid) reasons.push({ predicate: "lint_clean", detail: "draft-unclean: RELEASE must name this proposal's parked task" });
+    if (draftStale || proposal.evidenceAnchors.some((a) => !ctx.grepAnchorTrue(a))) {
+      reasons.push({ predicate: "evidence_anchors", detail: "evidence-drifted: release draft anchors are stale" });
+    }
+    if ((proposal.conflictsWith ?? []).some((id) => ctx.openProposalIds.has(id))) {
+      reasons.push({ predicate: "no_conflict", detail: "conflict: release proposal conflicts with another open proposal" });
+    }
+    return reasons.length > 0
+      ? { proposalId: proposal.id, state: "not_ready", reasons, draftStale, ...referentUnverified }
+      : { proposalId: proposal.id, state: "ready", reasons, releaseTaskId: draft.releaseTaskId, proposal, ...referentUnverified };
+  }
+
   const verdict = fragmentVerdict(ctx.fragmentMemo, ctx.plan, draft.fragmentYaml, proposal.id);
   const fragment = verdict.parsed;
   if ("error" in fragment) {
@@ -1492,9 +1547,13 @@ export function classifyProposal(
         detail: `deps-unobservable: ${detail} — GitHub could not be read, this is not a claim that it is unmerged`,
       });
     }
-    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan, lintPlan, ctx.draftRepoFacts ?? HARNESS_FACTS);
+    const repoFacts = ctx.draftRepoFacts ?? HARNESS_FACTS;
+    verdict.blocking ??= blockingLintMessages(ctx.plan, fragment.plan, lintPlan, repoFacts)
+      .filter((message) => !message.includes("[draft-path-missing]"));
     const blocking = [
       ...verdict.blocking,
+      ...fragment.plan.tasks.flatMap((task) => draftMissingPathViolations(task, repoFacts)
+        .map((v) => `${task.id}: [${v.check}] ${v.message}`)),
       ...stampLineViolations(proposal.id, draft.stampLine, fragment.plan.tasks.map((t) => t.id)).map((v) => `stamp: ${v.message}`),
     ];
     if (blocking.length > 0) {
@@ -1627,6 +1686,7 @@ export function inboxDraftExampleFragmentYaml(): string {
 }
 
 export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
+  const parked = parkedProposalTask(proposal.id, currentPlanText);
   // W1-T194: retraction is STRUCTURAL — a retracted round is omitted entirely, never summarised. Numbering stays
   // POSITIONAL against the FULL history, so "round N" always means the same round.
   const history = proposal.reframeHistory ?? [];
@@ -1659,6 +1719,10 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     proposal.summary,
     "",
     ...feedbackBlock,
+    ...(parked ? ["=== EXISTING PARKED SHARD ===", stringifyYaml({ title: parked.title, files: parked.files, acceptance: parked.acceptance }),
+      "First check whether releasing this shard as it stands satisfies the proposal and every reframe round.",
+      `Whenever the reframe rounds do not ask for different work, print RELEASE: ${parked.id} instead of a FRAGMENT.`,
+      "A RELEASE files no new task. Do not rewrite this shard as invented new tasks.", ""] : []),
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; an",
     "INDEX of the current plan/tasks.yaml is pasted below so you cite REAL existing task ids in",
@@ -1688,6 +1752,9 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "The harness supplies the proposal id, UTC date and fragment task ids for MASTER-PLAN.md's stamp.",
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
+    "Every files: path must exist in this checkout or origin/main: confirm with Glob before listing it.",
+    "A new file is either test/<task-title-slug>.test.ts or declared in design on its own CREATES: <path> line.",
+    "A CREATES path is new-file scope only, never the call site of a call-site proof. Every proof must fail on main.",
     'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
     "(no ```yaml or ``` line before or after it); the harness parses the fragment as YAML",
@@ -1723,11 +1790,13 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
 }
 
 export interface ParsedDraft {
+  releaseTaskId?: string;
   fragmentYaml: string;
   stampLine: string;
 }
 
 function composeDraftStamp(proposalId: string, draft: ParsedDraft, clock?: Clock): ParsedDraft {
+  if (draft.releaseTaskId !== undefined) return draft;
   const fragmentYaml = queueDraftedBlockedTasks(draft.fragmentYaml);
   const fragment = safeParseFragment(fragmentYaml, proposalId);
   const ids = "error" in fragment ? [] : fragment.plan.tasks.map((task) => task.id);
@@ -1813,10 +1882,31 @@ export function describeDraftParseFailure(text: string): DraftParseFailure {
   return { fragments, stamps, outputChars, ...(reason === undefined ? {} : { reason }) };
 }
 
-/** Extract the worker's FRAGMENT and STAMP off its concatenated output. LAST-marker-wins, like `parseTriageVerdict`.
- *  `null` when either marker is missing — a malformed draft is never silently treated as a candidate. The fragment
- *  runs through {@link stripMarkdownFence} first; a malformed fence throws, which {@link runDraftRung} isolates. */
-export function parseDraftedCandidate(text: string): ParsedDraft | null {
+function parkedProposalTaskId(proposalId: string): string | undefined {
+  return /^(?:machine-judge|verify-human|verify-human-automate):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposalId)?.[1];
+}
+
+function isReleasableTask(task: { verify?: unknown; status?: unknown; dispatch_hold?: unknown } | undefined): boolean {
+  return task?.verify === "human" && task.status === "queued" && task.dispatch_hold !== true;
+}
+
+function parkedProposalTask(proposalId: string, planText: string): Record<string, unknown> | undefined {
+  const id = parkedProposalTaskId(proposalId);
+  if (!id) return undefined;
+  const rows: unknown = parseYaml(planText);
+  if (!Array.isArray(rows)) return undefined;
+  const task = rows.find((row) => row?.id === id);
+  return isReleasableTask(task) ? task : undefined;
+}
+
+/** Parse a validated RELEASE or the last FRAGMENT/STAMP pair; malformed fences throw into the rung's isolation. */
+export function parseDraftedCandidate(text: string, proposal?: Proposal, currentPlanText?: string): ParsedDraft | null {
+  const releases = [...text.matchAll(/^RELEASE:[ \t]*([^\s]+)[ \t]*\r?$/gm)];
+  if (releases.length > 0) {
+    const task = proposal && currentPlanText ? parkedProposalTask(proposal.id, currentPlanText) : undefined;
+    if (releases.length !== 1 || task?.id !== releases[0][1] || /=== FRAGMENT(?: JSON)? START ===/.test(text)) return null;
+    return { releaseTaskId: releases[0][1], fragmentYaml: "", stampLine: "" };
+  }
   const stamps = [...text.matchAll(STAMP_RE)];
   // W1-T4864: a STRUCTURED fragment wins over a YAML one — its YAML is the harness's, so it cannot fail to parse.
   const structured = [...text.matchAll(new RegExp(FRAGMENT_JSON_RE, "g"))];
@@ -1950,6 +2040,7 @@ export interface DraftSpawnContext {
 }
 
 export interface DraftRungDeps {
+  repoFacts?: DraftRepoFacts;
   clock?: Clock;
   spawn: DraftSpawn;
   /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
@@ -1974,7 +2065,8 @@ export const MAX_DRAFT_LINT_ATTEMPTS = MAX_RELINT_ATTEMPTS;
 
 /** W1-T4700: the names a task's `repo:` may carry — every fleet-registry instance, the managed set, and `none`
  *  (status.ts's no-repo sentinel). `undefined` on an unreadable registry, which leaves the repo rule silent. */
-export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefined {
+export function knownPlanRepos(repoRoot: string, observer: SelectedRegistryObserver | undefined = selectedRegistryObserverInContext()): ReadonlySet<string> | undefined {
+  return observeSelectedRegistrySync(observer, "inbox-discovery", { instanceName: undefined }, () => {
   const text = readInstanceRegistryText(repoRoot);
   if (text === undefined) return undefined;
   try {
@@ -1984,6 +2076,7 @@ export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefine
     // Deliberate skip: a malformed registry or managed-repos file names no repos, so the rule refuses none.
     return undefined;
   }
+  });
 }
 
 const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -2006,9 +2099,10 @@ function draftPlaceholderViolations(
     }
   }
   const aimedElsewhere = task.repo !== undefined && task.repo !== "none" && task.repo !== "remudero"; // W1-T5890: top dir, this repo only
+  const creates = draftCreatedPaths(task);
   for (const path of aimedElsewhere ? [] : task.files ?? []) {
     const directory = path.includes("/") ? path.split("/")[0] : ".";
-    if (directory !== "." && directory !== "" && !directoryExists(directory)) {
+    if (directory !== "." && directory !== "" && !directoryExists(directory) && !creates.has(path)) {
       block("draft-missing-directory", `files entry ${JSON.stringify(path)} names a nonexistent directory ${JSON.stringify(directory)}`);
     }
   }
@@ -2053,12 +2147,18 @@ export const DRAFT_FILING_LINT_OPTIONS = Object.freeze({
 
 /** W1-T9039: what `lint-plan --base` reads off the checkout a task lands in. */
 export interface DraftRepoFacts {
+  pathIsDirectory?: (repoRelPath: string) => boolean;
+  pathExistsAtBase?: (repoRelPath: string) => boolean;
   moduleExists: (repoRelPath: string) => boolean;
   readGrepProofFile: (repoRelPath: string) => string | undefined;
 }
 
 export function checkoutRepoFacts(root: string): DraftRepoFacts {
   return {
+    pathIsDirectory: (path) => fs.statSync(resolvePath(root, path), { throwIfNoEntry: false })?.isDirectory() === true,
+    pathExistsAtBase: (path) => fs.existsSync(resolvePath(root, ".git")) &&
+      hostWorktreeGit(root, ["ls-tree", "-z", "--name-only", "origin/main", "--", path])
+      .split("\0").includes(path),
     moduleExists: (path) => fs.existsSync(resolvePath(root, path)),
     readGrepProofFile: (path) => {
       try {
@@ -2072,9 +2172,41 @@ export function checkoutRepoFacts(root: string): DraftRepoFacts {
 
 const HARNESS_FACTS = checkoutRepoFacts(HARNESS_ROOT);
 
+function draftCreatedPaths(task: import("./plan.js").Task): Set<string> {
+  return new Set([...task.design?.matchAll(/^[ \t]*CREATES:[ \t]*(\S+)[ \t]*$/gm) ?? []].map((m) => m[1]));
+}
+
+function draftMissingPathViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
+  const slug = kebabSlug(task.title, SHARD_SLUG_MAX_LEN).replace(/-+$/, "");
+  const creates = draftCreatedPaths(task);
+  const missing = missingDeclaredPaths(task, { pathExists: facts.moduleExists, pathExistsAtBase: facts.pathExistsAtBase },
+    (path) => path === `test/${slug}.test.ts` || creates.has(path));
+  return missing.map((path) => ({ check: "draft-path-missing", severity: "block",
+    message: `${task.id}: files path ${JSON.stringify(path)} exists in neither the checkout nor origin/main; use an existing path, a slug-named test, or a CREATES: declaration` }));
+}
+
+/** W1-T9307: a call-site-shaped proof (`grep: <sym>( in src/<x>.ts`) must name a caller the tree HOLDS. A path absent from
+ *  the checkout, or declared on a `CREATES:` line, is a module under test and never evidence the program reaches it. */
+function draftCallSiteAbsentViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
+  const creates = draftCreatedPaths(task);
+  const out: DraftLintViolation[] = [];
+  for (const criterion of task.acceptance ?? []) {
+    const m = /^grep:\s*(.+?)\s+in\s+(\S+)\s*$/i.exec(String(criterion.proof ?? "").trim());
+    if (!m || !m[1].includes("(")) continue;
+    const path = m[2];
+    if (!path.startsWith("src/") || !path.endsWith(".ts") || path.includes("*")) continue;
+    const created = creates.has(path);
+    if (!created && facts.moduleExists(path)) continue;
+    out.push({ check: "draft-call-site-absent", severity: "block",
+      message: `${task.id}: call-site proof ${JSON.stringify(criterion.proof)} names ${JSON.stringify(path)}, which ${created ? "is declared on a CREATES: line" : "the tree does not hold"}; a new file is never the caller. Name an existing src file that already calls the symbol, or drop the claim — never invent a caller file or add one to files:` });
+  }
+  return out;
+}
+
 /** W1-T9039: every floor lints a drafted task as the push floor lints a task its diff adds. */
 export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: ReadonlySet<string>): LintOpts {
-  return { ...DRAFT_FILING_LINT_OPTIONS, blockedDisposition: { baseTask: undefined }, baseAcceptance: [], ...facts, knownRepos };
+  return { ...DRAFT_FILING_LINT_OPTIONS, blockedDisposition: { baseTask: undefined }, baseAcceptance: [],
+    moduleExists: facts.moduleExists, readGrepProofFile: facts.readGrepProofFile, knownRepos };
 }
 
 /** W1-T9039: a drafted `status: blocked` with no legal retirement is the plan index copied, so the harness queues it. */
@@ -2103,6 +2235,8 @@ export function lintDraftedFragment(
   readGrepProofFile: DraftRepoFacts["readGrepProofFile"] = HARNESS_FACTS.readGrepProofFile,
   pathIsDirectory: (path: string) => boolean = (path) =>
     fs.statSync(resolvePath(HARNESS_ROOT, path), { throwIfNoEntry: false })?.isDirectory() === true,
+  pathExistsAtBase: (path: string) => boolean = pathExists === HARNESS_FACTS.moduleExists
+    ? HARNESS_FACTS.pathExistsAtBase! : () => false,
 ): DraftLintViolation[] {
   let tasks;
   try {
@@ -2115,6 +2249,8 @@ export function lintDraftedFragment(
   const directory = (path: string): boolean => path.endsWith("/") || pathIsDirectory(path);
   const directoryGuidance = "; name the files the task changes, never a directory";
   for (const task of tasks) {
+    violations.push(...draftMissingPathViolations(task, { moduleExists: pathExists, readGrepProofFile, pathExistsAtBase }));
+    violations.push(...draftCallSiteAbsentViolations(task, { moduleExists: pathExists, readGrepProofFile, pathExistsAtBase }));
     violations.push(...filingBlockers(lintTask(task, opts).violations, undefined, true));
     violations.push(...draftPlaceholderViolations(task, pathExists));
     violations.push(...draftAbsenceProofViolations(task));
@@ -2138,9 +2274,38 @@ export function lintDraftedFragment(
   return violations;
 }
 
+/** W1-T9307: for every `[call-site]` violation, the callers the TREE holds (via {@link callSiteCandidates}), so the drafter
+ *  — which cannot see the tree — picks a real path or drops the claim. Empty when no call-site violation fired. */
+function draftCallSiteCandidateLines(fragmentYaml: string, violations: DraftLintViolation[], root: string): string[] {
+  const lines: string[] = [];
+  let declared: ReadonlyMap<string, string[]> = new Map();
+  try {
+    declared = new Map(parseTasksFromYaml(fragmentYaml, "inbox relint").map((t) => [t.id, t.files ?? []]));
+  } catch {
+    declared = new Map(); // an unparseable fragment is draft-parse's finding; no declared files to offer
+  }
+  for (const v of violations) {
+    if (v.check !== "call-site") continue;
+    const taskId = /^task (\S+) adds /.exec(v.message)?.[1];
+    for (const m of v.message.matchAll(/new exported value (\S+) in (\S+?)(?:,|\s+but\b)/g)) {
+      const found = callSiteCandidates(root, m[1], { exclude: m[2] });
+      lines.push(found.length > 0
+        ? `Existing src files that already call ${m[1]}( — name ONE of these in the call-site proof: ${found.join(", ")}`
+        : `No existing src file calls ${m[1]}( — remove the claim (and the src path from files: if the task adds no src module); do NOT invent a caller file.`);
+    }
+    for (const m of v.message.matchAll(/new module (\S+?)(?:,|\s+but\b)/g)) {
+      const found = callSiteCandidates(root, undefined, { exclude: m[1], declared: taskId ? declared.get(taskId) : undefined });
+      lines.push(found.length > 0
+        ? `Existing declared src files you may name as the caller of ${m[1]}: ${found.join(", ")}`
+        : `No existing src file is declared that could call ${m[1]} — drop the call-site claim and remove ${m[1]} from files: if the task adds no src module; do NOT invent a caller file.`);
+    }
+  }
+  return lines.length > 0 ? [...lines, ""] : [];
+}
+
 /** The redraft prompt: the failed fragment + its violations + the Rule-19 resolution doctrine (the #588 merits test),
  *  so the Architect fixes the SPECIFIC failures rather than re-rolling. */
-export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[]): string {
+export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string, violations: DraftLintViolation[], root: string = HARNESS_ROOT): string {
   return [
     `Your drafted plan fragment for ${proposal.id} FAILED the plan's own linter (rmd lint-plan) and CANNOT be cached as-is. Fix EVERY blocking violation below, then re-emit the COMPLETE corrected fragment + one-line summary between the SAME literal markers as before:`,
     "",
@@ -2156,6 +2321,7 @@ export function inboxDraftRelintPrompt(proposal: Proposal, fragmentYaml: string,
     "",
     ...relintGuidanceLines(violations),
     "",
+    ...draftCallSiteCandidateLines(fragmentYaml, violations, root),
     "The fragment you must fix:",
     fragmentYaml,
   ].join("\n");
@@ -2206,23 +2372,24 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           subtype: worker.subtype,
           ...workerLedgerFields(worker),
         });
-        parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+        parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"), proposal, currentPlanText);
         if (!parsed) break; // no markers — nothing to lint or usefully retry (handled below)
         parsed = composeDraftStamp(proposal.id, parsed, deps.clock);
-        violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine);
+        violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
+          undefined, deps.repoFacts?.moduleExists, deps.repoFacts?.readGrepProofFile, deps.repoFacts?.pathIsDirectory, deps.repoFacts?.pathExistsAtBase);
         if (violations.length === 0) break; // lint-clean — cache it
         if (attempt < MAX_DRAFT_LINT_ATTEMPTS) {
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
           const from = draftWorkerModel(worker);
           if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
           dirty = { from, violations: violations.map((v) => v.message) };
-          prompt = inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations);
+          prompt = `${inboxDraftPrompt(proposal, currentPlanText, runId)}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`;
         }
       }
       if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
         const reason = parsed ? "dirty-lint" : "fragment-contract";
         const escalationPrompt = parsed
-          ? inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)
+          ? `${prompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
           : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
         try {
           const escalated = await deps.escalate(proposal, escalationPrompt);
@@ -2241,10 +2408,11 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               subtype: escalated.subtype,
               ...workerLedgerFields(escalated),
             });
-            const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"));
+            const candidate = parseDraftedCandidate([escalated.text, escalated.blocks.join("\n")].join("\n"), proposal, currentPlanText);
             if (candidate) {
               parsed = composeDraftStamp(proposal.id, candidate, deps.clock);
-              violations = lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine);
+              violations = parsed.releaseTaskId ? [] : lintDraftedFragment(parsed.fragmentYaml, proposal.id, parsed.stampLine,
+                undefined, deps.repoFacts?.moduleExists, deps.repoFacts?.readGrepProofFile, deps.repoFacts?.pathIsDirectory, deps.repoFacts?.pathExistsAtBase);
             }
           }
         } catch (error) {
@@ -2285,6 +2453,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         };
       }
       const candidate: DraftedCandidate = {
+        ...(parsed.releaseTaskId ? { releaseTaskId: parsed.releaseTaskId } : {}),
         proposalId: proposal.id,
         fragmentYaml: parsed.fragmentYaml,
         stampLine: parsed.stampLine,
@@ -2385,24 +2554,19 @@ export function gitGrepAnchorTrueAsync(
       ? [...new Set(pass.anchors.filter((a) => (a.path || null) === (anchor.path || null) && batchableAnchor(a)).map((a) => a.pattern))]
       : [anchor.pattern];
     const args = ["grep", "-I", ...(grouped ? ["--no-color", "--no-line-number", "--no-column", "--no-heading", "--no-break", "-h"] : ["-q"]), ...patterns.flatMap((pattern) => ["-e", pattern]), ref, ...(anchor.path ? ["--", anchor.path] : [])];
-    let timedOut = false;
     let done = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let bound: LoopBound | undefined;
     const child = run("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
       done = true;
-      clearTimeout(timer);
-      if (timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
+      bound?.cancel();
+      if (bound?.timedOut) return reject(new AnchorGrepTimeoutError(anchor, timeoutMs));
       if (!err) return resolve(grouped ? stdout : "matched");
       // execFile's error carries the exit code as `code` (a number); a spawn failure carries a string code.
       if ((err as { code?: unknown }).code === 1) return resolve("");
       reject(err);
     });
     if (done) return;
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killAfterGrace(child);
-    }, timeoutMs);
+    bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: GIT_FETCH_KILL_GRACE_MS });
   });
   if (grouped && pending === undefined) batches!.set(groupKey, result);
   return result.then(
@@ -2581,6 +2745,8 @@ export function renderInbox(classifications: InboxClassification[]): string {
     if (c.draft) {
       lines.push(`  stamp: ${c.draft.stampLine}`);
       lines.push(`  drafted tasks:\n${c.draft.fragmentYaml.replace(/^/gm, "    ")}`);
+    } else if (c.releaseTaskId) {
+      lines.push(`  release: ${c.releaseTaskId} (existing parked shard)`);
     } else {
       lines.push(`  draft: not cached`);
     }
@@ -2729,29 +2895,152 @@ function listProposalShardFiles(shardDir: string): string[] {
   return entries.filter((f) => f.endsWith(".json")).sort();
 }
 
-/** Parse every shard, keyed by each file's OWN declared `id`, never the filename. Two files declaring the SAME id is
- *  refused loud, mirroring plan.ts's duplicate-task-id guard. */
-function readProposalShards(shardDir: string): Map<string, { proposal: Proposal; path: string }> {
-  const out = new Map<string, { proposal: Proposal; path: string }>();
-  for (const file of listProposalShardFiles(shardDir)) {
-    const shardPath = join(shardDir, file);
-    let raw: unknown;
-    try {
-      raw = JSON.parse(fs.readFileSync(shardPath, "utf8"));
-    } catch (err) {
-      throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
-    }
-    const proposal = raw as Proposal;
-    if (typeof proposal?.id !== "string" || proposal.id.length === 0) {
-      throw new Error(`proposal shard (${shardPath}) has no valid 'id' field`);
-    }
-    const existing = out.get(proposal.id);
+/** Every shard, read synchronously (CLI callers); the daemon reads through {@link createProposalShardReader}. */
+function readProposalShards(shardDir: string): Map<string, ProposalShardEntry> {
+  return indexProposalShards(
+    listProposalShardFiles(shardDir).map((file) => {
+      const shardPath = join(shardDir, file);
+      let text: string;
+      try {
+        text = fs.readFileSync(shardPath, "utf8");
+      } catch (err) {
+        throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+      }
+      return parseProposalShard(shardPath, text);
+    }),
+  );
+}
+
+/** One parsed shard; `text` lets a registry write skip an unchanged shard (W1-T9443). */
+export interface ProposalShardEntry {
+  proposal: Proposal;
+  path: string;
+  text: string;
+}
+
+function parseProposalShard(shardPath: string, text: string): ProposalShardEntry {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+  }
+  const proposal = raw as Proposal;
+  if (typeof proposal?.id !== "string" || proposal.id.length === 0) {
+    throw new Error(`proposal shard (${shardPath}) has no valid 'id' field`);
+  }
+  return { proposal, path: shardPath, text };
+}
+
+/** Key shards by each file's OWN `id`; two files with one id are refused, as plan.ts refuses duplicate task ids. */
+function indexProposalShards(entries: readonly ProposalShardEntry[]): Map<string, ProposalShardEntry> {
+  const out = new Map<string, ProposalShardEntry>();
+  for (const entry of entries) {
+    const existing = out.get(entry.proposal.id);
     if (existing) {
-      throw new Error(`duplicate proposal id '${proposal.id}' (shard ${shardPath} collides with ${existing.path})`);
+      throw new Error(`duplicate proposal id '${entry.proposal.id}' (shard ${entry.path} collides with ${existing.path})`);
     }
-    out.set(proposal.id, { proposal, path: shardPath });
+    out.set(entry.proposal.id, entry);
   }
   return out;
+}
+
+export interface ProposalShardReaderFs {
+  readdir(dir: string): Promise<string[]>;
+  stat(path: string): Promise<{ ino: bigint; size: bigint; mtimeNs: bigint }>;
+  readFile(path: string): Promise<string>;
+}
+
+const realProposalShardReaderFs: ProposalShardReaderFs = {
+  readdir: (dir) => fs.promises.readdir(dir),
+  stat: async (path) => {
+    const s = await fs.promises.stat(path, { bigint: true });
+    return { ino: s.ino, size: s.size, mtimeNs: s.mtimeNs };
+  },
+  readFile: (path) => fs.promises.readFile(path, "utf8"),
+};
+
+export interface ProposalShardRefreshCounts {
+  files: number;
+  read: number;
+  unchanged: number;
+  removed: number;
+  ms: number;
+}
+
+export interface ProposalShardReader {
+  refresh(): Promise<Map<string, ProposalShardEntry>>;
+}
+
+const isEnoent = (err: unknown): boolean => (err as NodeJS.ErrnoException)?.code === "ENOENT";
+
+/**
+ * W1-T9443: {@link readProposalShards}' population and refusals, held for a daemon's life: `refresh()` re-reads only a file whose
+ * (inode, size, mtime ns) moved. Writers land shards by rename, so a rewrite always moves the inode. A file unlinked
+ * mid-refresh is gone; a refused refresh keeps the last good memo.
+ */
+export function createProposalShardReader(
+  shardDir: string,
+  io: { fs?: ProposalShardReaderFs; log?: (step: string, extra?: Record<string, unknown>) => void; clock?: Clock } = {},
+): ProposalShardReader {
+  const seam = io.fs ?? realProposalShardReaderFs;
+  const clock = io.clock ?? systemClock;
+  let memo = new Map<string, { digest: string; entry: ProposalShardEntry }>();
+  const width = Math.max(1, Number(process.env.UV_THREADPOOL_SIZE) || 4);
+  return {
+    async refresh() {
+      const started = clock.now();
+      let names: string[];
+      try {
+        names = (await seam.readdir(shardDir)).filter((f) => f.endsWith(".json")).sort();
+      } catch (err) {
+        if (!isEnoent(err)) throw new Error(`cannot read proposal shard directory (${shardDir}): ${String(err)}`);
+        names = [];
+      }
+      const next = new Map<string, { digest: string; entry: ProposalShardEntry }>();
+      const results: Array<{ digest: string; entry: ProposalShardEntry } | undefined> = new Array(names.length);
+      let read = 0;
+      let cursor = 0;
+      let failed = false;
+      const work = async (): Promise<void> => {
+        while (!failed && cursor < names.length) {
+          const i = cursor++;
+          const shardPath = join(shardDir, names[i]!);
+          try {
+            const s = await seam.stat(shardPath);
+            const digest = `${s.ino}:${s.size}:${s.mtimeNs}`;
+            const prior = memo.get(shardPath);
+            if (prior && prior.digest === digest) {
+              results[i] = prior;
+              continue;
+            }
+            let text: string;
+            try {
+              text = await seam.readFile(shardPath);
+            } catch (err) {
+              if (isEnoent(err)) throw err;
+              throw new Error(`cannot read proposal shard (${shardPath}): ${String(err)}`);
+            }
+            read++;
+            results[i] = { digest, entry: parseProposalShard(shardPath, text) };
+          } catch (err) {
+            if (!isEnoent(err)) {
+              failed = true;
+              throw err;
+            }
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(width, names.length) }, work));
+      for (const r of results) if (r) next.set(r.entry.path, r);
+      const population = indexProposalShards([...next.values()].map((r) => r.entry));
+      const removed = [...memo.keys()].filter((path) => !next.has(path)).length;
+      memo = next;
+      const counts: ProposalShardRefreshCounts = { files: next.size, read, unchanged: next.size - read, removed, ms: clock.now() - started };
+      io.log?.("proposal_shards.refreshed", { ...counts });
+      return population;
+    },
+  };
 }
 
 /** Load `registryPath` merged with the sibling `inbox-proposals.d/` shards as ONE population, with the same signature
@@ -2879,6 +3168,15 @@ export function updateProposalRegistry(
 
     const next = update(current);
     if (next === null) return null;
+    for (const p of next) {
+      const prior = current.find(before => before.id === p.id)?.automaticRetirement;
+      if (p.automaticRetirement && JSON.stringify(p.automaticRetirement) !== JSON.stringify(prior) &&
+        (!isMechanicalProducerObject(p) || !mechanicalAskPurpose(p)))
+        throw new Error("mechanical retirement purpose requires the maintained proof-audit producer");
+      const oldVerification = current.find(before => before.id === p.id)?.verificationAsk;
+      if (p.verificationAsk && JSON.stringify(p.verificationAsk) !== JSON.stringify(oldVerification) && !isVerificationProducerObject(p))
+        throw new Error("verification ask purpose requires the maintained verification producer");
+    }
     const currentIds = new Set(current.map((p) => p.id));
     const nextIds = new Set(next.map((p) => p.id));
 
@@ -2897,14 +3195,17 @@ export function updateProposalRegistry(
     // A `next` proposal that is NEW, or already had a shard mirror, gets its OWN file atomically — MIRRORED alongside
     // the blob write below, never instead of it, so every existing reader keeps seeing the same population. Promoting
     // an UNTOUCHED legacy entry is a migration, not a side effect of an unrelated write.
+    // W1-T9443: an unchanged shard is left alone, so the digest reader re-reads only what an update moved.
     for (const proposal of next) {
       const isNew = !currentIds.has(proposal.id);
-      const hadShard = shards.has(proposal.id);
-      if (isNew || hadShard) {
-        fs.mkdirSync(shardDir, { recursive: true });
+      const prior = shards.get(proposal.id);
+      if (isNew || prior) {
+        const text = JSON.stringify(proposal, null, 2);
         const shardPath = proposalShardPath(registryPath, proposal.id);
+        if (prior && prior.path === shardPath && prior.text === text) continue;
+        fs.mkdirSync(shardDir, { recursive: true });
         const tmpShardPath = `${shardPath}.tmp-${process.pid}-${Date.now()}`;
-        fs.writeFileSync(tmpShardPath, JSON.stringify(proposal, null, 2), "utf8");
+        fs.writeFileSync(tmpShardPath, text, "utf8");
         fs.renameSync(tmpShardPath, shardPath);
       }
     }
@@ -2967,6 +3268,94 @@ export function pruneOrphanedDrafts(draftsPath: string, registryPath: string): {
     return null; // the registry itself is never rewritten here
   });
   return result;
+}
+
+async function readFileIfExistsAsync(path: string): Promise<string | undefined> {
+  try {
+    return await fs.promises.readFile(path, "utf8");
+  } catch (err) {
+    if (isEnoent(err)) return undefined;
+    throw err;
+  }
+}
+
+/** {@link updateProposalRegistry}'s lock, awaiting between polls; resolves to its release. */
+async function acquireProposalRegistryLockAsync(registryPath: string, opts: UpdateProposalRegistryOpts = {}): Promise<() => Promise<void>> {
+  const lockPath = `${registryPath}.lock`;
+  const maxWaitMs = opts.maxWaitMs ?? 2000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 20;
+  const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  await fs.promises.mkdir(dirname(lockPath), { recursive: true });
+  const deadline = systemClock.now() + maxWaitMs;
+  for (;;) {
+    try {
+      const handle = await fs.promises.open(lockPath, "wx");
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), startedAt: systemClock.iso() }));
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const result = reclaimStaleLock(lockPath, {
+        parseHolder: parseRegistryLockInfo,
+        isStale: (held) => isHolderStale(held, { isPidAlive: isAlive, getProcessStartTime: opts.getProcessStartTime }),
+        onLostReclaim: opts.onLostReclaim,
+        beforeDelete: opts.__beforeReclaimDelete,
+      });
+      if (result.outcome === "live") {
+        if (systemClock.now() >= deadline) {
+          throw new Error(`pruneOrphanedDraftsAsync: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+    }
+  }
+  return async () => {
+    try {
+      await fs.promises.unlink(lockPath);
+    } catch {
+      // already gone — idempotent
+    }
+  };
+}
+
+/** W1-T9443: {@link pruneOrphanedDrafts} with every read awaited. Only an orphan takes the lock, and it looks again
+ *  under it; `undefined` when it did not look. */
+export async function pruneOrphanedDraftsAsync(
+  draftsPath: string,
+  registryPath: string,
+  reader: ProposalShardReader,
+  opts: UpdateProposalRegistryOpts = {},
+): Promise<{ count: number; bytesBefore: number; bytesAfter: number } | undefined> {
+  const look = async (): Promise<{ raw: string; drafts: DraftCache; orphans: number } | undefined> => {
+    const blob = parseProposalRegistryResult(await readFileIfExistsAsync(registryPath));
+    if (blob.kind !== "ok") return undefined;
+    const raw = await readFileIfExistsAsync(draftsPath);
+    if (raw === undefined) return undefined;
+    const shards = await reader.refresh();
+    const live = new Set([...blob.proposals.map((p) => p.id), ...shards.keys()]);
+    const drafts = parseDraftCache(raw);
+    const orphans = Object.keys(drafts).filter((id) => !live.has(id)).length;
+    return { raw, drafts: Object.fromEntries(Object.entries(drafts).filter(([id]) => live.has(id))), orphans };
+  };
+  const first = await look();
+  if (!first || first.orphans === 0) {
+    return first && { count: 0, bytesBefore: Buffer.byteLength(first.raw), bytesAfter: Buffer.byteLength(first.raw) };
+  }
+  const release = await acquireProposalRegistryLockAsync(registryPath, opts);
+  try {
+    const held = await look();
+    if (!held) return undefined;
+    const bytesBefore = Buffer.byteLength(held.raw);
+    if (held.orphans === 0) return { count: 0, bytesBefore, bytesAfter: bytesBefore };
+    const text = JSON.stringify(held.drafts, null, 2);
+    await writeAtomicAsync(draftsPath, text);
+    return { count: held.orphans, bytesBefore, bytesAfter: Buffer.byteLength(text) };
+  } finally {
+    await release();
+  }
 }
 
 /** `state/inbox-reopened-keys.json` (W1-T2566) — one entry per proposal id this host has re-opened. ⚠ KEYED ON
@@ -3393,6 +3782,10 @@ export function approveProposal(
   };
 }
 
+export function approvePrTitle(proposalId: string): string {
+  return fitConventionalTitle(`chore(plan): ratify ${proposalId} via rmd approve`).header;
+}
+
 /** The harness-authored commit message for a ratification branch — never the LLM. Carries NO `Remudero-Task:`
  *  trailer: this is a plan-FILING PR, and `findMergedByTrailer` (lib/status.ts) would mark a never-built task
  *  complete on merge. Uses `buildPlanPrCommitMessage` so the stamp is WRAPPED, never spliced raw (#387). */
@@ -3652,7 +4045,8 @@ export function assertRatificationDraftFileable(
   const relinted = relintRatificationFragment(fragmentYaml, proposalId, facts);
   const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos,
     facts.moduleExists, facts.readGrepProofFile,
-    (path) => fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true);
+    (path) => fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true,
+    facts.pathExistsAtBase);
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
   if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
   if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);

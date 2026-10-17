@@ -1,10 +1,28 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: fileURLToPath(new URL(".", import.meta.url)), encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 
 /**
  * MASTER-PLAN §5 TIER 3 (W1-T26): "src/lib imports nothing from spike/CLI" is
@@ -85,10 +103,10 @@ test("depcruise over remudero's OWN src tree is clean today (the rule is live, n
 // across the browser-driven serve suites so the class cannot silently regress.
 
 test("no serve test returns a bare (un-awaited) page.<method>(...) — the teardown-race anti-pattern is forbidden fleet-wide", () => {
-  const testDir = join(fileURLToPath(new URL("..", import.meta.url)), "test");
+  const { dir: testDir, files } = testCorpus();
   const offenders: string[] = [];
-  for (const file of readdirSync(testDir)) {
-    if (!/^serve.*\.test\.ts$/.test(file)) continue;
+  for (const file of files) {
+    if (!/(^|\/)serve[^/]*\.test\.ts$/.test(file)) continue;
     const lines = readFileSync(join(testDir, file), "utf8").split("\n");
     lines.forEach((line, i) => {
       // a `return page.<something>(` that is NOT `return await page.` — the un-awaited return.
@@ -151,7 +169,7 @@ test("no test imports a mutated module copy from outside the project root — th
     "a tmpdir holding fixture DATA is not this anti-pattern",
   );
 
-  const testDir = join(fileURLToPath(new URL("..", import.meta.url)), "test");
+  const { dir: testDir, files } = testCorpus();
   // THIS FILE IS SKIPPED, and the reason is not convenience: the controls above are the offending
   // shape written out as string literals, so a sweep including this file matches its own fixtures
   // and reports a defect that does not exist — the self-match failure mode CLAUDE.md names for
@@ -159,8 +177,8 @@ test("no test imports a mutated module copy from outside the project root — th
   // file itself, which is the one file in the repo whose whole purpose is to contain no such thing.
   const SELF = "architecture-fitness.test.ts";
   const offenders: string[] = [];
-  for (const file of readdirSync(testDir)) {
-    if (!/\.test\.ts$/.test(file) || file === SELF) continue;
+  for (const file of files) {
+    if (file.split("/").at(-1) === SELF) continue;
     for (const id of tmpdirModuleImports(readFileSync(join(testDir, file), "utf8"))) {
       offenders.push(`${file}: a mutant module imported from ${id}`);
     }
@@ -171,5 +189,71 @@ test("no test imports a mutated module copy from outside the project root — th
     "a mutant module imported from os.tmpdir() destroys the coverage record of every src/lib module " +
       "its graph re-enters; use writeMutantModule (test/helpers/mutant-module.ts), which writes the " +
       `copy under test/ instead:\n${offenders.join("\n")}`,
+  );
+});
+
+// THE SAME COLLAPSE, A SECOND SHAPE (#11757). The mechanism under both is tsx's MODULE FORMAT, not the
+// path: a `.ts`/`.js` file outside any `"type": "module"` package scope (os.tmpdir() has none) is compiled
+// as COMMONJS, and every real src module it imports is then `require()`d and compiled as CommonJS too,
+// with `import.meta` substituted by a `define` that esbuild names `<define:import.meta>` in the source
+// map. Under coverage that becomes `SF:src/lib/<define:import.meta>`. The pre-push harness of
+// test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts wrote
+// `harness/src/lib/git-push.ts` re-exporting the real module into a tmp dir with no package.json; its
+// hook children carried the record into coverage shard 3, and coverage-merge-ratchet refused #11757.
+// The guard above only sees `await import(<id>)` of a tmpdir path, so this shape walked past it.
+
+/** The offending shape: a generated `.ts`/`.js` module whose text imports the real `src/` through an
+ *  interpolated specifier, written as `<write>(join(<dir>, "...ts"), \`...\`)` into a `<dir>` the file never
+ *  makes an ESM scope (`join(<dir>, "package.json")` holding `type: "module"`). An `.mts`/`.mjs` name is ESM by
+ *  extension and never matches. BLIND SPOT: a path held in a variable rather than a literal `join(...)`. */
+function cjsScopeSourceWrappers(text: string): string[] {
+  const bad: string[] = [];
+  const write = /\b(?:writeFileSync|writeFile|put)\(\s*join\(\s*([A-Za-z_$][\w$]*)\s*,([^`;]*?\.(?:ts|tsx|cts|js|cjs))"\s*\)\s*,\s*`([^`]*)`/g;
+  for (const m of text.matchAll(write)) {
+    const [, dir, file, body] = m;
+    if (!/(?:\bfrom\s*|\bimport\s*\(\s*)\$\{[^}]*\bsrc["/]/.test(body)) continue;
+    const esmScope = new RegExp(`join\\(\\s*${dir.replace(/\$/g, "\\$")}\\s*,\\s*"package\\.json"\\s*\\)[^;]*\\btype"?\\s*:\\s*"module"`);
+    if (!esmScope.test(text)) bad.push(`${dir}:${file.trim().replace(/^"/, "")}`);
+  }
+  return bad;
+}
+
+test("no test compiles the real src graph as CommonJS through a generated module outside an ESM scope — the <define:import.meta> record is forbidden", () => {
+  // BOTH DIRECTIONS, as above: the #11757 harness construction verbatim must fire; the same wrapper in a
+  // directory given `{"type":"module"}` must not, nor an .mjs wrapper, nor a .ts fixture importing nothing real.
+  const wrapper = 'put(join(harness, "src/lib/git-push.ts"), `import * as p from ${url("src/lib/git-push.ts")};\nexport const x = p;\n`);\n';
+  assert.deepEqual(cjsScopeSourceWrappers(wrapper), ['harness:src/lib/git-push.ts'], "the detector must fire on the #11757 shape, or it is vacuous");
+  assert.deepEqual(
+    cjsScopeSourceWrappers(`put(join(harness, "package.json"), JSON.stringify({ type: "module" }));\n${wrapper}`),
+    [],
+    "a wrapper inside a declared ESM scope compiles as ESM and must stay silent",
+  );
+  assert.deepEqual(
+    cjsScopeSourceWrappers('writeFileSync(join(root, "child.mjs"), `import { f } from ${JSON.stringify(pathToFileURL(join(REPO, "src/lib/x.ts")).href)};`);\n'),
+    [],
+    "an .mjs wrapper is ESM by extension",
+  );
+  assert.deepEqual(
+    cjsScopeSourceWrappers('writeFileSync(join(root, "test", "a.test.ts"), `import { test } from "node:test";\ntest("a", () => {});\n`);\n'),
+    [],
+    "a generated test importing no real src module is not this shape",
+  );
+
+  const { dir: testDir, files } = testCorpus();
+  // SKIPPED: this file, whose controls above are the offending shape as literals, and the one suite that builds
+  // the shape ON PURPOSE to prove the mechanism — it points its probe child's NODE_V8_COVERAGE at its own temp
+  // dir, so the record it makes never reaches a shard's lcov.
+  const SKIP = new Set(["architecture-fitness.test.ts", "a-define-import-meta-coverage-record-names-its-commonjs-cause.test.ts"]);
+  const offenders: string[] = [];
+  for (const file of files) {
+    if (SKIP.has(file.split("/").at(-1)!)) continue;
+    for (const hit of cjsScopeSourceWrappers(readFileSync(join(testDir, file), "utf8"))) offenders.push(`${file}: ${hit}`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "a generated .ts/.js module outside an ESM package scope compiles the real src graph as CommonJS and plants " +
+      "SF:src/lib/<define:import.meta> in coverage, which coverage-merge-ratchet refuses; write " +
+      `{"type":"module"} into that directory's package.json, or name the module .mts/.mjs:\n${offenders.join("\n")}`,
   );
 });

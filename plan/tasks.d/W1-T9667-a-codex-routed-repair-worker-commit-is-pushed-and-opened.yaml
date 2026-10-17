@@ -1,0 +1,84 @@
+- id: W1-T9667
+  title: "A CODEX-ROUTED RED-MAIN OR ALERT FIX WORKER'S COMMIT IS PUSHED AND OPENED BY THE DISPATCHER — on 2026-10-15 the main-repair lane spent 3 fix rounds (13:35-13:53Z) on a 2-line test fix of main's W1-T9503 red, each refused 'the fix run opened no pull request': every round routed to codex gpt-6.1-sol, whose sandbox cannot write the git dir and is told never to push, while the lane's prompt tells it to push and open the PR and the dispatcher never pushes; round 2's REST open of the never-pushed head got HTTP 422"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — who pushes and opens the PR when a harness-committed (codex) worker repairs main or an alert
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: PR shepherding after main red 037a58d8f (#11987 x #11997); main-repair escalated to #12016 and a hand PR (#12034) repaired main. Evidence in ~/Remudero-notes/shep-1015/"
+  plan_refs: [W1-T6403, W1-T8572, W1-T9583, W1-T6148, W1-T3696, W1-T90]
+  files:
+    - src/run-task.ts
+    - test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts
+    - test/a-red-main-repairs-itself-fix-pr-then-revert-pr.test.ts
+    - test/a-main-repair-pr-carries-a-dispatcher-written-acceptance-block.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 in the core ledger (read-only), main red at 037a58d8f on two W1-T9503 tests:
+    - 13:34:38Z main.repair.located names offending 037a58d8f and test_files including
+      test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts.
+    - Three rounds, each main-repair.dispatching then worker.assignment selected provider codex, model gpt-6.1-sol
+      (requested sonnet, fix mount, band high), worker exit 0, verdict success:
+      13:35:20Z -> 13:38:07Z main-repair.no_pr; 13:41:40Z -> 13:48:23Z main-repair.acceptance_defect (no-proofs,
+      rewritten) then main-repair.pr_open_failed "gh api --method POST repos/craigoley/remudero/pulls ... head=
+      run-main-repair-037a58d8f96f-1792071694722 ... gh: Validation Failed (HTTP 422)" then no_pr;
+      13:49:47Z -> 13:53:11Z main-repair.no_pr. Each round wrote main.repair.fix_refused "the fix run opened no pull
+      request"; #12016 escalated and a session opened #12034 with the 2-line fixture fix.
+    - The 422 body still held both dispatcher placeholders (WORKER-PROSE, WORKER-ACCEPTANCE): the worker never edited
+      the body file, as a codex writer told not to touch git would not.
+    - No refs/heads/run-main-repair-* exists on origin: no round's branch was ever pushed.
+    - Contrast 2026-10-14 20:01Z: the same lane's worker routed to claude claude-sonnet-5-5 and opened #11782.
+    READ at origin/main cd482d436:
+    - src/lib/worker-provider.ts codexExecArgs gives a codex writer no --add-dir for the git dir (W1-T6148);
+      CODEX_HARNESS_COMMITS_PART tells it not to run git commit or git push; commitCodexWriterEdits commits its edits
+      LOCALLY and the result's harnessCommit field is read by nothing in src/.
+    - src/run-task.ts mainRepairFixPrompt (known test files) tells the worker to commit, `git push origin HEAD` and
+      `gh pr create`; with none it tells the worker to push and leaves the open to the dispatcher.
+      dispatchMainRepairFixRun pushes nothing: openCheckedMainRepairPr reads diffSinceMergeBase (committed only, so it
+      saw the harness commit) and POSTs a PR whose head was never pushed. alertFixPrompt / dispatchAlertFixRun have the
+      same worker-pushes contract and the same fix mount, so a codex-routed alert fix opens nothing either.
+    - The implement and fix lanes already own git for a harness-committed worker (fixRoundGitOwnership, the
+      harnessOwnsGit prompt in the implement lane): "the harness commits, pushes and opens the PR". These two lanes
+      were never moved.
+    W1-T9583 (#11885) fixed the lane's head NAMES (run-main-repair-*); it never touched who pushes.
+  design: |
+    - One predicate for both lanes: the spawn's harness owns git when the worker it ran was a harness-committed writer
+      (codexHarnessCommits for the selected provider, or the result's harnessCommit present). Read it from the
+      WorkerResult, not from the requested mount: the router picks the provider after the mount is resolved.
+    - Prompts: mainRepairFixPrompt and alertFixPrompt take that ownership and, when the harness owns git, say "save
+      your edits, run no git or gh command, write your prose (and bullets) into the body file" — the implement lane's
+      harnessOwnsGit wording — instead of push/open lines. Claude-routed workers keep today's prompt byte-for-byte.
+    - Dispatch: after a harness-owned round whose harnessCommit is committed, the dispatcher pushes the worktree's
+      branch from the host (as the implement lane's harness-owned path does; never from the worker sandbox), confirms
+      by ls-remote that the remote ref names the committed sha (publishAbandonedFixOwnerAhead's check), then opens over
+      REST: main-repair through openCheckedMainRepairPr with the
+      checked body file (known test files keep their dispatcher-rendered Acceptance block); alert-fix with a
+      dispatcher-written body carrying origin alert#, the worker's Acceptance bullets checked like main-repair's, and
+      the Remudero-Task trailer last. nothing-to-commit and refused write main-repair.no_change / a named refusal row
+      instead of the generic no_pr.
+    - A body still holding MAIN_REPAIR_PROSE_PLACEHOLDER when opened gets a dispatcher sentence naming the offending
+      sha and the failing tests, so no PR opens with a placeholder line.
+    - Unchanged: the codex sandbox (no git-dir write), the identity gates, the revert path, the round budget.
+  acceptance:
+    - claim: "a codex-routed main-repair worker that leaves a harness commit gets its branch pushed and a PR opened by the dispatcher, with a body holding no placeholder line"
+      proof: "grep: W1-T9667: a harness-committed main-repair round is pushed and opened by the dispatcher in test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts"
+    - claim: "the dispatcher never opens a PR for a head it has not pushed; a refused or empty harness commit writes a named row, not the generic no_pr"
+      proof: "grep: W1-T9667: no PR is opened for an unpushed head and an empty harness commit is named in test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts"
+    - claim: "a codex-routed alert-fix worker's harness commit is pushed and opened with origin alert# and the Remudero-Task trailer last"
+      proof: "grep: W1-T9667: a harness-committed alert-fix round is pushed and opened by the dispatcher in test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts"
+    - claim: "a harness-owned worker's prompt names no git push and no gh pr create, and a claude-routed worker's prompt is unchanged"
+      proof: "grep: W1-T9667: a harness-owned repair prompt names no push or PR open in test/a-codex-routed-repair-worker-commit-is-pushed-and-opened.test.ts"
+  falsifier: |
+    Drive dispatchMainRepairFixRun with a fake spawn returning a codex WorkerResult whose harnessCommit is committed
+    and a fake push/fetch: at origin/main no push is attempted and the REST create receives an unpushed head (the
+    13:48:23Z 422), so the first test reds; restore the push and it passes. Remove the ownership switch in either
+    prompt and the prompt test reds on the "git push origin HEAD" line.
+  note: |
+    EFFECT, measured after merge from the core ledger: the next main.repair.located whose fix worker routes to codex
+    reaches main.repair.fix_opened (main-repair.pr_opened) with no main.repair.fix_refused "opened no pull request".
+    Healthy shape: zero main-repair.pr_open_failed rows with HTTP 422, and no session hand PR for a lane-fixable red.

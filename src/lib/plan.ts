@@ -49,6 +49,25 @@ const MERGED_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 export const RETIREMENT_REASONS = ["retired", "closed", "withdrawn"] as const;
 export type RetirementReason = (typeof RETIREMENT_REASONS)[number];
 
+/** A plan task id (`W1-T9551`, `CONSOLE-T12`): letters, digits and dashes, so it is also its own regex. */
+const TASK_ID_SHAPE = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
+
+/** W1-T9729: a retirement naming its superseding task still holds its origin while that task has not
+ *  landed. `isLanded` is the caller's merged-credit reading, never the shard's `status:`. */
+export function retirementHoldsOrigin(task: { retirement?: string; superseded_by?: string }, isLanded: (taskId: string) => boolean): boolean {
+  return task.retirement !== undefined && task.superseded_by !== undefined && !isLanded(task.superseded_by);
+}
+
+/** `git` argv printing a commit on origin/main whose message carries exactly `Remudero-Task: <taskId>`. */
+export function taskLandedArgs(taskId: string): string[] {
+  return ["log", "-1", "--format=%H", `--grep=^Remudero-Task: ${taskId}$`, "origin/main"];
+}
+
+/** Whether `taskId` landed on origin/main, by its merged `Remudero-Task:` trailer (W1-T9729). */
+export async function taskLandedOnMain(taskId: string, runGit: (args: string[]) => string | Promise<string>): Promise<boolean> {
+  return (await runGit(taskLandedArgs(taskId))).trim() !== "";
+}
+
 export interface AcceptanceCriterion {
   claim: string;
   proof: string;
@@ -165,6 +184,7 @@ export interface Task {
   /** Why this task exists, in operator-facing prose. Read-only, like every other narrative field;
    *  rendered on the row-click task card (lib/task-card.ts). */
   rationale?: string;
+  design?: string;
   /** Provenance (Rules 16/17): where this task came from — `architect`, `feedback#…`, `alert#…`,
    *  `issue#…`. Never defaulted — its absence is itself what the §5C linter's provenance check reports. */
   origin?: string;
@@ -187,6 +207,8 @@ export interface Task {
   /** Operator-only retirement category (W1-T1287): why a `blocked` task will never be built. Never
    *  auto-written; see CLAUDE.md's plan-hygiene section, {@link RETIREMENT_REASONS} and Why: docs/forensics/plan.md#taskretirement. */
   retirement?: RetirementReason;
+  /** W1-T9729: the task a retirement hands its origin to; the origin stays held until that task lands. */
+  superseded_by?: string;
   /** W1-T2920 — the file this task's record was parsed FROM: the monolith path or a shard path,
    *  set by {@link parseTasksFromYaml} at parse time from its own `sourceLabel`. This is what lets
    *  {@link taskRecordPath} answer "which file holds this task" as a map lookup on an already-loaded
@@ -448,7 +470,7 @@ function isParkedMachineProposal(task: Task): boolean {
     (task.depends_on ?? []).length === 0 &&
     (isSelectorShadowEdgeShape(task) || isFlakeIncidentShape(task) ||
       (task.files?.length === 1 &&
-        ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
+        ((task.origin?.startsWith("ci-learning:") === true && (task.files[0] === "learnings/ci.yaml" || /^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$/.test(task.files[0]!))) ||
           (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
           (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))))
   );
@@ -650,6 +672,10 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
     if (retirement !== undefined && !RETIREMENT_REASONS.includes(retirement)) {
       throw new PlanError(`task ${id}: invalid retirement '${String(retirement)}' (must be ${RETIREMENT_REASONS.join("|")})`);
     }
+    const supersededBy = e.superseded_by;
+    if (supersededBy !== undefined && (typeof supersededBy !== "string" || !TASK_ID_SHAPE.test(supersededBy))) {
+      throw new PlanError(`task ${id}: superseded_by must be a task id, got '${String(supersededBy)}'`);
+    }
     const bandMeaning = e.band_meaning as BandMeaning | undefined;
     if (bandMeaning !== undefined && !BAND_MEANINGS.includes(bandMeaning)) {
       throw new PlanError(`task ${id}: invalid band_meaning '${String(bandMeaning)}' (must be ${BAND_MEANINGS.join("|")})`);
@@ -686,6 +712,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       pr: typeof e.pr === "number" ? e.pr : undefined,
       note: e.note as string | undefined,
       rationale: e.rationale as string | undefined,
+      design: typeof e.design === "string" ? e.design : undefined,
       origin: e.origin as string | undefined,
       // W1-T2968 — LAW 5'S MARK MUST SURVIVE THE FILE. Omitting this line made
       // `machineAuthorVerifyViolation` unfireable on every record that lives on disk: the field
@@ -698,6 +725,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       context: e.context as ContextClaim[] | undefined,
       files: Array.isArray(e.files) ? (e.files as string[]) : undefined,
       retirement,
+      superseded_by: supersededBy,
       // W1-T2920 — record it once, HERE, at the one place that already knows it: `sourceLabel`
       // is the monolith path or the shard path for every disk-backed caller (`loadPlan`,
       // `taskRecordPath`'s own fallback) and a git-ref label for `loadPlanAtRef`/`mergePlanBlobs`
@@ -721,7 +749,7 @@ export function loadPlanFromYaml(text: string, sourceLabel: string): Plan {
   for (const t of tasks) {
     for (const dep of t.depends_on) {
       if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
-    }
+    }    assertSupersededByResolves(t, byId);
   }
   return { tasks, byId };
 }
@@ -1026,13 +1054,19 @@ function readMergedPlan(
   return onDuplicate ? { tasks, byId } : validatedPlan(tasks);
 }
 
+function assertSupersededByResolves(t: Task, byId: ReadonlyMap<string, Task>): void {
+  if (t.superseded_by !== undefined && !byId.has(t.superseded_by)) {
+    throw new PlanError(`task ${t.id}: superseded_by unknown task '${t.superseded_by}'`);
+  }
+}
+
 function validatedPlan(tasks: Task[]): Plan {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   // Every dependency must resolve within the merged view (monolith + shards).
   for (const t of tasks) {
     for (const dep of t.depends_on) {
       if (!byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
-    }
+    }    assertSupersededByResolves(t, byId);
   }
   return { tasks, byId };
 }
@@ -1348,6 +1382,15 @@ export function assertRunnable(
   }
 }
 
+export function missingDeclaredPaths(
+  task: Task,
+  facts: Pick<MachineFilingAdmissionContext, "pathExists" | "pathExistsAtBase">,
+  allowedNewPath: (path: string) => boolean = () => false,
+): string[] {
+  return (task.files ?? []).filter((path) =>
+    !facts.pathExists?.(path) && !allowedNewPath(path) && !facts.pathExistsAtBase?.(path));
+}
+
 export function machineFilingAdmissionViolations(
   task: Task,
   context: MachineFilingAdmissionContext,
@@ -1376,15 +1419,13 @@ export function machineFilingAdmissionViolations(
     }
   }
 
-  const exists = context.pathExists ?? (() => false);
-  const existsAtBase = context.pathExistsAtBase ?? (() => false);
   const newTestAllowed = isCiFrictionRemedyProposal(task) || isFlowBlockerRemedyProposal(task) || isJudgeReleasedFlowBlockerRemedy(task) ||
     isSelectorShadowStructuralShape(task) || isHotFileRemedyProposal(task);
   // A merge-driver remedy creates the repository's .gitattributes; no other declared non-test file may be new.
   const created = (path: string) => NEW_TEST_FILE.test(path) || (path === ".gitattributes" && isHotFileRemedyProposal(task));
   const declared = task.files ?? [];
   const scoutNew = isScoutDraftShape(task) ? declared[declared.length - 1] : undefined;
-  const missing = declared.filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && created(path)) && path !== scoutNew);
+  const missing = missingDeclaredPaths(task, context, (path) => (newTestAllowed && created(path)) || path === scoutNew);
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +

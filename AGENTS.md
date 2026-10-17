@@ -44,6 +44,9 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   restored is the evidence it is load-bearing.**
 - **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
   file's identical line number and returns a FALSE `OK`.**
+- **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  worktree retirement to the harness.**
 - **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
   `run-<taskId>-*` branch — never from ledger verdict lines.**
 - **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`
@@ -75,8 +78,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   `mergeable_state: dirty` — check mergeability before waiting on CI.**
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
   the ours-side block yourself; esbuild says only `Unexpected end of file`.**
-- **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
-  nothing.**
+- **A RETITLE ALONE re-runs the title lint — `pr-title-lint.yml` fires on `edited`; push no sha to
+  clear a title red.**
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
   recycle, not at merge — confirm with `docker inspect` before calling it shipped.**
 - **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet

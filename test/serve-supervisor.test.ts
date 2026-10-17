@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   cgroupFreeMemory,
+  HANDOFF_NEED_MARGIN,
   clusterSpawn,
   createServeSupervisor,
   generationCommand,
@@ -194,7 +195,7 @@ test("insufficient cgroup headroom defers the handoff and ledgers the reason", a
   assert.equal(deferred.length, 5, "every refusal defers again: pressure never ends the supervisor");
   assert.deepEqual(
     { reason: deferred[0].extra?.reason, hold: deferred[0].extra?.hold, freeBytes: deferred[0].extra?.freeBytes, needBytes: deferred[0].extra?.needBytes },
-    { reason: "memory", hold: "container_headroom", freeBytes: 1_000, needBytes: 5_000 },
+    { reason: "memory", hold: "container_headroom", freeBytes: 1_000, needBytes: 5_000 * HANDOFF_NEED_MARGIN },
   );
   assert.equal(fleet.generations.length, 1, "no standby is forked while headroom is short");
   assert.deepEqual(exits, [], "no legacy exit");
@@ -224,7 +225,7 @@ test("a memory-short handoff asks the active generation to shed before it defers
   const shed = logs.find((l) => l.step === "serve.handoff_shed")?.extra;
   assert.deepEqual(
     { answered: shed?.answered, beforeBytes: shed?.beforeBytes, afterBytes: shed?.afterBytes, freeBefore: shed?.freeBefore, freeAfter: shed?.freeAfter, needBytes: shed?.needBytes },
-    { answered: true, beforeBytes: 5_000, afterBytes: 3_000, freeBefore: 1_000, freeAfter: 9_000, needBytes: 5_000 },
+    { answered: true, beforeBytes: 5_000, afterBytes: 3_000, freeBefore: 1_000, freeAfter: 9_000, needBytes: 5_000 * HANDOFF_NEED_MARGIN },
   );
   assert.deepEqual(
     { gc: shed?.gc, heapBeforeBytes: shed?.heapBeforeBytes, heapAfterBytes: shed?.heapAfterBytes },
@@ -247,8 +248,8 @@ test("a standby needs its boot peak and not its resident bytes at promotion", as
   const deferred = logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
   assert.deepEqual(
     { freeBytes: deferred?.freeBytes, needBytes: deferred?.needBytes, activeRssBytes: deferred?.activeRssBytes, activePeakBytes: deferred?.activePeakBytes },
-    { freeBytes: 1_400, needBytes: 1_500, activeRssBytes: 1_000, activePeakBytes: 1_500 },
-    "1 400 free covers the 1 000 resident at promotion but not the 1 500 boot peak",
+    { freeBytes: 1_400, needBytes: 1_500 * HANDOFF_NEED_MARGIN, activeRssBytes: 1_000, activePeakBytes: 1_500 },
+    "1 400 free covers the 1 000 resident at promotion but not the 1 500 boot peak (times the W1-T9542 margin)",
   );
   await supervisor.shutdown("test");
 });
@@ -531,6 +532,7 @@ function retryGate(deferMs: number) {
   const waiting: Array<{ ms: number; wake: () => void }> = [];
   return {
     sleep: (ms: number): Promise<void> => (ms >= deferMs ? new Promise<void>((resolve) => void waiting.push({ ms, wake: resolve })) : Promise.resolve()),
+    pending: () => waiting.length,
     async release(): Promise<number | undefined> {
       const next = waiting.shift();
       next?.wake();
@@ -539,6 +541,118 @@ function retryGate(deferMs: number) {
     },
   };
 }
+
+test("a pending memory retry coalesces external handoff requests without rebuilding workers", async () => {
+  const fleet = fakeFleet();
+  const gate = retryGate(10);
+  let pressured = true;
+  let prepares = 0;
+  let newest = "sha-2";
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    deferMs: 10, sleep: gate.sleep,
+    prepare: async () => { prepares++; return { dir: "/next", sha: newest }; },
+    hostPressure: async () => ({ ...AMPLE, swapInPagesPerSec: pressured ? 800 : 0, atMs: Date.now() }),
+  });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  assert.equal(gate.pending(), 1, "positive control: the actual refusal scheduled one retry");
+  newest = "sha-9";
+  await Promise.all(Array.from({ length: 5 }, () => supervisor.requestHandoff()));
+  assert.equal(prepares, 1, "external requests cannot skip the outstanding pressure backoff");
+  assert.equal(logs.filter(l => l.step === "serve.handoff_deferred").length, 1);
+  assert.equal(gate.pending(), 1, "not one retry timer per external request");
+  assert.equal(fleet.generations.length, 1, "the original generation still answers");
+  pressured = false;
+  await gate.release();
+  assert.equal(prepares, 2, "the one retry prepares again, rather than pinning an obsolete candidate");
+  assert.equal(supervisor.activeSha(), newest);
+  assert.equal(logs.filter(l => l.step === "serve.handoff_deferred").length, 1, "adoption adds no pressure retry");
+  await supervisor.shutdown("test");
+});
+
+test("host swap pressure is checked before a short handoff sheds the serving workers", async () => {
+  const fleet = fakeFleet();
+  const gate = retryGate(10);
+  let free = 1_000;
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    freeMemory: () => free, peakRss: () => 1_000, deferMs: 10, sleep: gate.sleep,
+    hostPressure: async () => ({ ...AMPLE, swapInPagesPerSec: 800, atMs: Date.now() }),
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0], send = cold.send;
+  cold.send = (m) => {
+    send(m);
+    if (m.type === "rmd.shed") { free = 5_000; cold.emit({ type: "rmd.shed_done", beforeBytes: 4_000, afterBytes: 1_000, heapBeforeBytes: 3_000, heapAfterBytes: 500, gc: true }); }
+  };
+  await supervisor.requestHandoff();
+  assert.deepEqual(cold.sent.map(m => m.type), ["rmd.promote"], "an already-unsafe host must not shed and rewarm a healthy generation");
+  const held = logs.find(l => l.step === "serve.handoff_deferred")?.extra;
+  assert.equal(held?.hold, "swap_in");
+  assert.equal(held?.phase, "before_shed");
+  assert.equal(held?.preserved, true);
+  assert.equal(fleet.generations.length, 1);
+  await supervisor.shutdown("test");
+});
+
+test("a pending memory retry does not defer the explicit handoff kill switch", async () => {
+  const fleet = fakeFleet(), gate = retryGate(10);
+  let enabled = true;
+  const { supervisor, exits } = decisionSupervisor(fleet, {
+    deferMs: 10, sleep: gate.sleep, handoffEnabled: () => enabled,
+    hostPressure: async () => ({ ...AMPLE, swapInPagesPerSec: 800, atMs: Date.now() }),
+  });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  assert.equal(gate.pending(), 1);
+  enabled = false;
+  await supervisor.requestHandoff();
+  assert.deepEqual(exits, [0], "the explicit legacy-exit switch is not delayed by coalescing");
+  await gate.release();
+  assert.equal(fleet.generations.length, 1, "a pending wake cannot fork after shutdown");
+});
+
+test("pressure arising during a handoff shed still blocks the final fork admission", async () => {
+  const fleet = fakeFleet();
+  const gate = retryGate(10);
+  let free = 1_000, pressured = false, reads = 0;
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    freeMemory: () => free, peakRss: () => 1_000, deferMs: 10, sleep: gate.sleep,
+    hostPressure: async () => { reads++; return { ...AMPLE, swapInPagesPerSec: pressured ? 800 : 0, atMs: Date.now() }; },
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0], send = cold.send;
+  cold.send = (m) => {
+    send(m);
+    if (m.type === "rmd.shed") { free = 5_000; pressured = true; cold.emit({ type: "rmd.shed_done", beforeBytes: 4_000, afterBytes: 1_000, heapBeforeBytes: 3_000, heapAfterBytes: 500, gc: true }); }
+  };
+  await supervisor.requestHandoff();
+  assert.equal(reads, 2, "a fresh final reading follows the early reading, never reuse it");
+  assert.equal(logs.find(l => l.step === "serve.handoff_deferred")?.extra?.hold, "swap_in");
+  assert.equal(fleet.generations.length, 1, "host pressure still prevents a standby fork");
+  assert.equal(supervisor.activeSha(), "sha-1");
+  await supervisor.shutdown("test");
+});
+
+test("a handoff shed can recover host headroom before final admission", async () => {
+  const fleet = fakeFleet(), gate = retryGate(10);
+  let free = 1_000, available = 2_000, reads = 0;
+  const { supervisor } = decisionSupervisor(fleet, {
+    freeMemory: () => free, peakRss: () => 1_000, deferMs: 10, sleep: gate.sleep,
+    hostPressure: async () => { reads++; return { ...AMPLE, memAvailableBytes: available, atMs: Date.now() }; },
+    upgradeThresholds: () => ({ ...THRESHOLDS, hostReserveBytes: 1_000 }),
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0], send = cold.send;
+  cold.send = m => {
+    send(m);
+    if (m.type === "rmd.shed") { free = available = 5_000; cold.emit({ type: "rmd.shed_done", beforeBytes: 4_000, afterBytes: 1_000, heapBeforeBytes: 3_000, heapAfterBytes: 500, gc: true }); }
+  };
+  await supervisor.requestHandoff();
+  assert(cold.sent.some(m => m.type === "rmd.shed"), "clean-but-thin headroom can be recovered by dropping caches");
+  assert.equal(reads, 2, "the final guard verifies the actual recovered headroom");
+  assert.equal(supervisor.activeSha(), "sha-2");
+  await supervisor.shutdown("test");
+});
 
 test("a memory-deferred serve upgrade keeps the healthy console answering", async () => {
   const fleet = fakeFleet((slot) => ({ readyAfter: slot.sha === "sha-1" ? 0 : 2 }));
@@ -943,7 +1057,9 @@ test("the supervisor's default seams read cgroup memory, procfs and the kill swi
   assert.equal(typeof clusterSpawn, "function");
 });
 
-// W1-T8378: the peak a handoff is priced on is refreshed from the still-active generation before any fork.
+// W1-T8378: the active generation's peak is refreshed after promotion, before any fork. W1-T9542: that lifetime
+// high-water mark is ledgered as evidence and no longer prices the handoff; the boot peak (until an overlap is
+// measured) times the margin does.
 const GIB = 1024 * MIB;
 
 test("unit test: a serve handoff refreshes its peak after promotion before forking", async () => {
@@ -953,57 +1069,56 @@ test("unit test: a serve handoff refreshes its peak after promotion before forki
   const { supervisor, logs } = decisionSupervisor(fleet, {
     peakRss: () => hwm,
     hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
-    deferMs: 10,
-    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
   });
   await supervisor.start();
   hwm = 4 * GIB; // grows after the supervisor's one promotion-time sample
   await supervisor.requestHandoff();
-  const deferred = logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
-  assert.equal(deferred?.hold, "host_headroom", "1 GiB would fit in 5 GiB over a 2 GiB reserve; the 4 GiB later peak needs 6 GiB");
-  assert.match(String(deferred?.detail), /need 6442450944 B/);
-  assert.equal(fleet.generations.length, 1, "no standby was forked");
-  assert.equal(supervisor.activeSha(), "sha-1", "the old generation is kept");
-  await supervisor.shutdown("test");
+  const admitted = logs.find((l) => l.step === "serve.handoff_admitted")?.extra;
+  assert.equal(admitted?.activePeakBytes, 4 * GIB, "the later high-water mark is read before the fork and ledgered");
+  assert.equal(admitted?.candidateNeedBytes, 1.5 * GIB, "W1-T9542: the 1 GiB boot peak times the margin prices it, not the 4 GiB lifetime peak");
+  assert.equal(admitted?.needBasis, "boot_peak");
+  assert.match(String(admitted?.peakBasis), /generation 1 boot peak/);
+  assert.equal(supervisor.activeSha(), "sha-2", "1.5 GiB over a 2 GiB reserve fits 5 GiB, where the 4 GiB lifetime peak needed 6 GiB");
 
-  // Positive control: the same early sample with no later growth is admitted, and an ample host promotes normally.
+  // Positive control: a boot peak that does not fit the host is still refused before any fork.
   const ctlFleet = fakeFleet();
   const ctl = decisionSupervisor(ctlFleet, {
-    peakRss: () => 1 * GIB,
+    peakRss: () => 4 * GIB,
     hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
+    deferMs: 10,
+    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
   });
   await ctl.supervisor.start();
   await ctl.supervisor.requestHandoff();
-  assert.equal(ctl.supervisor.activeSha(), "sha-2", "a peak that fits still hands off");
-  const ample = fakeFleet();
-  let ampleHwm = 1 * GIB;
-  const roomy = decisionSupervisor(ample, { peakRss: () => ampleHwm });
-  await roomy.supervisor.start();
-  ampleHwm = 4 * GIB;
-  await roomy.supervisor.requestHandoff();
-  assert.equal(roomy.supervisor.activeSha(), "sha-2", "a genuinely ample host promotes despite the larger peak");
-  assert.match(String(roomy.logs.find((l) => l.step === "serve.handoff_admitted")?.extra?.peakBasis), /generation 1 high-water mark/);
+  const deferred = ctl.logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
+  assert.equal(deferred?.hold, "host_headroom", "a 4 GiB boot peak times the margin needs 8 GiB with the reserve");
+  assert.match(String(deferred?.detail), /need 8589934592 B/);
+  assert.equal(ctlFleet.generations.length, 1, "no standby was forked");
+  assert.equal(ctl.supervisor.activeSha(), "sha-1", "the old generation is kept");
+  await ctl.supervisor.shutdown("test");
 });
 
 test("unit test: serve peak evidence keeps its generation and unknown state", async () => {
   // A later missing, invalid or lower reading never shrinks a known peak, and never fabricates one.
   let current: number | undefined = 4 * GIB;
   const fleet = fakeFleet();
+  const gate = retryGate(10);
   const { supervisor, logs } = decisionSupervisor(fleet, {
     peakRss: () => current,
     hostPressure: async () => ({ ...AMPLE, memAvailableBytes: 5 * GIB, atMs: Date.now() }),
     deferMs: 10,
-    sleep: (ms) => (ms >= 10 ? new Promise<void>(() => {}) : Promise.resolve()),
+    sleep: gate.sleep,
   });
   await supervisor.start();
   const deferredRows = (): Array<Record<string, unknown> | undefined> => logs.filter((l) => l.step === "serve.handoff_deferred").map((l) => l.extra);
   for (const later of [undefined, Number.NaN, -1, 0, 1 * GIB]) {
     current = later;
     const before = deferredRows().length;
-    await supervisor.requestHandoff();
+    if (before === 0) await supervisor.requestHandoff();
+    else await gate.release();
     const row = deferredRows()[before];
     assert.equal(row?.hold, "host_headroom", `reading ${String(later)} does not shrink the known 4 GiB peak`);
-    assert.match(String(row?.detail), /candidate 4294967296/);
+    assert.match(String(row?.detail), /candidate 6442450944/, "the 4 GiB boot peak times the W1-T9542 margin");
   }
   assert.equal(fleet.generations.length, 1, "nothing was forked on a shrunken or fabricated peak");
   await supervisor.shutdown("test");

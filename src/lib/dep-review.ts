@@ -1,7 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fixedClock } from "./clock.js";
+import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
+import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
 
@@ -65,7 +69,7 @@ export function isDependabotAuthor(author: DepReviewAuthor): boolean {
 export type SemverLevel = "major" | "minor" | "patch" | "unknown";
 
 /** Bumped when this lane's decision contract changes, independently of task-review semantics. */
-export const DEP_REVIEW_ENGINE_REVISION = "dep-review-action-sha-pin-v1";
+export const DEP_REVIEW_ENGINE_REVISION = "dep-review-selected-attempts-v2";
 
 function parseVersion(v: string): [number, number, number] | null {
   const m = v.trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?/);
@@ -161,7 +165,105 @@ export function parseDependabotBumpFacts(title: string, body: string): DepReview
       facts.push(fact);
     }
   }
-  return facts;
+  return facts.filter((f) => !facts.some((g) => g !== f && g.fromVersion === f.fromVersion && g.toVersion === f.toVersion &&
+    !g.dependency.includes(ELIDED_SEGMENT) && elidedDependencyMatches(f.dependency, g.dependency)));
+}
+
+const ELIDED_SEGMENT = "/…/";
+
+function elidedDependencyMatches(elided: string, full: string): boolean {
+  const at = elided.indexOf(ELIDED_SEGMENT);
+  if (at < 0) return false;
+  const head = elided.slice(0, at + 1), tail = elided.slice(at + ELIDED_SEGMENT.length - 1);
+  return full.length > head.length + tail.length && full.startsWith(head) && full.endsWith(tail);
+}
+
+export type DependabotTitleFit =
+  | { kind: "fits" }
+  | { kind: "fitted"; title: string }
+  | { kind: "unfittable"; reason: string };
+
+const VERSION_TEXT = String.raw`v?\d+(?:\.\d+){1,3}(?:[-+][\w.]*)?`;
+export const SINGLE_BUMP_RE = new RegExp(String.raw`^(bump)\s+([^\s,]+)\s+from\s+(${VERSION_TEXT})\s+to\s+(${VERSION_TEXT})`, "i");
+export const GROUP_BUMP_RE = /^(bump)\s+the\s+([\w./-]+)\s+group/i;
+export const TITLE_CLAUSE_RE = /\s+(in the [\w./-]+ group|across \d+ director(?:y|ies)|in \/\S*|with \d+ updates?)/y;
+
+export function overHeaderLimit(title: string): boolean {
+  return checkCommitMessage(title).some((v) => v.rule === "header-max-length");
+}
+
+function titleClauses(tail: string): string[] | undefined {
+  const clauses: string[] = [];
+  TITLE_CLAUSE_RE.lastIndex = 0;
+  while (TITLE_CLAUSE_RE.lastIndex < tail.length) {
+    const m = TITLE_CLAUSE_RE.exec(tail);
+    if (!m) return undefined;
+    clauses.push(m[1]);
+  }
+  return clauses;
+}
+
+export function fitDependabotTitle(title: string, body: string): DependabotTitleFit {
+  if (!overHeaderLimit(title)) return { kind: "fits" };
+  const prefix = CONVENTIONAL_TITLE_PREFIX_RE.exec(title)?.[0] ?? "";
+  const rest = title.slice(prefix.length).replace(/\s+/g, " ").trim();
+  const single = SINGLE_BUMP_RE.exec(rest), group = single ? null : GROUP_BUMP_RE.exec(rest);
+  const clauses = single ?? group ? titleClauses(rest.slice((single ?? group)![0].length)) : undefined;
+  if (clauses === undefined) return { kind: "unfittable", reason: "the title is not Dependabot's bump grammar" };
+  let dependency = single?.[2] ?? "";
+  const build = () => prefix + (single ? `${single[1]} ${dependency} from ${single[3]} to ${single[4]}` : `${group![1]} the ${group![2]} group`) +
+    clauses.map((c) => ` ${c}`).join("");
+  const drop = (re: RegExp) => () => { const i = clauses.findIndex((c) => re.test(c)); if (i >= 0) clauses.splice(i, 1); };
+  const elide = () => {
+    const segments = dependency.split("/");
+    if (segments.length > 3) dependency = [segments[0], segments[1], "…", segments[segments.length - 1]].join("/");
+  };
+  let fitted = build();
+  for (const step of [drop(/^across /), drop(/ group$/), elide, drop(/^in \//)]) {
+    if (!overHeaderLimit(fitted)) break;
+    step();
+    fitted = build();
+  }
+  if (overHeaderLimit(fitted)) {
+    return { kind: "unfittable", reason: `the dependency and versions alone exceed ${CONVENTIONAL_LIMITS.headerMaxLength} characters` };
+  }
+  const facts = (t: string) => JSON.stringify(parseDependabotBumpFacts(t, body));
+  if (facts(fitted) !== facts(title) || overallSemverLevel(fitted, body) !== overallSemverLevel(title, body)) {
+    return { kind: "unfittable", reason: "a fitted title would change the bump facts the lane reads" };
+  }
+  return { kind: "fitted", title: fitted };
+}
+
+export type DependabotRetitleOutcome = "fits" | "retitled" | "failed" | "refused";
+
+export async function reconcileDependabotTitle(args: {
+  statePath: string;
+  prNumber: number;
+  headSha: string;
+  title: string;
+  body: string;
+  retitle: (title: string) => Promise<void>;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): Promise<DependabotRetitleOutcome> {
+  const fit = fitDependabotTitle(args.title, args.body);
+  if (fit.kind === "fits") return "fits";
+  const at = { pr_number: args.prNumber, head_sha: args.headSha, old_title: args.title };
+  if (fit.kind === "unfittable") {
+    const state = readRefreshState(args.statePath, args.headSha) as DepReviewHoldState & { retitleRefused?: { headSha?: unknown; title?: unknown } };
+    if (state.retitleRefused?.headSha === args.headSha && state.retitleRefused.title === args.title) return "refused";
+    state.retitleRefused = { headSha: args.headSha, title: args.title };
+    writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+    args.log("dep-review.retitle_refused", { ...at, reason: fit.reason });
+    return "refused";
+  }
+  try {
+    await args.retitle(fit.title);
+  } catch (error) {
+    args.log("dep-review.retitle_failed", { ...at, candidate: fit.title, error: String((error as Error)?.message ?? error) });
+    return "failed";
+  }
+  args.log("dep-review.retitled", { ...at, new_title: fit.title });
+  return "retitled";
 }
 
 export function majorMigrationBumps(title: string, body: string): DepReviewBumpFact[] {
@@ -533,6 +635,86 @@ export interface DepReviewCheck {
   state?: string;
 }
 
+export interface DepReviewSelectedHead {
+  number: number;
+  url: string;
+  headSha: string;
+  body: string;
+}
+
+export type DepReviewChecksObservation =
+  | { kind: "observed"; checks: ReturnType<typeof rollupFromRest> }
+  | { kind: "unknown"; reason: string };
+
+export async function readSelectedDepReviewChecks(
+  owner: string, repo: string, selected: DepReviewSelectedHead, read: GhApiFetcher,
+): Promise<DepReviewChecksObservation> {
+  const target = { ...selected }, slug = `${owner}/${repo}`.toLowerCase();
+  const unknown = (reason: string): DepReviewChecksObservation => ({ kind: "unknown", reason });
+  const id = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+  const record = (value: unknown): Record<string, unknown> | undefined =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const timestamp = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+  const rows = (value: unknown, key: string): Record<string, unknown>[] | undefined => {
+    const body = record(value);
+    if (body === undefined) return undefined;
+    const list = body[key];
+    if (!Array.isArray(list) || !Number.isSafeInteger(body.total_count) || body.total_count !== list.length || !list.every(row => record(row) !== undefined)) return undefined;
+    return list;
+  };
+  const pull = (value: unknown) => {
+    const p = record(value), head = record(p?.head), repository = record(record(p?.base)?.repo);
+    if (p === undefined || head === undefined || repository === undefined) return undefined;
+    if (!id(p.id) || p.number !== target.number || p.html_url !== target.url || p.state !== "open" || p.merged !== false ||
+        head.sha !== target.headSha || (p.body ?? "") !== target.body || !id(repository.id) ||
+        typeof repository.full_name !== "string" || repository.full_name.toLowerCase() !== slug) return undefined;
+    return { prId: p.id, repoId: repository.id };
+  };
+  if (!id(target.number) || !/^[a-f0-9]{40}$/.test(target.headSha) ||
+      target.url.toLowerCase() !== `https://github.com/${slug}/pull/${target.number}`) return unknown("selected_target_invalid");
+  let stage = "selected_pr";
+  try {
+    const first = pull(await read(singlePrRestArgs(owner, repo, target.number)));
+    if (!first) return unknown("selected_target_unavailable_or_changed");
+    stage = "check_runs";
+    const args = checkRunsRestArgs(owner, repo, target.headSha);
+    args[1] += "&filter=all";
+    const checks = rows(await read(args), "check_runs");
+    if (!checks || new Set(checks.map(c => c.id)).size !== checks.length || checks.some(c => !id(c.id) || c.head_sha !== target.headSha ||
+      typeof c.name !== "string" || !c.name || typeof c.status !== "string" || !timestamp(c.started_at) ||
+      (c.conclusion != null && typeof c.conclusion !== "string") || (c.completed_at != null && !timestamp(c.completed_at)))) return unknown("check_runs_incomplete_or_unbound");
+    stage = "commit_statuses";
+    const statusBody = await read(combinedStatusRestArgs(owner, repo, target.headSha));
+    const statuses = rows(statusBody, "statuses");
+    if (record(statusBody)?.sha !== target.headSha || !statuses || statuses.some(s => !id(s.id) || typeof s.context !== "string" || !s.context ||
+      typeof s.state !== "string" || !timestamp(s.created_at) || (s.updated_at != null && !timestamp(s.updated_at)))) return unknown("commit_statuses_incomplete_or_unbound");
+    stage = "workflow_runs";
+    const workflows = rows(await read(runsForHeadRestArgs(owner, repo, target.headSha)), "workflow_runs");
+    if (!workflows || new Set(workflows.map(r => r.id)).size !== workflows.length || workflows.some(r => !id(r.id) || !id(r.workflow_id) ||
+      !id(r.check_suite_id) || !id(r.run_attempt) || r.head_sha !== target.headSha)) return unknown("workflow_runs_incomplete_or_unbound");
+    const rollup = rollupFromRest(checks as Parameters<typeof rollupFromRest>[0], statuses as Parameters<typeof rollupFromRest>[1], workflows as NonNullable<Parameters<typeof rollupFromRest>[2]>);
+    for (let index = 0; index < checks.length; index++) {
+      const check = checks[index], entry = rollup[index], suite = record(check.check_suite)?.id;
+      const posted = typeof check.external_id === "string" && /^run:\d+:\d+:job:\d+$/.test(check.external_id);
+      const matching = posted ? [] : workflows.filter(r => r.check_suite_id === suite);
+      const direct = workflows.find(r => r.id === entry.workflowRunId), run = direct ?? matching[0];
+      if (matching.length > 1 || (direct && matching[0] && direct.id !== matching[0].id) ||
+          ((entry.workflowRunId !== undefined || record(check.app)?.slug === "github-actions") && run === undefined)) return unknown("workflow_identity_unresolved");
+      if (run !== undefined) {
+        entry.workflowRunId = run.id as number;
+        entry.workflowId = run.workflow_id as number;
+      }
+    }
+    stage = "selected_pr_recheck";
+    const final = pull(await read(singlePrRestArgs(owner, repo, target.number)));
+    if (!final || final.prId !== first.prId || final.repoId !== first.repoId) return unknown("selected_target_changed_during_read");
+    return { kind: "observed", checks: rollup };
+  } catch (error) {
+    void error; // JSON/transport/shape failures remain explicit unknown; never an empty success or external effect.
+    return unknown(`selected_evidence_read_failed:${stage}`);
+  }
+}
+
 /** Check-run/status conclusions that mean a gate is RED — mirrors run-task.ts's RED_CONCLUSIONS. */
 const RED_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]);
 
@@ -563,14 +745,33 @@ const RED_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_RE
  */
 export const LANE_OWNED_STATUS_CONTEXT = REVIEW_CONTEXT;
 
-export function redChecks(checks: DepReviewCheck[]): string[] {
-  return checks
+export function redChecks(checks: DepReviewCheck[], required?: DepReviewRequired): string[] {
+  return splitRedChecks(checks, required).holding;
+}
+
+export type DepReviewRequired = { kind: "required"; names: readonly string[] } | { kind: "all-checks"; fallback: string }; // W1-T9929
+
+export function splitRedChecks(checks: DepReviewCheck[], required?: DepReviewRequired): { holding: string[]; advisory: string[] } { // W1-T9929
+  const red = checks
     .filter((c) => RED_CONCLUSIONS.has(String(c.conclusion ?? c.state ?? "").toUpperCase()))
     .map((c) => c.name ?? c.context ?? "unknown")
     // EXACTLY ONE NAME, never a relaxation. Every OTHER red check must keep holding — that is the
     // entire value of the hold, and a fix that widened into "ignore red checks" would arm
     // auto-merge over a genuinely broken bump, which is worse than the deadlock.
     .filter((name) => name !== LANE_OWNED_STATUS_CONTEXT);
+  if (required?.kind !== "required") return { holding: red, advisory: [] };
+  const names = new Set(required.names);
+  return { holding: red.filter((name) => names.has(name)), advisory: [...new Set(red.filter((name) => !names.has(name)))].sort() };
+}
+
+export function depReviewRequiredSet( // W1-T9929: protection's contexts ∪ ci-gate's REQUIRED; unreadable ⇒ every check
+  protection: { kind: "contexts"; contexts: readonly string[] } | { kind: "none" } | { kind: "unreadable"; reason: string },
+  ciGateRequired: readonly string[],
+): DepReviewRequired {
+  if (protection.kind === "unreadable") return { kind: "all-checks", fallback: `protection-unreadable:${protection.reason}` };
+  if (protection.kind === "none") return { kind: "all-checks", fallback: "protection-none" };
+  if (protection.contexts.includes("ci-gate") && ciGateRequired.length === 0) return { kind: "all-checks", fallback: "ci-gate-required-empty" };
+  return { kind: "required", names: [...new Set([...protection.contexts, ...ciGateRequired])].sort() };
 }
 
 // ── The five-way verdict ─────────────────────────────────────────────────
@@ -583,6 +784,7 @@ export interface DepReviewInput {
   body: string;
   diff: string;
   checks: DepReviewCheck[];
+  required?: DepReviewRequired;
 }
 
 export interface DepReviewResult {
@@ -594,6 +796,9 @@ export interface DepReviewResult {
   redChecks: string[];
   migrationBumps: DepReviewBumpFact[];
   reason: string;
+  advisoryRed?: string[]; // W1-T9929: reds outside the required set, on every verdict decideDepReview returns
+  judgedAgainst?: "required" | "all-checks";
+  requiredFallback?: string;
 }
 
 /**
@@ -606,7 +811,10 @@ export interface DepReviewResult {
 export function decideDepReview(input: DepReviewInput): DepReviewResult {
   const semverLevel = overallSemverLevel(input.title, input.body);
   const offending = offendingFiles(input.diff);
-  const red = redChecks(input.checks);
+  const { holding: red, advisory: advisoryRed } = splitRedChecks(input.checks, input.required);
+  const judged: Pick<DepReviewResult, "advisoryRed" | "judgedAgainst" | "requiredFallback"> = input.required?.kind === "required"
+    ? { advisoryRed, judgedAgainst: "required" }
+    : { advisoryRed, judgedAgainst: "all-checks", ...(input.required ? { requiredFallback: input.required.fallback } : {}) };
   const migrationBumps = majorMigrationBumps(input.title, input.body);
   const dependabot = isDependabotAuthor(input.author);
   const pinOnly = dependabot && offending.length === 0 && semverLevel === "unknown" &&
@@ -620,6 +828,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `author '${input.author.login}' is not dependabot[bot] — this lane reviews Dependabot PRs only`,
     };
   }
@@ -631,6 +840,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `diff touches file(s) outside the manifest/lockfile allowlist: ${offending.join(", ")}`,
     };
   }
@@ -642,6 +852,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `MAJOR dependency proposal requires rmd-owned migration: ${migrationBumps
         .map((b) => `${b.dependency} ${b.fromVersion}->${b.toVersion}`)
         .join(", ")}`,
@@ -655,6 +866,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason:
         semverLevel === "major"
           ? "MAJOR version bump parsed without a stable dependency identity — fail closed, treated like unparseable"
@@ -669,6 +881,7 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
       offendingFiles: offending,
       redChecks: red,
       migrationBumps,
+      ...judged,
       reason: `required check(s) not green: ${red.join(", ")}`,
     };
   }
@@ -679,9 +892,11 @@ export function decideDepReview(input: DepReviewInput): DepReviewResult {
     offendingFiles: offending,
     redChecks: red,
     migrationBumps,
-    reason: pinOnly
+    ...judged,
+    reason: (pinOnly
       ? "pin-only GitHub Actions SHA refresh, release annotations unchanged, gates green — safe to auto-merge"
-      : `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`,
+      : `${semverLevel} bump, confined to manifests, gates green — safe to auto-merge`) +
+      (advisoryRed.length > 0 ? `; advisory red, not holding: ${advisoryRed.join(", ")}` : ""),
   };
 }
 
@@ -759,9 +974,10 @@ export function buildDepReviewEscalation(args: {
   title: string;
   body: string;
   semverLevel: SemverLevel;
-  hold?: { headSha: string; redChecks: string[] };
+  hold?: { headSha: string; redChecks: string[]; advisoryRed?: string[]; refresh?: DependabotRefreshRecord };
 }): Escalation {
   if (args.hold) {
+    const refresh = args.hold.refresh;
     return {
       class: "BLOCKED",
       taskId: `dep-review-hold-PR${args.prNumber}`,
@@ -771,6 +987,11 @@ export function buildDepReviewEscalation(args: {
       detail: [
         `Dependabot PR ${args.prUrl} is held on head ${args.hold.headSha}.`,
         `Blocker: required check(s) not green: ${args.hold.redChecks.join(", ")}.`,
+        ...(args.hold.advisoryRed?.length ? [`Advisory red, not holding (still visible on the PR): ${args.hold.advisoryRed.join(", ")}.`] : []),
+        ...(refresh === undefined ? [] : [
+          `Refresh requested: \`${refresh.command}\` was posted for this head at ` +
+            `${fixedClock(refresh.requestedAtMs).iso()} (${refresh.cause}), and Dependabot has not produced a new head.`,
+        ]),
         `Owner: repository operator. Inspect the failed check logs, rerun transient failures,`,
         `or repair the dependency/CI failure and ask Dependabot to rebase or recreate the PR.`,
         `Do not override failing checks. Green checks resume deterministic review and auto-merge;`,
@@ -818,6 +1039,9 @@ interface DepReviewHoldState {
   headSha: string;
   heldSinceMs: number | null;
   asks: Array<{ headSha: string; issueUrl: string; retired: boolean }>;
+  /** W1-T9584 — every head a Dependabot refresh was asked for. Never pruned, so neither a restart
+   *  nor a ledger rotation can ask twice for one head. */
+  refreshes?: DependabotRefreshRecord[];
 }
 
 /** Durable per-PR state survives ledger rotation; delivered heads stay recorded after retirement. */
@@ -867,10 +1091,510 @@ export function reconcileDepReviewHold(args: {
   const issueUrl = escalate(buildDepReviewEscalation({
     ...args,
     semverLevel: args.result.semverLevel,
-    hold: { headSha: args.headSha, redChecks: args.result.redChecks },
+    hold: { headSha: args.headSha, redChecks: args.result.redChecks, advisoryRed: args.result.advisoryRed, ...refreshFor(state, args.headSha) },
   }), args.escalationDeps());
   if (!issueUrl) throw new Error("dependency hold escalation not delivered; retry after the issue read recovers");
   state.asks.push({ headSha: args.headSha, issueUrl, retired: false });
   save();
   args.log("dep-review.hold_escalated", { issue_url: issueUrl, head_sha: args.headSha, red_checks: args.result.redChecks });
+}
+
+// ── W1-T9584 — a held Dependabot head whose red is MAIN's is refreshed by asking Dependabot, once per head.
+// The dep-review row outranks every base-red row, and a fleet merge onto a Dependabot branch ends Dependabot's
+// management of it (#11791, #11793 on 2026-10-14). The evidence is decideBaseRed's, never a new rule.
+
+export const DEPENDABOT_REBASE_COMMAND = "@dependabot rebase";
+export const DEPENDABOT_RECREATE_COMMAND = "@dependabot recreate";
+
+/** decideBaseRed would refresh the head, or every failing test file passes at main's tip (W1-T6405). */
+export type DependabotRefreshCause = "base-red-recovered" | "fixed-on-main";
+export const DEPENDABOT_REFRESH_CAUSES: readonly DependabotRefreshCause[] = ["base-red-recovered", "fixed-on-main"];
+
+export interface DependabotRefreshRecord {
+  headSha: string;
+  command: string;
+  cause: DependabotRefreshCause | typeof DEPENDABOT_STALE_EVENT_CAUSE;
+  requestedAtMs: number;
+  /** False only between the write-ahead record and a comment that has not yet returned. */
+  delivered: boolean;
+}
+
+/** `wait`: main also fails this check, so a refresh would only inherit it. `request`: main's red has
+ *  cleared, or main's tip passes what this head fails. `own`: the red is this head's, or nothing says otherwise. */
+export type DependabotRefreshVerdict =
+  | { kind: "wait"; check: string }
+  | { kind: "request"; cause: DependabotRefreshCause; check: string }
+  | { kind: "own" };
+
+/** Folds `decideBaseRed` and `fixedOnMainTestFiles` into a verdict; structural inputs, so no sweep import. */
+export function dependabotRefreshVerdict(
+  baseRed: { kind: "own" } | { kind: "wait" | "refresh"; check: string },
+  fixedOnMainFiles: readonly string[] | undefined,
+): DependabotRefreshVerdict {
+  if (baseRed.kind === "wait") return { kind: "wait", check: baseRed.check };
+  if (baseRed.kind === "refresh") return { kind: "request", cause: "base-red-recovered", check: baseRed.check };
+  if (fixedOnMainFiles !== undefined && fixedOnMainFiles.length > 0) {
+    return { kind: "request", cause: "fixed-on-main", check: fixedOnMainFiles.join(", ") };
+  }
+  return { kind: "own" };
+}
+
+/** One commit of the PR view's `commits` field. GraphQL leaves a bot author's `login` empty, so the
+ *  name and noreply email are read as well. */
+export interface DependabotHeadCommit {
+  oid?: string;
+  authors?: Array<{ login?: string; name?: string; email?: string }>;
+}
+
+export const DEPENDABOT_NOREPLY_EMAIL_RE = /^(?:\d+\+)?dependabot\[bot\]@users\.noreply\.github\.com$/i;
+
+function isDependabotCommitAuthor(author: { login?: string; name?: string; email?: string }): boolean {
+  return [author.login, author.name].some((who) => typeof who === "string" && who !== "" && isDependabotAuthor({ login: who })) ||
+    DEPENDABOT_NOREPLY_EMAIL_RE.test(author.email ?? "");
+}
+
+/** True when any commit on the head has an author other than Dependabot. Unread commits count as
+ *  edited: `recreate` works on any Dependabot branch, while `rebase` is refused on an edited one. */
+export function headCarriesForeignCommit(commits: readonly DependabotHeadCommit[] | undefined): boolean {
+  if (commits === undefined || commits.length === 0) return true;
+  return commits.some((c) => (c.authors ?? []).length === 0 || (c.authors ?? []).some((a) => !isDependabotCommitAuthor(a)));
+}
+
+export function dependabotRefreshCommand(commits: readonly DependabotHeadCommit[] | undefined): string {
+  return headCarriesForeignCommit(commits) ? DEPENDABOT_RECREATE_COMMAND : DEPENDABOT_REBASE_COMMAND;
+}
+
+function refreshFor(state: DepReviewHoldState, headSha: string): { refresh?: DependabotRefreshRecord } {
+  const refresh = state.refreshes?.find((r) => r.headSha === headSha);
+  return refresh === undefined ? {} : { refresh };
+}
+
+function readRefreshState(statePath: string, headSha: string): DepReviewHoldState {
+  const state: DepReviewHoldState = existsSync(statePath)
+    ? JSON.parse(readFileSync(statePath, "utf8"))
+    : { headSha, heldSinceMs: null, asks: [] };
+  const refreshes = state?.refreshes;
+  if (refreshes !== undefined && (!Array.isArray(refreshes) || refreshes.some((r) =>
+    !r || typeof r.headSha !== "string" || typeof r.command !== "string" || typeof r.requestedAtMs !== "number"))) {
+    throw new Error("invalid dependency refresh state; refusing to forget requested heads");
+  }
+  return state;
+}
+
+export type DependabotRefreshOutcome = "requested" | "unanswered" | "failed" | "none";
+
+/** Runs after {@link reconcileDepReviewHold} on the same pass and state file. Acts only on a
+ *  `hold` with red checks: a hold on pending checks has nothing to refresh. */
+export function reconcileDependabotRefresh(args: {
+  statePath: string;
+  prNumber: number;
+  headSha: string;
+  result: DepReviewResult;
+  cause: DependabotRefreshCause | undefined;
+  commits: readonly DependabotHeadCommit[] | undefined;
+  nowMs: number;
+  comment: (body: string) => void;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotRefreshOutcome {
+  if (args.result.decision !== "hold" || args.result.redChecks.length === 0) return "none";
+  const state = readRefreshState(args.statePath, args.headSha);
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const prior = state.refreshes?.find((r) => r.headSha === args.headSha);
+  if (prior !== undefined) {
+    args.log("dep-review.refresh_unanswered", {
+      pr_number: args.prNumber, head_sha: args.headSha, command: prior.command, cause: prior.cause, delivered: prior.delivered,
+      requested_at: fixedClock(prior.requestedAtMs).iso(), age_ms: args.nowMs - prior.requestedAtMs,
+      red_checks: args.result.redChecks,
+    });
+    return "unanswered";
+  }
+  if (args.cause === undefined) return "none";
+  const record: DependabotRefreshRecord = {
+    headSha: args.headSha, command: dependabotRefreshCommand(args.commits), cause: args.cause,
+    requestedAtMs: args.nowMs, delivered: false,
+  };
+  state.refreshes = [...(state.refreshes ?? []), record];
+  save();
+  try {
+    args.comment(record.command);
+  } catch (error) {
+    state.refreshes = state.refreshes.filter((r) => r !== record);
+    save();
+    args.log("dep-review.refresh_failed", {
+      pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
+      error: String((error as Error)?.message ?? error),
+    });
+    return "failed";
+  }
+  record.delivered = true;
+  save();
+  args.log("dep-review.refresh_requested", {
+    pr_number: args.prNumber, head_sha: args.headSha, command: record.command, cause: record.cause,
+    edited_head: record.command === DEPENDABOT_RECREATE_COMMAND, red_checks: args.result.redChecks,
+  });
+  return "requested";
+}
+
+
+export const DEPENDABOT_STALE_EVENT_CAUSE = "stale-event";
+
+export type DependabotStaleEventVerdict = { kind: "stale-event"; checks: string[] } | { kind: "none" };
+
+export function dependabotStaleEventVerdict(input: {
+  mergeStateStatus: string | undefined;
+  autoMergeArmed: boolean;
+  reviewPosted: boolean;
+  supersededReds: readonly string[];
+}): DependabotStaleEventVerdict {
+  if ((input.mergeStateStatus ?? "").toUpperCase() !== "BLOCKED" || !input.autoMergeArmed || !input.reviewPosted ||
+      input.supersededReds.length === 0) return { kind: "none" };
+  return { kind: "stale-event", checks: [...new Set(input.supersededReds)].sort() };
+}
+
+export function buildDepReviewStaleEventEscalation(args: {
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  headSha: string;
+  checks: readonly string[];
+}): Escalation {
+  return {
+    class: "MANUAL",
+    taskId: `dep-review-stale-event-PR${args.prNumber}`,
+    headSha: args.headSha,
+    summary: `Dependabot PR is armed but GitHub still blocks it on a superseded red, after a recreate: ${args.title}`,
+    detail: [
+      `${args.prUrl} passed dependency review and auto-merge is armed, but GitHub reports it BLOCKED while`,
+      `${args.checks.join(", ")} failed only in a run an older event started; the newest run of each passed.`,
+      `rmd already asked Dependabot to recreate an earlier head of this PR for the same block, so it will not ask again.`,
+      ``,
+      `Head: ${args.headSha}`,
+    ].join("\n"),
+    options: [
+      { label: "rerun", detail: `re-run the failed job of ${args.checks.join(", ")} at ${args.headSha.slice(0, 7)}, so its own check suite turns green` },
+      { label: "investigate", detail: "read why the recreated head inherited the block (a title or body edit after its CI started)" },
+    ],
+    recommendation: "rerun",
+  };
+}
+
+export type DependabotStaleEventOutcome = "observed" | "requested" | "awaiting-dependabot" | "escalated" | "failed";
+
+export function reconcileDependabotStaleEvent(args: {
+  statePath: string;
+  prNumber: number;
+  headSha: string;
+  checks: readonly string[];
+  nowMs: number;
+  comment: (body: string) => void;
+  escalate: () => string | null | undefined;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotStaleEventOutcome {
+  const state = readRefreshState(args.statePath, args.headSha) as DepReviewHoldState & {
+    staleEvent?: { headSha?: unknown; firstSeenMs?: unknown; issueUrl?: unknown };
+  };
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const at = { pr_number: args.prNumber, head_sha: args.headSha, stale_checks: args.checks };
+  const ours = (state.refreshes ?? []).filter((r) => r.cause === DEPENDABOT_STALE_EVENT_CAUSE && r.delivered);
+  if (ours.some((r) => r.headSha === args.headSha)) return "awaiting-dependabot";
+  if (state.staleEvent?.headSha !== args.headSha) {
+    state.staleEvent = { headSha: args.headSha, firstSeenMs: args.nowMs };
+    save();
+    args.log("dep-review.stale_event.observed", at);
+    return "observed";
+  }
+  if (ours.length > 0) {
+    if (typeof state.staleEvent.issueUrl === "string") return "escalated";
+    let issueUrl: string | null | undefined;
+    try {
+      issueUrl = args.escalate();
+    } catch (error) {
+      issueUrl = undefined;
+      args.log("dep-review.stale_event.failed", { ...at, action: "escalate", error: String((error as Error)?.message ?? error) });
+    }
+    if (!issueUrl) return "failed";
+    state.staleEvent.issueUrl = issueUrl;
+    save();
+    args.log("dep-review.stale_event.escalated", { ...at, issue_url: issueUrl });
+    return "escalated";
+  }
+  const record: DependabotRefreshRecord = {
+    headSha: args.headSha, command: DEPENDABOT_RECREATE_COMMAND, cause: DEPENDABOT_STALE_EVENT_CAUSE, requestedAtMs: args.nowMs, delivered: false,
+  };
+  state.refreshes = [...(state.refreshes ?? []), record];
+  save();
+  try {
+    args.comment(record.command);
+  } catch (error) {
+    state.refreshes = state.refreshes.filter((r) => r !== record);
+    save();
+    args.log("dep-review.stale_event.failed", { ...at, command: record.command, error: String((error as Error)?.message ?? error) });
+    return "failed";
+  }
+  record.delivered = true;
+  save();
+  args.log("dep-review.stale_event.recreate_requested", { ...at, command: record.command });
+  return "requested";
+}
+
+// ── W1-T9586 — an own red on a minor/patch Dependabot head becomes a migration proposal (W1-T2705's capture path).
+
+/** `main-passes`: main's newest genuine run passes a check this head fails; `unclassified`: nothing says whose red it is. */
+export type DependabotOwnRedSignal = "main-passes" | "unclassified";
+export const DEPENDABOT_OWN_RED_SIGNALS: readonly DependabotOwnRedSignal[] = ["main-passes", "unclassified"];
+
+export function dependabotOwnRedSignal(
+  verdict: DependabotRefreshVerdict | undefined,
+  main: { state: string; failingChecks: readonly string[]; observedChecks?: readonly string[] } | undefined,
+  failing: readonly string[],
+): DependabotOwnRedSignal | undefined {
+  if (verdict?.kind !== "own" || failing.length === 0) return undefined;
+  const observed = main?.state === "green" || main?.state === "red" ? main.observedChecks : undefined;
+  return observed !== undefined && failing.some((name) => observed.includes(name) && !main!.failingChecks.includes(name))
+    ? "main-passes" : "unclassified";
+}
+
+export function dependabotReviewArgs(refresh: DependabotRefreshVerdict | undefined, ownRed: DependabotOwnRedSignal | undefined): string[] {
+  if (refresh?.kind === "request") return ["--dependabot-refresh", refresh.cause];
+  return ownRed === undefined ? [] : ["--dependabot-own-red", ownRed];
+}
+
+interface DependabotOwnRedBump { dependency: string; fromVersion: string; toVersion: string }
+
+interface DependabotOwnRedRecord {
+  headSha: string;
+  bumps: DependabotOwnRedBump[];
+  redChecks: string[];
+  firstSeenMs: number;
+  lastSeenMs: number;
+  feedbackId?: string;
+}
+
+interface DependabotOwnRedProposal { feedbackId: string; submissionKey: string; bumps: string[]; prNumbers: number[]; filedAtMs: number }
+
+const OWN_RED_PROPOSALS_FILE = "own-red-proposals.json";
+
+function ownRedBumpKey(b: DependabotOwnRedBump): string {
+  return `${b.dependency.trim().toLowerCase()}@${b.toVersion}`;
+}
+
+function ownRedBumpText(b: DependabotOwnRedBump): string {
+  return `${b.dependency} ${b.fromVersion} -> ${b.toVersion}`;
+}
+
+export function depReviewOwnRedSubmissionKey(owner: string, repo: string, bumps: readonly DependabotOwnRedBump[]): string {
+  const targets = [...new Set(bumps.map(ownRedBumpKey))].sort().join(",");
+  return `dep-review:own-red:${owner.trim().toLowerCase()}/${repo.trim().toLowerCase()}:${targets}`;
+}
+
+export function renderDepReviewOwnRedFeedback(args: {
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  basis: "main-passes" | "survived-refresh" | "outside-allowlist";
+  bumps: readonly DependabotOwnRedBump[];
+  redChecks: readonly string[];
+  siblings: ReadonlyArray<{ prNumber: number; bumps: readonly DependabotOwnRedBump[] }>;
+  offendingFiles?: readonly string[];
+}): string {
+  return [
+    `Land the dependency bump(s) of Dependabot PR #${args.prNumber}, whose red is its own: ${args.title}`,
+    "",
+    args.basis === "main-passes"
+      ? "Dependabot proposed a minor/patch update whose head fails a required check that main's newest run passes."
+      : args.basis === "outside-allowlist"
+        ? `Dependabot edited dependency file(s) outside the lane's allowlist: ${(args.offendingFiles ?? []).join(", ")}.`
+        : "Dependabot proposed a minor/patch update whose red survived a requested Dependabot refresh.",
+    "A companion edit cannot ride the Dependabot branch (dep-review refuses any file outside the manifest",
+    "allowlist), so rmd must land the SAME version moves plus the companion edits on an owned task branch:",
+    "tests that pin the old version or action SHA literal, derived pins (the image CLI must equal the locked",
+    "SDK's claudeCodeVersion), and the bumps of every sibling Dependabot PR named below that the fix needs.",
+    "Do not edit or close the Dependabot PRs: the superseded-by row closes them once the owned PR carries",
+    "their hunks, or Dependabot does once main carries the versions.",
+    "",
+    `PR: ${args.prUrl}`,
+    `Head: ${args.headSha}`,
+    `Bumps: ${args.bumps.map(ownRedBumpText).join(", ")}`,
+    `Red checks: ${args.redChecks.join(", ")}`,
+    `Sibling Dependabot PRs folded in: ${args.siblings.length === 0 ? "none"
+      : args.siblings.map((s) => `#${s.prNumber} (${s.bumps.map(ownRedBumpText).join(", ")})`).join("; ")}`,
+    "",
+    "Dependabot proposal body:",
+    "",
+    args.body.trim().length > 0 ? args.body.trim() : "(empty body)",
+  ].join("\n");
+}
+
+function isOwnRedRecord(r: unknown): r is DependabotOwnRedRecord {
+  const o = r as DependabotOwnRedRecord | null;
+  return !!o && typeof o.headSha === "string" && Array.isArray(o.bumps) && Array.isArray(o.redChecks) &&
+    typeof o.firstSeenMs === "number" && typeof o.lastSeenMs === "number" &&
+    (o.feedbackId === undefined || typeof o.feedbackId === "string");
+}
+
+function readOwnRedProposals(path: string): DependabotOwnRedProposal[] {
+  if (!existsSync(path)) return [];
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as { proposals?: unknown } | null;
+  const proposals = parsed === null || typeof parsed !== "object" ? undefined : parsed.proposals;
+  if (!Array.isArray(proposals) || proposals.some((p: DependabotOwnRedProposal) =>
+    !p || typeof p.feedbackId !== "string" || !Array.isArray(p.bumps) || !Array.isArray(p.prNumbers))) {
+    throw new Error("invalid dependency own-red proposals; refusing to file a duplicate");
+  }
+  return proposals;
+}
+
+/** Siblings held own-red on their current head since this head was first seen; an unreadable one is not named. */
+function ownRedSiblings(dir: string, prNumber: number, sinceMs: number): Array<{ prNumber: number; bumps: DependabotOwnRedBump[] }> {
+  const siblings: Array<{ prNumber: number; bumps: DependabotOwnRedBump[] }> = [];
+  for (const name of readdirSync(dir).sort()) {
+    const m = /^PR(\d+)\.json$/.exec(name);
+    if (!m || Number(m[1]) === prNumber) continue;
+    let state: DepReviewHoldState & { ownRed?: unknown };
+    try {
+      state = JSON.parse(readFileSync(join(dir, name), "utf8"));
+    } catch (error) {
+      void error; // its own dep-review pass fails on the same file
+      continue;
+    }
+    const own = state?.ownRed;
+    if (isOwnRedRecord(own) && own.headSha === state.headSha && state.heldSinceMs !== null &&
+        own.feedbackId === undefined && own.lastSeenMs >= sinceMs) {
+      siblings.push({ prNumber: Number(m[1]), bumps: own.bumps });
+    }
+  }
+  return siblings;
+}
+
+export type DependabotOwnRedOutcome = "none" | "observed" | "captured" | "folded" | "proposed" | "unkeyed" | "failed";
+
+/** Pass one records the head so held siblings register; pass two files ONE proposal; named bumps fold into it. */
+export function reconcileDependabotOwnRed(args: {
+  statePath: string;
+  owner: string;
+  repo: string;
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  result: DepReviewResult;
+  signal: DependabotOwnRedSignal | undefined;
+  nowMs: number;
+  capture: (args: { raw: string; submissionKey: string }) => { id: string };
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotOwnRedOutcome {
+  if (args.result.decision !== "hold" || args.result.redChecks.length === 0 || args.signal === undefined) return "none";
+  const state = readRefreshState(args.statePath, args.headSha) as DepReviewHoldState & { ownRed?: unknown };
+  if (state.ownRed !== undefined && !isOwnRedRecord(state.ownRed)) throw new Error("invalid dependency own-red state; refusing to file a duplicate");
+  const survived = (state.refreshes ?? []).some((r) => r.delivered && r.headSha !== args.headSha && r.cause !== DEPENDABOT_STALE_EVENT_CAUSE);
+  const basis = args.signal === "main-passes" ? "main-passes" : survived ? "survived-refresh" : undefined;
+  if (basis === undefined) return "none";
+  const bumps = parseDependabotBumpFacts(args.title, args.body)
+    .map((b) => ({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
+  if (bumps.length === 0) {
+    args.log("dep-review.own_red.unkeyed", { pr_number: args.prNumber, head_sha: args.headSha, red_checks: args.result.redChecks });
+    return "unkeyed";
+  }
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const prior = isOwnRedRecord(state.ownRed) && state.ownRed.headSha === args.headSha ? state.ownRed : undefined;
+  const record: DependabotOwnRedRecord = prior ?? { headSha: args.headSha, bumps, redChecks: args.result.redChecks, firstSeenMs: args.nowMs, lastSeenMs: args.nowMs };
+  record.lastSeenMs = args.nowMs;
+  record.redChecks = args.result.redChecks;
+  state.ownRed = record;
+  save();
+  if (record.feedbackId !== undefined) return "proposed";
+  if (prior === undefined) {
+    args.log("dep-review.own_red.observed", { pr_number: args.prNumber, head_sha: args.headSha, basis, red_checks: args.result.redChecks });
+    return "observed";
+  }
+  const registryPath = join(dirname(args.statePath), OWN_RED_PROPOSALS_FILE);
+  const proposals = readOwnRedProposals(registryPath);
+  const mine = bumps.map(ownRedBumpKey);
+  const carrier = proposals.find((p) => mine.every((k) => p.bumps.includes(k)));
+  if (carrier !== undefined) {
+    record.feedbackId = carrier.feedbackId;
+    save();
+    args.log("dep-review.own_red.folded", { pr_number: args.prNumber, head_sha: args.headSha, feedback_id: carrier.feedbackId });
+    return "folded";
+  }
+  const siblings = ownRedSiblings(dirname(args.statePath), args.prNumber, record.firstSeenMs)
+    .filter((s) => !proposals.some((p) => s.bumps.every((b) => p.bumps.includes(ownRedBumpKey(b)))));
+  const all = [...bumps, ...siblings.flatMap((s) => s.bumps)];
+  const submissionKey = depReviewOwnRedSubmissionKey(args.owner, args.repo, all);
+  const raw = renderDepReviewOwnRedFeedback({ ...args, basis, bumps, redChecks: args.result.redChecks, siblings });
+  let entry: { id: string };
+  try {
+    entry = args.capture({ raw, submissionKey });
+  } catch (error) {
+    args.log("dep-review.own_red.capture_failed", {
+      pr_number: args.prNumber, head_sha: args.headSha, submission_key: submissionKey, error: String((error as Error)?.message ?? error),
+    });
+    return "failed";
+  }
+  writeAtomic(registryPath, `${JSON.stringify({ proposals: [...proposals, {
+    feedbackId: entry.id, submissionKey, bumps: [...new Set(all.map(ownRedBumpKey))].sort(),
+    prNumbers: [args.prNumber, ...siblings.map((s) => s.prNumber)], filedAtMs: args.nowMs,
+  }] })}\n`);
+  record.feedbackId = entry.id;
+  save();
+  args.log("dep-review.own_red.feedback_captured", {
+    pr_number: args.prNumber, head_sha: args.headSha, feedback_id: entry.id, submission_key: submissionKey, basis,
+    red_checks: args.result.redChecks, folded_prs: siblings.map((s) => s.prNumber),
+  });
+  return "captured";
+}
+
+
+export type DependabotRefusedPathOutcome = "not-proposed" | "captured" | "folded" | "failed";
+
+export function reconcileDependabotRefusedPath(args: {
+  registryDir: string;
+  owner: string;
+  repo: string;
+  prUrl: string;
+  prNumber: number;
+  title: string;
+  body: string;
+  headSha: string;
+  author: DepReviewAuthor;
+  commits: readonly DependabotHeadCommit[] | undefined;
+  result: DepReviewResult;
+  capture: (args: { raw: string; submissionKey: string }) => { id: string };
+  nowMs: number;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): DependabotRefusedPathOutcome {
+  const facts = { pr_number: args.prNumber, head_sha: args.headSha, offending_files: args.result.offendingFiles };
+  const bumps = parseDependabotBumpFacts(args.title, args.body)
+    .map((b) => ({ dependency: b.dependency, fromVersion: b.fromVersion, toVersion: b.toVersion }));
+  const reason = !isDependabotAuthor(args.author) ? "non-dependabot-author"
+    : headCarriesForeignCommit(args.commits) ? "foreign-commit"
+      : bumps.length === 0 ? "unkeyed" : undefined;
+  if (reason !== undefined) {
+    args.log("dep-review.refused_path.not_proposed", { ...facts, reason });
+    return "not-proposed";
+  }
+  const registryPath = join(args.registryDir, OWN_RED_PROPOSALS_FILE);
+  const submissionKey = depReviewOwnRedSubmissionKey(args.owner, args.repo, bumps);
+  try {
+    const proposals = readOwnRedProposals(registryPath);
+    const mine = bumps.map(ownRedBumpKey);
+    const carrier = proposals.find((p) => mine.every((k) => p.bumps.includes(k)));
+    if (carrier !== undefined) {
+      args.log("dep-review.refused_path.folded", { ...facts, feedback_id: carrier.feedbackId });
+      return "folded";
+    }
+    const raw = renderDepReviewOwnRedFeedback({ ...args, basis: "outside-allowlist", bumps, redChecks: args.result.redChecks,
+      siblings: [], offendingFiles: args.result.offendingFiles });
+    const entry = args.capture({ raw, submissionKey });
+    writeAtomic(registryPath, `${JSON.stringify({ proposals: [...proposals, {
+      feedbackId: entry.id, submissionKey, bumps: [...new Set(mine)].sort(), prNumbers: [args.prNumber], filedAtMs: args.nowMs,
+    }] })}\n`);
+    args.log("dep-review.refused_path.feedback_captured", { ...facts, feedback_id: entry.id, submission_key: submissionKey });
+    return "captured";
+  } catch (error) {
+    args.log("dep-review.refused_path.capture_failed", { ...facts, submission_key: submissionKey, error: String((error as Error)?.message ?? error) });
+    return "failed";
+  }
 }

@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-11: follow-ups from the recycle-stall fix (hand PR #10925); operator ruling: no hard thresholds"
   plan_refs: [W1-T2598, W1-T1046, W1-T6062, W1-T5127, W1-T7807, W1-T7697]
   files: [src/lib/deployer.ts, deploy/recycle-container.sh, test/a-refused-recycle-retries-when-its-blockers-settle.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

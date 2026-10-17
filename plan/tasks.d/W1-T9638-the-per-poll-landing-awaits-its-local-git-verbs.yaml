@@ -1,0 +1,66 @@
+- id: W1-T9638
+  title: "THE PER-POLL FEEDBACK LANDING STILL RUNS ITS LOCAL GIT VERBS ON THE DAEMON LOOP — W1-T5672 awaited only fetch, ls-remote, push and gh; landPendingSteps' own git calls (stageBranchPending, scanLocalUnlanded, acknowledgeLandedQueueCopies, decideFeedbackStage, the scratch-index build) are execFileSync at feedback-landing.ts:295, measured at up to 727 calls and 24.6 s in one 98 s lag window, and they grow with the landing branch's pending files"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — where the landing's local git verbs run; the trees, commits, pushes and verdicts are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15: W1-T9564 analysis of the 06:16Z full pass (53.4 min reverification to sweep.pass)"
+  plan_refs: [W1-T9564, W1-T5672, W1-T5620, W1-T9615, W1-T9616, W1-T9425, W1-T5689]
+  files:
+    - src/lib/feedback-landing.ts
+    - test/the-per-poll-landing-awaits-its-local-git-verbs.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: merged
+  priority: 1  # operator-2026-10-15: stuck PRs and stalls must not happen; a held loop starves every timer-bounded daemon read
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger union, read-only; ~/Remudero-notes/w1-t9564/all.ndjson). Summed over the
+    corpus's daemon.loop_lag rows, sync_spawn_by_caller at `<anonymous>@feedback-landing.ts:295` (defaultGit's
+    execFileSync), split by the caller one frame up:
+    - stageBranchPending 77.4 s
+    - acknowledgeLandedQueueCopies 25.4 s
+    - scanLocalUnlanded 22.4 s
+    - decideFeedbackStage 8.3 s
+    - discriminatingLandingProof 2.8 s
+    - buildTree 1.3 s and listDirtyRelFiles 1.0 s
+    The 06:58:35Z row (lag 98 s, sync_spawn_ms 150 s) holds stageBranchPending at 727 calls, 24.6 s, plus
+    scanLocalUnlanded at 175 calls and acknowledgeLandedQueueCopies at 139. The `run` caller (96 s over 23 calls) is the SYNC
+    driver's network asks, which is W1-T9615's capture path. This task does not cover it.
+    READ at origin/main 7a9076fd4:
+    - sweepFeedbackLandingAsync drives landPendingSteps with driveLandingAsync. Only `net.git`/`net.gh` asks
+      (fetch, ls-remote, push, PR calls; W1-T5672) and the plan-PR preflight (W1-T5620) are awaited.
+    - Every other git call in landPendingSteps' reach calls the sync `git` seam directly, which is
+      `landOpts.git ?? defaultGit(root)` (execFileSync). That reach is listDirtyRelFiles,
+      acknowledgeLandedQueueCopies, acknowledgeLandedFeedbackQueue, scanLocalUnlanded (hash-object,
+      rev-parse, hasFeedbackLineage, decideFeedbackStage), buildTree (read-tree, stageBranchPending,
+      hash-object, update-index, write-tree), `rev-parse origin/main`, and finishLanding's commit-tree,
+      diff, remoteBranchTree, landingTreeContent and tipAuthor.
+    - stageBranchPending makes 2-4 calls for each path the landing branch carries. The per-poll cost
+      therefore grows with the pending set. The SRE lane filed every 60-100 s on 2026-10-15.
+    - After W1-T9615 every daemon-loop capture lands through this per-poll sweep. This path then carries
+      all of that load.
+  design: |
+    1. Every git call in landPendingSteps' reach goes through the LandingNet ask (`yield* net.git(...)`,
+       with the scratch-index `env` where it has one). driveLandingAsync then awaits each one through
+       `gitAsync`, and the sync driver (boot sweep, CLI, landContent) runs it inline exactly as today.
+       Helpers that call git become generators. Pure helpers stay plain.
+    2. The sync and async drivers return byte-identical results for the same repository state: the same
+       tree sha, files, refused list and acknowledgement.
+    3. Lower or delete each SYNC_SPAWN_LOOP_BASELINE row the conversion empties, in the same PR.
+    4. Out of scope: W1-T9615's capture routing, W1-T9616/W1-T9425's push decisions, and the boot-time
+       `sweepFeedbackLanding()` in daemonBoot, which stays sync by design (W1-T5620, W1-T5672).
+  acceptance:
+    - claim: "a slow git child during a per-poll landing with pending files does not delay a concurrent timer"
+      proof: 'grep: test("W1-T9638: a slow git child in a per-poll landing does not delay a concurrent timer" in test/the-per-poll-landing-awaits-its-local-git-verbs.test.ts'
+    - claim: "the sync and async landing drivers build the same tree and result from the same pending state"
+      proof: 'grep: test("W1-T9638: the sync and async landings build the same tree from the same pending files" in test/the-per-poll-landing-awaits-its-local-git-verbs.test.ts'
+  falsifier: |
+    Build a fixture checkout with a bare origin, a landing branch that carries several pending feedback
+    paths, and a dirty local record. Put a `git` on PATH that sleeps 0.3 s and then execs the real git, and
+    run sweepFeedbackLandingAsync with a 20 ms setInterval beside it. At origin/main the local verbs are
+    execFileSync, so the largest gap between ticks is at least one 0.3 s child, and the first test fails.
+    Route only the network asks through gitAsync, as at base, and the test fails the same way.

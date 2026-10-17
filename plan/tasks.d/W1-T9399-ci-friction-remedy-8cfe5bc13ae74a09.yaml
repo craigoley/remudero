@@ -1,0 +1,55 @@
+- id: W1-T9399
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:comment-load-ratchet cost 53.9 PR minute(s) across 88 round(s) on 75 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.13
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:comment-load-ratchet"
+  files:
+    - src/lib/classify.ts
+    - test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:comment-load-ratchet"
+      proof: "grep: test(\"W1-T9399: check:ci-log:comment-load-ratchet is prevented, not retried\" in test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:comment-load-ratchet's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:comment-load-ratchet cost 53.9 PR minute(s) (seven-day half-life) across 88 fix round(s) on 75 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/classify.ts: test/classify.test.ts imports it
+    - test/classify.test.ts: named by the failing check
+    - the rounds name a failing test: test/classify.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #10954 at 2026-10-11T22:50:40.909Z: ci-log round — comment-load-ratchet; mutation-ratchet: test/classify.test.ts
+    - PR #10785 (https://github.com/craigoley/remudero/pull/10785) at 2026-10-11T06:21:43.895Z: ci-log round — comment-load-ratchet
+        failing tests: the count of classes extending Error directly under tracked src/**/*.ts cannot grow past the recorded ceiling
+    - PR #10523 (https://github.com/craigoley/remudero/pull/10523) at 2026-10-10T01:28:39.587Z: ci-log round — comment-load-ratchet
+        failing tests: every registered garden can close its own refused machine shard
+    - PR #10479 (https://github.com/craigoley/remudero/pull/10479) at 2026-10-09T22:33:28.679Z: ci-log round — comment-load-ratchet
+        failing tests: W1-T2782: source paths normalize separators, strip only the terminal line number, and suffix-match a checkout prefix; W1-T2782: source matching never uses basename alone and malformed or non-diff-coverage text abstains
+    - PR #10361 at 2026-10-09T14:10:58.931Z: ci-log round — comment-load-ratchet; ci-shard (1/8)
+
+    WHAT THE LAST RUNG TRIED: W1-T5097 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:comment-load-ratchet in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/lib/classify.ts and one new test file. Neither is in the escalation categories (secrets, auth, permissions, merge/deploy/infra/review policy, data deletion, irreversible actions)."
+      - "The task asks for a code-path change so a CI ratchet round is prevented or self-healed. This is a bounded, reversible engineering fix, and the PR still goes through CI and review."
+      - "The acceptance check is a concrete grep for a named test in the new test file. The finding is verifiable from what is shown, and no operator-only decision (priority, budget, policy) is requested."
+      - "The family track record is weak (25 merged, 40 declined, Beta mean 0.61), and the filing note flags the cause as machine-authored. The ratchet's purpose is to hold counts down, so a remedy that loosens the ratchet rather than preventing the cause would be a concern. That is a reason for ordinary review, not for escalation, and nothing here shows such a loosening."
+      - "No ACTUAL CHANGE view was supplied, so this judgment rests on the description and declared files only."
+    judged_at: "2026-10-15T02:38:38.310Z"
+    pin: "761e5d0426899f14558047f0e35da7407a10877c0c489cf1cfdd79ca4d9acbcd"

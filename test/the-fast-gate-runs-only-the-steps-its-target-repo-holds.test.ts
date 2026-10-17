@@ -65,31 +65,42 @@ test("W1-T8920: the harness repo still fails a missing fast-gate script", () => 
   }
 });
 
-test("W1-T8920: a consumer worktree without bin/rmd is gated through the harness rmd", async () => {
+test("W1-T8920: a consumer worktree without bin/rmd is gated through the harness rmd with a portable UTC clock", async () => {
   const work = scratch("gate");
   const harness = scratch("harness");
   try {
-    // A real child: the fake harness rmd records its argv and writes the summary the gate reads back.
+    // A real child: the fake harness rmd records its argv and writes the summary the gate reads back, at the
+    // `--summary-file` path the harness names (W1-T9619: outside the worktree).
     const fakeRmd = join(harness, "rmd");
     const argvFile = join(harness, "argv.txt");
+    const summaryCopy = join(harness, "summary-copy.json");
+    // BSD date does not implement GNU %N; use the pinned native Node clock.
     writeFileSync(
       fakeRmd,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argvFile}"\nmkdir -p "$PWD/coverage"\n` +
-        `printf '{"ok":false,"finishedAt":"%s","steps":[{"name":"jscpd","ok":false}]}' "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" > "$PWD/coverage/preflight-summary.json"\nexit 1\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "${argvFile}"\nsummary="\${@: -1}"\n` +
+        `printf '{"ok":false,"finishedAt":"%s","steps":[{"name":"jscpd","ok":false}]}' "$(${JSON.stringify(process.execPath)} -e 'process.stdout.write(new Date().toISOString())')" > "$summary"\ncp "$summary" "${summaryCopy}"\nexit 1\n`,
     );
     chmodSync(fakeRmd, 0o755);
+    // W1-T9619: the sandbox is a stand-in that runs the command after `--`, so this host needs no bubblewrap.
+    const fakeSandbox = join(harness, "sandbox");
+    writeFileSync(fakeSandbox, `#!/usr/bin/env bash\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`);
+    chmodSync(fakeSandbox, 0o755);
+    const contain = async () => ({ mode: "sandboxed" as const, file: fakeSandbox, argv: ["--"] });
 
     assert.deepEqual(preopenGateCommand(work, fakeRmd), { file: fakeRmd, args: ["preflight", "--fast", "--repo-root", work] });
 
-    const result = await runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, fakeRmd) });
+    const result = await runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, fakeRmd, undefined, {}, { contain }) });
     assert.equal(result.kind, "fail", `a consumer build must be measured, got ${JSON.stringify(result)}`);
     assert.deepEqual(result.kind === "fail" ? result.failedSteps : [], ["jscpd"]);
-    assert.deepEqual(readFileSync(argvFile, "utf8").trim().split("\n"), ["preflight", "--fast", "--repo-root", work]);
+    const summary = JSON.parse(readFileSync(summaryCopy, "utf8")) as { finishedAt: string };
+    assert.match(summary.finishedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "the real child writes a millisecond UTC clock, not a date-tool extension");
+    const argv = readFileSync(argvFile, "utf8").trim().split("\n");
+    assert.deepEqual(argv.slice(0, 5), ["preflight", "--fast", "--repo-root", work, "--summary-file"]);
 
-    // A worktree holding its own bin/rmd still spawns that one, unchanged.
+    // W1-T9619: a worktree holding its own bin/rmd is gated through the harness rmd too, never its own.
     mkdirSync(join(work, "bin"));
     writeFileSync(join(work, "bin", "rmd"), "#!/usr/bin/env bash\n");
-    assert.deepEqual(preopenGateCommand(work, fakeRmd), { file: join(work, "bin", "rmd"), args: ["preflight", "--fast"] });
+    assert.deepEqual(preopenGateCommand(work, fakeRmd), { file: fakeRmd, args: ["preflight", "--fast", "--repo-root", work] });
   } finally {
     rmSync(work, { recursive: true, force: true });
     rmSync(harness, { recursive: true, force: true });

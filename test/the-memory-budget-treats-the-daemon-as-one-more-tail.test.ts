@@ -237,21 +237,21 @@ test("a recorded verdict splits the proc-measured daemon growth at the median of
   recordShadowMemoryVerdict({ workerClass: "garden", reservationId: "start", root: "/home/node/Remudero" }, ports(rows, tail));
   const row = rows.find((r) => r.step === "memory_budget.shadow")!;
   const growth = (row.daemon_growth as Array<{ growthMib: number; typicalMib?: number; typicalBasis?: string }>)[0]!;
-  assert.equal(growth.growthMib, 480, "the peak is still the proc's VmHWM - VmRSS");
-  assert.equal(growth.typicalMib, 2380 - 2100, "median 2380 of the seven samples, less the latest 2100");
+  assert.equal(growth.growthMib, 2450 - 2038, "W1-T9972: the series' peak less the proc's VmRSS + VmSwap");
+  assert.equal(growth.typicalMib, 2380 - 2038, "median 2380 of the seven samples, less the current 2038");
   assert.equal(growth.typicalBasis, "median of 7 sample row(s)");
   const numbers = row.numbers as Record<string, number>;
-  assert.equal(numbers.daemonGrowthTypicalMib, 280);
-  assert.equal(numbers.daemonGrowthTailMib, 200);
-  // The garden's tail (730) is the container's one tail; the daemon adds only its typical 280.
-  assert.equal(numbers.containerHeadroomMib, 8379 - 5000 - (90 + 730) - 280);
+  assert.equal(numbers.daemonGrowthTypicalMib, 342);
+  assert.equal(numbers.daemonGrowthTailMib, 70);
+  // The garden's tail (730) is the container's one tail; the daemon adds only its typical 342.
+  assert.equal(numbers.containerHeadroomMib, 8379 - 5000 - (90 + 730) - 342);
 
   resetShadowMemoryStateForTests();
   const short: LedgerLine[] = [];
   recordShadowMemoryVerdict({ workerClass: "garden", reservationId: "start", root: "/home/node/Remudero" },
     ports(short, series.slice(0, 3).map(([ago, mib]) => tickLine(ago!, mib!)).join("\n")));
   const whole = (short[0]!.daemon_growth as Array<{ typicalMib?: number; typicalBasis?: string }>)[0]!;
-  assert.equal(whole.typicalMib, undefined, "three samples since the rotation: no split");
+  assert.equal(whole.typicalMib, undefined, "three samples since the rotation: no split, the proc's VmHWM - VmRSS");
   assert.equal(whole.typicalBasis, "all typical: 3 daemon sample row(s) in the last hour");
   assert.equal((short[0]!.numbers as Record<string, number>).containerHeadroomMib, 8379 - 5000 - (90 + 730) - 480);
 });

@@ -22,6 +22,7 @@ import { RmdError } from "./errors.js";
 import { buildRiskJudgeSpawnArgs, resolveRiskJudgeMount, scrubRiskJudgeText } from "./risk-judge.js";
 import { loadMounts, mountsPath, type Mount } from "./mounts.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { ledgerRotationEntries, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import type { SpawnWorkerArgs, WorkerResult, WorkerStreamEvent, WorkerStreamObserver } from "./worker.js";
 
 /** One `worker.quiet_bound` row per worker spawn. */
@@ -63,36 +64,175 @@ function assignmentProvider(row: Record<string, unknown>): string | undefined {
  * run's `worker.assignment` row named. An episode still open (no later non-quiet row) is not a gap yet and is skipped.
  * Pure: takes ledger rows (the union read, per the ledger rules) and returns durations in ms. */
 export function quietGapsByProvider(rows: ReadonlyArray<Record<string, unknown>>): Map<string, number[]> {
-  const byRun = new Map<string, Array<Record<string, unknown>>>();
+  const byRun = new Map<string, Array<{ ms: number; row: Record<string, unknown> }>>();
   for (const row of rows) {
     if (row.step !== "worker.state" && row.step !== "worker.assignment") continue;
-    if (typeof row.run_id !== "string" || !Number.isFinite(tsMs(row))) continue;
+    const ms = tsMs(row);
+    if (typeof row.run_id !== "string" || !Number.isFinite(ms)) continue;
     const list = byRun.get(row.run_id) ?? [];
-    list.push(row);
+    list.push({ ms, row });
     byRun.set(row.run_id, list);
   }
   const out = new Map<string, number[]>();
   for (const list of byRun.values()) {
-    list.sort((a, b) => tsMs(a) - tsMs(b));
+    list.sort((a, b) => a.ms - b.ms);
     let provider: string | undefined;
     let quietSince: number | undefined;
     let quietProvider: string | undefined;
-    for (const row of list) {
+    for (const { ms, row } of list) {
       if (row.step === "worker.assignment") {
         provider = assignmentProvider(row) ?? provider;
         continue;
       }
       if (row.state === "quiet") {
-        quietSince = tsMs(row);
+        quietSince = ms;
         quietProvider = provider;
       } else if (quietSince !== undefined) {
-        const gap = tsMs(row) - quietSince;
-        if (quietProvider !== undefined && gap >= 0) out.set(quietProvider, [...(out.get(quietProvider) ?? []), gap]);
+        const gap = ms - quietSince;
+        if (quietProvider !== undefined && gap >= 0) {
+          const gaps = out.get(quietProvider);
+          if (gaps) gaps.push(gap);
+          else out.set(quietProvider, [gap]);
+        }
         quietSince = undefined;
       }
     }
   }
   return out;
+}
+
+/** The steps the bound reads. */
+export const QUIET_HISTORY_STEPS: readonly string[] = ["worker.state", "worker.assignment"];
+
+/** The fields {@link quietGapsByProvider} reads, plus the writer's `host` and `actor_pid`, so two writers' rows stamped in
+ * the same millisecond stay two rows through the union's replay dedupe, as they do in a whole-row read. W1-T9527: the
+ * bound's history is held in daemon memory and in a durable digest, and a `worker.assignment` row is ~2.4 KB of routing
+ * evidence of which the bound reads one field. Idempotent. */
+export function projectQuietHistoryRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of ["ts", "step", "run_id", "state", "host", "actor_pid"]) if (row[field] !== undefined) out[field] = row[field];
+  const provider = assignmentProvider(row);
+  if (provider !== undefined) out.worker_assignment = { selected: { provider } };
+  return out;
+}
+
+/** One history pass's reads, on the spawn's `worker.quiet_bound` row: rotations loaded off the loop (unseen) vs answered
+ * from memory (reused), and the bytes read synchronously on the loop (the live tail, any digest or rotation read inline). */
+export interface QuietBoundHistoryCost {
+  history_ok: boolean;
+  history_rows: number;
+  history_rotations: number;
+  history_rotations_unseen: number;
+  history_rotation_bytes_unseen: number;
+  history_rotation_bytes_reused: number;
+  history_loop_read_bytes: number;
+  /** W1-T9710: lines JSON-parsed on the loop, and rotations the union took from the off-loop load, not its digest. */
+  history_loop_parsed_lines: number;
+  history_seeded_rotations: number;
+}
+
+export type QuietBoundHistory = (stateDir: string) => Promise<{ rows: ReadonlyArray<Record<string, unknown>>; cost: QuietBoundHistoryCost }>;
+
+/** The slice reader a {@link QuietBoundHistory} reads through: `createEscalationTriageHistoryReader` in production. */
+export type QuietHistoryReaderFactory = (io: {
+  fs: LedgerGrepFsDeps;
+  slice: { holder: string; steps: readonly string[]; project: typeof projectQuietHistoryRow; version: string };
+}) => ((stateDir: string) => Promise<{ ok: boolean; rows: ReadonlyArray<Record<string, unknown>> }>) & {
+  lastPass?: () => { parsedLines: number; seededRotations: number };
+};
+
+/** W1-T9527: the bound's history, one slice reader per state dir for the process's life, one pass at a time. OBSERVED
+ * 2026-10-14: the whole-union read it replaces froze core 1,447 s and 965 s. */
+export function createQuietBoundHistory(io: { holder: string; createReader: QuietHistoryReaderFactory; fs?: LedgerGrepFsDeps }): QuietBoundHistory {
+  const base = io.fs ?? realLedgerFs;
+  const stat = base.statSync ?? realLedgerFs.statSync;
+  const readRange = base.readRangeSync ?? realLedgerFs.readRangeSync;
+  type Pass = { stateDir: string; names?: string[]; stats: Map<string, { size: number; mtimeMs: number }>; loopBytes: number };
+  let pass: Pass | undefined;
+  const fs: LedgerGrepFsDeps = {
+    ...base,
+    readdirSync: (dir) => {
+      const names = base.readdirSync(dir);
+      if (pass?.stateDir === dir) pass.names ??= names;
+      return names;
+    },
+    statSync: (path) => {
+      const s = stat(path);
+      pass?.stats.set(path, s);
+      return s;
+    },
+    readFileSync: (path) => {
+      const buf = base.readFileSync(path);
+      if (pass) pass.loopBytes += buf.length;
+      return buf;
+    },
+    readRangeSync: (path, start, end) => {
+      const buf = readRange(path, start, end);
+      if (pass) pass.loopBytes += buf.length;
+      return buf;
+    },
+  };
+  const slice = { holder: io.holder, steps: QUIET_HISTORY_STEPS, project: projectQuietHistoryRow, version: "1" };
+  const dirs = new Map<string, { reader: ReturnType<QuietHistoryReaderFactory>; seen: Map<string, string> }>();
+  let queue: Promise<unknown> = Promise.resolve();
+  const run = async (stateDir: string): ReturnType<QuietBoundHistory> => {
+    let dir = dirs.get(stateDir);
+    if (!dir) {
+      dir = { reader: io.createReader({ fs, slice }), seen: new Map() };
+      dirs.set(stateDir, dir);
+    }
+    const current: Pass = { stateDir, stats: new Map(), loopBytes: 0 };
+    pass = current;
+    let read: Awaited<ReturnType<ReturnType<QuietHistoryReaderFactory>>>;
+    try {
+      read = await dir.reader(stateDir);
+    } finally {
+      pass = undefined;
+    }
+    const seen = new Map<string, string>();
+    const loop = dir.reader.lastPass?.();
+    const cost: QuietBoundHistoryCost = {
+      history_ok: read.ok, history_rows: read.rows.length, history_rotations: 0, history_rotations_unseen: 0,
+      history_rotation_bytes_unseen: 0, history_rotation_bytes_reused: 0, history_loop_read_bytes: current.loopBytes,
+      history_loop_parsed_lines: loop?.parsedLines ?? 0, history_seeded_rotations: loop?.seededRotations ?? 0,
+    };
+    // As the reader does: a rotation whose size or mtime this process has not read is loaded, any other is reused.
+    for (const entry of ledgerRotationEntries(current.names ?? [], stateDir)) {
+      cost.history_rotations += 1;
+      const s = current.stats.get(entry.path);
+      if (!s) continue;
+      const key = `${s.size}:${s.mtimeMs}`;
+      seen.set(entry.path, key);
+      if (dir.seen.get(entry.path) === key) cost.history_rotation_bytes_reused += s.size;
+      else {
+        cost.history_rotations_unseen += 1;
+        cost.history_rotation_bytes_unseen += s.size;
+      }
+    }
+    dir.seen = seen;
+    return { rows: read.ok ? read.rows : [], cost };
+  };
+  return (stateDir) => {
+    const next = queue.then(() => run(stateDir));
+    queue = next.catch(() => {
+      // deliberate: this pass's failure reaches its own caller through `next`; the queue only orders the next pass.
+    });
+    return next;
+  };
+}
+
+/** The watchdog's `history` and `historyCost` over one state dir's {@link QuietBoundHistory}. */
+export function quietHistoryOptions(stateDir: string, history: QuietBoundHistory): Pick<QuietWatchdogOptions, "history" | "historyCost"> {
+  let cost: QuietBoundHistoryCost | undefined;
+  return {
+    history: async () => {
+      cost = undefined;
+      const read = await history(stateDir);
+      cost = read.cost;
+      return read.rows;
+    },
+    historyCost: () => ({ ...cost }),
+  };
 }
 
 /** Derive one provider's quiet bound from the ledger. With no history it FALLS BACK to the policy `workerStall` row and
@@ -448,8 +588,11 @@ export interface QuietWatchdogOptions {
   rootPid: () => number | undefined;
   /** The provider the run's `worker.assignment` named, once known. */
   provider: () => string | undefined;
-  /** Ledger rows carrying `worker.state` and `worker.assignment` (the union read). */
-  history: () => ReadonlyArray<Record<string, unknown>>;
+  /** Ledger rows carrying `worker.state` and `worker.assignment` (the union read). W1-T9527: awaited, so a read that loads
+   * its rotations off the loop never blocks it; a rejection is an empty history, named on the bound row. */
+  history: () => ReadonlyArray<Record<string, unknown>> | Promise<ReadonlyArray<Record<string, unknown>>>;
+  /** What the last `history` read cost (bytes and rotations read vs reused), carried on the `worker.quiet_bound` row. */
+  historyCost?: () => Record<string, unknown>;
   /** The policy `workerStall` row — the fallback bound when a provider has no history. */
   fallbackBoundMs: number;
   /** The quiet floor the `worker.state` sensor uses; a quiet episode begins this long after the last activity. */
@@ -546,16 +689,29 @@ export function runQuietWorkerWatchdog(opts: QuietWatchdogOptions): QuietWatchdo
     busy = true;
     try {
       if (await yieldToRecycle()) return;
-      const nowMs = now();
-      const quietForMs = nowMs - lastActivityMs - opts.quietFloorMs;
-      if (quietForMs <= 0) return;
+      if (now() - lastActivityMs - opts.quietFloorMs <= 0) return;
       if (!bound) {
         const provider = opts.provider() ?? "unknown";
-        bound = deriveQuietBound(opts.history(), provider, opts.fallbackBoundMs);
+        const startedMs = now();
+        let rows: ReadonlyArray<Record<string, unknown>> = [];
+        let historyError: string | undefined;
+        try {
+          rows = await opts.history();
+        } catch (error) {
+          // An unreadable history is the empty one (the policy fallback bound), and the row says why.
+          historyError = String((error as Error)?.message ?? error);
+        }
+        const loadedMs = now();
+        bound = deriveQuietBound(rows, provider, opts.fallbackBoundMs);
         opts.ledger(QUIET_BASIS_LEDGER_STEP, {
           provider: bound.provider, bound_ms: bound.boundMs, bound_source: bound.source, samples: bound.samples,
+          history_ms: loadedMs - startedMs, derive_ms: now() - loadedMs, ...opts.historyCost?.(),
+          ...(historyError ? { history_error: historyError } : {}),
         });
       }
+      // Read after the history: the worker may have spoken while it loaded.
+      const quietForMs = now() - lastActivityMs - opts.quietFloorMs;
+      if (quietForMs <= 0) return;
       nextDueMs ??= bound.boundMs;
       if (quietForMs < nextDueMs) return;
       nextDueMs = quietForMs + bound.boundMs; // re-check at the next bound whatever this inspection finds

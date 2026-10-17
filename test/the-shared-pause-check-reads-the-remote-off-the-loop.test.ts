@@ -156,12 +156,12 @@ test("local pauses win immediately and recycle pauses still consult async shared
     };
     t.after(() => disposeSharedPauseRefresh(deps));
     requestPause(root, "operator hold");
-    assert.equal(checkSharedPause(root, deps), "PAUSE requested: operator hold");
+    assert.match(checkSharedPause(root, deps) ?? "", /^PAUSE requested: operator hold; actor: \S/);
     assert.equal(reads, 0);
     resumeFleet(root);
     checkSharedPause(root, deps);
     requestPause(root, "new local hold");
-    assert.equal(checkSharedPause(root, deps), "PAUSE requested: new local hold");
+    assert.match(checkSharedPause(root, deps) ?? "", /^PAUSE requested: new local hold; actor: \S/);
     await settle();
     requestPause(root, "container recycle (deploy/recycle-container.sh)");
     assert.match(checkSharedPause(root, deps)!, /cannot reach origin/);
@@ -169,7 +169,7 @@ test("local pauses win immediately and recycle pauses still consult async shared
     t.after(() => disposeSharedPauseRefresh(absent));
     checkSharedPause(root, absent);
     await settle();
-    assert.equal(checkSharedPause(root, absent), "PAUSE requested: container recycle (deploy/recycle-container.sh)");
+    assert.match(checkSharedPause(root, absent) ?? "", /^PAUSE requested: container recycle \(deploy\/recycle-container\.sh\); actor: \S/);
   });
 });
 

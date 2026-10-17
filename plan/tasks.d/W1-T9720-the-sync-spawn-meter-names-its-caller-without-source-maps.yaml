@@ -1,0 +1,62 @@
+- id: W1-T9720
+  title: "THE SYNC-SPAWN METER NAMES ITS CALLER WITHOUT MAKING NODE PARSE AND KEEP EVERY MODULE'S SOURCE MAP — read-plane.ts callerFrame formats a 50-frame `new Error().stack` on every synchronous spawn, and under tsx (source maps on) each frame's module map is parsed and held for the life of the process: up to +134.5 MiB heap / +171 MiB RSS per isolate for 587 maps, offline"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how the sync-spawn meter captures its caller frames; what it attributes and where it writes are unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9091 builder measurements (logs-8864/9091-bench-*.log)'
+  plan_refs: [W1-T9647, W1-T9577, W1-T7745, W1-T9117, W1-T9091, W1-T9361]
+  files:
+    - src/lib/read-plane.ts
+    - test/the-sync-spawn-meter-names-its-caller-without-source-maps.test.ts
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/lib/read-plane.ts callerFrame() raises Error.stackTraceLimit to 50, reads `new Error().stack`, and also
+      calls getCallSites(50) for the caller chain (W1-T9577). It runs on every synchronous spawn the meter sees.
+    - bin/rmd runs the daemon under tsx, which calls process.setSourceMapsEnabled(true) (verified in tsx 4.23.15's
+      dist by W1-T9647's filing). With maps enabled, formatting `.stack` applies each frame's module source map,
+      and Node parses a module's map on first use and keeps it for the process's life.
+    - The daemon's main thread and its read-plane worker are separate isolates; each pays for the maps its own
+      stacks touch.
+    OBSERVED live: the core daemon.loop_lag row at 2026-10-15T19:08:2xZ names `src/lib/inbox.ts:2123:7`
+    (pathExistsAtBase), which is the TypeScript line and column of the hostWorktreeGit call at the daemon's checkout
+    03269ad67, so the daemon's stacks are being source-mapped.
+    OBSERVED offline by the W1-T9091 builder at a5d569886 (logs-8864/9091-bench-parsed-maps.log,
+    9091-bench-sourcemaps.log): parsing run-task.ts's map alone adds 15.8 MiB heap in 28 ms; parsing all 587 maps
+    adds 134.5 MiB heap and 171.1 MiB RSS in 262 ms. Loading run-task.ts with maps off instead of on: RSS 307-312 vs
+    272-277 MiB, heapUsed 97.9 vs 90.0 MiB.
+    INFERRED: the daemon's sync spawns come from dozens of modules over a day, so the main isolate holds most of
+    those maps (W1-T9647's daemon.memory census will rank this holder; this task is the fix it measures).
+  design: |
+    1. callerFrame captures its frames without applying source maps: from structured call sites (getCallSites
+       with source maps off, or a scoped Error.prepareStackTrace that reads the raw CallSite objects), never from
+       a formatted `.stack` while maps are enabled. The leaf, caller and chain logic is unchanged.
+    2. OPERATOR DECISION (named, not chosen here; the builder proposes, the operator rules before merge): without
+       maps the caller text names the position in the code node runs (tsx's transpiled output, or the bundle), not
+       the TypeScript line, so every daemon.loop_lag and stall row reads differently. The PR shows one row before and
+       after and proposes one of: (a) function name + file + raw position (proposed); (b) map only the ONE chosen
+       caller frame, lazily, through a cache whose size is itself an operator decision; (c) turn source maps off
+       for the daemon after boot, which changes every error stack too.
+    3. Measure: daemon.alive's existing memory sample (or W1-T9647's daemon.memory row once merged) gains
+       `source_maps: {enabled, parsed}` where Node exposes a count, so the saving is read per generation.
+    4. No change to which spawns are metered, the window logic, or the rows' other fields.
+    Tests go in test/the-sync-spawn-meter-names-its-caller-without-source-maps.test.ts, titled verbatim as in the
+    proofs. One test runs a real child node process with --enable-source-maps and a module that ships a map, so the
+    default capture path is covered.
+  acceptance:
+    - claim: "with source maps enabled, metering a sync spawn from a module with a source map parses no source map"
+      proof: 'grep: test("W1-T9720: metering a sync spawn parses no source map" in test/the-sync-spawn-meter-names-its-caller-without-source-maps.test.ts'
+    - claim: "the metered caller, leaf and chain still name the calling function and file"
+      proof: 'grep: test("W1-T9720: the metered caller still names the calling function and file" in test/the-sync-spawn-meter-names-its-caller-without-source-maps.test.ts'
+  falsifier: |
+    On origin/main, in a child process with --enable-source-maps, import a module that ships an inline source map
+    and has it call a metered execFileSync, then read module.findSourceMap's cache (or the heap delta) before and
+    after: the map was parsed by callerFrame's `.stack`, so the first test fails. Capture call sites but then format
+    them through `.stack` for the caller text: the map is parsed again and the first test fails.

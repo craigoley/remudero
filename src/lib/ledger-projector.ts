@@ -9,7 +9,7 @@
  * crash at any point resumes to exactly what a clean rebuild produces.
  */
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync, type BigIntStats } from "node:fs";
 import { basename, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { systemClock, type Clock } from "./clock.js";
@@ -25,9 +25,16 @@ export const LEDGER_PROJECTOR_SCHEMA_VERSION = 1;
 export const FUTURE_ROW_TOLERANCE_MS = 5 * 60_000;
 /** The live file is read in pieces of this size, one transaction each (design §1.1). */
 export const DEFAULT_CHUNK_BYTES = 8 << 20;
-/** A directory mtime younger than this may still move within the same timestamp tick. */
+/**
+ * A directory mtime younger than this may still move within the same timestamp tick. The gate it settles only spares a
+ * quiet directory its listing; a busy one is listed every tick, and each applied archive is then skipped by its `stat`.
+ */
 export const DIR_GATE_SETTLE_MS = 2_000;
-/** A closed gate re-lists after this long anyway: a directory whose mtime failed to move never hides a rotation for good. */
+/**
+ * A closed gate re-lists after this long anyway: a directory whose mtime failed to move never hides a rotation for good.
+ * It is also how often every archive's head is re-read even when `stat` says nothing changed: a recycled inode re-created
+ * inside one timestamp tick can match an applied archive's stat, but never its head.
+ */
 export const DIR_GATE_RELIST_MS = 60_000;
 /** The fewest lines a tick's first transaction applies, so a collapsed rate estimate still moves a backlog. */
 export const MIN_TRANSACTION_LINES = 64;
@@ -52,10 +59,29 @@ export const LEDGER_PROJECTOR_DDL = `
   CREATE TABLE IF NOT EXISTS fact(seq INTEGER PRIMARY KEY, ts TEXT NOT NULL, ts_ms INTEGER NOT NULL, step TEXT NOT NULL,
     task_id TEXT, run_id TEXT, body TEXT NOT NULL);
   CREATE INDEX IF NOT EXISTS fact_task ON fact(task_id, seq) WHERE task_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS fact_step ON fact(step, ts_ms);
+  CREATE TABLE IF NOT EXISTS fact_alias(task TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(task, seq)) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS quarantine(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, ts TEXT NOT NULL, step TEXT NOT NULL,
     ingested_ms INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;
   INSERT OR IGNORE INTO meta(k, v) VALUES('generation', '0');
 `;
+
+/**
+ * W1-T9436: `fact_alias` names each fact row whose `task` differs from its `task_id` (a DAEMON-lane row naming the task
+ * it acted on), so a task's own rows are read from the store by `fact_task` plus this table, as `buildLedgerIndex` files
+ * them. The writer adds a row beside each such fact row; a store built before the table is backfilled once from its own
+ * fact bodies, and this meta key says it was.
+ */
+export const FACT_ALIAS_META = "fact_alias";
+const FACT_ALIAS_BACKFILLED = "backfilled";
+const FACT_ALIAS_BACKFILL = `INSERT OR IGNORE INTO fact_alias(task, seq)
+  SELECT json_extract(body, '$.task'), seq FROM fact
+  WHERE json_type(body, '$.task') = 'text' AND json_type(body, '$.task_id') = 'text' AND json_extract(body, '$.task') <> json_extract(body, '$.task_id')`;
+
+/** True once every fact row's alias is in `fact_alias`: written with the row, or backfilled. */
+export function factAliasReady(db: ReadModelDb): boolean {
+  return db.meta(FACT_ALIAS_META) === FACT_ALIAS_BACKFILLED;
+}
 
 /** Opens (or creates) one instance's projector read model under `stateDir` (core's, design §1.7). */
 export function openProjectorReadModel(stateDir: string, instance: string, clock?: Clock, generation?: string | null): ReadModelDb {
@@ -362,6 +388,25 @@ interface Checkpoint {
   fp: string | null;
 }
 
+/**
+ * An archive whose head matched a fully applied checkpoint, as `stat` saw that file. A later listing skips it while its
+ * checkpoint row and its stat are unchanged: a state dir whose mtime moves several times a second (the live ledger and its
+ * sidecars) otherwise re-opened every archive on every tick. Any replacement under the name moves `ino` or `ctime`
+ * (which no writer can set), and an in-place rewrite moves `mtime` and `ctime`.
+ */
+interface AppliedArchive {
+  stat: string;
+  checkpoint: Checkpoint;
+}
+
+function statIdentity(st: BigIntStats): string {
+  return `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+}
+
+function sameCheckpoint(a: Checkpoint, b: Checkpoint): boolean {
+  return a.ino === b.ino && a.size === b.size && a.off === b.off && a.fp === b.fp;
+}
+
 /** Hash of the first and last {@link FINGERPRINT_BYTES} before `upTo`: a replaced file fails it. */
 function fingerprint(fd: number, upTo: number): string {
   const hash = createHash("sha1");
@@ -401,6 +446,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   const sql = {
     seen: db.prepare("INSERT OR IGNORE INTO seen(ts_ms, h) VALUES(?, ?)"),
     fact: db.prepare("INSERT INTO fact(ts, ts_ms, step, task_id, run_id, body) VALUES(?, ?, ?, ?, ?, ?)"),
+    alias: db.prepare("INSERT OR IGNORE INTO fact_alias(task, seq) VALUES(?, last_insert_rowid())"),
     quarantine: db.prepare("INSERT INTO quarantine(ts_ms, h, ts, step, ingested_ms, body) VALUES(?, ?, ?, ?, ?, ?)"),
     checkpoint: db.prepare(`INSERT INTO source_file(name, ino, size, off, fp) VALUES(?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET ino = excluded.ino, size = excluded.size, off = excluded.off, fp = excluded.fp`),
@@ -410,6 +456,9 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   };
   let gateMtimeMs: number | undefined;
   let listedAt = Number.NEGATIVE_INFINITY;
+  /** When every archive's head was last re-read regardless of its stat ({@link DIR_GATE_RELIST_MS}). */
+  let verifiedAt = Number.NEGATIVE_INFINITY;
+  const applied = new Map<string, AppliedArchive>();
   /** Rows applied per ms in the last timed transaction; unknown until one took measurable time. */
   let linesPerMs: number | undefined;
   let deadline = Number.POSITIVE_INFINITY;
@@ -444,9 +493,15 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       withWriteTransaction(db, lease, () => {
         for (const p of projections) db.exec(p.ddl);
         if (Number(db.prepare("SELECT count(*) AS n FROM source_file").get()?.n) > 0) {
-          for (const table of ["seen", "fact", "quarantine", "source_file", ...projections.flatMap((p) => p.tables)]) db.exec(`DELETE FROM ${table}`);
+          for (const table of ["seen", "fact", "fact_alias", "quarantine", "source_file", ...projections.flatMap((p) => p.tables)]) db.exec(`DELETE FROM ${table}`);
         }
         for (const p of stale) db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(`projection:${p.name}`, String(p.version));
+      });
+    }
+    if (!factAliasReady(db)) {
+      withWriteTransaction(db, lease, () => {
+        db.exec(FACT_ALIAS_BACKFILL);
+        db.prepare("INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(FACT_ALIAS_META, FACT_ALIAS_BACKFILLED);
       });
     }
     projectionsBuilt = true;
@@ -486,6 +541,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       if (!isFactRow(row, factStep)) continue;
       const task = typeof row.task_id === "string" ? row.task_id : typeof row.task === "string" ? row.task : null;
       sql.fact.run(id.ts, id.tsMs, row.step, task, typeof row.run_id === "string" ? row.run_id : null, line);
+      if (typeof row.task_id === "string" && typeof row.task === "string" && row.task !== row.task_id) sql.alias.run(row.task);
       c.facts++;
     }
   }
@@ -544,8 +600,10 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     let ino: string;
     let size: number;
     let head: string;
+    let stat: string;
     let fd: number | undefined;
     const prev = known.get(name);
+    applied.delete(name);
     try {
       fd = openSync(entry.path, "r");
       const st = fstatSync(fd, { bigint: true });
@@ -553,9 +611,12 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       size = Number(st.size);
       head = headFingerprint(fd, size);
       if (archiveBacklog(prev, head, size) === 0) {
-        if (prev!.fp === null) upgrades.push({ name, ino, size, fp: `${ARCHIVE_HEAD}${head}` });
+        const upgrade = prev!.fp === null ? { name, ino, size, fp: `${ARCHIVE_HEAD}${head}` } : undefined;
+        if (upgrade) upgrades.push(upgrade);
+        applied.set(name, { stat: statIdentity(st), checkpoint: upgrade ? { ino, size, off: size, fp: upgrade.fp } : prev! });
         return true; // a rotation is immutable once named
       }
+      stat = statIdentity(st);
       if (spent(c)) {
         c.pending = true;
         c.backlogBytes += archiveBacklog(prev, head, size);
@@ -588,7 +649,22 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       off = to;
     } while (off < data.length);
     c.archivesRead++;
+    applied.set(name, { stat, checkpoint: { ino, size, off: size, fp: `${ARCHIVE_HEAD}${head}` } });
     return true;
+  }
+
+  /** Whether an archive applied by an earlier listing is still that file under that checkpoint, by `stat` alone. */
+  function stillApplied(entry: LedgerCorpusEntry, known: Map<string, Checkpoint>): boolean {
+    const name = basename(entry.path);
+    const was = applied.get(name);
+    const prev = known.get(name);
+    if (!was || !prev || !sameCheckpoint(prev, was.checkpoint)) return false;
+    try {
+      return statIdentity(statSync(entry.path, { bigint: true })) === was.stat;
+    } catch {
+      // deliberate: an archive `stat` cannot see is opened, and that open names the failure in `unread`.
+      return false;
+    }
   }
 
   function listRotations(known: Map<string, Checkpoint>, now: number, c: ProjectorTickResult): void {
@@ -596,11 +672,18 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     if (gateMtimeMs !== undefined && dirMtimeMs === gateMtimeMs && now - listedAt < DIR_GATE_RELIST_MS) return;
     c.listed = true;
     listedAt = now;
+    if (now - verifiedAt >= DIR_GATE_RELIST_MS) {
+      applied.clear();
+      verifiedAt = now;
+    }
     const names = readdirSync(ledgerDir);
     let complete = true;
     const upgrades: ArchiveUpgrade[] = [];
-    for (const entry of ledgerRotationEntries(names, ledgerDir)) complete = ingestArchive(entry, known, now, c, upgrades) && complete;
+    for (const entry of ledgerRotationEntries(names, ledgerDir)) {
+      if (!stillApplied(entry, known)) complete = ingestArchive(entry, known, now, c, upgrades) && complete;
+    }
     const present = new Set(names);
+    for (const name of applied.keys()) if (!present.has(name)) applied.delete(name);
     const gone = [...known.keys()].filter((name) => !present.has(name));
     if (gone.length > 0 || upgrades.length > 0) {
       withWriteTransaction(db, lease, () => {

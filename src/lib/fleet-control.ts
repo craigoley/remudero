@@ -1,7 +1,9 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { describeActorEvidence, gatherActorEvidence, readActorEvidence, type ActorEvidence, type ActorEvidenceProbe } from "./actor-evidence.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { repoScopedTaskKey } from "./ledger.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -35,6 +37,7 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
  */
 
 export interface FleetControlInfo {
+  actor_evidence?: ActorEvidence;
   reason?: string;
   requestedAt: string;
   pid: number;
@@ -68,6 +71,7 @@ export function quietHoursFilePath(root: string): string {
 /** The extra fields only a PAUSE flag ever carries (see {@link FleetControlInfo}'s own doc) — STOP and
  *  quiet-hours keep calling {@link writeFlag} with this omitted, so their on-disk shape is unchanged. */
 interface PauseFlagExtra {
+  actor_evidence: ActorEvidence;
   sessionId: string;
   expiresAt: string | null;
   indefinite: boolean;
@@ -80,7 +84,7 @@ function writeFlag(path: string, reason: string | undefined, extra?: PauseFlagEx
     requestedAt: new Date().toISOString(),
     pid: process.pid,
     host: hostname(),
-    ...(extra ? { sessionId: extra.sessionId, expiresAt: extra.expiresAt, indefinite: extra.indefinite } : {}),
+    ...(extra ? { sessionId: extra.sessionId, expiresAt: extra.expiresAt, indefinite: extra.indefinite, actor_evidence: extra.actor_evidence } : {}),
     ...(extra?.instance === undefined ? {} : { instance: extra.instance }),
   };
   mkdirSync(dirname(path), { recursive: true });
@@ -177,6 +181,7 @@ function resolvePauseOwnerSessionId(): string {
 /** {@link requestPause}'s optional third argument set — an explicit `--until` (an ISO instant, or the
  *  literal `"indefinite"`), and an injectable clock for a deterministic test. */
 export interface RequestPauseOptions {
+  actorProbe?: ActorEvidenceProbe;
   until?: string;
   now?: Date;
   /** W1-T7727 — the registry instance being paused, recorded in the flag. */
@@ -201,13 +206,15 @@ export function requestPause(
   const now = options?.now ?? systemClock.date();
   const { expiresAt, indefinite } = resolvePauseExpiry(reason, options?.until, now);
   const sessionId = resolvePauseOwnerSessionId();
-  const info = writeFlag(pauseFilePath(root), reason, { sessionId, expiresAt, indefinite, instance: options?.instance });
-  if (deps) writeSharedPause(deps, { reason, expiresAt, indefinite, sessionId });
+  const actor_evidence = gatherActorEvidence(options?.actorProbe);
+  const info = writeFlag(pauseFilePath(root), reason, { sessionId, expiresAt, indefinite, instance: options?.instance, actor_evidence });
+  if (deps) writeSharedPause(deps, { reason, expiresAt, indefinite, sessionId, actor_evidence });
   return info;
 }
 
 /** What {@link requestFleetPause} pushed: the same owner/reason/expiry a PAUSE flag records. */
 export interface FleetPauseResult {
+  actor_evidence: ActorEvidence;
   pushed: boolean;
   sessionId: string;
   expiresAt: string | null;
@@ -225,7 +232,8 @@ export function requestFleetPause(deps: SharedPauseGitDeps, reason?: string, opt
   const now = options?.now ?? systemClock.date();
   const { expiresAt, indefinite } = resolvePauseExpiry(reason, options?.until, now);
   const sessionId = resolvePauseOwnerSessionId();
-  return { pushed: writeSharedPause(deps, { reason, expiresAt, indefinite, sessionId }), sessionId, expiresAt, indefinite };
+  const actor_evidence = gatherActorEvidence(options?.actorProbe);
+  return { pushed: writeSharedPause(deps, { reason, expiresAt, indefinite, sessionId, actor_evidence }), sessionId, expiresAt, indefinite, actor_evidence };
 }
 
 /** W1-T7727 — `rmd resume --fleet`: delete the fleet-wide hold, touching no instance's flags. */
@@ -263,13 +271,22 @@ const RECYCLE_PAUSE_DETAIL = "PAUSE requested: container recycle (deploy/recycle
 /** W1-T5804: whether an already-read PAUSE detail is the recycle's own. Exact match: an operator hold
  *  that merely mentions the script is still an operator hold. */
 export function isRecyclePauseDetail(detail: string | undefined): boolean {
-  return detail === RECYCLE_PAUSE_DETAIL;
+  const actorAt = detail?.lastIndexOf("; actor: ") ?? -1;
+  return detail === RECYCLE_PAUSE_DETAIL || (actorAt >= 0 && detail?.slice(0, actorAt) === RECYCLE_PAUSE_DETAIL);
+}
+
+export function pauseActor(root: string): string | undefined {
+  if (!isPaused(root)) return undefined;
+  return describeActorEvidence(readFlag(pauseFilePath(root))?.actor_evidence);
 }
 
 export function pauseDetail(root: string): string | undefined {
   if (!isPaused(root)) return undefined;
   const info = readFlag(pauseFilePath(root));
-  return info?.reason ? `PAUSE requested: ${info.reason}` : "PAUSE file present — run `rmd resume` to clear";
+  const detail = info?.reason ? `PAUSE requested: ${info.reason}` : "PAUSE file present — run `rmd resume` to clear";
+  // Legacy recycle scripts write a machine-consumed sentinel; pauseActor and the board still expose its missing actor.
+  if (detail === RECYCLE_PAUSE_DETAIL && info?.actor_evidence === undefined) return detail;
+  return `${detail}; actor: ${describeActorEvidence(info?.actor_evidence)}`;
 }
 
 /**
@@ -379,6 +396,7 @@ export type SharedPauseRead = "absent" | "held" | "unreachable";
  *  alongside the pid/host/timestamp line it already wrote. Every field optional: a caller that omits
  *  it (any test fixture predating this task) reproduces the exact legacy one-line message. */
 export interface SharedPauseMintInfo {
+  actor_evidence?: ActorEvidence;
   reason?: string;
   sessionId?: string;
   /** `null` marks an INDEFINITE hold (design (ii)) — mints an `expires: indefinite` line instead of
@@ -441,16 +459,15 @@ export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
     run,
     runAsync: (args) => new Promise((resolve) => {
       if (args[0] === "push") assertLiveWriteAllowed("git-push", `${args.at(-1)} on ${repoRoot}'s origin`);
-      execFile("git", argv(args), {
+      execFileLoopBounded("git", argv(args), {
         encoding: "utf8",
         timeout: SHARED_PAUSE_GIT_TIMEOUT_MS,
         killSignal: "SIGTERM",
-      }, (error, stdout) => {
+      }).then(
+        ({ stdout }) => resolve({ status: 0, stdout }),
         // Exit failures, timeouts and spawn failures all mean the read was unreachable.
-        resolve(error
-          ? { status: typeof error.code === "number" ? error.code : 1, stdout: "" }
-          : { status: 0, stdout });
-      });
+        (error: { code?: unknown }) => resolve({ status: typeof error.code === "number" ? error.code : 1, stdout: "" }),
+      );
     }),
     mintAnchor(info?: SharedPauseMintInfo) {
       const tree = run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
@@ -463,6 +480,7 @@ export function realSharedPauseGitDeps(repoRoot: string): SharedPauseGitDeps {
       if (info?.reason) lines.push(`reason: ${info.reason}`);
       if (info?.indefinite) lines.push(`expires: indefinite`);
       else if (info?.expiresAt) lines.push(`expires: ${info.expiresAt}`);
+      if (info?.actor_evidence) lines.push(`actor: ${JSON.stringify(info.actor_evidence)}`);
       return run(["commit-tree", tree, "-m", lines.join("\n")]).stdout.trim();
     },
   };
@@ -504,6 +522,7 @@ export function readSharedPause(deps: SharedPauseGitDeps): SharedPauseRead {
  *  {@link SharedPauseMintInfo} adds (design (i)) — every one optional, since an anchor minted before
  *  this task (or by a test fixture that supplies no `info`) carries only the first line. */
 export interface SharedPauseAnchorInfo {
+  actor_evidence?: ActorEvidence;
   pid: string;
   host: string;
   timestamp: string;
@@ -560,6 +579,16 @@ function parseSharedPauseAnchor(stdout: string): SharedPauseAnchorInfo | null {
       info.expiresAt = null;
     } else {
       info.expiresAt = raw;
+    }
+  }
+  const actorLine = /^actor: (.+)$/m.exec(stdout);
+  if (actorLine) {
+    try {
+      const actor = readActorEvidence(JSON.parse(actorLine[1]!));
+      if (actor) info.actor_evidence = actor;
+    } catch (err) {
+      // Malformed actor metadata leaves the safety hold intact and its actor explicitly unrecorded.
+      void err;
     }
   }
   return info;
@@ -730,7 +759,7 @@ function sharedPauseReadDetail(ls: SharedPauseLsRemote, anchor: SharedPauseAncho
           : "";
       return (
         `PAUSE held on ${sharedPauseRef()} — set by pid ${anchor.pid}@${anchor.host} at ` +
-        `${anchor.timestamp}${reasonPart}${untilPart} — run \`rmd resume --fleet\` to clear`
+        `${anchor.timestamp}${reasonPart}${untilPart}; actor: ${describeActorEvidence(anchor.actor_evidence)} — run \`rmd resume --fleet\` to clear`
       );
     }
     return (

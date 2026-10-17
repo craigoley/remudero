@@ -359,6 +359,19 @@ test("GOLDEN — CI SHARD SEVEN-EIGHT LESSON: the cited proof executes and task 
   }
 });
 
+test("GOLDEN — SCAN LESSON: the cited incident executes and the matched lane arms (W1-T7651)", () => {
+  const { verdict, golden } = judgeCase("ci-scan-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T7651.yaml", "scripts/comment-load-baseline.json", "src/lib/policy.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "scan-gate-refusals-repaired-by-hand"), taskFile);
+  }
+});
+
 test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the matched lane arms", () => {
   const { verdict, golden } = judgeCase("ci-remudero-review-lesson");
   assert.equal(golden.violation, "none");
@@ -369,6 +382,58 @@ test("GOLDEN — REMUDERO-REVIEW LESSON: the cited incident executes and the mat
     const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
     const selected = selectLearnings(entries, [taskFile]).selected;
     assert.ok(selected.some((entry) => entry.id === "remudero-review-refusals-repaired-by-hand"), taskFile);
+  }
+});
+
+test("GOLDEN — MUTATION-RATCHET LESSON: the cited incident executes and the mutation target's lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-mutation-ratchet-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["src/lib/classify.ts", "stryker.conf.json", "scripts/mutation-baseline.json"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "mutation-ratchet-refusal-repair-lane"), taskFile);
+  }
+});
+
+test("GOLDEN — PROOF-DISCRIMINATION LESSON: the cited incident executes and the proof-writing lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-proof-discrimination-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T9000.yaml", "test/new-proof.test.ts", "src/lib/proof-grammar.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "proof-discrimination-refusal-repair-lane"), taskFile);
+  }
+});
+
+test("GOLDEN — DOCS-INDEX LESSON: the cited incident executes and a docs edit's lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-docs-index-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["docs/README.md", "docs/docs-index.json", "docs/architecture.md", "scripts/generate-docs-index.mjs"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "docs-index-stale-after-doc-edit"), taskFile);
+  }
+});
+
+test("GOLDEN — LEAK-GREP LESSON: the cited incident executes and the plan-shard authoring lane receives the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-leak-grep-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T9415.yaml", ".github/scripts/leak-grep.sh", ".github/workflows/ci.yml"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "leak-grep-refuses-plan-shard-token-text"), taskFile);
   }
 });
 
@@ -400,4 +465,17 @@ test("GOLDEN — KNOWLEDGE RETIRE: the gardener's own retire pass (active to sup
   assert.match(diff, /^\+  lifecycle: superseded$/m);
   assert.equal(checkTroubleshootingCoverage(diff).pass, true);
   assert.equal(checkDrillCoverage(diff).pass, true);
+});
+
+test("GOLDEN — TASK-ID-EXISTENCE LESSON: the cited incident executes and the id-citing lanes receive the guidance", () => {
+  const { verdict, golden } = judgeCase("ci-task-id-existence-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const taskFile of ["plan/tasks.d/W1-T8446.yaml", "plan/tasks.yaml", "scripts/task-id-existence-check.mjs", "src/lib/task-id-reservation.ts"]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, [taskFile]);
+    const selected = selectLearnings(entries, [taskFile]).selected;
+    assert.ok(selected.some((entry) => entry.id === "task-id-existence-cites-must-resolve"), taskFile);
+  }
 });

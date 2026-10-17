@@ -1,0 +1,61 @@
+- id: W1-T9742
+  title: "THE SCOPE-TIME SHIPPED CHECK READS ORIGIN/MAIN'S TRAILERS WITH A POSITIVE CONTROL, NOT A GITHUB SEARCH — the W1-T9619 builder's merged-PR search returned 0 hits although #11977 (merged 11:32Z) names W1-T9619, and the doctrine's own command pages only the newest 100 closed PRs; a check that cannot see what it was asked about reads as 'not shipped'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, how a hand builder answers "has task X shipped?"; the claim check (ls-remote) is unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9619/W1-T9602 builder report, item T (doctrine/tooling)'
+  plan_refs: [W1-T3323, W1-T444, W1-T1268]
+  files:
+    - scripts/task-shipped.mjs
+    - doctrine/plan-and-task-hygiene/run-both-scope-checks.md
+    - test/the-scope-time-shipped-check-has-a-positive-control.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420:
+    - doctrine/plan-and-task-hygiene/run-both-scope-checks.md gives the shipped check as
+      `gh api "repos/<owner>/<repo>/pulls?state=closed&per_page=100" --jq '...test("(?m)^Remudero-Task:[ \t]*<id>[ \t]*$")...'`.
+      That reads ONE page: the newest 100 closed PRs. A task merged before them reads as not shipped.
+    - The same file says GitHub's search is not exact-phrase. The operator session's BUILDER-RULES step 2 asks for
+      "gh search via cadence; also git log origin/main".
+    - Squash merges here carry the PR body's `Remudero-Task:` trailer into the commit message on main, so
+      `git log origin/main --format=%B` answers the trailer question locally, with no GitHub read and no paging.
+      The doctrine's second credit path, a `run-<taskId>-*` head with no trailer (#1657), is not in git log.
+    OBSERVED (logs-8864/9619-scope-claim.sh, 2026-10-15T13:05:15Z): the merged-PR search for W1-T9619 or W1-T9602
+    returned 0 PRs. #11977 ("chore(plan): file W1-T9619 ...", merged 11:32Z) names W1-T9619, so the search failed
+    its positive control; the builder fell back to git log. Not established why the search missed (index lag or
+    tokenization of the hyphenated id).
+    INFERRED: every hand builder that trusts a zero from either GitHub form can rebuild a shipped task.
+  design: |
+    1. scripts/task-shipped.mjs <id>: reads `git log origin/main --format=%H%x00%B` and reports
+       - shipped: the commits whose message has an exact `^Remudero-Task:[ \t]*<id>[ \t]*$` line;
+       - named: commits whose subject names the id but carry no trailer (filings, amendments), as information only;
+       - the origin/main sha and age it read.
+       POSITIVE CONTROL, required before a zero is reported: the same matcher must find the newest trailer on
+       origin/main; if it does not, or origin/main is missing, the answer is `unmeasured` with a reason, never
+       `not shipped`. Exit codes: 0 not shipped, 4 shipped, 3 unmeasured.
+    2. It states, in its output, that a `run-<id>-*` head merged with no trailer is not visible in git log, and prints
+       the head-ref query to run when that path matters.
+    3. The doctrine body names the script as the primary shipped check, keeps the ls-remote claim check beside it,
+       and replaces the single-page `per_page=100` command with a note that it reads one page. The index headline in
+       CLAUDE.md is unchanged (it already says "merged PRs for an exact trailer").
+    4. No network read and no new constant.
+    Tests go in test/the-scope-time-shipped-check-has-a-positive-control.test.ts, titled verbatim as in the proofs,
+    over a temp repo with an `origin/main` ref built from squash-style commits.
+  acceptance:
+    - claim: "a task whose squash commit carries its trailer reads shipped, and a filing commit that only names it reads not shipped"
+      proof: 'grep: test("W1-T9742: a trailer reads shipped and a filing subject does not" in test/the-scope-time-shipped-check-has-a-positive-control.test.ts'
+    - claim: "with no trailer findable on origin/main the check answers unmeasured, never not shipped"
+      proof: 'grep: test("W1-T9742: a failed positive control answers unmeasured, never not shipped" in test/the-scope-time-shipped-check-has-a-positive-control.test.ts'
+    - claim: "the doctrine names the script as the primary shipped check"
+      proof: 'grep: scripts/task-shipped.mjs in doctrine/plan-and-task-hygiene/run-both-scope-checks.md'
+  falsifier: |
+    On origin/main the script does not exist and the doctrine's command is one page, so the first test fails (no
+    script) and the third proof reads 0. Report zero without the control over a repo whose origin/main ref is
+    missing: the script prints "not shipped" and the second test fails.

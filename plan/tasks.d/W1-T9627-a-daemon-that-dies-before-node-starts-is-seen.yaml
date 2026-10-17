@@ -1,0 +1,49 @@
+- id: W1-T9627
+  title: "A DAEMON THAT DIES BEFORE NODE STARTS IS SEEN AND ITS LAST WORDS ARE KEPT: on 2026-10-15 every core boot from 08:22:44 died in the entrypoint about a second in, so no daemon.paths or daemon.boot row was written, progress-watchdog read failedBoots15m 0 and said STALLED action=recycle (which the down-container arm never acts on), the diagnostics bundle captured docker logs only for running containers, and each 5-minute revive ran docker rm -f on the dead container, destroying the only copy of the error; the revive keeps the dead container's log tail and the verdict counts revivals that never reached daemon.paths"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what the host watchdog records about a daemon that never reaches node
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: core outage 08:22-10:29Z root-cause investigation (read-only on the host)"
+  plan_refs: [W1-T9623, W1-T5687, W1-T5688, W1-T3268]
+  files: [deploy/install-host-units.sh, src/lib/progress-watchdog.ts, test/a-daemon-that-dies-before-node-starts-is-seen.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only):
+    - ~/rmd-revivals.log: "revive boot=0 prev_status=exited prev_exit=1 prev_restarts=5" every 5 min from 08:23:53, and
+      "crash-loop count=5..25 exit=1" from 08:43:51. watchdog-verdict state=STALLED action=capture-diagnostics at 08:38:51;
+      the journal shows "progress-watchdog -- STALLED action=recycle" on every later tick.
+    - state/diagnostics/progress-20261015T083850Z/verdict.json: failedBoots15m 0. docker-ps.txt lists remudero-serve,
+      site, console and cloudflared. The docker-logs-*.txt files hold only those containers' logs.
+    - docker events: each revived container's start was followed by die exitCode 1 within 0.84-1.96 s, five restarts, then
+      destroy/create at the next revive. No daemon.* ledger row came from any of those containers.
+    - The real error (git checkout refusing on 45 untracked files, W1-T9623) had to be inferred from the HEAD reflog and a
+      hand-made recovery directory. No log of it survived.
+    READ at origin/main 8b45ddbe7:
+    - decideProgressWatchdog (src/lib/progress-watchdog.ts, via failedBootTimes) counts failed boots as daemon.paths rows with no daemon.boot.
+      A boot that dies in deploy/entrypoint.sh writes neither row, so it is never counted, and CRASH_LOOP/hold-revive
+      cannot fire.
+    - captureDiagnosticsBundle lists containers with `docker ps` (running only), so a dead daemon's log is never captured.
+    - The rendered launcher (deploy/install-host-units.sh) runs `docker rm -f remudero-daemon` before every revive's
+      `docker run`, and recycle_on_verdict runs only in the arm where the container is running.
+  design: |
+    Before the revive's `docker rm -f`, append the dead container's `docker logs --tail` (bounded) to a per-revive file
+    under state/diagnostics/, and name that file in the revive line of the revival log. captureDiagnosticsBundle also captures
+    the logs of exited remudero containers (`docker ps -a`). The progress verdict also counts revivals from the revival
+    log whose container never wrote daemon.paths, so a pre-node crash loop reads CRASH_LOOP with a reason naming the
+    entrypoint. The existing hold-revive and alert paths then apply to it. Bounds come from the revival log's own recent
+    history, not a new fixed constant.
+  acceptance:
+    - claim: "a revive keeps the dead container's log tail before it removes the container"
+      proof: "grep: a daemon that dies before node starts keeps its log in test/a-daemon-that-dies-before-node-starts-is-seen.test.ts"
+    - claim: "revivals that never reached daemon.paths read as CRASH_LOOP, not STALLED"
+      proof: "grep: a crash loop before node starts reads CRASH_LOOP in test/a-daemon-that-dies-before-node-starts-is-seen.test.ts"
+  falsifier: |
+    Drop the log capture or the revival-log count: the dead container's log is gone after the revive, or the verdict
+    stays STALLED with failedBoots15m 0, and the tests fail.

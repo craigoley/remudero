@@ -28,7 +28,7 @@ const TSX = import.meta.resolve("tsx");
 const MERGER = join(REPO_ROOT, "scripts", "coverage-merge-ratchet.mjs");
 
 type Step = { name?: string; id?: string; if?: string; run?: string; uses?: string; with?: Record<string, unknown>; env?: Record<string, string> };
-type Job = { name?: string; steps: Step[] };
+type Job = { name?: string; "timeout-minutes"?: number; steps: Step[] };
 // Literal paths on purpose: workflow-guard-mutation-ratchet finds ci.yml's readers by grepping for
 // `workflows/ci.yml`, and only a reader it finds can cover the fetch step's two `exit 0` guards.
 const workflow = (path: string) => parseYaml(readFileSync(join(REPO_ROOT, path), "utf8")) as { jobs: Record<string, Job> };
@@ -93,6 +93,8 @@ test("W1-T6107: the nightly map is uploaded as test-impact-map for at least seve
 
 test("W1-T6107: an install or builder failure never fails the nightly and leaves no map", () => {
   const body = step(NIGHTLY, BUILD).run!;
+  const bound = /\btimeout (\d+m) node --import tsx scripts\/coverage-merge-ratchet\.mjs/.exec(body);
+  assert.ok(bound, "the fixture drives the workflow's actual bounded builder");
   const writesMap = 'for a in "$@"; do if [ "$prev" = "--impact-map" ]; then printf "{}" > "$a"; fi; prev="$a"; done';
   for (const [label, npm, node, built] of [
     ["builder succeeds", 0, 0, true],
@@ -100,18 +102,50 @@ test("W1-T6107: an install or builder failure never fails the nightly and leaves
     ["install fails", 1, 0, false],
   ] as const) {
     const cwd = mkdtempSync(join(tmpdir(), "rmd-t6107-nightly-"));
-    const bin = stubs({ npm: { code: npm }, node: { code: node, body: node === 0 ? writesMap : "printf '{}' > test-impact-map.json" } });
+    const bin = stubs({ npm: { code: npm }, node: { code: node, body: node === 0 ? writesMap : "printf '{}' > test-impact-map.json" },
+      timeout: { code: 0, body: 'shift; exec "$@"' } });
     try {
       const summary = join(cwd, "summary.md");
       const r = bash(body, { cwd, path: [bin.dir], env: { GITHUB_SHA: "abc1234", GITHUB_STEP_SUMMARY: summary } });
       assert.equal(r.status, 0, `${label}: the step never fails the job (${r.stderr})`);
       assert.equal(existsSync(join(cwd, "test-impact-map.json")), built, `${label}: a map exists only after a successful build`);
       assert.match(readFileSync(summary, "utf8"), built ? /built the test impact map for abc1234/ : /impact-map build FAILED/);
-      if (npm !== 0) assert.equal(bin.log("node"), "", "no build runs without an install");
+      if (npm !== 0) {
+        assert.equal(bin.log("timeout"), "", "no bounded build starts without an install");
+        assert.equal(bin.log("node"), "", "no build runs without an install");
+      } else {
+        assert.match(bin.log("timeout"), new RegExp(`^${bound[1]} node --import tsx scripts/coverage-merge-ratchet\\.mjs --impact-map test-impact-map\\.json`),
+          "the builder is reached through the workflow's unchanged timeout argv on every host");
+        assert.match(bin.log("node"), /^--import tsx scripts\/coverage-merge-ratchet\.mjs --impact-map test-impact-map\.json/);
+      }
     } finally {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(bin.dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("W1-T6107: the map build has its own bound inside the job's, and a build past it leaves no map and never fails the nightly", () => {
+  // Run 38514060349 (2026-10-14): the build ran 11m16s, the job hit its 20m bound, and the floor
+  // ratchet after it never ran. The merge keeps the 20m it had; the build gets its own bound on top.
+  const body = step(NIGHTLY, BUILD).run!;
+  const bound = /\btimeout (\d+)m node --import tsx scripts\/coverage-merge-ratchet\.mjs/.exec(body);
+  assert.ok(bound, "the builder runs under its own timeout inside the step");
+  assert.ok(NIGHTLY["timeout-minutes"]! >= 20 + Number(bound[1]), `the job leaves the merge its 20m plus the build's ${bound[1]}m`);
+  const cwd = mkdtempSync(join(tmpdir(), "rmd-t6107-bound-"));
+  // GNU timeout exits 124 when it stops the command; a half-written map must not survive it.
+  const bin = stubs({ npm: { code: 0 }, node: { code: 0 }, timeout: { code: 124, body: "printf '{' > test-impact-map.json" } });
+  try {
+    const summary = join(cwd, "summary.md");
+    const r = bash(body, { cwd, path: [bin.dir], env: { GITHUB_SHA: "abc1234", GITHUB_STEP_SUMMARY: summary } });
+    assert.equal(r.status, 0, `a build stopped by its bound never fails the job (${r.stderr})`);
+    assert.match(bin.log("timeout"), new RegExp(`^${bound[1]}m node --import tsx scripts/coverage-merge-ratchet\\.mjs --impact-map test-impact-map\\.json`));
+    assert.equal(bin.log("node"), "", "the builder never runs outside its bound");
+    assert.equal(existsSync(join(cwd, "test-impact-map.json")), false, "no map is uploaded");
+    assert.match(readFileSync(summary, "utf8"), /impact-map build FAILED or passed its 10m bound/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(bin.dir, { recursive: true, force: true });
   }
 });
 

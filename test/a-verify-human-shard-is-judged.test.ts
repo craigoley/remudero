@@ -724,3 +724,50 @@ test("W1-T3188: a shard whose file IS in git reports a real age in days, not the
 
   assert.equal(shards[0].ageDays, 3, "three days after the shard was added, the age must read 3");
 });
+
+import { world as whyMeWorld } from "./helpers/why-me-world.js";
+
+test("the production sweep intake reads correction receipts from its configured state root", async t => {
+  const repo = gitRepo({ kind: "why-me-production", seedCommit: false });
+  t.after(() => repo.cleanup());
+  const w = await whyMeWorld(t, { root: repo.dir });
+  writeFileSync(w.planPath, w.plan + "  files: [DECISIONS.md]\n"); await w.refresh();
+  mkdirSync(join(w.root, ".remudero"));
+  (await import("node:fs")).copyFileSync(join(import.meta.dirname, "..", ".remudero", "mounts.yaml"), join(w.root, ".remudero", "mounts.yaml"));
+  const { persistedInboxPath } = await import("../src/lib/fleet-lane.js");
+  repo.addRemote("origin", "https://github.com/owner/core.git");
+  const before = process.env.RMD_INSTANCE_NAME;
+  t.after(() => { if (before === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = before; });
+  const intake = async (check: (shard: ShardUnderJudgement) => void) => {
+    let seen = false;
+    const status = await verifyHumanSweepCommand([], { root: w.root, config: { root: w.root, claudeBin: "/unused" } as never,
+      route: async shards => {
+        assert.equal(shards.length, 1); check(shards[0]!); seen = true;
+        return { judged: 0, needsOperator: [], automated: [], backlog: [], skipped: [], deferred: [] };
+      } });
+    assert.equal(status, 0); assert.equal(seen, true);
+  };
+  delete process.env.RMD_INSTANCE_NAME;
+  await intake(shard => {
+    assert.equal(shard.whyMeFeedback, undefined);
+    assert.equal(shard.whyMeFeedbackUnavailable, undefined, "known empty history preserves ordinary behavior with env unset");
+  });
+  const input = w.request("why-me-production-intake"), ack = await w.call(input); assert.equal(ack.status, 200); await w.refresh();
+  await intake(shard => {
+    assert.equal(shard.whyMeFeedback, undefined, "a source cannot supply its own missing instance authority");
+    assert.match(shard.whyMeFeedbackUnavailable!, /source is unverified/);
+  });
+  process.env.RMD_INSTANCE_NAME = "core";
+  await intake(shard => assert.equal(shard.whyMeFeedback?.receipts[0]?.receiptId, ack.body.correction.receiptId));
+  const foreign = await whyMeWorld(t, { instance: "foreign", repository: "owner/core" });
+  const other = await foreign.call(foreign.request("why-me-foreign-production")); assert.equal(other.status, 200); await foreign.refresh();
+  writeFileSync(persistedInboxPath(w.state), readFileSync(persistedInboxPath(foreign.state)));
+  writeFileSync(join(w.state, "inbox-intent-receipts", other.body.correction.receiptId + ".json"), readFileSync(join(foreign.state, "inbox-intent-receipts", other.body.correction.receiptId + ".json")));
+  for (const instance of [undefined, "core"]) {
+    if (instance === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = instance;
+    await intake(shard => {
+      assert.equal(shard.whyMeFeedback, undefined, "a valid same-repo foreign-instance corpus remains foreign");
+      assert.match(shard.whyMeFeedbackUnavailable!, /source is unverified/);
+    });
+  }
+});

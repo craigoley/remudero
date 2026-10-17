@@ -51,7 +51,7 @@ export const HOST_MEMORY_PRIORITY_PROPOSAL: HostMemoryPriorityPolicy = {
   // A review, a proof check or a push gate finishes work already admitted; a garden is maintenance that can wait. A test
   // run is found inside a running tree, never a start that waits, so its weight only completes the table.
   classWeight: {
-    review: 3, fix: 2, implement: 1, unclassified: 1, advisory: 2, garden: 0.5, "check-proof": 3, "push-gate": 3, test: 1,
+    review: 3, fix: 2, implement: 1, unclassified: 1, advisory: 2, garden: 0.5, "check-proof": 3, "push-gate": 3, test: 1, "run-child-probe": 0.5,
   },
   agingPerMinute: 0.05,
   demandRefreshBoundMs: 5 * 60_000,
@@ -445,7 +445,11 @@ export interface ZeroWorkerSample {
   memAvailableMib: number | null;
   /** rss+swap of every worker tree in the ledger: what MemAvailable would regain with zero workers. */
   workersResidentMib: number;
-  daemonGrowthMib: number;
+  /** W1-T9557: the daemons' TYPICAL growth; the whole growth only when too few samples split one off, as the basis says. */
+  daemonGrowthChargedMib: number;
+  daemonGrowthBasis: string;
+  /** Their growth back to the lifetime peak (VmHWM - VmRSS): reported beside the charge, never charged. */
+  daemonGrowthPeakMib: number;
   coldStartReserveMib: number;
   hostReserveMib: number;
 }
@@ -453,7 +457,7 @@ export interface ZeroWorkerSample {
 /** MiB the host would still lack with ZERO workers, or undefined when it fits (or headroom was unread). */
 export function zeroWorkerShortfallMib(sample: ZeroWorkerSample): number | undefined {
   if (sample.memAvailableMib === null) return undefined;
-  const zeroWorkerAvailable = sample.memAvailableMib + sample.workersResidentMib - sample.daemonGrowthMib - sample.coldStartReserveMib;
+  const zeroWorkerAvailable = sample.memAvailableMib + sample.workersResidentMib - sample.daemonGrowthChargedMib - sample.coldStartReserveMib;
   const shortfall = sample.hostReserveMib - zeroWorkerAvailable;
   return shortfall > 0 ? shortfall : undefined;
 }
@@ -470,6 +474,9 @@ export interface CapacityDecision {
   shortfallGb: number;
   samples: number;
   levers: readonly string[];
+  daemonGrowthBasis?: string;
+  daemonGrowthChargedMib?: number;
+  daemonGrowthPeakMib?: number;
 }
 
 export interface ShortfallTracker {
@@ -478,7 +485,7 @@ export interface ShortfallTracker {
 }
 
 export function createShortfallTracker(): ShortfallTracker {
-  const streak = new Map<string, { samples: number; worstMib: number }>();
+  const streak = new Map<string, { samples: number; worstMib: number; worst: ZeroWorkerSample }>();
   const raised = new Set<string>();
   return {
     observe(sample, policy) {
@@ -487,8 +494,9 @@ export function createShortfallTracker(): ShortfallTracker {
         streak.delete(sample.scenario);
         return undefined;
       }
-      const s = streak.get(sample.scenario) ?? { samples: 0, worstMib: 0 };
+      const s = streak.get(sample.scenario) ?? { samples: 0, worstMib: 0, worst: sample };
       s.samples += 1;
+      if (shortfall >= s.worstMib) s.worst = sample;
       s.worstMib = Math.max(s.worstMib, shortfall);
       streak.set(sample.scenario, s);
       if (s.samples < policy.zeroWorkerShortfallSamples || raised.has(sample.scenario)) return undefined;
@@ -499,6 +507,9 @@ export function createShortfallTracker(): ShortfallTracker {
         shortfallGb: Math.round((s.worstMib / 1024) * 10) / 10,
         samples: s.samples,
         levers: SHORTFALL_LEVERS,
+        daemonGrowthBasis: s.worst.daemonGrowthBasis,
+        daemonGrowthChargedMib: s.worst.daemonGrowthChargedMib,
+        daemonGrowthPeakMib: s.worst.daemonGrowthPeakMib,
       };
     },
   };
@@ -519,10 +530,17 @@ export function capacityDecisionText(d: CapacityDecision): {
     detail:
       `Shadow evidence (counterfactual, nothing was held): in scenario ${d.scenario} the measured service baselines plus ` +
       `that scenario's serve reserve leave the host ${d.shortfallGb} GB short of its reserve with ZERO workers, across ` +
-      `${d.samples} consecutive samples. This is a capacity choice; the fleet does not choose a lever.`,
+      `${d.samples} consecutive samples.${growthChargeText(d)} This is a capacity choice; the fleet does not choose a lever.`,
     options: d.levers.map((lever) => ({ label: lever, detail: `close the ${d.shortfallGb} GB shortfall with ${lever}` })),
     recommendation: "none: the operator chooses the lever",
   };
+}
+
+/** W1-T9557: which daemon growth the shortfall charged, beside the lifetime-peak growth it did not. */
+function growthChargeText(d: CapacityDecision): string {
+  if (d.daemonGrowthChargedMib === undefined) return "";
+  return ` It charges ${Math.round(d.daemonGrowthChargedMib)} MiB of daemon growth (${d.daemonGrowthBasis}), not their ` +
+    `${Math.round(d.daemonGrowthPeakMib ?? d.daemonGrowthChargedMib)} MiB growth back to their lifetime peak.`;
 }
 
 const pendingDecisions: CapacityDecision[] = [];

@@ -201,7 +201,8 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
   "src/lib/serve-slots.ts": { count: 9, reason: "CHECKOUT: slotUnfit/createSlotPreparer cut and read serve's own slot checkouts" },
   "src/lib/serve-supervisor-main.ts": { count: 1, reason: "CHECKOUT: runServeSupervisor reads the supervised checkout" },
   "src/lib/serve.ts": { count: 5, reason: "CHECKOUT: serve's console/gateway checkout reads (-C dir/repoDir)" },
-  "src/lib/sre-lane.ts": { count: 3, reason: "CHECKOUT: mergedPrsSince reads origin/main in the managed checkout" },
+  "src/lib/source-text-readers.ts": { count: 1, reason: "CHECKOUT: discoverSourceTextReaders reads the repo root (cwd: repoRoot)" },
+  "src/lib/sre-lane.ts": { count: 1, reason: "CHECKOUT: mergedPrsSince reads origin/main in the managed checkout" },
   "src/lib/sre-runbooks.ts": { count: 1, reason: "CHECKOUT: daemonSreRunbookHost reads the managed checkout" },
   "src/lib/status-board.ts": { count: 4, reason: "CHECKOUT: status-board ref reads of the managed checkout (-C repoDir)" },
   "src/lib/status.ts": {
@@ -239,10 +240,16 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "the managed source checkout (-C repoDir)",
   },
   "src/run-task.ts": {
-    count: 75,
+    count: 70,
     reason:
       "CHECKOUT (W1-T6135): every site classed per function, with the tree it addresses, in RUN_TASK_WIDENED_SITES " +
       "in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts, whose sum this count must equal",
+  },
+  "src/lib/tick-read-worker.ts": {
+    count: 5,
+    reason:
+      "CHECKOUT (W1-T6135): the credit evidence root's 4 sites and the async plan-sync runner moved with the tick-read worker, still " +
+      "classed per function in RUN_TASK_WIDENED_SITES in test/run-task-s-widened-git-sites-are-classified-and-converted.test.ts",
   },
 };
 
@@ -333,6 +340,8 @@ function childProcessPrimitives(code: string): Set<string> {
   for (const m of code.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*promisify\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
     if (names.has(m[2]!)) names.add(m[1]!);
   }
+  // W1-T9651: the loop-bounded execFile is execFile with a loop-available budget, not a git helper.
+  if (/import\s*\{[^}]*\bexecFileLoopBounded\b[^}]*\}\s*from\s*["'][./]*(?:lib\/)?loop-bounded-child\.js["']/.test(code)) names.add("execFileLoopBounded");
   return names;
 }
 

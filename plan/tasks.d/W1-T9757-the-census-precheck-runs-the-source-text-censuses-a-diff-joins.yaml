@@ -1,0 +1,43 @@
+- id: W1-T9757
+  title: "THE CENSUS PRECHECK RUNS THE SOURCE-TEXT CENSUSES A DIFF JOINS — rmd census-membership names them since #12175, but scripts/census-precheck.mjs (the census step of rmd preflight --fast and the pre-push hook) still runs only CENSUS_ADMITTED_MEMBERS and its triggered suites, so a hand or fleet push still learns of a source-text census red only in CI"
+  repo: remudero
+  depends_on: [W1-T9740]  # same file (scripts/census-precheck.mjs); serialize, never parallel
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator session 2026-10-15: #12019 (W1-T9426) and #12104 (W1-T9667) passed every local check and reddened CI on an unnamed source-text census; #12175 fixed membership, this is the precheck half"
+  plan_refs: [W1-T5617, W1-T5693, W1-T5663, W1-T9050, W1-T9740]
+  files: [scripts/census-precheck.mjs, test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-15: root-cause the census reds hand PRs only meet in CI
+  attempts: 0
+  rationale: |
+    VERIFIED on origin/main after #12175:
+    - src/lib/source-text-readers.ts `discoverSourceTextReaders` places every test suite by the tracked paths it reads as
+      text (readFileSync/readFile arguments, git ls-files/grep pathspecs, `@census-reads:` declarations), and
+      `rmd census-membership --files` prints the census-shaped ones a diff joins.
+    - scripts/census-precheck.mjs `evaluateAdmittedCensusSuites` joins only `listAdmittedCensusMembers` (CENSUS_ADMITTED_MEMBERS)
+      plus PRECHECK_TRIGGERED_SUITES / PRECHECK_PATH_TRIGGERED_SUITES. Neither names
+      test/a-generic-route-has-an-explicit-tool-bound.test.ts (#12104) or test/a-wall-clock-bound-declares-itself.test.ts (#12019).
+    - MEASURED 2026-10-15: a src/run-task.ts diff joins 41 census-shaped readers, a src/lib/worker.ts diff 19, a new test file 18.
+      Running them on every push is a push-gate cost the operator should see measured, not assumed.
+  design: |
+    1. The admission-table child in `listAdmittedCensusMembers` also imports src/lib/source-text-readers.ts when the tree holds it
+       and appends each census-shaped reader as `{ testFile, script: "", walks }`. `evaluateAdmittedCensusSuites` already joins by
+       `walks` prefixes, runs head then merge base, and refuses only head-red/base-green (W1-T5663). A tree without the module
+       appends nothing.
+    2. Cost is bounded by measurement, never a fixed cap: joined readers run in their own child, and the existing
+       `censusRunawayThresholdMs` (src/lib/ci-parity.ts, measured from census durations) decides a runaway. A reader the child cannot finish is UNMEASURED by name (exit 2), never a pass.
+    3. Record the measured push-gate wall time before and after on the Azure host (never the Mac) in the PR body.
+    4. The new suite is itself a precheck test: add `"test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts":
+       { modeled: evaluateAdmittedCensusSuites }` to PRECHECK_PARITY beside the other evaluateAdmittedCensusSuites rows.
+  acceptance:
+    - claim: "the census precheck runs a source-text census suite a diff joins and refuses a head-red base-green one"
+      proof: "grep: test(\"W1-T9757: the precheck runs a source-text census the diff joins\" in test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts"
+    - claim: "a tree without the reader module joins no extra suite"
+      proof: "grep: test(\"W1-T9757: a tree without the reader module adds no suite\" in test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts"
+  falsifier: |
+    Replay #12104's diff (src/run-task.ts with a `tools,` shorthand at a spawn site) through `main(["--base", <its base>])`. At origin/main
+    the precheck prints OK. With the change it prints `census-suite: test/a-generic-route-has-an-explicit-tool-bound.test.ts fails`.

@@ -61,14 +61,11 @@ test("test/the-janitor-reaps-the-state-disks-ad-hoc-top-level.test.ts", () => {
   const r = run(fx, disk.env);
   assert.equal(r.status, 0, r.stderr + r.stdout);
 
-  // the idle unknown name is archived first, then reaped
-  assert.equal(existsSync(followups), false, r.stdout);
-  const bundles = readdirSync(join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, "scratch")).filter(n => n.endsWith(".bundle"));
-  assert.equal(bundles.length, 1, r.stdout);
-  const heads = git(main, "bundle", "list-heads", join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, "scratch", bundles[0]));
-  assert.ok(heads.includes(`${unpublished} refs/heads/followups`), heads);
-  assert.ok(r.stdout.indexOf(`ARCHIVE-WORKTREE ${clone}`) >= 0, r.stdout);
-  assert.ok(r.stdout.indexOf(`ARCHIVE-WORKTREE ${clone}`) < r.stdout.indexOf(`REMOVE ${followups}\n`), r.stdout);
+  // A state-disk scratch name is not permission to remove unpublished work.
+  assert.equal(existsSync(followups), true, r.stdout);
+  assert.equal(git(clone, "rev-parse", "followups").trim(), unpublished);
+  assert.equal(existsSync(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT), false);
+  assert.match(r.stdout, /not-proven-published/);
   assert.equal(existsSync(fh5), false, r.stdout);
   assert.ok(r.stdout.includes(`REMOVE ${fh5}\n`), r.stdout);
 

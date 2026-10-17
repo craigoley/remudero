@@ -1,0 +1,140 @@
+- id: W1-T9559
+  title: Selected registry reader and writer carry every existing lifecycle field without exposure
+  repo: remudero
+  depends_on: [W1-T9493]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator instruction 2026-10-14: advance the governed public compatibility steps before private rmd-ops staging, without schedules, duplicate work or live changes"
+  plan_refs: [W1-T9435, W1-T9493, W1-T4227, W1-T4198, W1-T7727]
+  files: [src/lib/instance-registry.ts, src/lib/instance-registry-selection.ts, src/lib/onboarding-golive.ts, test/one-registry-for-the-fleet.test.ts, test/onboarding-golive.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json]
+  status: merged
+  attempts: 0
+  rationale: |
+    READ actual main 27a4ee4aaeea20ce5cf7fa736e82750689131384 after the normal
+    W1-T9435 reader source merge11714 and W1-T9493 writer source merge11802.
+    The selected reader's FIELDS and selectedRegistryText's writer-local field
+    set each accept 22 named fields. The actual installer and recycler each
+    accept gh_app_private_key_host_path as well; neither selected field set
+    does. A registry carrying this already-supported host-side path is refused
+    by the selected public contract, despite being a valid lifecycle input.
+    Independently, the shell consumers still reject mode. This task fixes only
+    the public selected reader/writer field contract, NOT shell mode handling,
+    deployment, private selection or the remaining consumer forwarding work.
+    Fresh controlled subject sweeps cover main and ALL20 OPEN PR head trees,
+    more than3000 plan shards and500 public source/script paths per head, exact
+    W1-T4227 title positive controls, actual named blobs and own diffs against
+    each real merge base. PR11801's installer overlap adds dependency-seed-guard
+    installation/checking, not registry parsing. W1-T4198 handles recycle env
+    forwarding; retired W1-T6095 concerned credential mounts and live layout;
+    W1-T7727 targets pause; W1-T9410 repairs missing git-admin reclaim. None owns
+    this selected-field mismatch. Do not reopen, rewrite or duplicate them.
+    The100 closed/merged-PR window11670..11817 covers the immediate predecessor
+    filing11733 and both source merges, credited by exact canonical trailers OR
+    run branches. It no longer covers historical reader filing11669; that older
+    coverage is not claimed. The predecessor package's real runnableCandidates
+    frontier is empty because both source tasks actually merged. Reserve this
+    new task normally from the operator checkout; do not infer global ranking.
+    A host-path metadata string is not credential bytes, a container path or
+    Git-relative writer target. Docker's bind-mount documentation distinguishes
+    host source from container destination and read-only from read permission:
+    https://docs.docker.com/engine/storage/bind-mounts/
+    No credential file is read or mounted by this task, and no raw private value
+    belongs in a public plan/PR, projection, diagnostic or serialized binding.
+  design: |
+    1. Reuse instance-registry.ts for one immutable, explicit selected-field
+       vocabulary shared by the existing selected reader and selected proposal
+       writer. Include the union of the ACTUAL installer/recycler case fields
+       and existing selected identity/mode/primary fields: the only currently
+       missing member is gh_app_private_key_host_path. Derive the compatibility
+       test's census from the actual bounded case blocks, not a guessed count or
+       an arbitrary new-field wildcard. Use a readonly frozen vocabulary, not
+       an exported mutable Set that callers can widen. No new registry service,
+       scanner, protocol hierarchy, dependency or duplicated permissive parser.
+    2. Change only selected field recognition. Preserve the existing parser's
+       legacy behavior, contract versions1/2 and capability refusals, identity,
+       mode/primary validation, bounded async reads, Git regular-blob checks,
+       file/repository/commit binding, final rechecks and minimum shadow runs.
+       Unknown fields, roots, shapes, revisions and outages remain refused or
+       unknown; removing one duplicated allowlist must not make either consumer
+       accept arbitrary fields. No baseline/detector exemption or new capability.
+       Allowing a lifecycle field means carrying its bytes under the existing
+       integrity contract, NOT validating every installer value, following the
+       named key path, acquiring a credential or authorizing an effect.
+    3. Preserve all non-target bytes, including the host-side key path, comments
+       and unrelated lifecycle fields in selected writer proposals. Revision or
+       digest changes to ANY carried field must invalidate an existing read or
+       pre-effect writer binding. The field must not be projected into instances,
+       public routes, serialized bindings, diagnostics or success/incomplete
+       receipts. Publication permission remains not-granted. No actual private
+       file, GitHub proposal, mount, install, recycle, promotion or closure.
+    4. Extend the EXISTING two test files with the exact behavioral titles below.
+       Use realistic FULL lifecycle fixtures with independent host/container/Git
+       path controls; read the actual registry through the real bounded default
+       reader, and exercise selected writer REST/identity/SHA/byte preservation
+       with existing disposable transports. Cover unsupported siblings, malformed
+       identities/safety fields, missing/revised evidence and no-selection legacy
+       requests beside the new supported host-path field. Use private-path sentinels
+       and forbidden-effect traps, not real credentials or a passing source marker.
+       Keep the existing verified-operator/high-tier confirmation and owner override.
+    5. Prove the shared field vocabulary reaches BOTH real consumers and cannot be
+       widened by caller mutation. Its actual lifecycle census must report every
+       opened case block and known key-path positive control. Add a behavioral
+       regression for the observed missing field before the fix. Delete that field
+       or detach one consumer from the shared contract to observe red, restore the
+       exact committed source and observe green. Exercise the actual default and
+       any newly reached catch branch. Do not reinterpret a missing test path or
+       zero-match TAP wrapper as a completed test or behavioral discrimination.
+    6. Update the existing contract doc and generated index ONLY if generation
+       changes it. State that current lifecycle data fields are carried, unknown
+       future fields still refuse, old shell binaries still reject mode, and full
+       daemon/lifecycle/effect integration is NOT qualified. Preserve the host vs
+       container vs Git-relative distinction, private-publication boundary, complete
+       public Apache core, trusted PR flow and scoped services. WORKERS CONTINUE
+       for this isolated source stage: none of its source paths is image-baked at
+       the filing pin. Any later live compatible replacement needs separately
+       approved exact-instance drain; incompatible shared writer/state/credential
+       changes need approved FULL AFFECTED WRITER STOP, all workers only if all
+       are actually affected. Flag that requirement before action, not afterwards.
+    7. Before build AND publication refresh merged canonical trailers OR run-branch
+       credit, active task/ID refs, actual main and ALL OPEN-head subjects with
+       corpus/window/positive controls, package runnableCandidates and ordinary
+       ownership. A competing holder is not ours to delete; no duplicate run.
+       Commit before measurement, verify every test path, use child tsx/tmp hygiene
+       and shipped host admission, and instrument every changed source SF in mapped
+       diff coverage. One native author per distinct committed tree; compare EVERY
+       failed title on THAT run's actual unchanged pinned base before attribution
+       or repair. Unknown causes stay unknown and retained failures stay failures.
+       No unchanged-failure retry, extra reviewer, forced/admin merge, fake green,
+       canonical-proof divergence or out-of-scope repair before normal scope merge.
+    8. All new admission remains opt-in SHADOW ONLY. This task neither selects the
+       private overlay nor changes live policy/config, GitHub settings, infra,
+       schedules, credentials, state/claim formats or production scheduler behavior.
+       Human owner/admin override remains intact, not a gate waiver. Live activation
+       and foreign-input adoption exceptions remain separate human decisions.
+  acceptance:
+    - claim: The real selected reader accepts full current lifecycle data including the host key path
+      proof: 'unit test: selected registry reads full lifecycle fields without reading credentials'
+    - claim: The selected writer preserves every non-target lifecycle byte including the host key path
+      proof: 'unit test: selected registry writer preserves full lifecycle fields in only its target'
+    - claim: Both selected consumers still refuse unknown fields and malformed safety evidence
+      proof: 'unit test: selected registry lifecycle compatibility never permits unknown fields or unsafe identity'
+    - claim: Carried lifecycle revisions invalidate read and pre-effect writer bindings
+      proof: 'unit test: selected registry lifecycle field revisions invalidate bound reads and writes'
+    - claim: Operational fields remain private and never grant publication permission
+      proof: 'unit test: selected registry lifecycle fields never enter public projections or receipts'
+    - claim: The shared immutable vocabulary reaches both consumers and matches actual lifecycle cases
+      proof: 'unit test: selected registry lifecycle field contract is immutable and shared by both consumers'
+    - claim: No-selection and old compatible behavior retain their existing effects
+      proof: 'unit test: selected registry lifecycle field support preserves legacy and bounded compatibility'
+  falsifier: |
+    On the unchanged filing base a real selected registry containing
+    gh_app_private_key_host_path is not ready, and the selected writer refuses
+    the same valid lifecycle bytes before proposal writes. New behavioral tests
+    fail on those outcomes. Removing the shared field from the corrected contract
+    must reproduce the refusal in both consumers; restoring it passes. Unsupported
+    sibling fields still refuse, with healthy legacy and current known-field controls.

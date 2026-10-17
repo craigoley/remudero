@@ -1,0 +1,28 @@
+- id: W1-T9653
+  title: Record the root mechanism behind the coverage-ratchet CI friction cause before choosing a structural fix
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=2f83a480880802b3
+  attempts: 0
+  files:
+    - docs/ci-friction-remedies.md
+  acceptance:
+    - claim: docs/ci-friction-remedies.md records a W1-T5309 root mechanism section that names where src/lib/ci-parity.ts and src/run-task.ts handle coverage-ratchet and which failure mode drives the repeated rounds
+      proof: "grep: W1-T5309 root mechanism in docs/ci-friction-remedies.md"
+    - claim: The same section states whether a W1-T4810 remedy entry exists in docs/ci-friction-remedies.md and, if it does not, says so explicitly and names the shard that owns that remedy
+      proof: "grep: W1-T4810 remedy entry in docs/ci-friction-remedies.md"
+    - claim: The section ends by naming exactly one structural fix to pursue, with the evidence that rules out the alternatives
+      proof: "grep: W1-T5309 chosen structural fix in docs/ci-friction-remedies.md"
+  origin: architect
+  rationale: >-
+    From the 2026-10-14 follow-up on W1-T5309-1792008247994, ratified via rmd approve:
+  
+    follow-up harvest [research]: read `src/lib/ci-parity.ts` and `src/run-task.ts` around
+    "coverage-ratchet", plus the W1-T4810 entry in `docs/ci-friction-remedies.md`, because the
+    root mechanism determines which structural fix to choose. — from W1-T5309 (run
+    W1-T5309-1792008247994)

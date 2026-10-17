@@ -92,8 +92,10 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   ISSUES: producer("issues", "Issues Intake"),
   INTAKE: producer("intake", "Intake Cadence"),
   GOVERNOR: producer("governor", "Governor"),
+  "MEMORY-BUDGET": producer("memory-budget", "Memory Budget"),
   MINT: producer("mint", "Task-Id Mint"),
   "MODEL-CATALOG": producer("model-catalog", "Model Catalog"),
+  "BENCHMARK-AA": producer("benchmark-aa", "Benchmark A/A"),
   "ESCALATION-ANSWERS": producer("escalation-answers", "Escalation Answers"),
   INCIDENT: producer("incident", "Incident Ingest"),
   inbox: producer("inbox", "Inbox"),
@@ -104,6 +106,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   "hand-run-census": producer("hand-run-census", "Hand-Run Census"),
   "knowledge-measurement": producer("knowledge-measurement", "Knowledge Measurement"),
   "RECOVERY-REFS": producer("recovery-refs", "Recovery Refs"),
+  HARNESS: producer("harness", "Harness Child Launch"),
 });
 
 /**

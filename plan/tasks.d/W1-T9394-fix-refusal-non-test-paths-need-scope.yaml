@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.12
   status: queued
@@ -33,3 +33,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.78
+    reasons:
+      - "The declared files are src/run-task.ts and one new test file. Neither is a secrets, auth, permissions, deploy, merge-policy or review-policy surface according to the description."
+      - "The task is aimed at stopping a repeated fix-round refusal (\"non-test paths need scope\"), which is measured across 31 rounds on 27 PRs. Five specific PRs are cited, so the finding can be checked from the record."
+      - "The acceptance criterion is a concrete grep on a named test in a new test file, so it is verifiable. The gates state shows no deletion, irreversible action or operator-only decision."
+      - "The ci-friction family has a mixed record (25 merged, 40 declined, Beta mean 0.61). That calls for ordinary scrutiny, but it does not by itself mark this change as dangerous. The change is also a code path in run-task.ts that could touch dispatch scoping, and the PR will still pass CI and review."
+    judged_at: "2026-10-15T02:38:30.786Z"
+    pin: "b604bbc7d4b5243726b7fe9efe1b30a5e25ad9a7875eba1f62aa78f813ae70f0"

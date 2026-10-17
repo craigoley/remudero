@@ -1,0 +1,59 @@
+- id: W1-T9565
+  title: "THE EXPIRING-FIXTURE CENSUS LOADS THE GATE GARDENER AS ESM, SO NO COVERAGE SHARD CARRIES A <define:import.meta> RECORD — scripts/expiring-fixture-census.mjs loads src/lib/gate-gardener.ts through tsx/cjs/api's require, which compiles the src graph as CommonJS, and coverage-merge-ratchet then refuses an unrelated PR (#11757, run 38637609131)"
+  repo: remudero
+  depends_on: [W1-T421, W1-T7812]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the module format the census loads the gardener in; one CI script and the five suites that call its main
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: \"fix all issues found\"; the coverage-ratchet red on #11757 traced to two CommonJS compiles of the src graph. Operator approved this filing 2026-10-14"
+  plan_refs: [W1-T421, W1-T7812, W1-T3655, W1-T5826, W1-T9300]
+  files: [scripts/expiring-fixture-census.mjs, test/expiring-fixture-census.test.ts, test/the-census-watches-its-own-base.test.ts, test/a-fixture-crossing-on-main-warns-ahead-instead-of-reddening-ci.test.ts, test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts, test/the-merge-queue-runs-the-recorded-literal-gates.test.ts, test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts]
+  status: merged
+  priority: 1.5
+  attempts: 0
+  rationale: |
+    WHAT HAPPENS:
+    - `main` in scripts/expiring-fixture-census.mjs reaches `tsRequire("../src/lib/gate-gardener.ts", import.meta.url)`
+      (imported as `require` from "tsx/cjs/api") whenever a reported fixture is within NEAR_CROSSING_HOURS (W1-T7812).
+      tsx's CommonJS transform compiles gate-gardener and every src module it imports as CommonJS and replaces
+      `import.meta` through an esbuild define. Under NODE_V8_COVERAGE each such module's source map gains a second source,
+      `<define:import.meta>`, which becomes `SF:src/lib/<define:import.meta>` in the shard lcov.
+    - test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts calls `census.main` in process
+      with a 0.5-day crossing, so every coverage shard that runs it reaches that require.
+    - When that record carries a positive hit, scripts/coverage-merge-ratchet.mjs throws "shard LCOV has positive line hits
+      missing from the raw range merge" and reds the coverage-ratchet of whatever PR the shard ran for. #11757 hit it on
+      2026-10-14 in run 38637609131.
+    REPRODUCED 2026-10-14 on origin/main, on the Mac, with `node --enable-source-maps` and NODE_V8_COVERAGE set:
+    - a script that loads src/lib/gate-gardener.ts through `tsx/cjs/api`'s require: 263 mapped sources, 26 of them
+      `<define:import.meta>`, src/lib's among them;
+    - the same script loading it through `tsx/esm/api`'s `tsImport`: 233 mapped sources, 0 `<define:` sources.
+    RELATED, NOT OVERLAPPING:
+    - PR #11834 (run-unfiled-1792017075419) fixes the other producer, the pre-push harness's `.ts` wrapper written into a
+      tmp dir with no package.json, and adds an architecture-fitness detector for that generated-wrapper shape and a merge
+      refusal that names the CommonJS cause. Its detector does not see a `tsx/cjs/api` require, so this producer is not
+      covered there. This task touches neither of its files.
+    - W1-T421 (merged) is the first out-of-root CommonJS compile of this class.
+  design: |
+    1. Load the gardener as ESM. Replace the `tsx/cjs/api` import with `tsImport` from "tsx/esm/api" (or a dynamic
+       `import()` under the tsx loader the script already runs with), so `import.meta` stays native.
+    2. That load is asynchronous, so `main` returns a Promise. The CLI entry awaits it before `process.exit`, and every
+       in-repo caller awaits `census.main(...)`: the five suites in `files`. Keep the gardener's load lazy, on the
+       near-crossing path only, so a census with no near crossing loads nothing extra.
+    3. A guard that does not depend on a crossing being near: the new suite fails if any `scripts/*.mjs` imports
+       "tsx/cjs/api" to load a src module. It names the file and says to use tsx's ESM api.
+    4. Out of scope: the coverage merger and the pre-push harness, both in #11834.
+  acceptance:
+    - claim: "the census run in a child under NODE_V8_COVERAGE with a near crossing loads the gate gardener, maps its sources, and writes no <define: source; the static guard finds no tsx/cjs/api import in scripts/"
+      proof: "unit test: test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts"
+    - claim: "the suite names the coverage assertion in a test title"
+      proof: "grep: W1-T9565: a near-crossing census run under coverage writes no define:import\\.meta source in test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts"
+    - claim: "the census loads the gardener through tsx's ESM api"
+      proof: "grep: tsImport in scripts/expiring-fixture-census.mjs"
+  falsifier: |
+    Run the census `main` in a child process under `node --enable-source-maps --import tsx` with NODE_V8_COVERAGE set to
+    a temp dir, a reported fixture 0.5 days from crossing, and an injected `runSuite`. At origin/main the reports'
+    `source-map-cache` holds `src/lib/%3Cdefine:import.meta%3E` sources (26 in the 2026-10-14 reproduction). With the change
+    it holds none, while still mapping src/lib/gate-gardener.ts, so the comparison saw its corpus.

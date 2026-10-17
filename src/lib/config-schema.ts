@@ -42,8 +42,19 @@ export interface ModelApproval {
   expiresAt?: string;
 }
 
+/** Configuration owns this data-only contract; it must not import an effect consumer. */
+export interface SelectedModeSettings {
+  mode: "shadow";
+  instanceName?: string;
+  registryPath?: string;
+  contractVersion?: number;
+  maxBytes?: number;
+  timeoutMs?: number;
+}
+
 export interface Config {
   contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
+  selectedRegistryMode?: SelectedModeSettings;
   claudeBin: string;
   root: string;
   diskArtifactScanRoots?: string[];
@@ -279,6 +290,16 @@ const workerProvidersShape: ValueSchema = {
 };
 
 export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
+  configField("selectedRegistryMode", "SelectedModeSettings", true, undefined, "config.json", "Opt-in SHADOW mode evidence only; never selected authority or publication permission.", {
+    kind: "object", fields: [
+      configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
+      configField("instanceName", "string", true, undefined, "config.json", "Explicit instance identity, not a default selection.", stringShape),
+      configField("registryPath", "string", true, undefined, "config.json", "Explicit selected source, never a private publication grant.", stringShape),
+      configField("contractVersion", "number", true, undefined, "config.json", "Selected reader contract version.", numberShape),
+      configField("maxBytes", "number", true, undefined, "config.json", "Selected reader allocation ceiling.", numberShape),
+      configField("timeoutMs", "number", true, undefined, "config.json", "Bounded asynchronous selected read.", numberShape),
+    ],
+  }),
   configField("contributorAdmission", "AdmissionSettings", true, undefined, "config.json", "Opt-in shadow contributor evaluation; no enforcement or production identity defaults.", {
     kind: "object", fields: [
       configField("mode", '"shadow"', false, undefined, "config.json", "Observation only.", { kind: "enum", values: ["shadow"] }),
@@ -394,6 +415,7 @@ export interface EnvRegistryEntry {
 }
 
 export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
+  envEntry("RMD_DEPENDENCY_SEED_ROOT", "Account-owned dependency generation store on the checkout filesystem. Existing installs are preserved and reference-aware reclamation has a six-hour minimum.", ["src/lib/dependency-seeds.ts"]),
   envEntry("RMD_HEAVY_READY_DIR", "Override for config.heavyReadyDirectory. Both unset disable NEW-implement reservation admission; a configured unreadable private local store defers only NEW builds.", ["src/lib/config.ts"]),
   envEntry("RMD_HEAVY_READY_DEADLINE_SERVICE", "Default OFF. Exact 1 separately enables the independent READY deadline worker at natural startup, with an explicit private READY directory. Unavailable service refuses only NEW builds; no eval dispatch or runtime activation authority.", ["src/lib/heavy-ready-startup.ts"]),
   envEntry("REMUDERO_CLAUDE_BIN", "Overrides the Claude binary path for worker spawn tests and diagnostics.", ["src/lib/worker.ts"]),
@@ -417,6 +439,8 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_TEST_SLOT_DIR", "The directory holding the host-wide test-run slots, shared by every container and the host; default /mnt/scratch/rmd/test-slots on the host, else /tmp/rmd-test-slots.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_SLOTS", "How many test-suite runs may hold a host-wide slot at once; default one per four cores.", ["src/lib/test-slot.ts"]),
   envEntry("RMD_TEST_LIVE_DENY_ROOT", "Test-only operator root that ledger writes must never reach; propagated to children.", ["src/lib/live-write-guard.ts", "src/lib/env.ts"]),
+  envEntry("RMD_BOOT_CHECKOUT_BLOCKED", "Set by deploy/entrypoint.sh on a STALE BOOT to the target sha its checkout could not reach; the daemon does not freshness-restart toward it (W1-T9631).", ["src/lib/daemon.ts"]),
+  envEntry("RMD_BUNDLED_WORKERS", "W1-T9370: \"0\" starts every worker a tsx parent spawns from its .ts source instead of a current worker bundle; read once per module at its first start.", ["src/lib/child-entry-argv.ts"]),
   envEntry("RMD_AUTOMATED_RETRO_DECISION", "Carries an automated retro decision into retro subprocess handling.", ["src/lib/retro-subprocess.ts", "src/run-task.ts"]),
   envEntry("RMD_CASH_WEB_SEARCH_API_KEY", "Supplies the daemon's own credential for brokered cash-worker web search; never copied into a worker environment.", ["src/lib/cash-web-bridge.ts"]),
   envEntry("RMD_CENSUS_SNAPSHOT", "Names the harness git snapshot a fix round's census precheck reads instead of running git (W1-T7182).", ["src/run-task.ts", "src/lib/prompt-render.ts"]),
@@ -424,14 +448,17 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_FOUNDRY_CLAUDE_ENDPOINT", "HTTPS Foundry /anthropic base URL for the bounded Opus cash adapter.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_FRESHNESS_RESTART_MAX", "Deploy entrypoint knob documented by the containment restart discipline.", ["src/lib/containment.ts"]),
   envEntry("RMD_GH_CACHE_HOME", "Overrides the cache root for shared GitHub reads and cadence state.", ["src/lib/config.ts", "src/lib/github-transport.ts"]),
+  envEntry("RMD_GH_COOLDOWN_S", "Sets the shared GitHub read floor in seconds; digits only, default 180, and zero disables the floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GH_READ_BURST", "Overrides the GitHub read burst this process grants inside the shared cadence floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GH_SHARED_READ_GAP_MS", "Overrides the short cross-process gap between shared GitHub reads; not a second cadence budget window.", ["src/lib/github-transport.ts"]),
-  envEntry("RMD_GH_TRANSPORT_FLOOR", "Selects advisory pacing or enforced refusal for the GitHub transport cadence floor.", ["src/lib/github-transport.ts"]),
+  envEntry("RMD_GH_TRANSPORT_FLOOR", "Selects advisory pacing, enforced refusal, or waiting for the GitHub transport cadence floor.", ["src/lib/github-transport.ts"]),
   envEntry("RMD_GITHUB_WEBHOOK_SECRET_FILE", "Names the file holding the GitHub webhook secret.", ["src/lib/github-event-wake.ts", "src/lib/serve.ts"]),
   envEntry("RMD_HARNESS_HOOKS_DIR", "Replaces the harness's own hooks/ dir whose pre-push the host push leaf runs; daemon environment, never worker input.", ["src/lib/worktree-git.ts"]),
   envEntry("RMD_HEADROOM_ENABLED", "Overrides the headroom governor on or off for this process.", ["src/lib/config.ts"]),
   envEntry("RMD_IDLE_STARVED_SUPERVISED", "Enables supervised idle-starvation handling for a daemon targeting another repository without an explicit plan.", ["src/run-task.ts"]),
-  envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts"]),
+  envEntry("RMD_INBOX_GARDENER_MODE", "Controls the bounded Inbox gardener: absent/invalid is off; shadow permits advisory revalidation only, act permits source-proven reversible retirement. Host activation requires separate operator authority (W1-T9284).", ["src/lib/inbox-retirement.ts"]),
+  envEntry("RMD_INSTANCE_NAME", "Names this daemon's registry instance inside its container; set by deploy/recycle-container.sh --instance and the installed launcher, and preferred by the SRE lane over the state-root match (W1-T9500).", ["src/lib/sre-lane.ts", "src/lib/sweep.ts", "src/run-task.ts"]),
+  envEntry("RMD_INSTANCE_REGISTRY", "Path to the daemon instance registry that rmd pause/resume resolve their target instance through (W1-T7727); defaults to the checkout's own registry (daemonInstanceRegistryPath through the repo layout); the deploy shell readers honor the same name.", ["src/run-task.ts", "src/lib/sweep.ts"]),
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_MEASUREMENT_CADENCE_CHILD_CONFIG", "Carries the daemon's Config as JSON to the measurement-cadence child so it measures the daemon's root, never $HOME's.", ["src/lib/measurement-cadence.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
@@ -443,6 +470,9 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_RESOURCE_POLICY_CONTAINER", "Selects the container checked for deployed resource policy and mount drift.", ["src/lib/deployer.ts"]),
   envEntry("RMD_RESOURCE_POLICY_ROLE", "Selects the serve or build resource policy for deployment checks.", ["src/lib/deployer.ts"]),
+  envEntry("RMD_REVIVAL_LOG", "Names the host watchdog's revival log, which the launcher hands rmd progress-watchdog so a container that died before node counts as a crash loop.", ["src/lib/progress-watchdog.ts"]),
+  envEntry("RMD_RUN_CHILD_DIR", "Marks a run child so credential readers never fall back to the daemon's socket.", ["src/run-child-main.ts", "src/lib/secret-boundary.ts"]),
+  envEntry("RMD_RUN_CHILD_GIT_SOCKET", "Carries the run child's own git credential socket to its worker spawns.", ["src/run-child-main.ts", "src/lib/secret-boundary.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_GENS_DIR", "Names the directory holding the serve supervisor's two generation slots and its handoff.off switch.", ["src/lib/serve-supervisor-main.ts"]),

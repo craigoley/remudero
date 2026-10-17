@@ -1,0 +1,65 @@
+- id: W1-T9557
+  title: "THE CAPACITY DECISION CHARGES THE DAEMON'S TYPICAL GROWTH, NOT ITS LIFETIME PEAK — the zero-worker shortfall behind #11519 charges every daemon's full VmHWM - VmRSS as standing demand, so a transient 3.3-5.2 GB climb back to a lifetime peak reads as no room for any worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which daemon growth the zero-worker capacity decision charges, across the shadow recorder and the shortfall tracker
+  band_meaning: span
+  origin: "operator approval 2026-10-14 (chat, \"go\"): file the #11519 capacity-estimator fix at priority 1; standing rulings: no hard fixed thresholds, never raise core memory.max"
+  plan_refs: [W1-T7094, W1-T7095, W1-T9097, W1-T9106]
+  files: [src/lib/host-memory-priority.ts, src/lib/host-memory-shadow.ts, test/the-capacity-decision-charges-the-daemons-typical-growth.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    #11519 (`MEMORY-CAPACITY-serve-steady`, "host memory cannot fit zero workers") is raised by the shadow
+    recorder's shortfall tracker, and its numbers are a transient, not standing demand.
+    READ on origin/main 102ce7602 (symbols):
+      - `zeroWorkerShortfallMib` (src/lib/host-memory-priority.ts) computes
+        memAvailableMib + workersResidentMib - daemonGrowthMib - coldStartReserveMib.
+      - The shadow recorder (src/lib/host-memory-shadow.ts) feeds it `verdict.numbers.daemonGrowthMib`: the SUM of
+        every daemon's full growth back to its peak. For the own daemon that is `daemonGrowthFromStatus`, VmHWM - VmRSS,
+        where VmHWM is the process's LIFETIME resident high-water mark and is never reset.
+      - The same verdict already splits that growth: `daemonGrowthTypicalMib` (median of the daemon's own footprint
+        samples over the last hour less its latest, from `footprintGrowthOf`/`seriesGrowth`) and
+        `daemonGrowthTailMib`. Its own host projection charges the typical part plus ONE tail allowance. Only the
+        capacity decision charges the whole lifetime peak.
+    MEASURED 2026-10-14 (the #11519 investigation, operator session): shortfall samples appear only in the hours the
+    lifetime-peak growth spikes to 3.3-5.2 GB (03Z, 06Z, 10Z and 12Z); the daemon's typical growth is about 342 MB. A
+    lifetime peak is reached once and then sits in VmHWM for the rest of the process, so every GC that lowers VmRSS
+    widens the charged gap. The result is false "no room for workers" escalations and the over-deferral they imply.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main for daemonGrowth, zeroWorkerShortfall, MEMORY-CAPACITY and
+    "zero workers". W1-T9097 sizes the lane count from learned tails through the shadow budget and does not touch the
+    shortfall tracker; W1-T9106 applies a learned heap ceiling at boot (it shrinks the peak, not how it is charged);
+    W1-T9358 reclaims before a host-short hold. W1-T7095 built the tracker.
+  design: |
+    No new constant, interval, count or byte threshold.
+    1. The zero-worker sample charges the daemons' TYPICAL growth: the shadow recorder passes
+       `verdict.numbers.daemonGrowthTypicalMib`, not `daemonGrowthMib`. The tail stays a transient: the per-start
+       verdict already charges it as the one tail allowance, and the tracker's existing sustained-samples rule
+       (`zeroWorkerShortfallSamples`) is what tells a standing shortfall from a spike.
+    2. The basis is the daemon's own measurement, unchanged: the median of its footprint samples (`footprintGrowthOf`)
+       when it has `daemonGrowthMinSamples` of them in the last hour; with fewer, `seriesGrowth` leaves the whole
+       growth typical, so the charge falls back to the full growth, as today, and says so.
+    3. RECORD THE BASIS. `ZeroWorkerSample` and `CapacityDecision` gain `daemonGrowthBasis` (per daemon: "median of N
+       footprint samples" or "all typical: <reason>") and `daemonGrowthChargedMib`; the
+       `memory_budget.capacity_decision` ledger row and `capacityDecisionText`'s detail name both, beside the lifetime
+       peak growth for comparison. The decision's summary stays stable (the escalation path dedups on it).
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Fixture: memAvailable, worker
+    resident and reserve values that leave the host short only when a 5,200 MiB lifetime-peak growth is charged and
+    fit when its 342 MiB typical part is.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-capacity-decision-charges-the-daemons-typical-growth.test.ts"
+    - claim: "a lifetime-peak daemon growth spike with a small typical growth raises no capacity decision"
+      proof: 'grep: test("W1-T9557: a lifetime-peak spike with a small typical growth raises no capacity decision" in test/the-capacity-decision-charges-the-daemons-typical-growth.test.ts'
+    - claim: "a sustained shortfall on the typical growth still raises one decision, and the decision names its growth basis"
+      proof: 'grep: test("W1-T9557: a sustained typical shortfall still raises one decision naming its basis" in test/the-capacity-decision-charges-the-daemons-typical-growth.test.ts'
+    - claim: "with too few footprint samples the whole growth is charged and the basis says so"
+      proof: 'grep: test("W1-T9557: too few footprint samples charge the whole growth and say so" in test/the-capacity-decision-charges-the-daemons-typical-growth.test.ts'
+  falsifier: |
+    Keep `daemonGrowthMib` in the zero-worker sample: the 5,200 MiB fixture raises a decision after
+    `zeroWorkerShortfallSamples` samples and the first test fails. Drop the basis field: the second test fails.

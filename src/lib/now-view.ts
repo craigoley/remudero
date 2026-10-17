@@ -22,16 +22,18 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve as resolvePath } from "node:path";
 import {
   computeBoardSnapshot,
-  computeRecentActivity,
   createRecentActivityCache,
+  feedRecentActivity,
+  recentActivityEntries,
   type BoardRow,
   isBlockedRow,
   isRunningRow,
   type BoardSnapshot,
   type PrQueueRow,
   type RecentActivityCache,
+  type RecentActivityEntry,
 } from "./board.js";
-import { createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type Row } from "./board-projection.js";
+import { boardSweepRepeat, createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type BoardProjectionOptions, type Row } from "./board-projection.js";
 import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
@@ -83,7 +85,7 @@ import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
+import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type BoardDeps, type GitHub, type LedgerIndex } from "./status.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
@@ -136,7 +138,7 @@ export interface NowTask {
   needsHuman?: true;
   verifyHumanPending?: true;
   escalation?: { title?: string; issueUrl?: string; unverified?: true; openedAt?: string };
-  worker?: { servedModel?: string; requestedModel?: string };
+  worker?: Pick<NonNullable<BoardRow["workerTelemetry"]>, "runId" | "role" | "provider" | "servedModel" | "requestedModel">;
   /** The run's worker liveness, carried from {@link BoardRow.workerState}: the console's fleet map evidences a
    *  worker process only from it (a phase or a model is task context, not process evidence). It moves only on a
    *  `worker.state` transition, so it does not churn the ETag the way per-event activity would. */
@@ -198,7 +200,7 @@ export interface NowViewData {
   };
   prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean; reviewState: PrQueueRow["reviewState"] }> };
   actions: NowAction[];
-  recent: { entries: Array<{ ts: string; verb: string; taskId: string; title: string; detail?: string; costUsd?: number; prUrl?: string }>; mergedToday: { count: number; day: string } };
+  recent: { entries: RecentActivityEntry[]; mergedToday: { count: number; day: string } };
   health: NowHealth;
   decisions: NowDecision[];
   /** How many open decisions past the cap `decisions` leaves out. */
@@ -234,6 +236,8 @@ const DEP_REVIEW_TASK = /^dep-review(?:-(arm|hold))?-PR(\d+)$/;
 export function nowDependencyVerificationGates(input: {
   instance: string; repo?: string; plan: Plan | undefined; rows: ReadonlyArray<Row>; github: GitHub;
   snapshot: Pick<BoardSnapshot, "tasks" | "prQueue" | "github_unreachable">;
+  /** W1-T9436: the board's index over these rows, whose step and task buckets the fact store answers. */
+  index?: LedgerIndex;
 }): HumanGateSource[] {
   const { snapshot, rows, plan } = input;
   const ledger = rows as Array<Record<string, unknown>>;
@@ -241,7 +245,7 @@ export function nowDependencyVerificationGates(input: {
   // snapshot stage already built for this row generation, never a walk of the whole ledger. Four whole-ledger walks
   // (this loop, the rulings and one per dependency escalation) were the `decisions.dependencies` lap: 0.33-0.6 s per
   // core build over ~0.85 M fact rows on 2026-10-08, due on every new ledger row.
-  const index = buildLedgerIndex(ledger);
+  const index = input.index?.rows === ledger ? input.index : buildLedgerIndex(ledger);
   const stepRows = (step: string): ReadonlyArray<Row> => (index.byStep.get(step) ?? []) as ReadonlyArray<Row>;
   const decided = new Map<number, Row>();
   const escalated = new Map<number, Set<string>>();
@@ -299,7 +303,8 @@ function sweepRepeat(): (row: Row) => boolean {
   const last = new Map<number, unknown>();
   return (row) => {
     if (row.step !== "sweep.disposed" || typeof row.pr_number !== "number") return false;
-    const same = last.has(row.pr_number) && last.get(row.pr_number) === row.disposition;
+    // W1-T9436: a board keeping only some rows judged each one over every row it ingested; its earlier ones are gone.
+    const same = boardSweepRepeat(row) ?? (last.has(row.pr_number) && last.get(row.pr_number) === row.disposition);
     last.set(row.pr_number, row.disposition);
     return same;
   };
@@ -424,7 +429,12 @@ function nowTask(row: BoardRow): NowTask {
     ...(row.startedAt ? { startedAt: row.startedAt } : {}),
     ...(row.needsHuman ? { needsHuman: row.needsHuman } : {}), ...(row.verifyHumanPending ? { verifyHumanPending: row.verifyHumanPending } : {}),
     ...(escalation ? { escalation } : {}),
-    ...(t?.servedModel || t?.requestedModel ? { worker: { ...(t.servedModel ? { servedModel: t.servedModel } : {}), ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}) } } : {}),
+    ...(t ? { worker: {
+      ...(t.runId ? { runId: t.runId } : {}), ...(t.role ? { role: t.role } : {}),
+      ...(t.provider ? { provider: t.provider } : {}),
+      ...(t.servedModel ? { servedModel: t.servedModel } : {}),
+      ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}),
+    } } : {}),
     ...(row.workerState ? { workerState: row.workerState } : {}),
     ...(row.workerState === "quiet" && row.workerStateSince ? { workerStateSince: row.workerStateSince } : {}),
     ...(row.processUnevidenced ? { processUnevidenced: true as const } : {}),
@@ -437,7 +447,7 @@ export function assembleNowView(input: {
   snapshot: BoardSnapshot;
   rows: ReadonlyArray<Row>;
   plan: Plan;
-  recent: ReturnType<typeof computeRecentActivity>;
+  recent: ReturnType<typeof recentActivityEntries>;
   health: NowHealth;
   decisions: NowDecisionsData;
   nowMs: number;
@@ -469,7 +479,22 @@ export function assembleNowView(input: {
     },
     actions: nowActions(snapshot, input.rows),
     recent: {
-      entries: input.recent.map((e) => ({ ts: e.ts, verb: e.verb, taskId: e.taskId, title: e.title, ...(e.detail ? { detail: e.detail } : {}), ...(e.costUsd !== undefined ? { costUsd: e.costUsd } : {}), ...(e.prUrl ? { prUrl: e.prUrl } : {}) })),
+      entries: input.recent.map((e) => ({
+        ts: e.ts, verb: e.verb, taskId: e.taskId, title: e.title,
+        ...(e.runId ? { runId: e.runId } : {}), ...(e.detail ? { detail: e.detail } : {}),
+        ...(e.costUsd !== undefined ? { costUsd: e.costUsd } : {}),
+        ...(e.numTurns !== undefined ? { numTurns: e.numTurns } : {}),
+        ...(e.prUrl ? { prUrl: e.prUrl } : {}), ...(e.prNumber !== undefined ? { prNumber: e.prNumber } : {}),
+        ...(e.eventKind ? { eventKind: e.eventKind } : {}), ...(e.eventAt ? { eventAt: e.eventAt } : {}),
+        ...(e.workerRole ? { workerRole: e.workerRole } : {}), ...(e.provider ? { provider: e.provider } : {}),
+        ...(e.requestedModel ? { requestedModel: e.requestedModel } : {}), ...(e.servedModel ? { servedModel: e.servedModel } : {}),
+        ...(e.turnsSoFar !== undefined ? { turnsSoFar: e.turnsSoFar } : {}),
+        ...(e.toolName ? { toolName: e.toolName } : {}), ...(e.toolReason ? { toolReason: e.toolReason } : {}),
+        ...(e.toolStartedAt ? { toolStartedAt: e.toolStartedAt } : {}), ...(e.toolCompletedAt ? { toolCompletedAt: e.toolCompletedAt } : {}),
+        ...(e.toolDurationMs !== undefined ? { toolDurationMs: e.toolDurationMs } : {}),
+        ...(e.toolOutcome ? { toolOutcome: e.toolOutcome } : {}),
+        ...(e.prTitle ? { prTitle: e.prTitle } : {}), ...(e.githubUnavailable ? { githubUnavailable: true as const } : {}),
+      })),
       mergedToday: mergedTodayCount(input.rows, input.plan, input.nowMs),
     },
     health: input.health,
@@ -652,6 +677,10 @@ export interface NowViewOptions {
   boardIngestChunkRows?: number;
   /** False: the board keeps its rows' parsed strings (W1-T6467's equality arm). */
   boardInternStrings?: boolean;
+  /** W1-T9436's equality and census arms: further board projection options (`keepEveryRow`, `deriveFromRows`). */
+  boardOptions?: Pick<BoardProjectionOptions, "keepEveryRow" | "deriveFromRows">;
+  /** W1-T9436's census seam: the rows each build's readers walk, wrapped (a recording proxy per row). */
+  wrapBoardRows?: (rows: ReadonlyArray<Row>) => ReadonlyArray<Row>;
 }
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
@@ -785,6 +814,8 @@ interface Held {
   db: ReadModelDb;
   board: BoardProjection;
   recent: RecentActivityCache;
+  /** The build whose board stage is ingesting: the recent feed classifies each row with its plan and gateway. */
+  feed?: BoardDeps;
   generation: number;
   planKey: string;
   githubKey: string;
@@ -898,6 +929,8 @@ export function createNowView(opts: NowViewOptions): {
   prepare(ctx: NowViewContext, more: () => boolean): boolean;
   stages(ctx: NowViewContext): Record<string, number> | undefined;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
+  /** W1-T9403: each held board projection, by instance: the rows it keeps and their source bytes. */
+  heldSizes(): Record<string, { rows: number; keptBytes: number }>;
   perInstance: true;
   readPaced: true;
 } {
@@ -1041,7 +1074,7 @@ export function createNowView(opts: NowViewOptions): {
       deploy, nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
   };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, index: LedgerIndex, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const lap = decisionsLap(instance.name);
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
@@ -1105,7 +1138,7 @@ export function createNowView(opts: NowViewOptions): {
     const dependencyKey = JSON.stringify([keys.plan, generation, keys.github]);
     let dependencies = dependencySources.get(instance.name);
     if (!dependencies || dependencies.db !== db || dependencies.key !== dependencyKey) {
-      dependencies = { db, key: dependencyKey, sources: dependencyGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github: statusGithub, snapshot }) };
+      dependencies = { db, key: dependencyKey, sources: dependencyGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, index, github: statusGithub, snapshot }) };
       dependencySources.set(instance.name, dependencies);
     }
     sources.push(...dependencies.sources);
@@ -1143,6 +1176,13 @@ export function createNowView(opts: NowViewOptions): {
     gateway?: ReturnType<typeof snapshotGithub>;
     h?: Held;
     rows?: ReadonlyArray<Row>;
+    /** W1-T9436: the board's index over `rows`, released with the build. */
+    index?: LedgerIndex;
+    /**
+     * W1-T9458: the projector's newest row when the board stage caught up. `state` is the live slot state, which
+     * moves on while later stages run, so the body's ledger source is stamped with this: what its board read.
+     */
+    boardNewestTs?: string | null;
     snapshot?: BoardSnapshot;
     decisions?: NowDecisionsData;
     body?: { key: string; data: NowViewData; sources: ViewSource[] };
@@ -1179,29 +1219,40 @@ export function createNowView(opts: NowViewOptions): {
     ["board", (instance, b) => {
       const name = instance.name;
       let h = held.get(name);
-      // One projection per store, kept across snapshot re-saves: the gateway is swapped in and only a
-      // change in what the snapshot holds restamps every task. Behind the lease it persists, so a restart reuses it.
+      // One projection per store, kept across snapshot re-saves: the gateway is swapped in, and a change in what the
+      // snapshot holds re-derives only the tasks whose GitHub reads it moved (W1-T6016). Behind the lease it persists,
+      // so a restart reuses it.
       if (!h || h.db !== b.db) {
         const board = createBoardProjection({
           db: b.db, ...(b.lease ? { lease: b.lease } : {}), ledgerPath: ledgerPathOf(instance), readPlan: () => planCache.get(name)!.plan, clock, instance: name,
           // The held gateway, read per derive: a value here pinned the store's first gateway and its snapshot for the store's life (E33).
           get github() { return held.get(name)!.gateway.github; },
+          // When this moves, each task's own GitHub reads are replayed against the new gateway (W1-T6016).
           githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
           ...(opts.boardIngestChunkRows ? { ingestChunkRows: opts.boardIngestChunkRows } : {}),
           ...(opts.boardInternStrings === false ? { internStrings: false } : {}),
+          ...opts.boardOptions,
+          // W1-T9436: the recent feed takes each row once as the board reads it; the board's rows now drop rows.
+          onIngest: (fresh) => {
+            const g = held.get(name);
+            if (g?.feed) feedRecentActivity(g.feed, g.recent, fresh);
+          },
         });
         h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
         held.set(name, h);
       }
-      Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway });
-      if (!h.board.update({ force: true }).caughtUp) return false;
+      Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway, feed: depsOf(instance, b) });
+      if (!h.board.update({ force: true, readerNowMs: b.now }).caughtUp) return false;
+      b.boardNewestTs = b.state.newestTs;
       b.h = h;
-      b.rows = h.board.rows();
+      const rows = h.board.rows();
+      b.rows = opts.wrapBoardRows ? opts.wrapBoardRows(rows) : rows;
+      b.index = h.board.index(b.rows);
     }],
     ["snapshot", (instance, b) => {
       const projections = b.h!.board.projections();
-      b.snapshot = computeBoardSnapshot(depsOf(instance, b), { reuseProjection: (task) => projections.get(task.id) });
+      b.snapshot = computeBoardSnapshot({ ...depsOf(instance, b), ledgerIndex: b.index! }, { reuseProjection: (task) => projections.get(task.id) });
       // The fact store keeps only the steps a reader decides on; a task's newest row of any step is legacy's sort time.
       const activity = readTaskActivity(b.db);
       for (const t of b.snapshot.tasks) {
@@ -1215,15 +1266,17 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.index!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
-      const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
+      const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: recentActivityEntries(h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
       Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
       shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
         sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), disposedAt: new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt])), credit: h.board.creditRead() });
       const sources: ViewSource[] = [
-        ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
+        // A row the projector ingested after the board stage is not in this body: its asOf must not claim it, or the
+        // shadow's gap window (view asOf, legacy asOf] misses that row and calls the lag real (W1-T9458).
+        ...(opts.ledgerSource ? [opts.ledgerSource({ ...state, newestTs: b.boardNewestTs !== undefined ? b.boardNewestTs : state.newestTs }, now)] : []),
         judgeSource({ name: `github:${instance.name}`, ...b.gateway!.source }, now),
         planSource(`plan:${instance.name}`, planBehind(instance), now),
         judgeSource({ name: `host-probe:${instance.name}`, asOf: h.probe!.sampledAt, state: "fresh" }, now),
@@ -1382,6 +1435,9 @@ export function createNowView(opts: NowViewOptions): {
     stages(ctx) {
       const out = Object.assign({}, ...ctx.instances.map(({ state }) => ran.get(state.instance) ?? {})) as Record<string, number>;
       return Object.keys(out).length > 0 ? out : undefined;
+    },
+    heldSizes() {
+      return Object.fromEntries([...held].map(([instance, h]) => [instance, h.board.size()]));
     },
     /** Takes each finished build's body; an instance with none in flight is built here in one go, as a caller with no `prepare` expects. */
     materialize(ctx) {

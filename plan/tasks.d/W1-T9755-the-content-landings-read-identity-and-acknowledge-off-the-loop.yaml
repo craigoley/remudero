@@ -1,0 +1,54 @@
+- id: W1-T9755
+  title: "THE CI-LEARNING AND PLAN-RECONCILE LANDINGS READ THEIR IDENTITY AND ACKNOWLEDGE QUEUED SHARDS OFF THE LOOP — ciLearningLandingKind and the plan-reconcile kind drive landingIdentitySteps through the SYNC driver (2 spawns per landing), and acknowledgeMergedCiLearningShards runs a synchronous git rev-parse and hash-object for every queued shard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the last synchronous git spawns on the content landings' daemon path; their answers are unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9638 builder report (PR 12228), item X'
+  plan_refs: [W1-T9638, W1-T9695, W1-T5965, W1-T5672, W1-T9660]
+  files:
+    - src/lib/feedback-landing.ts
+    - test/the-content-landings-read-identity-and-acknowledge-off-the-loop.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 3ce249c80 (src/lib/feedback-landing.ts; symbols, not lines):
+    - ciLearningLandingKind builds its identity with `driveLanding(landingIdentitySteps("ci-learning", ...),
+      syncPreflightOf(...))`, the SYNC driver, even inside landCiLearningShardsAsync. landingIdentitySteps asks
+      repositoryFromGitConfig (`git config --get remote.origin.url`) and sourceRepositoryFromCwdSteps (its sync form
+      runs execFileSync git), so each landing spawns 2 synchronous children on the loop. The plan-reconcile kind's
+      identity is built the same way (the `relative(root, ... "tasks.d")` kind beside it).
+    - acknowledgeMergedCiLearningShards(stateRoot, shardRelDir, git, ...) runs, for each queued shard not yet seen on
+      main, `git rev-parse origin/main:<path>` and `git hash-object <file>` through the sync `git` seam: 2 synchronous
+      spawns per queued shard, called from landCiLearningShardsSteps after the (async) landing.
+    - W1-T9638 (queued, PR 12228) moves the per-poll feedback landing's local verbs off the loop, and W1-T9695
+      (queued) moves the boot sweep and the sync content-landing drivers. Neither names these two sites; the W1-T9638
+      builder found them left over.
+    INFERRED: small per landing (2 + 2 x queued shards), but every one is a full fork of a 1.5-2 GB daemon (see the
+    spawn-cost evidence filed beside this).
+  design: |
+    1. The content landings' identity is resolved through the driver that runs the landing: the async driver awaits
+       repositoryFromGitConfig and sourceRepositoryFromCwdAsync; the sync CLI path keeps the sync form.
+    2. acknowledgeMergedCiLearningShards becomes a generator of LandingNet asks (or takes an async git), so its
+       rev-parse and hash-object are awaited by the async driver. One `git rev-parse` over all queued paths and one
+       `git hash-object` over all queued files replace the per-shard pairs where the answers are the same.
+    3. The sync-spawn census (test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts) loses the rows this
+       empties, in the same PR.
+    No new constant.
+    Tests go in test/the-content-landings-read-identity-and-acknowledge-off-the-loop.test.ts, titled verbatim as in the
+    proofs, with a `git` on PATH that sleeps 0.3 s before running the real git and a 20 ms timer beside the landing.
+  acceptance:
+    - claim: "a ci-learning landing through the async driver never blocks a concurrent timer while it reads its identity"
+      proof: 'grep: test("W1-T9755: a content landing reads its identity without blocking a timer" in test/the-content-landings-read-identity-and-acknowledge-off-the-loop.test.ts'
+    - claim: "acknowledging queued ci-learning shards never blocks a concurrent timer and removes exactly the shards main already holds"
+      proof: 'grep: test("W1-T9755: acknowledging queued shards never blocks a timer and removes only merged ones" in test/the-content-landings-read-identity-and-acknowledge-off-the-loop.test.ts'
+  falsifier: |
+    On origin/main, with the sleeping git on PATH, a landCiLearningShardsAsync call holds the 20 ms timer for at least
+    two 0.3 s children while it builds its kind, so the first test fails; with three queued shards the
+    acknowledgement holds it for six, so the second fails.

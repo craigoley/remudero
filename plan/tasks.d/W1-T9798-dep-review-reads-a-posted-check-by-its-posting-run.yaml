@@ -1,0 +1,57 @@
+- id: W1-T9798
+  title: "DEP REVIEW HOLDS EVERY DEPENDABOT PR ON UNKNOWN EVIDENCE — W1-T9689's selected-check reader requires a check run's suite to belong to its run, but GitHub files the checks light-gates posts under another workflow's suite, so PR11968's green head reads workflow_identity_unresolved forever"
+  repo: remudero
+  depends_on: [W1-T9689, W1-T5695]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high # Rule 19: one concern, the posted-check identity read; current red, pending and unread evidence still hold
+  band_meaning: span
+  origin: "operator PR queue request 2026-10-16T11:25Z (review 11968, 12043, 12191, 12219, 12289; fix the root cause)"
+  plan_refs: [W1-T9689, W1-T5695, W1-T4399, W1-T5694]
+  files: [src/lib/dep-review.ts, test/dep-review.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger 2026-10-16T07:07Z to 11:26Z. Every dep-review.decided row for Dependabot
+    PR11968 (head f102d2d75) is hold with "selected check evidence unknown:
+    workflow_identity_unresolved", 37 passes in all. Before W1-T9689 deployed, the hold read
+    "commitlint, ci-gate"; those were superseded attempts, and the reruns succeeded at 15:10Z on
+    10-15. The sweep reads this same head as checks green.
+    WHY. The 11:49Z read (check-runs?filter=all, 78 runs) shows light-gates posting 16 checks via
+    the checks API with external_id run:38722031956:1:job:116378673939. GitHub filed all 16 under
+    check suite 104930348981, which belongs to run 38722026716 (security-policy-producer).
+    readSelectedDepReviewChecks resolves the direct run 38722031956 from external_id, finds that
+    the suite's run differs, and returns unknown. W1-T5695 gives every PR these posted checks, so
+    this reader cannot observe ANY head and no Dependabot PR can arm. The W1-T9689 fixtures put
+    each posted check in its own run's suite, a shape GitHub does not produce. Its table case
+    "run identity contradicts check suite" asserts unknown for exactly the real shape.
+    REPRODUCED. The real reader over the 78 recorded runs, with workflow runs rebuilt from each
+    native check's details_url and suite, returns workflow_identity_unresolved. With the posted
+    identity read by its posting run, it returns observed, and decideDepReview over the
+    selected rollup returns arm ("minor bump, confined to manifests, gates green").
+    SWEEP: 414 run- heads; the only dep-review.ts change is merged W1-T9689.
+  design: |
+    1. In readSelectedDepReviewChecks, a check whose external_id is a full posted identity
+       (run:<run>:<attempt>:job:<job>) is bound by that posting run alone; its check_suite is
+       not evidence. The posting run must still appear in this head's workflow-run listing,
+       or the read stays unknown (workflow_identity_unresolved). A native Actions check, and
+       any check without a full posted identity, keeps today's suite rules unchanged: an
+       ambiguous suite or a details-URL run that contradicts its suite is still unknown.
+    2. Correct the W1-T9689 table case that encodes the unreal shape. Keep a negative control
+       for a NATIVE details-URL run that contradicts its suite. Add a PR11968-shaped test: a
+       native producer check and a posted check share one suite, and each must keep its own
+       workflowRunId and workflowId. A posted run absent from the listing must stay unknown.
+    OUT OF SCOPE: the selector policy, ci-gate.yml's read, the light-gates posting step, the
+    hold age backstop, and any arm, status or comment effect.
+  acceptance:
+    - claim: "a posted check is bound by its posting run, so the real PR11968 shape is observed evidence with each producer's own run, while a posting run absent from the head's listing stays unknown"
+      proof: 'grep: test("W1-T9798 a posted check is read by its posting run, not the suite GitHub files it under" in test/dep-review.test.ts'
+    - claim: "a native Actions check whose details run contradicts its suite still reads unknown"
+      proof: "grep: native run identity contradicts check suite in test/dep-review.test.ts"
+  falsifier: |
+    Restore origin/main's suite match for posted checks. The PR11968-shaped pair then reads
+    unknown (workflow_identity_unresolved), and the first criterion fails. Dropping the
+    listing bind for posted runs makes the absent-run case observed, which fails it too.

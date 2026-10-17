@@ -14,10 +14,14 @@
  * The hash and the marker are the ones `ensureInstallFresh` uses (src/lib/install-hash.ts), so a
  * slot prepared here reads as fresh to serve. The marker is written by temp file and rename: in a
  * hard-linked tree an in-place write would change the other slot's marker too.
+ *
+ * W1-T9421: after its install, a slot builds its precompiled child entries and worker bundles
+ * (scripts/build-child-entries.mjs) in a child process, so serve's workers can start from them (W1-T9370).
  */
 import { execFile } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import { reclaimStaleGitLocks, type StaleLockReclaimOptions } from "./git-lock-reclaim.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { PreparedSlot, ServeSupervisorOptions } from "./serve-supervisor.js";
@@ -32,7 +36,8 @@ export type RunCommand = (command: string, args: string[], cwd: string) => Promi
 export const runCommand: RunCommand = (command, args, cwd) =>
   new Promise((resolvePromise, reject) => {
     execFile(command, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: SLOT_INSTALL_TIMEOUT_MS }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`${command} ${args.join(" ")} failed in ${cwd}: ${stderr.trim() || err.message}`));
+      if (err) reject(new Error(`${stderr.trim() || `${err.code ?? err.signal ?? err.name}: ${err.message}`}\n` +
+        `${command} ${args.join(" ")} failed in ${cwd}`));
       else resolvePromise(stdout);
     });
   });
@@ -96,6 +101,30 @@ export async function prepareSlotDeps(dir: string, activeDir: string, run: RunCo
   return "installed";
 }
 
+export const CHILD_ENTRY_BUILD_SCRIPT = "scripts/build-child-entries.mjs";
+export interface SlotChildEntries {
+  /** `absent`: the tree predates the script (an older sha). `failed`: the build exited non-zero; `reason` is its first line. */
+  outcome: "built" | "absent" | "failed";
+  reason?: string;
+  ms: number;
+}
+
+/**
+ * W1-T9421: builds `dir`'s child entries and worker bundles with its own build script, in a child process so its memory is
+ * never serve's. Never throws: a tree without the script, or a failed build, leaves the workers on their .ts source, and the
+ * build removes its manifest before it writes, so a failed build never leaves a stale bundle vouched for.
+ */
+export async function buildSlotChildEntries(dir: string, run: RunCommand = runCommand, clock: Clock = systemClock): Promise<SlotChildEntries> {
+  const started = clock.now();
+  if (!existsSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT))) return { outcome: "absent", ms: clock.now() - started };
+  try {
+    await run(process.execPath, [CHILD_ENTRY_BUILD_SCRIPT], dir);
+    return { outcome: "built", ms: clock.now() - started };
+  } catch (err) {
+    return { outcome: "failed", reason: (err instanceof Error ? err.message : String(err)).split("\n")[0]!.slice(0, 200), ms: clock.now() - started };
+  }
+}
+
 /**
  * Why `dir` cannot be reused as a worktree of `repoDir`, or undefined when it can. A `.git` file is
  * not proof: its admin dir can be pruned away (2026-10-02, every handoff aborted at checkout), or it
@@ -144,6 +173,7 @@ export function createSlotPreparer(opts: { repoDir: string; gensDir: string; run
       await run("git", ["-C", opts.repoDir, "worktree", "add", "--quiet", "--detach", "--force", dir, sha], opts.repoDir);
     }
     const deps = await prepareSlotDeps(dir, activeDir, run);
+    log("serve.slot_child_entries", { slot: dir, sha, ...(await buildSlotChildEntries(dir, run)) });
     return { dir, sha, deps };
   };
 }

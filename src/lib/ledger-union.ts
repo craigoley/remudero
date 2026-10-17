@@ -1071,8 +1071,10 @@ export interface LedgerRotationMemoPass {
   /** Rotations this pass found unmemoized and read as EMPTY; hand them to `load`, then read again. */
   missing: () => LedgerCorpusEntry[];
   /** True when no rotation was missing — the pass's rows are the union's — and prunes every memoized
-   *  rotation this pass did not touch. False means this pass's rows must be discarded. */
-  complete: () => boolean;
+   *  rotation this pass did not touch, except one still listed in `retain`. False means this pass's rows
+   *  must be discarded. A read that stopped early (`satisfied`) passes its listing as `retain`: the
+   *  rotations it never reached are still on disk, and the next deeper read would otherwise reload them all. */
+  complete: (retain?: readonly string[]) => boolean;
 }
 
 /** A rotation memo: `pass` answers one union read from it, and `load` fills what a pass found missing. */
@@ -1080,7 +1082,12 @@ export interface LedgerRotationMemo {
   /** `parseMissing` parses an unmemoized rotation inline and keeps it, so a pass after a rotation costs that rotation, not the union. */
   pass: (opts?: { parseMissing?: boolean }) => LedgerRotationMemoPass;
   load: (entries: readonly LedgerCorpusEntry[]) => Promise<void>;
+  /** W1-T9710: the rows kept for `path` while it is still keyed `key`, so a load can seed another reader. */
+  kept: (path: string, key: string) => LedgerRotationRecords | undefined;
   size: () => number;
+  /** W1-T9647: the retained rows' serialized bytes, accounted when each rotation is kept (a digest's own length,
+   *  the digest text just written, or a sliced measure after a load), so the daemon's memory row never walks it. */
+  approxBytes: () => number;
   retention: () => { archives: number; rows: number; tornRows: number; failedArchives: number;
     digestHits?: number; digestMisses?: number; digestOutcomes?: Record<string, number>; digestErrors?: Record<string, string> };
   reportRetention: (stateDir: string, instance?: string, log?: MemoRetentionLog) => void;
@@ -1097,7 +1104,81 @@ export function setLedgerMemoRetentionContext(context: MemoRetentionContext | un
 /** Lines one turn of the event loop parses while {@link createLedgerRotationMemo} loads a rotation. */
 export const LEDGER_ROTATION_LOAD_LINES_PER_TURN = 10_000;
 
-type MemoEntry = { key: string; read?: LedgerRotationRecords };
+type MemoEntry = { key: string; read?: LedgerRotationRecords; bytes?: number };
+
+/**
+ * W1-T9647: EVERY LEDGER MEMO THIS ISOLATE BUILT, BY HOLDER NAME, held weakly. The daemon's `daemon.memory` row
+ * (daemon-memory-census.ts) sizes them from here, so a memo built deep in a detector or the sweep is named on the
+ * row without its owner registering it. A memo built with no `holder` is named by the file that built it.
+ */
+export type LedgerMemoKind = "rotation-memo" | "incremental-union";
+interface LedgerMemoBookEntry { name: string; kind: LedgerMemoKind; ref: WeakRef<object>; measure: (target: object) => MemoSize }
+const ledgerMemoBook = new Set<LedgerMemoBookEntry>();
+const ledgerMemoFinalizer = new FinalizationRegistry<LedgerMemoBookEntry>((entry) => ledgerMemoBook.delete(entry));
+
+function enterLedgerMemoBook<T extends object>(name: string, kind: LedgerMemoKind, target: T, measure: (target: T) => MemoSize): void {
+  // `measure` takes the target, never closes over it: the book must not keep a dropped memo alive.
+  const entry: LedgerMemoBookEntry = { name, kind, ref: new WeakRef(target), measure: measure as (target: object) => MemoSize };
+  ledgerMemoBook.add(entry);
+  ledgerMemoFinalizer.register(target, entry);
+}
+
+// The book's measures live at module scope ON PURPOSE: an arrow written inside a memo's constructor shares that
+// constructor's closure context, which holds the memo itself, and the book would then keep every memo alive.
+const measureRotationMemo = (memo: LedgerRotationMemo): MemoSize => ({ entries: memo.retention().rows, approx_bytes: memo.approxBytes() });
+const measureIncrementalUnion = (union: { size(): MemoSize }): MemoSize => union.size();
+
+/** The file (and function, when named) that called a memo constructor, read from raw call sites: a stack is never
+ *  formatted, so no source map is decoded for it. */
+export function memoCreationSite(skip: number = 2): string {
+  const priorPrepare = Error.prepareStackTrace;
+  const priorLimit = Error.stackTraceLimit;
+  try {
+    Error.stackTraceLimit = skip + 1;
+    Error.prepareStackTrace = (_error, sites) => sites;
+    const holder: { stack?: unknown } = {};
+    Error.captureStackTrace(holder);
+    const site = (holder.stack as NodeJS.CallSite[] | undefined)?.[skip];
+    const file = site?.getFileName();
+    if (!file) return "unknown";
+    const fn = site?.getFunctionName();
+    return `${basename(file)}${fn ? `#${fn}` : ""}`;
+  } finally {
+    Error.prepareStackTrace = priorPrepare;
+    Error.stackTraceLimit = priorLimit;
+  }
+}
+
+/** {@link approximateMemoBytes} of kept rows, or undefined for rows JSON cannot serialize (a BigInt): such a rotation
+ *  stays kept and is reported unsized, never failed. */
+function memoRowBytes(rows: ReadonlyArray<Record<string, unknown>>): number | undefined {
+  try {
+    return approximateMemoBytes(rows);
+  } catch {
+    // deliberate: the only throw is JSON's on an unserializable value; undefined is the caller's `unsized`.
+    return undefined;
+  }
+}
+
+/** One holder name's memos in this isolate, summed: how many are alive, their entries and their accounted bytes. */
+export interface LedgerMemoHolderReading { name: string; kind: LedgerMemoKind; instances: number; entries: number; approx_bytes: number }
+
+/** W1-T9647: every live memo in {@link ledgerMemoBook}, summed per kind and name. A collected memo has left the book. */
+export function ledgerMemoHolders(): LedgerMemoHolderReading[] {
+  const byName = new Map<string, LedgerMemoHolderReading>();
+  for (const entry of ledgerMemoBook) {
+    const target = entry.ref.deref();
+    if (target === undefined) continue;
+    const size = entry.measure(target);
+    const key = `${entry.kind}:${entry.name}`;
+    const prior = byName.get(key) ?? { name: entry.name, kind: entry.kind, instances: 0, entries: 0, approx_bytes: 0 };
+    prior.instances += 1;
+    prior.entries += size.entries;
+    prior.approx_bytes += size.approx_bytes;
+    byName.set(key, prior);
+  }
+  return [...byName.values()];
+}
 
 const ROTATION_DIGEST_CODEC = "rotation-digest-codec";
 type DigestCodecRequest = { id: number; operation: "parse" | "stringify"; value: unknown };
@@ -1223,7 +1304,7 @@ export function createLedgerRotationMemo(
   };
   const digestDirectory = (stateDir: string): string => join(stateDir, "cache", "rotation-digests", encodeURIComponent(io.holder!).replaceAll(".", "%2E"));
   const digestPath = (entry: LedgerCorpusEntry): string => join(digestDirectory(dirname(entry.path)), `${basename(entry.path)}.json`);
-  const readDigest = async (entry: LedgerCorpusEntry, key: string): Promise<LedgerRotationRecords | undefined> => {
+  const readDigest = async (entry: LedgerCorpusEntry, key: string): Promise<{ read: LedgerRotationRecords; bytes: number } | undefined> => {
     let raw: Buffer;
     try {
       raw = await nodeReadFile(digestPath(entry));
@@ -1253,15 +1334,18 @@ export function createLedgerRotationMemo(
       return undefined;
     }
     digestHits++;
-    return digest.read as LedgerRotationRecords;
+    return { read: digest.read as LedgerRotationRecords, bytes: raw.length };
   };
-  const writeDigest = async (entry: LedgerCorpusEntry, key: string, read: LedgerRotationRecords): Promise<void> => {
+  /** Resolves to the digest text's length once it is serialized (whether or not it then lands), else undefined. */
+  const writeDigest = async (entry: LedgerCorpusEntry, key: string, read: LedgerRotationRecords): Promise<number | undefined> => {
+    let serialized: number | undefined;
     const path = digestPath(entry);
     const temp = `${path}.${randomUUID()}.tmp`;
     try {
       await nodeMkdir(dirname(path), { recursive: true, mode: 0o700 });
       const text = await rotationDigestCodec<string>("stringify", { schema: 1, holder: io.holder,
         reducerVersion: io.durableDigest!.reducerVersion, archive: basename(entry.path), key, read });
+      serialized = text.length;
       await nodeWriteFile(temp, text,
       { flag: "wx", mode: 0o600, flush: true });
       await nodeRename(temp, path);
@@ -1277,6 +1361,19 @@ export function createLedgerRotationMemo(
         if (reason !== "ENOENT") outcome("cleanupFailed", reason);
       }
     }
+    return serialized;
+  };
+  /** The kept rows' bytes, measured a slice per turn, like the load that kept them. Its yields are its own, never
+   *  `io.yieldTurn`: that seam counts the load's parse slices (test/ledger-rotation-memo.test.ts). */
+  const measureRows = async (rows: ReadonlyArray<Record<string, unknown>>): Promise<number | undefined> => {
+    let bytes = 0;
+    for (let at = 0; at < rows.length; at += LEDGER_ROTATION_LOAD_LINES_PER_TURN) {
+      if (at > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      const slice = memoRowBytes(rows.slice(at, at + LEDGER_ROTATION_LOAD_LINES_PER_TURN));
+      if (slice === undefined) return undefined;
+      bytes += slice;
+    }
+    return bytes;
   };
   const pruneDigests = async (stateDir: string): Promise<void> => {
     try {
@@ -1300,7 +1397,7 @@ export function createLedgerRotationMemo(
       if (io.durableDigest) {
         const digest = await readDigest(entry, key);
         if (digest) {
-          memo.set(entry.path, { key, read: digest });
+          memo.set(entry.path, { key, read: digest.read, bytes: digest.bytes });
           return;
         }
         digestMisses++;
@@ -1357,8 +1454,11 @@ export function createLedgerRotationMemo(
         else await pipeline(source, consume);
       }
       const read = { rows, torn, tornLines };
-      memo.set(entry.path, { key, read });
-      if (io.durableDigest) await writeDigest(entry, key, read);
+      const kept: MemoEntry = { key, read };
+      memo.set(entry.path, kept);
+      const written = io.durableDigest ? await writeDigest(entry, key, read) : undefined;
+      kept.bytes = written ?? await measureRows(rows);
+      if (kept.bytes === undefined) outcome("unsized");
     } catch {
       // deliberate: a failed load leaves a keyed marker, so the next pass parses this rotation inline and a
       // corrupt archive still lands in the union's `unread` exactly as it would without a memo.
@@ -1368,6 +1468,15 @@ export function createLedgerRotationMemo(
 
   const result: LedgerRotationMemo = {
     size: () => memo.size,
+    kept: (path, key) => {
+      const entry = memo.get(path);
+      return entry?.key === key ? entry.read : undefined;
+    },
+    approxBytes: () => {
+      let bytes = 0;
+      for (const entry of memo.values()) bytes += entry.bytes ?? 0;
+      return bytes;
+    },
     reportRetention: (stateDir, instance, log) => {
       if (!io.holder) return;
       const context = memoRetentionContext;
@@ -1438,7 +1547,8 @@ export function createLedgerRotationMemo(
           return { rows: [], torn: 0, tornLines: [] };
         }
         const parsed = parse();
-        const fresh = { key, read: { rows: reduce(parsed.rows), torn: parsed.torn, tornLines: parsed.tornLines } };
+        const rows = reduce(parsed.rows);
+        const fresh = { key, read: { rows, torn: parsed.torn, tornLines: parsed.tornLines }, bytes: memoRowBytes(rows) };
         memo.set(entry.path, fresh);
         touched.set(entry.path, fresh);
         return fresh.read;
@@ -1446,13 +1556,20 @@ export function createLedgerRotationMemo(
       return {
         rotationRecords,
         missing: () => [...missing],
-        complete: () => {
-          if (missing.length === 0) memo = touched;
+        complete: (retain) => {
+          if (missing.length === 0) {
+            if (retain !== undefined) {
+              const listed = new Set(retain);
+              for (const [path, entry] of memo) if (!touched.has(path) && listed.has(path)) touched.set(path, entry);
+            }
+            memo = touched;
+          }
           return missing.length === 0;
         },
       };
     },
   };
+  enterLedgerMemoBook(io.holder ?? memoCreationSite(), "rotation-memo", result, measureRotationMemo);
   return result;
 }
 
@@ -1661,12 +1778,21 @@ export async function readLedgerUnionRecordsMemoized(
   opts: LedgerUnionRecordReadOptions = {},
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): Promise<LedgerUnionRecordRead> {
+  // An early stop never reaches the older rotations, so it must not prune them: on 2026-10-14 the credit
+  // scan stopped on the live file at 11:37:33Z and emptied its memo, so the next pass reloaded all 393
+  // rotations, inside the 12:04-12:34Z core loop freeze.
+  let stoppedEarly = false;
+  const satisfied = opts.satisfied && ((stepsSeen: ReadonlySet<string>) => (stoppedEarly = opts.satisfied!(stepsSeen)));
+  const readPass = (pass: LedgerRotationMemoPass): LedgerUnionRecordRead => {
+    stoppedEarly = false;
+    return readLedgerUnionRecordsSync(stateDir, { ...opts, satisfied, rotationRecords: pass.rotationRecords }, fsDeps);
+  };
   let pass = memo.pass();
-  let read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
-  while (!pass.complete()) {
+  let read = readPass(pass);
+  while (!pass.complete(stoppedEarly ? read.archiveFiles : undefined)) {
     await memo.load(pass.missing());
     pass = memo.pass();
-    read = readLedgerUnionRecordsSync(stateDir, { ...opts, rotationRecords: pass.rotationRecords }, fsDeps);
+    read = readPass(pass);
   }
   memo.reportRetention(stateDir);
   return read;
@@ -1766,21 +1892,46 @@ export function ledgerRotationDigests(
   return { rotationRecords, counts: () => ({ ...counts }) };
 }
 
+/** W1-T9710: what one {@link createIncrementalLedgerUnion} call did on the loop. `parsedLines` counts lines handed
+ *  to JSON.parse (live candidates, and every row of a rotation parsed inline); `seededRotations` counts rotations
+ *  answered from a {@link IncrementalLedgerUnionHandle.seed} instead of their digest. */
+export interface IncrementalUnionPass { readBytes: number; parsedLines: number; seededRotations: number }
+
+export interface IncrementalLedgerUnionHandle {
+  size(): MemoSize;
+  /** Hand the union a rotation another reader just loaded under the same size:mtime `key`; the next call keeps it
+   *  rather than reading its digest. Seeds the next call does not consume are dropped. */
+  seed(path: string, key: string, read: LedgerRotationRecords): void;
+  lastPass(): IncrementalUnionPass;
+}
+
 /** Bytes before the live file's read watermark that must still match before only its tail is read. */
 const LIVE_ANCHOR_BYTES = 64;
 
-interface IncrementalLiveState {
+interface IncrementalReadPart {
+  read: LedgerRotationRecords;
+  size: MemoSize;
+}
+
+interface IncrementalLiveState extends IncrementalReadPart {
   ino: number;
   /** End of the last complete line read; a line still being written is re-read on the next call. */
   committed: number;
   anchor: Buffer;
-  read: LedgerRotationRecords;
 }
 
 interface IncrementalUnionState {
-  rotations: Map<string, { key: string; read: LedgerRotationRecords }>;
+  rotations: Map<string, IncrementalReadPart & { key: string }>;
   live?: IncrementalLiveState;
-  last?: { signature: string; result: LedgerUnionRecordRead };
+  /** Normally aliases the parts; only an uncommitted fragment or an unstattable part adds rows. */
+  last?: { signature: string; result: LedgerUnionRecordRead; extraSizes: MemoSize[] };
+}
+
+/** Size only newly parsed/projected rows. Strip JSON's empty-array syntax so ignored appends add zero;
+ *  retain the former measure's64-byte row allowance. This is payload accounting, not a heap reading. */
+function incrementalReadSize(read: LedgerRotationRecords): MemoSize {
+  return { entries: read.rows.length, approx_bytes: approximateMemoBytes(read.rows) +
+    approximateMemoBytes(read.tornLines) - 4 + read.rows.length * 64 };
 }
 
 /**
@@ -1801,28 +1952,65 @@ interface IncrementalUnionState {
  */
 export function createIncrementalLedgerUnion(
   opts: { holder: string; reducerVersion: string; project?: (row: Record<string, unknown>) => Record<string, unknown> },
-  fsDeps: LedgerGrepFsDeps = realLedgerFs,
-): ((stateDir: string, readOpts?: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead) & { size(): MemoSize } {
+  baseFs: LedgerGrepFsDeps = realLedgerFs,
+): ((stateDir: string, readOpts?: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead) & IncrementalLedgerUnionHandle {
+  // W1-T9710: every byte a pass reads, digests and inline rotations included, is counted for `lastPass`.
+  let pass: IncrementalUnionPass = { readBytes: 0, parsedLines: 0, seededRotations: 0 };
+  const counted = (buf: Buffer): Buffer => ((pass.readBytes += buf.length), buf);
+  const baseRange = baseFs.readRangeSync ?? realLedgerFs.readRangeSync;
+  const fsDeps: LedgerGrepFsDeps = { ...baseFs, readFileSync: (path) => counted(baseFs.readFileSync(path)),
+    readRangeSync: (path, start, end) => counted(baseRange(path, start, end)) };
   const statSync = fsDeps.statSync ?? realLedgerFs.statSync;
-  const readRange = fsDeps.readRangeSync ?? realLedgerFs.readRangeSync;
+  const readRange = fsDeps.readRangeSync as NonNullable<LedgerGrepFsDeps["readRangeSync"]>;
+  const seeds = new Map<string, { key: string; read: LedgerRotationRecords }>();
   const states = createSizedMemo<string, IncrementalUnionState>((key, state) => {
-    const reads = [...state.rotations.values()].map((entry) => entry.read);
-    if (state.live) reads.push(state.live.read);
-    const rows = new Set(reads.flatMap((read) => read.rows));
-    for (const row of state.last?.result.rows ?? []) rows.add(row);
-    return { entries: rows.size, approx_bytes: approximateMemoBytes([key, [...rows],
-      [...state.rotations].map(([path, entry]) => [path, entry.key]), reads.map((read) => read.tornLines),
-      state.last?.signature]) + (state.live?.anchor.length ?? 0) + rows.size * 64 };
+    let entries = 0;
+    let approx_bytes = Buffer.byteLength(key);
+    for (const [path, part] of state.rotations) {
+      entries += part.size.entries;
+      approx_bytes += part.size.approx_bytes + Buffer.byteLength(path) + Buffer.byteLength(part.key);
+    }
+    if (state.live) {
+      entries += state.live.size.entries;
+      approx_bytes += state.live.size.approx_bytes + state.live.anchor.length;
+    }
+    if (state.last) {
+      approx_bytes += Buffer.byteLength(state.last.signature);
+      for (const size of state.last.extraSizes) { entries += size.entries; approx_bytes += size.approx_bytes; }
+    }
+    return { entries, approx_bytes };
   });
   const project = opts.project ?? ((row: Record<string, unknown>) => row);
   const reader = (stateDir: string, readOpts: LedgerUnionRecordReadOptions = {}): LedgerUnionRecordRead => {
+    pass = { readBytes: 0, parsedLines: 0, seededRotations: 0 };
+    try {
+      return readOnce(stateDir, readOpts);
+    } finally {
+      seeds.clear();
+    }
+  };
+  const readOnce = (stateDir: string, readOpts: LedgerUnionRecordReadOptions): LedgerUnionRecordRead => {
     const { step, refuseIncomplete, requireArchives, ...rest } = readOpts;
     if (step === undefined || Object.values(rest).some((value) => value !== undefined)) {
       return readLedgerUnionRecordsSync(stateDir, readOpts, fsDeps);
     }
     const steps = typeof step === "string" ? [step] : [...step];
+    // W1-T9710: the live file parses only a line naming an asked step (JSON-quoted, anywhere in the line), and
+    // `stepMatches` still decides. A line not framed as `{...}` is parsed too, so `torn` matches a whole read.
+    const candidate = new RegExp([...steps.map((name) => JSON.stringify(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "^[^{]", "[^}]$"].join("|"));
     const stateKey = JSON.stringify([stateDir, steps, refuseIncomplete === true, requireArchives === true]);
     const state: IncrementalUnionState = states.get(stateKey) ?? { rotations: new Map() };
+    const pendingSizes: Array<() => void> = [];
+    const extraSizes: MemoSize[] = [];
+    const partSize = (read: LedgerRotationRecords, prior?: MemoSize, lastOnly = false): MemoSize => {
+      const size = { entries: prior?.entries ?? 0, approx_bytes: prior?.approx_bytes ?? 0 };
+      pendingSizes.push(() => {
+        if (lastOnly && !state.last) return;
+        const added = incrementalReadSize(read);
+        size.entries += added.entries; size.approx_bytes += added.approx_bytes;
+      });
+      return size;
+    };
 
     const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, fsDeps);
     const keys = new Map<string, string>();
@@ -1849,32 +2037,45 @@ export function createIncrementalLedgerUnion(
     if (liveKey !== undefined && state.last?.signature === signature) return state.last.result;
     if (liveKey === "absent") state.live = undefined;
 
-    const reduce = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> =>
-      rows.filter((row) => stepMatches(row, steps)).map(project);
+    const reduce = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {
+      pass.parsedLines += rows.length;
+      return rows.filter((row) => stepMatches(row, steps)).map(project);
+    };
     let digests: ReturnType<typeof ledgerRotationDigests> | undefined;
-    const kept = new Map<string, { key: string; read: LedgerRotationRecords }>();
+    const kept = new Map<string, IncrementalReadPart & { key: string }>();
     const rotationRecords: LedgerRotationHook = (entry, parse) => {
       const key = keys.get(entry.path);
       if (key === undefined) {
-        const read = parse();
-        return { ...read, rows: reduce(read.rows) };
+        const parsed = parse();
+        const read = { ...parsed, rows: reduce(parsed.rows) };
+        extraSizes.push(partSize(read, undefined, true));
+        return read;
       }
       const hit = state.rotations.get(entry.path);
       if (hit?.key === key) {
         kept.set(entry.path, hit);
         return hit.read;
       }
+      const seeded = seeds.get(entry.path);
+      if (seeded?.key === key) {
+        kept.set(entry.path, { key, read: seeded.read, size: partSize(seeded.read) });
+        pass.seededRotations += 1;
+        return seeded.read;
+      }
       digests ??= ledgerRotationDigests(stateDir, reduce, { holder: opts.holder, reducerVersion: `${opts.reducerVersion}:${steps.join(",")}` }, fsDeps);
       const read = digests.rotationRecords(entry, parse);
-      kept.set(entry.path, { key, read });
+      kept.set(entry.path, { key, read, size: partSize(read) });
       return read;
     };
 
     const scan = (buf: Buffer): LedgerRotationRecords => {
       const rows: Array<Record<string, unknown>> = [];
       const tornLines: string[] = [];
-      const torn = scanLedgerBuffer(buf, undefined, (row) => void (stepMatches(row, steps) && rows.push(project(row))), 0,
-        Number.POSITIVE_INFINITY, (line) => tornLines.push(line)).bad;
+      const torn = scanLedgerBuffer(buf, candidate, (row) => {
+        pass.parsedLines += 1;
+        if (stepMatches(row, steps)) rows.push(project(row));
+      }, 0, Number.POSITIVE_INFINITY, (line) => tornLines.push(line)).bad;
+      pass.parsedLines += torn;
       return { rows, torn, tornLines };
     };
     const liveRecords = (path: string): LedgerRotationRecords => {
@@ -1896,21 +2097,32 @@ export function createIncrementalLedgerUnion(
         : added;
       const committed = (base ? base.committed : 0) + complete.length;
       const anchorFrom = Math.max(0, committed - LIVE_ANCHOR_BYTES) - start;
-      state.live = { ino: stat.ino, committed, anchor: Buffer.from(buf.subarray(Math.max(0, anchorFrom), committed - start)), read };
+      state.live = { ino: stat.ino, committed, anchor: Buffer.from(buf.subarray(Math.max(0, anchorFrom), committed - start)), read,
+        size: partSize(added, base?.size) };
       // A final line with no newline yet is read, exactly as a whole-file read reads it, but never committed.
       const fragment = scan(body.subarray(complete.length));
       if (fragment.rows.length === 0 && fragment.torn === 0) return read;
+      extraSizes.push(partSize(fragment, undefined, true));
       return { rows: [...read.rows, ...fragment.rows], torn: read.torn + fragment.torn, tornLines: [...read.tornLines, ...fragment.tornLines] };
     };
 
     const result = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete, requireArchives, rotationRecords, liveRecords }, fsDeps);
     Object.freeze(result.rows);
     state.rotations = kept;
-    state.last = result.unread.length === 0 ? { signature, result } : undefined;
+    state.last = result.unread.length === 0 ? { signature, result, extraSizes } : undefined;
+    // Outside the union's read catches, just as the old set-time measurement was: a size error must
+    // not turn a successful read into an unread archive. Only new parts/tails are visited here.
+    for (const measure of pendingSizes) measure();
     states.set(stateKey, state);
     return result;
   };
-  return Object.assign(reader, { size: states.size });
+  const sized = Object.assign(reader, {
+    size: states.size,
+    seed: (path: string, key: string, read: LedgerRotationRecords): void => void seeds.set(path, { key, read }),
+    lastPass: (): IncrementalUnionPass => ({ ...pass }),
+  });
+  enterLedgerMemoBook(opts.holder, "incremental-union", sized, measureIncrementalUnion);
+  return sized;
 }
 
 export function resolveLedgerUnion(

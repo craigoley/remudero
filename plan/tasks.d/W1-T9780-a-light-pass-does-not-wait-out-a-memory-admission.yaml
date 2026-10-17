@@ -1,0 +1,61 @@
+- id: W1-T9780
+  title: "A LIGHT PASS'S REVIEW OR FIX THAT WAITS FOR MEMORY ADMISSION DOES NOT HOLD THE IN-FLIGHT TICKER — W1-T2379 (#3095) detached only the fix rung's CI wait, so on 2026-10-16 the ticker wrote no daemon.alive, no light pass and no full-pass retrigger from 06:10:58Z to 06:57:17Z while #12270, #12271 and #12267 waited 32-42 min in memory_budget enforce admission inside one awaited light pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the light pass returns while its admitted review or fix waits for memory
+  band_meaning: span
+  origin: "operator session 2026-10-16: agent F5, the 06:12:54Z light pass of DAEMON-1792125203347, read-only on the host"
+  plan_refs: [W1-T100, W1-T9748, W1-T2379, W1-T463, W1-T5366, W1-T2744, W1-T1211, W1-T8086, W1-T9762, W1-T9761]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-light-pass-does-not-wait-out-a-memory-admission.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger (live ledger.ndjson, streamed read-only to the Mac):
+    - The ticker's own heartbeat, `daemon.alive` (startInFlightTicker, src/lib/daemon.ts), is absent from 05:33Z to
+      06:10:58Z and from 06:10:58Z to 06:57:17Z. Each gap is one awaited `deps.sweepLight()`.
+    - 06:12:54Z the light pass wrote six `sweep.pass` surface light rows, then admitted reviews of #12270 and #12271
+      (06:12:57Z `sweep.review_started`) and disposed #12267 blocked-fixable. All three spawns waited in
+      awaitMemoryAdmission (src/lib/host-memory-admission.ts) under classModes review/fix "enforce":
+      `memory_budget.enforce_admit` waited_ms 1,931,002 (#12271, 06:46:11Z), 2,182,763 (#12270, 06:50:24Z) and
+      2,531,380 (the #12267 fix, 06:54:08Z). The reasons are unrealized-reservations, swap-in and psi.
+    - runSweepLightPass resolves only when every per-PR runSweep resolves, so the pass returned at 06:57:11Z
+      (`sweep.summary` after `fix.progress_judged`). The next `daemon.alive` came at 06:57:17Z.
+    - Cost: no light pass for 44 min, and no full retrigger, because the retrigger is checked in the same loop body.
+      The full pass that started at 06:10:59Z waited too: its last three dispositions came at 06:59:14-15Z. The
+      progress watchdog read the silence as a stall and recycled the container (the in-pass half is W1-T9779).
+    - The same shape at 05:26:09Z: the review of #12269 waited 595,875 ms for admission inside the awaited pass.
+    - Across 10-14T23Z to 10-16T07Z, waits that ended in `memory_budget.enforce_admit`: review n=69, p50 4.3 min,
+      p90 18.5 min, max 60.9 min, 16 over 10 min. Fix n=7, p50 7.2 min, max 42.2 min.
+    READ at origin/main 4a64661fb: W1-T2379's #3095 added SweepDeps.detachFixWait, which detaches only the CI wait
+    AFTER a fix dispatch. The memory admission sits in spawnWorker (src/lib/worker.ts) before any worker runs, so a
+    review or a fix admitted by the light pass still waits inside the pass.
+    OVERLAP CHECKED. W1-T9762 (queued) re-prices unrealized reservations, so waits get shorter but do not leave the
+    pass. W1-T9761 (queued) is about garden deferral priority. W1-T2379 (merged) covers only the CI wait. Swept plan/ on
+    origin/main and the 3 open run- PR heads for enforce_wait, awaitMemoryAdmission and onShortfall with the same
+    positive control as W1-T9779. W1-T100 (the sweep's home in tasks.yaml) and W1-T9748 (tracing declared files to the
+    staging step) also declare sweep.ts and run-task.ts; neither touches how a light pass awaits its actions.
+  design: |
+    Operator rulings: no new fixed threshold, no shorter interval, no second ticker.
+    1. The light pass admits and RECORDS synchronously, exactly as today: sweep.review_admitted, the review-admission
+       slot, the fix claim and the strike stay in the pass.
+    2. The admitted action's memory wait and its worker run continue as a DETACHED sweep action, tracked by the
+       registry #3095 built (drainDetachedSweepActions), so stop() and the freshness drain still wait for it and the
+       daemon.alive row still counts it (detached_sweep_actions).
+    3. The per-head claims keep a later pass from admitting the same head while the detached action waits. A later pass
+       disposes that head `wait` and names the in-flight action.
+    4. Nothing paces. The ticker's period returns to pollIntervalMs plus the pass's own reads.
+    Tests go in a new file, with `test(` titles verbatim as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-light-pass-does-not-wait-out-a-memory-admission.test.ts"
+    - claim: "a light pass returns while its admitted review is still waiting for memory admission"
+      proof: "grep: W1-T9780: a light pass returns while its admitted review waits for memory in test/a-light-pass-does-not-wait-out-a-memory-admission.test.ts"
+    - claim: "a later pass never admits the same head while the detached action waits"
+      proof: "grep: W1-T9780: a later pass does not re-admit a head whose action is still waiting in test/a-light-pass-does-not-wait-out-a-memory-admission.test.ts"
+  falsifier: |
+    At origin/main, a light pass whose review's admission never resolves never returns, and the first test times out.

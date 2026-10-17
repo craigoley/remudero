@@ -41,7 +41,7 @@
 //
 // Why: recon-2026-09-05 R-40 — plan/tasks.d/W1-T2904-*.yaml; plan/tasks.d/W1-T3699-*.yaml.
 
-import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { POOL_ISOLATION_FLAG, runShardWithPool, spawnJudgedRun } from "./pure-test-pool.mjs";
@@ -136,6 +136,37 @@ export function loadManifest(path) {
   };
 }
 
+const basenameIndexes = new WeakMap();
+
+function manifestKeyFor(manifest, file) {
+  const files = manifest.files ?? {};
+  if (Object.hasOwn(files, file)) return file;
+  let index = basenameIndexes.get(files);
+  if (!index) {
+    index = new Map();
+    for (const key of Object.keys(files)) {
+      const name = posix.basename(key);
+      index.set(name, index.has(name) ? undefined : key);
+    }
+    basenameIndexes.set(files, index);
+  }
+  return index.get(posix.basename(file));
+}
+
+/** Exact paths win; only a unique basename may carry a moved test's measurement. */
+export function manifestEntryFor(manifest, file) {
+  const key = manifestKeyFor(manifest, file);
+  return key === undefined ? undefined : manifest.files[key];
+}
+
+export function reportManifestFallbacks(testFiles, manifest, log = console.error) {
+  const count = new Set(testFiles.filter(file => {
+    const key = manifestKeyFor(manifest, file);
+    return key !== undefined && key !== file;
+  })).size;
+  log(`tier: ${count} files matched by basename`);
+}
+
 /** Pure classifier: a duration at or above `thresholdMs` is "slow", everything else "fast". */
 export function tierForDuration(durationMs, thresholdMs) {
   return durationMs >= thresholdMs ? "slow" : "fast";
@@ -160,7 +191,7 @@ export function medianMeasuredDurationMs(manifest) {
  *  of 1,566 files distributed as though weightless). The median is strictly better than zero on
  *  every distribution without inventing a per-file estimate. */
 export function weightedDurationMs(file, manifest, medianMs = medianMeasuredDurationMs(manifest)) {
-  const recorded = manifest.files[file];
+  const recorded = manifestEntryFor(manifest, file);
   return typeof recorded === "number" && recorded > 0 ? recorded : medianMs;
 }
 
@@ -168,7 +199,7 @@ export function weightedDurationMs(file, manifest, medianMs = medianMeasuredDura
  *  and what share of the suite that is — the number recon-2026-09-16 could only get by hand-deriving
  *  it from the manifest JSON. `share` is 0 when `testFiles` is empty rather than NaN. */
 export function unmeasuredSummary(testFiles, manifest) {
-  const unmeasuredCount = testFiles.filter((f) => !(manifest.files[f] > 0)).length;
+  const unmeasuredCount = testFiles.filter((f) => !(manifestEntryFor(manifest, f) > 0)).length;
   const total = testFiles.length;
   return { unmeasuredCount, total, share: total === 0 ? 0 : unmeasuredCount / total };
 }
@@ -192,7 +223,7 @@ export function tierFiles(testFiles, manifest) {
   const fast = [];
   const slow = [];
   for (const f of testFiles) {
-    const durationMs = manifest.files[f] ?? 0;
+    const durationMs = manifestEntryFor(manifest, f) ?? 0;
     (tierForDuration(durationMs, manifest.thresholdMs) === "slow" ? slow : fast).push(f);
   }
   return { fast, slow };
@@ -226,15 +257,19 @@ export function balanceFilesByDuration(testFiles, manifest, shardCount) {
 export function instrumentedManifest(uninstrumented, instrumented) {
   const measured = (value) => typeof value === "number" && value > 0;
   const ratios = Object.entries(instrumented.files ?? {})
-    .filter(([file, duration]) => measured(duration) && measured(uninstrumented.files[file]))
-    .map(([file, duration]) => duration / uninstrumented.files[file])
+    .filter(([file, duration]) => measured(duration) && measured(manifestEntryFor(uninstrumented, file)))
+    .map(([file, duration]) => duration / manifestEntryFor(uninstrumented, file))
     .sort((a, b) => a - b);
   const mid = Math.floor(ratios.length / 2);
   const ratio = ratios.length === 0 ? 1 : ratios.length % 2 === 0 ? (ratios[mid - 1] + ratios[mid]) / 2 : ratios[mid];
   const files = {};
-  for (const file of new Set([...Object.keys(uninstrumented.files), ...Object.keys(instrumented.files ?? {})])) {
-    const own = instrumented.files?.[file];
-    const fallback = uninstrumented.files[file];
+  const uninstrumentedOnly = Object.keys(uninstrumented.files).filter(file => {
+    const key = manifestKeyFor(instrumented, file);
+    return key === undefined || key === file;
+  });
+  for (const file of new Set([...uninstrumentedOnly, ...Object.keys(instrumented.files ?? {})])) {
+    const own = manifestEntryFor(instrumented, file);
+    const fallback = manifestEntryFor(uninstrumented, file);
     files[file] = measured(own) ? own : measured(fallback) ? Math.ceil(fallback * ratio) : (fallback ?? own ?? 0);
   }
   return { thresholdMs: uninstrumented.thresholdMs, files, ratio, instrumentedCount: ratios.length };
@@ -382,11 +417,16 @@ export function judgeObservation(history, observed, bandLog) {
 export function foldDurationsEwma(manifest, measured, { alpha = DURATION_EWMA_ALPHA, knownFiles, history } = {}) {
   if (!(alpha > 0 && alpha <= 1)) throw new RangeError("EWMA alpha must be in (0, 1]");
   const known = knownFiles ? new Set(knownFiles) : undefined;
+  const current = known ? { files: Object.fromEntries([...known].map(file => [file, file])) } : undefined;
   const files = {};
-  for (const [file, duration] of Object.entries(manifest.files ?? {})) if (!known || known.has(file)) files[file] = duration;
+  for (const file of known ?? Object.keys(manifest.files ?? {})) {
+    const duration = manifestEntryFor(manifest, file);
+    if (duration !== undefined) files[file] = duration;
+  }
   const prior = {};
-  for (const [file, values] of Object.entries(history ?? manifest.history ?? {})) {
-    if (known && !known.has(file)) continue;
+  for (const [recordedFile, values] of Object.entries(history ?? manifest.history ?? {})) {
+    const file = current ? manifestEntryFor(current, recordedFile) : recordedFile;
+    if (file === undefined) continue;
     if (Array.isArray(values)) prior[file] = values.filter((v) => typeof v === "number" && Number.isFinite(v) && v > 0);
   }
   const bandLog = fleetNoiseBandLog(prior);
@@ -408,10 +448,62 @@ export function foldDurationsEwma(manifest, measured, { alpha = DURATION_EWMA_AL
   return { thresholdMs: manifest.thresholdMs, files, history: nextHistory, outliers };
 }
 
-/** W1-T4071 — the instrumented ledger the shards weigh: the CI snapshot at `snapshotPath` when it
- *  is a readable `{ files }` document of finite non-negative numbers, else the committed ledger.
- *  Every shard of a run reads the same bytes, so `digest` names what the split was computed from. */
-export function loadInstrumentedLedger(committedPath, snapshotPath) {
+/** A usable ledger contains finite, non-negative instrumented durations. */
+function parseInstrumentedLedger(raw) {
+  const parsed = JSON.parse(raw);
+  const files = parsed?.files;
+  if (!files || typeof files !== "object" || Array.isArray(files) ||
+      Object.values(files).some((d) => typeof d !== "number" || !Number.isFinite(d) || d < 0)) {
+    throw new Error("not a { files: { path: ms } } ledger");
+  }
+  const manifest = { thresholdMs: typeof parsed.thresholdMs === "number" ? parsed.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS, files };
+  const history = parsed.history;
+  if (history && typeof history === "object" && !Array.isArray(history)) {
+    manifest.history = Object.fromEntries(Object.entries(history).filter(([, v]) => Array.isArray(v)));
+  }
+  return manifest;
+}
+
+const coverageLedgerDigest = (raw) => createHash("sha256").update(raw).digest("hex");
+
+/** The producer alone chooses a ledger. Consumers bind its immutable bytes to this run's source. */
+export function validateCoverageLedgerChoice(choice, expected = {}) {
+  if (choice?.version !== 1 || typeof choice.runId !== "string" || !/^\d+$/.test(choice.runId) ||
+      typeof choice.sourceSha !== "string" || !/^[0-9a-f]{40}$/.test(choice.sourceSha) ||
+      typeof choice.digest !== "string" || !/^[0-9a-f]{64}$/.test(choice.digest) ||
+      !["snapshot", "committed"].includes(choice.source) ||
+      (choice.source === "snapshot" && (typeof choice.artifactId !== "string" || !/^\d+$/.test(choice.artifactId))) ||
+      (choice.source === "committed" && choice.artifactId !== undefined)) {
+    throw new Error("resolved coverage ledger choice is malformed");
+  }
+  if (expected.runId !== undefined && choice.runId !== expected.runId) throw new Error("resolved coverage ledger belongs to another run");
+  if (expected.sourceSha !== undefined && choice.sourceSha !== expected.sourceSha) throw new Error("resolved coverage ledger belongs to another source SHA");
+  return choice;
+}
+
+export function makeCoverageLedgerChoice(raw, identity) {
+  parseInstrumentedLedger(raw);
+  return validateCoverageLedgerChoice({ version: 1, ...identity, digest: coverageLedgerDigest(raw) });
+}
+
+function readCoverageLedgerChoice(path, env) {
+  if (!env.GITHUB_RUN_ID || !env.GITHUB_SHA) throw new Error("resolved coverage ledger requires GITHUB_RUN_ID and GITHUB_SHA");
+  return validateCoverageLedgerChoice(JSON.parse(readFileSync(path, "utf8")), { runId: env.GITHUB_RUN_ID, sourceSha: env.GITHUB_SHA });
+}
+
+/** W1-T9448: a resolved choice is mandatory and never falls back. Without one, preserve the
+ *  W1-T4071 optional-snapshot contract for local/manual consumers. */
+export function loadInstrumentedLedger(committedPath, snapshotPath, resolvedChoice) {
+  if (resolvedChoice !== undefined) {
+    validateCoverageLedgerChoice(resolvedChoice);
+    const label = resolvedChoice.artifactId ?? resolvedChoice.source;
+    let raw;
+    try { raw = readFileSync(snapshotPath); }
+    catch (error) { throw new Error(`resolved coverage ledger ${label} unreadable (${error.message}); refusing a different ledger`); }
+    if (coverageLedgerDigest(raw) !== resolvedChoice.digest) throw new Error(`resolved coverage ledger ${label} digest mismatch; refusing a different ledger`);
+    try { return { manifest: parseInstrumentedLedger(raw), source: resolvedChoice.source, digest: resolvedChoice.digest }; }
+    catch (error) { throw new Error(`resolved coverage ledger ${label} invalid (${error.message}); refusing a different ledger`); }
+  }
   const committed = () => ({ manifest: loadManifest(committedPath), source: "committed", digest: "committed" });
   if (!snapshotPath) return committed();
   let raw;
@@ -421,18 +513,7 @@ export function loadInstrumentedLedger(committedPath, snapshotPath) {
     return { ...committed(), warning: `snapshot ${snapshotPath} is absent; weighing the committed ledger` };
   }
   try {
-    const parsed = JSON.parse(raw);
-    const files = parsed?.files;
-    if (!files || typeof files !== "object" || Array.isArray(files) ||
-        Object.values(files).some((d) => typeof d !== "number" || !Number.isFinite(d) || d < 0)) {
-      throw new Error("not a { files: { path: ms } } ledger");
-    }
-    const manifest = { thresholdMs: typeof parsed.thresholdMs === "number" ? parsed.thresholdMs : DEFAULT_SLOW_THRESHOLD_MS, files };
-    // W1-T7810: the raw per-file history the previous fold carried, when it is well formed.
-    const rawHistory = parsed.history;
-    if (rawHistory && typeof rawHistory === "object" && !Array.isArray(rawHistory)) {
-      manifest.history = Object.fromEntries(Object.entries(rawHistory).filter(([, v]) => Array.isArray(v)));
-    }
+    const manifest = parseInstrumentedLedger(raw);
     return { manifest, source: "snapshot", digest: createHash("sha256").update(raw).digest("hex").slice(0, 16) };
   } catch (error) {
     return { ...committed(), warning: `snapshot ${snapshotPath} is unusable (${error.message}); weighing the committed ledger` };
@@ -441,10 +522,14 @@ export function loadInstrumentedLedger(committedPath, snapshotPath) {
 
 /** W1-T4071 — the coverage shards' selections must partition `testFiles` exactly and come from
  *  one ledger. Returns the problems found; an empty list is a clean partition. */
-export function partitionProblems(testFiles, selections) {
+export function partitionProblems(testFiles, selections, resolvedDigest) {
   const problems = [];
   const digests = new Set(selections.map((s) => s.digest));
-  if (digests.size > 1) problems.push(`shards weighed different ledgers: ${[...digests].sort().join(", ")}`);
+  const expected = resolvedDigest ?? selections[0]?.digest;
+  if (digests.size > 1 || (resolvedDigest !== undefined && selections.some((s) => s.digest !== resolvedDigest))) {
+    const diverged = selections.filter((s) => s.digest !== expected).map((s) => `shard ${s.shard}=${s.digest} (expected ${expected})`);
+    problems.push(`shards weighed different ledgers: ${[...digests].sort().join(", ")}; ${diverged.join("; ")}`);
+  }
   const owner = new Map();
   for (const { shard, files } of selections) {
     for (const file of files) {
@@ -565,8 +650,8 @@ export function selectPlanReadingShard(candidateText, testFiles, manifest, shard
   };
 }
 
-/** Pure merge: every path in `measured` overwrites (or adds) that entry in a NEW manifest object;
- *  every other recorded file is left byte-for-byte untouched. Never mutates `manifest`. */
+/** Pure merge: measurements replace rows, re-keying a unique basename to its measured path.
+ *  Unrelated rows stay untouched. Never mutates `manifest`. */
 export function mergeDurations(manifest, measured) {
   // W1-T3724 — A REAL MEASUREMENT IS NEVER REPLACED BY THE PLACEHOLDER.
   //
@@ -580,9 +665,10 @@ export function mergeDurations(manifest, measured) {
   // against an existing real value: a file with no measurement yet still takes the placeholder.
   const files = { ...manifest.files };
   for (const [file, duration] of Object.entries(measured)) {
-    const existing = files[file];
-    if (duration === 0 && typeof existing === "number" && existing > 0) continue;
-    files[file] = duration;
+    const key = manifestKeyFor(manifest, file);
+    const existing = manifestEntryFor(manifest, file);
+    if (key !== undefined && key !== file && !Object.hasOwn(measured, key)) delete files[key];
+    files[file] = duration === 0 && typeof existing === "number" && existing > 0 ? existing : duration;
   }
   return { thresholdMs: manifest.thresholdMs, files };
 }
@@ -640,7 +726,7 @@ export function durationStalenessWarnings(manifest, measured, factor = DURATION_
   if (!Number.isFinite(factor) || factor <= 1) throw new RangeError("duration staleness factor must be greater than 1");
   const warnings = [];
   for (const file of Object.keys(measured).sort()) {
-    const recorded = manifest.files[file];
+    const recorded = manifestEntryFor(manifest, file);
     const observed = measured[file];
     if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(observed) || observed < 0) continue;
     const low = Math.min(recorded, observed);
@@ -668,8 +754,8 @@ export function proposalIsMaterial(committed, proposed, shardCount = DEFAULT_CI_
   if (files.length === 0) return false;
 
   const firstRealMeasurement = files.some((file) => {
-    const before = committed.files?.[file];
-    const after = proposed.files?.[file];
+    const before = manifestEntryFor(committed, file);
+    const after = manifestEntryFor(proposed, file);
     return !(typeof before === "number" && before > 0) && typeof after === "number" && after > 0;
   });
   if (firstRealMeasurement) return true;
@@ -796,15 +882,40 @@ function parseShard(raw) {
 
 export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
   const root = resolve(getFlagValue(argv, "--root") ?? ".");
+  if (argv.includes("--write-resolved-ledger") || argv.includes("--verify-resolved-ledger")) {
+    try {
+      const snapshot = resolve(root, getFlagValue(argv, "--snapshot") ?? "coverage/ledger-snapshot.manifest");
+      const choicePath = resolve(root, getFlagValue(argv, "--resolved-ledger") ?? "coverage/ledger-choice.json");
+      let choice;
+      if (argv.includes("--write-resolved-ledger")) {
+        choice = makeCoverageLedgerChoice(readFileSync(snapshot), {
+          runId: env.GITHUB_RUN_ID, sourceSha: env.GITHUB_SHA,
+          source: getFlagValue(argv, "--ledger-source"), artifactId: getFlagValue(argv, "--artifact-id"),
+        });
+        writeFileSync(choicePath, `${JSON.stringify(choice)}\n`, { flag: "wx" });
+      } else {
+        choice = readCoverageLedgerChoice(choicePath, env);
+        loadInstrumentedLedger(undefined, snapshot, choice);
+      }
+      const output = getFlagValue(argv, "--github-output");
+      if (output) appendFileSync(output, `digest=${choice.digest}\nsource=${choice.source}\n`);
+      console.log(`resolved coverage ledger: run=${choice.runId} source=${choice.source} artifact=${choice.artifactId ?? "committed"} digest=${choice.digest}`);
+      return 0;
+    } catch (error) {
+      console.error(`test-tier-manifest: ${error.message}`);
+      return 1;
+    }
+  }
   const manifestPath = resolve(root, getFlagValue(argv, "--manifest") ?? DEFAULT_MANIFEST_RELATIVE_PATH);
   const manifest = loadManifest(manifestPath);
   const testFiles = listTestFiles(root);
+  reportManifestFallbacks(testFiles, manifest);
 
   // W1-T6085: `pool` appends --experimental-test-isolation=none so the files share ONE process;
   // `quiet` is a leak-locating re-run whose output and durations nobody wants. A role other than
   // "rest" writes its durations beside the main file (shard-1.pool.json), because the reporter
   // rewrites its destination and two children would otherwise erase each other's evidence.
-  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest", bounded = false } = {}) => {
+  const spawnTestFiles = (files, { pool = false, quiet = false, role = "rest", bounded = false, deadlineMs } = {}) => {
     // TAP on stdout always: test-with-retry parses this output, and Node 24 no longer defaults a
     // piped run to TAP. Reporters pair with destinations in order, so the duration reporter follows.
     const testArgs = ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--test-reporter=tap", "--test-reporter-destination=stdout"];
@@ -825,7 +936,8 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     // file whose own child exits 0 part-way is reported `ok` — the rest, the slow tier and the
     // plan-reading candidates are judged the same way as the pool ladder.
     const prefix = role === "rest" ? "test-tier-manifest" : "pure-test-pool";
-    return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role, prefix });
+    // W1-T9426: a leak-locate probe carries a deadline measured from the full pool run.
+    return spawnJudgedRun(files, { spawn, cwd: root, args: testArgs, pool, quiet, role, prefix, deadlineMs });
   };
 
   if (argv.includes("--record-evidence")) {
@@ -917,7 +1029,14 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
           "test file that does not exist on disk — a new test file never needs a row (it defaults " +
           "to the fast tier), so a stale row is the one thing left this gate refuses:",
       );
-      for (const f of ghosts) console.error(`  ${f}`);
+      const current = { files: Object.fromEntries(testFiles.map(file => [file, file])) };
+      let anyMoved = false;
+      for (const f of ghosts) {
+        const moved = manifestEntryFor(current, f);
+        if (moved !== undefined) anyMoved = true;
+        console.error(moved === undefined ? `  ${f}` : `  re-key: ${f} -> ${moved}`);
+      }
+      if (anyMoved) console.error("A `re-key:` row names a moved file — re-key it to the path shown.");
       console.error("Remove the row(s) above, or restore the file they name.");
       return 1;
     }
@@ -932,7 +1051,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     // `--seed` is no longer called by hooks/pre-commit (W1-T4430 design ii) — it survives for
     // `flake-retry-aggregate`'s reviewed --adopt writer to place a first placeholder ahead of a
     // real measurement, never for an author's own commit to carry one.
-    const missing = testFiles.filter((f) => !(f in manifest.files));
+    const missing = testFiles.filter((f) => manifestEntryFor(manifest, f) === undefined);
     if (missing.length === 0) {
       console.log("test-tier-manifest: nothing to seed — every test file already has a recorded duration.");
       return 0;
@@ -1020,11 +1139,21 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.error(`test-tier-manifest: --workers requires a positive integer, got ${JSON.stringify(workersRaw)}`);
       return 2;
     }
-    const ledger = instrumentedPath === undefined
-      ? undefined
-      : loadInstrumentedLedger(resolve(root, instrumentedPath), snapshotPath === undefined ? undefined : resolve(root, snapshotPath));
+    const resolvedPath = getFlagValue(argv, "--resolved-ledger");
+    let ledger;
+    try {
+      if (argv.includes("--resolved-ledger") && !resolvedPath) throw new Error("resolved coverage ledger requires a choice path");
+      if (resolvedPath !== undefined && (instrumentedPath === undefined || snapshotPath === undefined)) throw new Error("resolved coverage ledger requires an instrumented manifest and the chosen snapshot path");
+      const choice = resolvedPath === undefined ? undefined : readCoverageLedgerChoice(resolve(root, resolvedPath), env);
+      ledger = instrumentedPath === undefined ? undefined : loadInstrumentedLedger(resolve(root, instrumentedPath),
+        snapshotPath === undefined ? undefined : resolve(root, snapshotPath), choice);
+    } catch (error) {
+      console.error(`test-tier-manifest: ${error.message}`);
+      return 1;
+    }
     if (ledger?.warning) console.error(`test-tier-manifest: warning: ${ledger.warning}`);
     const weighed = ledger === undefined ? manifest : instrumentedManifest(manifest, ledger.manifest);
+    if (ledger !== undefined) reportManifestFallbacks(testFiles, weighed);
     const balanced = workers === undefined
       ? balanceFilesByDuration(testFiles, weighed, shard.count)
       : packFilesByMakespan(testFiles, weighed, shard.count, workers);
@@ -1062,7 +1191,12 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
       console.error(`test-tier-manifest: --check-partition could not read a selection (${error.message})`);
       return 1;
     }
-    const problems = paths.length === 0 ? ["no shard selections were given"] : partitionProblems(testFiles, selections);
+    const resolvedDigest = getFlagValue(argv, "--resolved-digest");
+    if (argv.includes("--resolved-digest") && (typeof resolvedDigest !== "string" || !/^[0-9a-f]{64}$/.test(resolvedDigest))) {
+      console.error("test-tier-manifest: resolved coverage ledger digest is missing or malformed");
+      return 1;
+    }
+    const problems = paths.length === 0 ? ["no shard selections were given"] : partitionProblems(testFiles, selections, resolvedDigest);
     for (const problem of problems.slice(0, 50)) console.error(`test-tier-manifest: partition: ${problem}`);
     if (problems.length > 0) {
       console.error(`test-tier-manifest: the coverage shards do NOT partition the ${testFiles.length} test file(s): ${problems.length} problem(s).`);
@@ -1094,7 +1228,7 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
     }
     // W1-T6085: only the fast tier shares processes; a slow file keeps its own child.
     if (runTier === "fast" && env.RMD_TEST_POOL !== "0") {
-      return runShardWithPool(files, { fast, root, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
+      return runShardWithPool(files, { fast, root, env, run: (subset, opts) => spawnTestFiles(subset, { ...opts, bounded: true }) }).status;
     }
     return spawnTestFiles(files, { bounded: runTier === "fast" });
   }

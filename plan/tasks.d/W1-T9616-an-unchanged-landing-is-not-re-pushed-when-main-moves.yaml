@@ -1,0 +1,51 @@
+- id: W1-T9616
+  title: "AN UNCHANGED FEEDBACK LANDING IS RE-PUSHED WHENEVER MAIN MOVES — finishLanding pushes unless origin/feedback-landing's TREE equals main-plus-pending, so any main commit between sweeps force-replaces the open landing PR's head with the same records (#11901, 03:25Z 2026-10-15: the same 20 files, a new head, a new CI run and review); #11948 has just made those pushes succeed again"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — when the landing sweep force-pushes an already-open landing branch
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: #11901's 3h42m landing, four head changes"
+  plan_refs: [W1-T3560, W1-T3888, W1-T5748, W1-T9536]
+  files: [src/lib/feedback-landing.ts, test/an-unchanged-landing-is-not-re-pushed-when-main-moves.test.ts]
+  status: queued
+  priority: 1  # operator-2026-10-15: each re-push costs a landing PR a full CI run and review; with pushes working again it fires on most sweeps while a landing is open
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-15 (core ledger union, read-only):
+    - feedback.landing_sweep pushed the same 20 plan/feedback files at 02:24:28Z (head 73ee5e8) and again at
+      03:25:49Z (head b72b9c0). The second push replaced #11901's head, its CI and its review only because main
+      had moved.
+    - The sweeps at 03:05Z, 03:43Z and 05:41Z tried the same re-push. They failed only on "could not read
+      Username", the daemon-checkout credential defect #11948 fixed (merged 08:00Z).
+    - #11901 was open 3h42m with four head changes. #11662 took 46 min on 10-14. It was re-pushed once, naming the
+      same one file (12:58Z, then 13:27Z).
+    READ at origin/main (src/lib/feedback-landing.ts finishLanding): the short-circuit compares
+    remoteBranchTree(origin/<branch>) to build.treeSha. That tree is origin/main's tree plus the pending records,
+    so any main commit makes them differ, even when the records are byte-identical. The comment there
+    (docs/forensics/feedback-landing.md#finishlanding_shortcircuit) explains comparing trees instead of commits.
+    It did not consider main moving under an open landing.
+  design: |
+    1. Before pushing, compare the landing's OWN change, not the whole tree. Take the branch's diff from its
+       merge base with origin/main to its tip, restricted to the family's ownedDir, as `git diff-tree -r --raw`
+       lines (old blob, new blob, path). Compare that with the build's diff from mainSha to treeSha over the same
+       directory. If the two are identical, the branch already carries exactly this landing and main has touched
+       none of its records since. Skip the push and ensurePrOpen, as the existing short-circuit does.
+    2. Staleness is the direct-merge preflight's to judge (W1-T5748: a behind plan PR merges as-is when its
+       merged plan loads), never the landing sweep's.
+    3. Any difference still pushes, under the W1-T3560 lease: a new record, a changed record, or a record main
+       changed since the branch's base. A branch tip produced by update-branch (a merge commit) is compared from
+       its merge base the same way.
+    4. A ledger field on feedback.landing_sweep names the skip (for example unchanged_since_main_moved: true),
+       so a quiet pass is not read as a failed one.
+  acceptance:
+    - claim: "an open landing whose records are unchanged is not re-pushed when main has moved, and its PR head stays"
+      proof: 'grep: test("W1-T9616: an unchanged landing is not re-pushed when main moves" in test/an-unchanged-landing-is-not-re-pushed-when-main-moves.test.ts'
+    - claim: "a new or changed record, or one main changed since the branch's base, is still pushed under the lease"
+      proof: 'grep: test("W1-T9616: a changed landing is still pushed under its lease" in test/an-unchanged-landing-is-not-re-pushed-when-main-moves.test.ts'
+  falsifier: |
+    At origin/main, push a landing of one record, commit an unrelated file to main, and run the sweep again: it
+    force-pushes a new commit with the same record, and the first test fails.

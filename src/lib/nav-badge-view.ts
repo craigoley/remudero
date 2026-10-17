@@ -15,10 +15,12 @@
  * operator-agent memory folded from it, and the inbox classification `GET /v1/inbox` writes. A cold
  * input makes its count absent with a reason, never a zero.
  */
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ANALYTICS_REFRESH_INTERVAL_MS, ANALYTICS_REFRESH_TIMEOUT_MS, type AnalyticsSnapshot } from "./analytics-route.js";
 import { systemClock, type Clock } from "./clock.js";
+import { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
 import { classificationSnapshotPath, readClassificationSnapshot } from "./fleet-lane.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { inboxOwner } from "./inbox-owner.js";
@@ -50,8 +52,7 @@ const THRESHOLDS = { minimumRuns: 5, highTokensPerRun: 50_000, queuedTasks: 5, s
 /** An analytics snapshot older than two refresh cycles plus a timed-out scan has missed a refresh. */
 const ANALYTICS_STALE_AFTER_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANALYTICS_REFRESH_TIMEOUT_MS;
 
-/** Serve's slow lane rewrites the classification at least every half of this, with or without a reader (inbox-view.ts). */
-export const INBOX_STALE_AFTER_MS = 10 * 60_000;
+export { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
 
 /** How many visible proposal ids ride with the agent count. */
 const MAX_PROPOSAL_IDS = 20;
@@ -92,7 +93,64 @@ export function navBadgeWithDecisions(view: ViewDefinition<NavBadgeData>, projec
   };
 }
 
-type Candidate = { proposalId: string; category: string; signal: string; confidence: number };
+export interface GeneratedProposalEvidence {
+  key: string;
+  value: number;
+  unit: "count" | "tokens" | "tokens/run" | "ms" | "ratio";
+  source: string;
+  observedAt: string;
+  freshness: "fresh";
+  window: { start: string; end: string } | null;
+}
+
+export interface GeneratedProposalDetail {
+  state: "reported";
+  kind: "generated-recommendation";
+  observationId: string;
+  repository: string;
+  instanceId: string;
+  proposalText: string;
+  reasoning: string;
+  observedAt: string;
+  scoreKind: "native-heuristic";
+  evidence: GeneratedProposalEvidence[];
+  unavailable: string[];
+}
+
+export type ProposalDetail = GeneratedProposalDetail | { state: "unavailable"; reason: string };
+type Candidate = { proposalId: string; category: string; signal: string; confidence: number; detail?: ProposalDetail };
+type DetailObservation = { now: number; sourceRepository?: string; sourceInstance: string; sourceState: ViewSource["state"] };
+type EvidenceTerm = Pick<GeneratedProposalEvidence, "key" | "value" | "unit">;
+type DetailTerms = { proposalText: string; reasoning: string; source: string; values: EvidenceTerm[]; window?: { start: string; end: string }; invalid?: boolean };
+
+/** PRIMARY CONTROL: publication budgets, separate from rank arithmetic and visibility policy. */
+export const AGENT_RECORD_LIMITS = { rows: 100, label: 160, id: 512, text: 600, reasoning: 1400, bytes: 65_536 } as const;
+
+function safeDetailText(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function generatedDetail(snapshot: NavBadgeAnalytics, scope: { repository: string; instanceId: string }, candidate: Candidate, terms: DetailTerms, observation: DetailObservation): ProposalDetail {
+  if (!safeDetailText(scope.repository, AGENT_RECORD_LIMITS.label) || !safeDetailText(scope.instanceId, AGENT_RECORD_LIMITS.label) ||
+      observation.sourceRepository !== scope.repository || observation.sourceInstance !== scope.instanceId) return { state: "unavailable", reason: "repository or instance source identity is unavailable or foreign" };
+  const at = typeof snapshot.asOf === "string" ? Date.parse(snapshot.asOf) : Number.NaN;
+  if (!Number.isFinite(at) || !Number.isFinite(observation.now) || at > observation.now) return { state: "unavailable", reason: "source observation time is unknown or in the future" };
+  if (observation.sourceState !== "fresh" || observation.now - at > ANALYTICS_STALE_AFTER_MS) return { state: "unavailable", reason: "source analytics is stale or unavailable" };
+  if (terms.invalid || terms.values.some((term) => !Number.isFinite(term.value) || term.value < 0 ||
+      (term.unit === "count" && !Number.isSafeInteger(term.value)) || (term.unit === "ratio" && term.value > 1))) return { state: "unavailable", reason: "signal evidence is malformed or its denominator is unavailable" };
+  const window = terms.window ?? null;
+  if (window && (!Number.isFinite(Date.parse(window.start)) || !Number.isFinite(Date.parse(window.end)) ||
+      Date.parse(window.start) >= Date.parse(window.end) || Date.parse(window.end) > at || observation.now - Date.parse(window.end) > ANALYTICS_STALE_AFTER_MS)) return { state: "unavailable", reason: "signal measurement window is invalid, future or stale" };
+  if (!safeDetailText(terms.proposalText, AGENT_RECORD_LIMITS.text) || !safeDetailText(terms.reasoning, AGENT_RECORD_LIMITS.reasoning)) return { state: "unavailable", reason: "signal text exceeds the publication budget" };
+  const detail = {
+    state: "reported" as const, kind: "generated-recommendation" as const, repository: scope.repository, instanceId: scope.instanceId,
+    proposalText: terms.proposalText, reasoning: terms.reasoning, observedAt: snapshot.asOf!, scoreKind: "native-heuristic" as const,
+    evidence: terms.values.map((term) => ({ ...term, source: terms.source, observedAt: snapshot.asOf!, freshness: "fresh" as const, window })),
+    unavailable: [...(window ? [] : ["source-window"]), "independent-sample-size", "causation", "cost", "savings", "human-consent"],
+  };
+  const observationId = createHash("sha256").update(JSON.stringify([candidate, detail])).digest("hex");
+  return { ...detail, observationId };
+}
 
 type OperatorAgentProjection = AnalyticsSnapshot["consoleV1"]["operatorAgent"];
 
@@ -109,6 +167,26 @@ export interface NavBadgeAnalytics {
     };
   };
   routingTelemetry: Pick<AnalyticsSnapshot["routingTelemetry"], "buckets">;
+}
+
+/** Validate the fields the sole engine reads before arithmetic, interpolation or slugging. */
+export function proposalSnapshotReason(snapshot: NavBadgeAnalytics | undefined): string | undefined {
+  const agent = snapshot?.consoleV1?.operatorAgent;
+  const lists = [snapshot?.consoleV1?.metrics, snapshot?.routingTelemetry?.buckets, agent?.outcomes?.classes, agent?.decisions?.classes, agent?.capacity?.measurements];
+  if (agent === undefined || agent === null || agent.proof === null || typeof agent.proof !== "object" || lists.some((list) => !Array.isArray(list))) return "malformed committed proposal analytics";
+  if (lists.some((list) => list!.length > AGENT_RECORD_LIMITS.rows)) return "proposal analytics exceeds the row budget";
+  if (lists.some((list) => list!.some((row) => row === null || typeof row !== "object" || Array.isArray(row)))) return "malformed committed proposal analytics";
+  const label = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+  const number = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+  const nullableNumber = (value: unknown): boolean => value === null || number(value);
+  if (snapshot!.consoleV1.metrics.some((metric) => !label(metric.key) || !["observed", "provider_reported", "modeled"].includes(metric.class) || !nullableNumber(metric.value))) return "malformed committed metric provenance or value";
+  if (snapshot!.routingTelemetry.buckets.some((row) => !label(row.taskType) || !label(row.assignedModel) || !number(row.terminalResults) || !number(row.failures))) return "malformed committed routing signal row";
+  if (agent.outcomes.classes.some((row) => !label(row.verdictClass) || !number(row.total) || !number(row.revertedCount) || !nullableNumber(row.revertRate))) return "malformed committed outcomes signal row";
+  if (agent.decisions.classes.some((row) => !label(row.taskClass) || !number(row.approvalDenominator) || !nullableNumber(row.approvalRate) || !number(row.approvedCount) || !number(row.acceptedCount) || !number(row.rejectedCount))) return "malformed committed decisions signal row";
+  if (agent.capacity.measurements.some((row) => !label(row.repo) || !["scale-up", "underutilized", "balanced"].includes(row.recommendation) || !number(row.configuredCapacity) || !number(row.admittedLanes) || !number(row.activeWorkers) || !number(row.queuedWork) || !number(row.utilizationRatio) || !label(row.windowStart) || !label(row.windowEnd))) return "malformed committed capacity signal row";
+  const proof = agent.proof;
+  if (!["measured", "not-collected"].includes(proof.status) || (proof.status === "measured" && (!nullableNumber(proof.denominator) || !nullableNumber(proof.passRate) || !number(proof.executedPass) || !number(proof.executedFail)))) return "malformed committed proof signal";
+  return undefined;
 }
 
 export function navBadgeAnalyticsSlice(snapshot: NavBadgeAnalytics): NavBadgeAnalytics {
@@ -168,7 +246,10 @@ export function operatorAgentCandidates(
   snapshot: NavBadgeAnalytics,
   scope: { repository: string; instanceId: string },
   history: readonly OperatorAgentHistory[],
+  observation?: DetailObservation,
 ): Candidate[] {
+  const reason = proposalSnapshotReason(snapshot);
+  if (reason) throw new Error(reason);
   const metrics = new Map<string, number>();
   for (const m of snapshot.consoleV1.metrics) if (m.value !== null && Number.isFinite(m.value)) metrics.set(m.key, m.value);
   const runs = metrics.get("runs.completed");
@@ -177,44 +258,80 @@ export function operatorAgentCandidates(
   const queue = metrics.get("queue.pending");
   const repoHistory = history.filter((entry) => entry.repo === scope.repository);
   const out: Candidate[] = [];
-  const add = (category: string, signal: string, score: number): void => {
-    out.push({
+  const add = (category: string, signal: string, score: number, terms: DetailTerms): void => {
+    const candidate: Candidate = {
       proposalId: `operator-agent:${slug(scope.repository)}:${scopeToken(scope.instanceId)}:${category}:${signal}`,
       category,
       signal,
       confidence: Number(clamp(score + preferenceAdjustment(repoHistory, category, signal)).toFixed(3)),
-    });
+    };
+    if (observation) candidate.detail = generatedDetail(snapshot, scope, candidate, terms, observation);
+    out.push(candidate);
   };
 
   const tokensPerRun = runs !== undefined && tokens !== undefined && runs > 0 ? tokens / runs : undefined;
   if (runs !== undefined && tokensPerRun !== undefined && runs >= THRESHOLDS.minimumRuns && tokensPerRun >= THRESHOLDS.highTokensPerRun) {
-    add("optimize", "token-burn", confidence(runs, 2, 0.02));
+    add("optimize", "token-burn", confidence(runs, 2, 0.02), {
+      proposalText: "Review token usage in completed work",
+      reasoning: `The snapshot reports ${tokens} tokens and ${runs} completed runs; the native ratio is ${tokensPerRun} tokens/run. Cohort alignment and the source window are unavailable. Review measured usage before changing routing; no cost or savings is inferred.`,
+      source: "console-v1.metrics", values: [{ key: "tokens.total", value: tokens!, unit: "tokens" }, { key: "runs.completed", value: runs, unit: "count" }, { key: "tokens.per-run", value: tokensPerRun, unit: "tokens/run" }],
+    });
   }
   if (runs !== undefined && duration !== undefined && runs >= THRESHOLDS.minimumRuns && duration >= THRESHOLDS.slowP50Ms) {
     const scale = queue !== undefined && queue >= THRESHOLDS.queuedTasks;
-    add(scale ? "scale" : "fix", scale ? "queue-pressure" : "slow-runs", confidence(runs, scale ? 3 : 2, scale ? 0.035 : 0.02));
+    add(scale ? "scale" : "fix", scale ? "queue-pressure" : "slow-runs", confidence(runs, scale ? 3 : 2, scale ? 0.035 : 0.02), {
+      proposalText: scale ? "Review queued work and slow completed runs" : "Investigate slow completed runs",
+      reasoning: `The snapshot reports a ${duration} ms median over its duration cohort and ${runs} completed runs${scale ? `, with ${queue} queued tasks` : ""}. Queue pressure alone does not measure utilization, current workers or the cause of latency.`,
+      source: "console-v1.metrics", values: [{ key: "duration.p50.ms", value: duration, unit: "ms" }, { key: "runs.completed", value: runs, unit: "count" }, ...(scale ? [{ key: "queue.pending", value: queue!, unit: "count" as const }] : [])],
+    });
   }
   for (const bucket of snapshot.routingTelemetry.buckets) {
     if (bucket.terminalResults < THRESHOLDS.minimumRuns || bucket.failures / bucket.terminalResults < THRESHOLDS.highWorkerFailureRate) continue;
-    add("fix", `worker-failure-rate-${bucket.taskType}-${bucket.assignedModel}`, confidence(runs, 3, 0.03));
+    add("fix", `worker-failure-rate-${bucket.taskType}-${bucket.assignedModel}`, confidence(runs, 3, 0.03), {
+      proposalText: `Investigate terminal failures for ${bucket.taskType} on ${bucket.assignedModel}`,
+      reasoning: `This routing bucket reports ${bucket.failures} failures of ${bucket.terminalResults} terminal results. Assignments, retries and terminal results are different populations; this ratio does not establish provider causation or independent runs.`,
+      source: "signals.routingTelemetry.buckets", invalid: bucket.failures > bucket.terminalResults || !safeDetailText(bucket.taskType, AGENT_RECORD_LIMITS.label) || !safeDetailText(bucket.assignedModel, AGENT_RECORD_LIMITS.label),
+      values: [{ key: "failures", value: bucket.failures, unit: "count" }, { key: "terminalResults", value: bucket.terminalResults, unit: "count" }, { key: "failureRate", value: bucket.failures / bucket.terminalResults, unit: "ratio" }],
+    });
   }
   const agent = snapshot.consoleV1.operatorAgent;
   const proof = agent.proof;
   if (proof.status === "measured" && proof.denominator !== null && proof.passRate !== null && proof.denominator >= THRESHOLDS.minimumRuns) {
     const failing = 1 - proof.passRate >= 0.2;
-    add(failing ? "fix" : "optimize", failing ? "proof-failure-rate" : "proof-pass-rate", confidence(runs, 3, failing ? 0.03 : 0.015));
+    add(failing ? "fix" : "optimize", failing ? "proof-failure-rate" : "proof-pass-rate", confidence(runs, 3, failing ? 0.03 : 0.015), {
+      proposalText: failing ? "Investigate executed proof failures" : "Review executed proof outcomes",
+      reasoning: `Executed criterion outcomes have a ${proof.passRate} pass ratio over ${proof.denominator} pass/fail outcomes. Non-executable and execution-error outcomes are outside that denominator. These are criterion outcomes, not independent reviews. Keep proof validation and its existing requirements in place.`,
+      source: "console-v1.operatorAgent.proof", invalid: proof.executedPass + proof.executedFail !== proof.denominator || proof.executedPass / proof.denominator !== proof.passRate || proof.executedPass < 0 || proof.executedFail < 0,
+      values: [{ key: "executedPassFail", value: proof.denominator, unit: "count" }, { key: "passRate", value: proof.passRate, unit: "ratio" }],
+    });
   }
   for (const outcome of agent.outcomes.classes) {
     if (outcome.total < THRESHOLDS.minimumRuns || outcome.revertRate === null || outcome.revertRate < 0.2) continue;
-    add("fix", `revert-rate-${slug(outcome.verdictClass)}`, confidence(runs, 3, 0.035));
+    add("fix", `revert-rate-${slug(outcome.verdictClass)}`, confidence(runs, 3, 0.035), {
+      proposalText: `Review reverted outcomes in ${outcome.verdictClass}`,
+      reasoning: `The ${outcome.verdictClass} outcome cohort reports a ${outcome.revertRate} revert ratio over ${outcome.total} outcomes. This association does not identify a cause or prove that a proposed remedy will help.`,
+      source: "console-v1.operatorAgent.outcomes.classes", invalid: !safeDetailText(outcome.verdictClass, AGENT_RECORD_LIMITS.label) || outcome.revertedCount / outcome.total !== outcome.revertRate,
+      values: [{ key: "total", value: outcome.total, unit: "count" }, { key: "revertRate", value: outcome.revertRate, unit: "ratio" }],
+    });
   }
   for (const decision of agent.decisions.classes) {
     if (decision.approvalDenominator < THRESHOLDS.minimumRuns || decision.approvalRate === null || decision.approvalRate < 0.95 || decision.rejectedCount > 0) continue;
-    add("optimize", `approval-pattern-${slug(decision.taskClass)}`, confidence(runs, 3, 0.025));
+    add("optimize", `approval-pattern-${slug(decision.taskClass)}`, confidence(runs, 3, 0.025), {
+      proposalText: `Review explicit approval patterns for ${decision.taskClass}`,
+      reasoning: `The explicit operator-decision cohort reports a ${decision.approvalRate} approval ratio over ${decision.approvalDenominator} approval/rejection outcomes and ${decision.rejectedCount} rejections. Automatic merge events are a separate population. History grants no auto-merge policy or future consent.`,
+      source: "console-v1.operatorAgent.decisions.classes", invalid: !safeDetailText(decision.taskClass, AGENT_RECORD_LIMITS.label) || decision.approvedCount + decision.acceptedCount + decision.rejectedCount !== decision.approvalDenominator || (decision.approvedCount + decision.acceptedCount) / decision.approvalDenominator !== decision.approvalRate,
+      values: [{ key: "approvalDenominator", value: decision.approvalDenominator, unit: "count" }, { key: "approvalRate", value: decision.approvalRate, unit: "ratio" }, { key: "rejectedCount", value: decision.rejectedCount, unit: "count" }],
+    });
   }
   for (const capacity of agent.capacity.measurements) {
     if (capacity.recommendation !== "scale-up" && capacity.recommendation !== "underutilized") continue;
-    add(capacity.recommendation === "scale-up" ? "scale" : "optimize", `capacity-${capacity.recommendation}-${slug(capacity.repo)}`, confidence(runs, 4, 0.035));
+    add(capacity.recommendation === "scale-up" ? "scale" : "optimize", `capacity-${capacity.recommendation}-${slug(capacity.repo)}`, confidence(runs, 4, 0.035), {
+      proposalText: capacity.recommendation === "scale-up" ? "Review the measured capacity constraint" : "Review measured capacity underutilization",
+      reasoning: `The recorded window reports capacity ${capacity.configuredCapacity}, admitted lanes ${capacity.admittedLanes}, active workers ${capacity.activeWorkers} and queued work ${capacity.queuedWork}. These are historical observations, not current worker counts or permission to resize a pool.`,
+      source: "console-v1.operatorAgent.capacity.measurements", window: { start: capacity.windowStart, end: capacity.windowEnd },
+      invalid: capacity.repo !== scope.repository || capacity.configuredCapacity <= 0 || capacity.utilizationRatio !== capacity.activeWorkers / capacity.configuredCapacity,
+      values: [{ key: "configuredCapacity", value: capacity.configuredCapacity, unit: "count" }, { key: "admittedLanes", value: capacity.admittedLanes, unit: "count" }, { key: "activeWorkers", value: capacity.activeWorkers, unit: "count" }, { key: "queuedWork", value: capacity.queuedWork, unit: "count" }],
+    });
   }
   return out;
 }
@@ -254,12 +371,14 @@ interface InstanceInputs {
 }
 
 function countInstance(input: InstanceInputs, nowMs: number, sources: ViewSource[]): CountedInstance {
-  const analyticsState = sourceAge(input.analytics?.asOf ?? null, nowMs, ANALYTICS_STALE_AFTER_MS);
+  const reason = input.analytics === null ? undefined : proposalSnapshotReason(input.analytics);
+  const analyticsState = reason ? "unavailable" : sourceAge(input.analytics?.asOf ?? null, nowMs, ANALYTICS_STALE_AFTER_MS);
   // A cold cache (never refreshed, or dropped by serve.analytics_shed) leaves this instance out of the sum: a partial answer, so warming.
-  const cold = input.analytics === null || analyticsState === "unavailable";
+  const cold = input.analytics === null || (reason === undefined && analyticsState === "unavailable");
   sources.push({ name: `analytics:${input.instanceId}`, asOf: input.analytics?.asOf ?? null, state: analyticsState, kind: "analytics", budgetMs: ANALYTICS_STALE_AFTER_MS, ...(cold ? { phase: "warming" as const } : {}) });
   const base = { instanceId: input.instanceId, ...(input.repository ? { repository: input.repository } : {}) };
   if (input.repository === undefined) return { badge: { ...base, reason: "serve names no repository for this instance" }, ids: [] };
+  if (reason) return { badge: { ...base, reason }, ids: [] };
   if (input.analytics === null || cold) return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
   const memory = input.memory();
   if ("reason" in memory) {

@@ -445,6 +445,11 @@ test("W1-T4075: the real daemon wiring publishes a worker generation that the ti
     const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
     assert.ok(ledger.includes("daemon.target"), "positive control: this is the daemon's own ledger");
     assert.equal(ledger.includes("read_plane.inline"), false, "the generation came from the worker thread, not the fallback");
+    // W1-T9722: the worker's first row names the entry it was started from: the narrow module or its bundle.
+    const started = ledger.split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((row) => row.step === "read_plane.worker_started");
+    assert.match(String(started?.entry), /^(src\/lib\/tick-read-worker\.ts|dist\/child-entries\/worker-lib-tick-read-worker\.mjs)$/,
+      `the daemon starts its read-plane worker from the narrow entry, never run-task.ts: ${JSON.stringify(started)}`);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

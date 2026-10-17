@@ -368,6 +368,24 @@ test("W1-T2734: the default origin/main base is fetched before measurement", () 
   }
 });
 
+test("W1-T9619: an unreachable origin measures against the local origin/main and says so; with none it fails", () => {
+  const { outer, repo } = signalFixture();
+  try {
+    const local = git(repo, "rev-parse", "origin/main");
+    git(repo, "remote", "set-url", "origin", join(outer, "unreachable.git"));
+    const offline = runSignal(repo, "--json");
+    assert.equal(offline.status, 0, `${offline.stdout}\n${offline.stderr}`);
+    assert.match(offline.stderr, new RegExp(`origin/main not refreshed \\(.+\\); measured against the local origin/main ${local.slice(0, 12)}`));
+    assert.equal((JSON.parse(offline.stdout) as { hotspots: unknown[] }).hotspots.length, 2, "the measurement itself is unchanged");
+    git(repo, "update-ref", "-d", "refs/remotes/origin/main");
+    const none = runSignal(repo);
+    assert.notEqual(none.status, 0);
+    assert.match(none.stderr, /source-size-signal: MEASUREMENT FAILED — refresh origin\/main: /);
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2734: an invalid base is a measurement failure, not a green empty signal", () => {
   const { outer, repo } = signalFixture();
   try {

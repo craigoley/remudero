@@ -3,11 +3,16 @@ import assert from "node:assert/strict";
 import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
+  boardObservationPath,
+  boardOpenSnapshotPath,
   boardSnapshotPath,
   createBoardSnapshotCache,
+  createBoardSnapshotReader,
   type BoardSnapshotIo,
 } from "../src/lib/board-snapshot-cache.js";
+import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { BOARD_MAX_PAGES, type BoardIssueRest, type BoardPrRest } from "../src/lib/open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -458,4 +463,248 @@ test("production daemon and Serve composition roots construct and pass the share
   assert.ok(/snapshotCache:\s*boardSnapshotFor\(|snapshotFor:\s*boardSnapshotFor\b/.test(source), "daemon projection and lane gateways receive the per-repo shared cache");
   assert.ok(/buildSweepHook\([\s\S]*?boardSnapshotFor\(target\.owner, target\.repo\)/.test(source), "the full sweep gateway receives the same daemon cache");
   assert.ok(/const serveBoardSnapshot = createBoardSnapshotCache\([\s\S]*?snapshotCache:\s*serveBoardSnapshot/.test(source), "Serve uses the same state namespace");
+});
+
+// W1-T8912: a successful unchanged closed read persists WHEN it was seen, bound to the exact data file it saw.
+const T0 = Date.parse("2026-10-01T00:00:00.000Z");
+const MIN = 60_000;
+const at = (ms: number) => new Date(ms).toISOString();
+
+function steppedClock(start: number): { clock: Clock; set(ms: number): void } {
+  let ms = start;
+  return { clock: { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() }, set: (next) => { ms = next; } };
+}
+
+function physical(path: string): { bytes: string; mtimeMs: number; ino: number } {
+  const st = fs.statSync(path);
+  return { bytes: readFileSync(path, "utf8"), mtimeMs: st.mtimeMs, ino: st.ino };
+}
+
+function observed(dir: string, owner = "o", repo = "r", clock = fixedClock(T0 + 24 * 60 * MIN)) {
+  const telemetry: Array<{ event: string; extra?: Record<string, unknown> }> = [];
+  const cache = createBoardSnapshotCache(dir, owner, repo, { clock, log: (event, extra) => telemetry.push({ event, extra }) });
+  const refusal = telemetry.find((row) => row.event === "board_snapshot.observation_refused")?.extra?.reason;
+  return { at: cache.rows!().closedObservedAt, refusal, cache };
+}
+
+test("W1-T8912: unchanged PR observations survive restart without rewriting history", () => {
+  const dir = root();
+  try {
+    const rows = [closed(1), closed(2)];
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0) }).commitClosed(rows), true);
+    const dataPath = boardSnapshotPath(dir, "o", "r");
+    const sidecar = boardObservationPath(dir, "o", "r");
+    const history = physical(dataPath);
+    const readerEvents: string[] = [];
+    const warmReader = createBoardSnapshotReader({ log: (event) => readerEvents.push(event) });
+    assert.equal(warmReader(dir, "o", "r").closedObservedAt, at(T0));
+    assert.deepEqual(readerEvents.splice(0), ["board_snapshot.loaded"], "positive control: the reader parsed once");
+
+    const step = steppedClock(T0 + 10 * MIN);
+    const restarted = createBoardSnapshotCache(dir, "o", "r", { clock: step.clock });
+    assert.equal(restarted.rows!().closedObservedAt, at(T0), "a restart before any new read keeps the data's own clock");
+    assert.equal(restarted.commitClosed(rows.map((row) => ({ ...row }))), true);
+    assert.equal(restarted.rows!().closedObservedAt, at(T0 + 10 * MIN), "the unchanged successful read advances the clock");
+    assert.deepEqual(physical(dataPath), history, "historical rows are neither rewritten nor touched");
+    const record = JSON.parse(readFileSync(sidecar, "utf8")) as Record<string, unknown>;
+    assert.deepEqual(record.snapshot, { sha256: createHash("sha256").update(history.bytes).digest("hex"), bytes: Buffer.byteLength(history.bytes) });
+    assert.equal(record.observedAt, at(T0 + 10 * MIN));
+    assert.equal(fs.statSync(sidecar).mode & 0o777, 0o600);
+
+    // Coalesced: a second unchanged read inside the resave cadence does not rewrite the sidecar.
+    const firstSidecar = physical(sidecar);
+    step.set(T0 + 10 * MIN + 30_000);
+    assert.equal(restarted.commitClosed(rows), true);
+    assert.deepEqual(physical(sidecar), firstSidecar);
+    step.set(T0 + 12 * MIN);
+    assert.equal(restarted.commitClosed(rows), true);
+    assert.equal(JSON.parse(readFileSync(sidecar, "utf8")).observedAt, at(T0 + 12 * MIN));
+    // A rolled-back clock never moves the observation backwards.
+    step.set(T0 + 11 * MIN);
+    assert.equal(restarted.commitClosed(rows), true);
+    assert.equal(restarted.rows!().closedObservedAt, at(T0 + 12 * MIN));
+    assert.deepEqual(physical(dataPath), history);
+    assert.deepEqual(fs.readdirSync(dirname(dataPath)).sort(), [basename(dataPath), basename(sidecar)].sort(), "no stage is left behind");
+
+    // Cold restart and a warm shared reader both recover the persisted watermark without re-parsing history.
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 60 * MIN) }).rows!().closedObservedAt, at(T0 + 12 * MIN));
+    assert.equal(createBoardSnapshotReader()(dir, "o", "r").closedObservedAt, at(T0 + 12 * MIN));
+    assert.equal(warmReader(dir, "o", "r").closedObservedAt, at(T0 + 12 * MIN));
+    assert.deepEqual(readerEvents.filter((event) => event === "board_snapshot.loaded"), [], "the warm reader re-validated only the sidecar");
+
+    // A legacy snapshot without its own clock stays readable but uncertified until a real successful read.
+    const legacy = root();
+    try {
+      const legacyPath = boardSnapshotPath(legacy, "o", "r");
+      mkdirSync(dirname(legacyPath), { recursive: true });
+      writeFileSync(legacyPath, snapshotLines([{ type: "closed", row: diskClosed(closed(1)) }],
+        { closed: { complete: true, count: 1 }, issues: { complete: true, count: 0 } }, { closed: 1, issues: 0 }));
+      const legacyHistory = physical(legacyPath);
+      const uncertified = createBoardSnapshotCache(legacy, "o", "r", { clock: fixedClock(T0) });
+      assert.equal(uncertified.rows!().closedObservedAt, undefined);
+      assert.equal(uncertified.commitClosed([closed(1)]), true);
+      assert.deepEqual(physical(legacyPath), legacyHistory);
+      assert.equal(observed(legacy).at, at(T0), "the successful read certified the legacy bytes it matched");
+    } finally {
+      rmSync(legacy, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T8912: PR observation identity refuses foreign replaced and torn metadata", () => {
+  const dir = root();
+  try {
+    const rows = [closed(1)];
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0) }).commitClosed(rows), true);
+    const writer = createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 10 * MIN) });
+    assert.equal(writer.commitClosed(rows), true);
+    const sidecar = boardObservationPath(dir, "o", "r");
+    const valid = JSON.parse(readFileSync(sidecar, "utf8")) as Record<string, unknown> & { snapshot: { sha256: string; bytes: number } };
+    assert.equal(observed(dir).at, at(T0 + 10 * MIN), "positive control: the untouched sidecar certifies");
+
+    const cases: Array<{ name: string; body: string; reason: string }> = [
+      { name: "torn", body: JSON.stringify(valid).slice(0, 40), reason: "invalid_json" },
+      { name: "foreign repository", body: JSON.stringify({ ...valid, repository: "o/other" }), reason: "wrong_repository" },
+      { name: "foreign channel", body: JSON.stringify({ ...valid, channel: "issues" }), reason: "wrong_channel" },
+      { name: "other generation", body: JSON.stringify({ ...valid, snapshot: { ...valid.snapshot, sha256: "0".repeat(64) } }), reason: "foreign_snapshot" },
+      { name: "other length", body: JSON.stringify({ ...valid, snapshot: { ...valid.snapshot, bytes: valid.snapshot.bytes + 1 } }), reason: "foreign_snapshot" },
+      { name: "incompatible schema", body: JSON.stringify({ ...valid, schema: 2 }), reason: "future_version" },
+      { name: "other type", body: JSON.stringify({ ...valid, type: "board-open-snapshot" }), reason: "invalid_schema" },
+      { name: "unparseable clock", body: JSON.stringify({ ...valid, observedAt: "yesterday" }), reason: "invalid_schema" },
+      { name: "oversized", body: JSON.stringify({ ...valid, pad: "x".repeat(5000) }), reason: "oversized" },
+    ];
+    for (const fixture of cases) {
+      writeFileSync(sidecar, fixture.body);
+      const result = observed(dir);
+      assert.equal(result.at, at(T0), `${fixture.name}: falls back to the data file's own clock`);
+      assert.equal(result.refusal, fixture.reason, fixture.name);
+    }
+    rmSync(sidecar);
+    mkdirSync(sidecar);
+    assert.deepEqual([observed(dir).at, observed(dir).refusal], [at(T0), "not_file"]);
+    rmSync(sidecar, { recursive: true });
+
+    // Another repository cannot borrow this repository's certification, even holding the identical sidecar.
+    assert.equal(createBoardSnapshotCache(dir, "o", "s", { clock: fixedClock(T0) }).commitClosed([{ ...closed(1), url: "https://github.com/o/s/pull/1" }]), true);
+    writeFileSync(boardObservationPath(dir, "o", "s"), JSON.stringify(valid));
+    assert.deepEqual([observed(dir, "o", "s").at, observed(dir, "o", "s").refusal], [at(T0), "wrong_repository"]);
+
+    // A replaced snapshot cannot inherit the old sidecar, and a writer holding the replaced identity cannot certify the new one.
+    writeFileSync(sidecar, JSON.stringify(valid));
+    const reader = createBoardSnapshotReader();
+    assert.equal(reader(dir, "o", "r").closedObservedAt, at(T0 + 10 * MIN));
+    const stale = createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 20 * MIN) });
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0 + 5 * MIN) }).commitClosed([closed(1), closed(2)]), true);
+    assert.deepEqual([observed(dir).at, observed(dir).refusal], [at(T0 + 5 * MIN), "foreign_snapshot"]);
+    assert.equal(reader(dir, "o", "r").closedObservedAt, at(T0 + 5 * MIN), "a warm reader sees the replacement between reads");
+    assert.equal(stale.commitClosed(rows), true, "the stale writer's rows still match what it alone holds");
+    assert.equal(stale.rows!().closedObservedAt, at(T0 + 20 * MIN));
+    assert.deepEqual([observed(dir).at, observed(dir).refusal], [at(T0 + 5 * MIN), "foreign_snapshot"]);
+    assert.equal(reader(dir, "o", "r").closedObservedAt, at(T0 + 5 * MIN));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T8912: failed partial and invalid PR observations preserve honest coverage", async () => {
+  const dir = root();
+  try {
+    const rows = [closed(1)];
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: fixedClock(T0) }).commitClosed(rows), true);
+    const sidecar = boardObservationPath(dir, "o", "r");
+    const later = fixedClock(T0 + 60 * MIN);
+
+    // Failed and truncated GitHub reads never reach the observation writer.
+    const cache = createBoardSnapshotCache(dir, "o", "r", { clock: later });
+    const failed = buildBatchedGithub("o", "r", { snapshotCache: cache, exec: (args) => {
+      if (/state=closed/.test(args[1] ?? "")) throw new Error("simulated GitHub failure");
+      return "[]";
+    } });
+    failed.listMergedHeadBranches!();
+    const many = Array.from({ length: BOARD_MAX_PAGES * 30 }, (_, i) => closed(10_000 - i, new Date(Date.UTC(2026, 8, 6) - i * MIN).toISOString()));
+    const truncated = buildBatchedGithub("o", "r", { snapshotCache: cache, exec: pagingExec({ open: [], closed: many, issues: [] }, []) });
+    truncated.listMergedHeadBranches!();
+    assert.equal(truncated.readTruncated?.(), true);
+    // Invalid rows are refused before the unchanged comparison.
+    assert.equal(cache.commitClosed([rows[0]!, rows[0]!]), false);
+    assert.equal(cache.rows!().closedObservedAt, at(T0));
+    assert.equal(fs.existsSync(sidecar), false, "no failed, partial or invalid read wrote an observation");
+
+    // Interrupted before the metadata rename: no advance in process or after restart, and no stage left behind.
+    const telemetry: Array<{ event: string; extra?: Record<string, unknown> }> = [];
+    const interrupted = createBoardSnapshotCache(dir, "o", "r", { clock: later, log: (event, extra) => telemetry.push({ event, extra }),
+      io: realIo({ rename: () => { throw new Error("simulated crash before rename"); } }) });
+    assert.equal(interrupted.commitClosed(rows), true);
+    assert.equal(interrupted.rows!().closedObservedAt, at(T0));
+    assert.equal(telemetry.at(-1)?.event, "board_snapshot.observation_refused");
+    assert.equal(telemetry.at(-1)?.extra?.reason, "write_failed");
+    assert.deepEqual(fs.readdirSync(dirname(sidecar)).filter((name) => name.includes(".observed")), [], "no sidecar or stage is left behind");
+    assert.equal(observed(dir).at, at(T0));
+
+    // Future and stale frames are refused against a real certified sidecar.
+    assert.equal(createBoardSnapshotCache(dir, "o", "r", { clock: later }).commitClosed(rows), true);
+    assert.equal(observed(dir).at, at(T0 + 60 * MIN), "positive control: a successful read certifies");
+    assert.deepEqual([observed(dir, "o", "r", fixedClock(T0 + 60 * MIN - 1)).at, observed(dir, "o", "r", fixedClock(T0 + 60 * MIN - 1)).refusal],
+      [at(T0), "future_observation"]);
+    const valid = JSON.parse(readFileSync(sidecar, "utf8")) as Record<string, unknown>;
+    writeFileSync(sidecar, JSON.stringify({ ...valid, observedAt: at(T0 - MIN) }));
+    assert.deepEqual([observed(dir).at, observed(dir).refusal], [at(T0), "stale_observation"]);
+    writeFileSync(sidecar, JSON.stringify(valid));
+    const unopenable: Array<unknown> = [];
+    const blind = createBoardSnapshotCache(dir, "o", "r", { clock: later, log: (_event, extra) => unopenable.push(extra?.reason),
+      io: realIo({ openRead: (path) => {
+        if (path === sidecar) throw new Error("simulated open failure");
+        return fs.openSync(path, "r");
+      } }) });
+    assert.equal(blind.rows!().closedObservedAt, at(T0));
+    assert.deepEqual(unopenable.filter(Boolean), ["open_failed"]);
+
+    // BACKSTOP: an observation record past its byte bound is refused, not truncated or written.
+    const owner = "o".repeat(5000);
+    const wide = createBoardSnapshotCache(dir, owner, "r", { clock: fixedClock(T0) });
+    assert.equal(wide.commitClosed(rows), true);
+    const wideLog: Array<unknown> = [];
+    const wideLater = createBoardSnapshotCache(dir, owner, "r", { clock: later, log: (_event, extra) => wideLog.push(extra?.reason) });
+    assert.equal(wideLater.commitClosed(rows), true);
+    assert.equal(wideLater.rows!().closedObservedAt, at(T0));
+    assert.deepEqual(wideLog.filter(Boolean), ["oversized"]);
+    assert.equal(fs.existsSync(boardObservationPath(dir, owner, "r")), false);
+
+    // Through the real repository-flow collector: unavailable observation is never a current zero; a real one may be.
+    const { captureRepositoryFlow } = await import("../src/lib/repository-flow.js");
+    const empty = root();
+    try {
+      const state = join(empty, "state");
+      mkdirSync(state, { recursive: true });
+      writeFileSync(join(state, "ledger.ndjson"), JSON.stringify({ ts: at(T0), step: "daemon.tick" }) + "\n");
+      const now = T0 + 120 * MIN;
+      assert.equal(createBoardSnapshotCache(empty, "o", "r", { clock: fixedClock(T0) }).commitClosed([]), true);
+      const emptyCache = createBoardSnapshotCache(empty, "o", "r", { clock: fixedClock(now) });
+      assert.equal(emptyCache.commitOpen!([], now), true);
+      // The gateway runs on the same fixed clock, so its open snapshot is not stamped at real time.
+      buildBatchedGithub("o", "r", { snapshotCache: emptyCache, now: () => now, exec: (args) => {
+        if (/state=closed/.test(args[1] ?? "")) throw new Error("simulated GitHub failure");
+        return "[]";
+      } }).listMergedHeadBranches!();
+      const before = (await captureRepositoryFlow(empty, state, "o/r", fixedClock(now)))!;
+      assert.equal(before.reason, null, JSON.stringify(before.sources));
+      assert.equal(before.sources.closedObservedAt, at(T0));
+      assert.equal(before.sources.prFreshness, "stale");
+      assert.equal(before.windows[0]!.summary.merged, null, "a failed read cannot turn a stale empty corpus into zero");
+      assert.equal(before.windows[0]!.coverage.merged, "unknown");
+      buildBatchedGithub("o", "r", { snapshotCache: emptyCache, now: () => now, exec: () => "[]" }).listMergedHeadBranches!();
+      const after = (await captureRepositoryFlow(empty, state, "o/r", fixedClock(now)))!;
+      assert.equal(after.sources.closedObservedAt, at(now));
+      assert.equal(after.sources.prFreshness, "fresh");
+      assert.equal(after.windows[0]!.summary.merged, 0, "a genuinely fresh complete empty read certifies zero");
+      assert.equal(after.windows[0]!.coverage.merged, "complete");
+      assert.equal(fs.existsSync(boardOpenSnapshotPath(empty, "o", "r")), true);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

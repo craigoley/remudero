@@ -1,13 +1,18 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { promisedFollowUps, unreportedFollowUps, followUpPlanRecords, parseHarvestableFollowUps, type HarvestableFollowUp, type PromisedFollowUp, type FollowUpPlanRecord } from "./promised-follow-ups.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from "./test-path-resolver.js";
+// Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
+export { resolveTestPath };
 import { createRequire } from "node:module";
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
+import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -21,13 +26,15 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
+import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
+import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -421,6 +428,8 @@ export interface CriterionVerdict {
   /** The reviewer sandbox's own output for an `executed_fail` proof ({@link proofFailureExcerpt}): command, exit
    *  status and output tail. #10555's fix rounds saw only `reason` and could not reproduce a reviewer-only red. */
   proofFailureOutput?: string;
+  /** The output tail alone of an `executed_fail` proof (see {@link recordFailureTail}); absent for a pass. */
+  failureTail?: string;
   /** See {@link ProofSkipReason}. Absent when the proof executed. */
   proof_skip?: ProofSkipReason;
   /** `met` as computed by the mechanical floor, BEFORE any semantic downgrade (W1-T178). Optional so the
@@ -858,6 +867,8 @@ export interface WhitelistedProof {
   loadError?: string;
   /** The default executor's bounded excerpt of a run it graded `"fail"` — {@link proofFailureExcerpt}. */
   failureOutput?: string;
+  /** Just the output tail of a run graded `"fail"` (no argv/exit header) — {@link recordFailureTail} writes it. */
+  failureTail?: string;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -1568,6 +1579,46 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
   return null;
 }
 
+/** The test path a proof CITES, when it is one the basename fallback may resolve (W1-T9860): a whole-file node
+ *  `unit test:` path, or a house-dialect `grep:` target under test/. A title-only proof already searches recursively
+ *  and is left alone; a Vitest path and a legacy fenced argv are not this resolver's. */
+function citedTestPath(w: WhitelistedProof): string | undefined {
+  if (w.kind === "test") return w.nameFiltered || w.runner === "vitest" ? undefined : w.label;
+  const target = dialectGrepTargetPath(w);
+  return target?.startsWith("test/") ? target : undefined;
+}
+
+/** A proof's text with its cited test path resolved in the tree being judged (W1-T9860). */
+export interface ResolvedProofText {
+  proof: string;
+  /** The cited test path, when the proof cites one. */
+  cited?: string;
+  resolution?: TestPathResolution;
+  /** Set only when the basename fallback was used: the line a caller prints so the move stays visible. */
+  note?: string;
+}
+
+/** Resolve a proof's cited test path through {@link resolveTestPath} and return proof TEXT naming the resolved file,
+ *  so every executor, base-tree builder and parse downstream reads one path. FAIL CLOSED: an exact hit, an absent or
+ *  ambiguous basename, or a rewrite that does not re-parse to the resolved path returns the proof unchanged, so the
+ *  caller grades it exactly as it did before. `tree` omitted judges the checkout's own files. */
+export function resolveProofTestPath(
+  proof: string,
+  root: string,
+  opts: { tree?: string; target?: SuiteRegistryTarget } = {},
+): ResolvedProofText {
+  const w = parseWhitelistedProof(proof, opts.target);
+  const cited = w ? citedTestPath(w) : undefined;
+  if (cited === undefined) return { proof };
+  const resolution = resolveTestPath(cited, { root, ...(opts.tree === undefined ? {} : { tree: opts.tree }) });
+  if (!("path" in resolution) || resolution.how !== "basename") return { proof, cited, resolution };
+  const at = proof.lastIndexOf(cited);
+  const rewritten = proof.slice(0, at) + resolution.path + proof.slice(at + cited.length);
+  const reparsed = parseWhitelistedProof(rewritten, opts.target);
+  if (!reparsed || citedTestPath(reparsed) !== resolution.path) return { proof, cited, resolution };
+  return { proof: rewritten, cited, resolution, note: basenameResolutionNote(cited, resolution.path) };
+}
+
 /** Executes a {@link WhitelistedProof}'s argv and reports the outcome — injectable so unit tests fake
  *  pass/fail/no-match/throw without touching the filesystem. `"no-match"` (name-filtered proofs only) means the run
  *  completed but ZERO tests matched: NOT a failing test, so the caller degrades it to `not_executable`. */
@@ -1812,6 +1863,7 @@ export function proofLinkedModuleRoots(cwd: string): string[] {
   }
   const checkout = realpathSync(cwd);
   const roots = isWithin(target, checkout) ? [] : [target];
+  roots.push(...intermediateModuleLinks(join(cwd, "node_modules"), target, checkout));
   const scan = (dir: string, depth: number): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
@@ -1828,6 +1880,29 @@ export function proofLinkedModuleRoots(cwd: string): string[] {
   };
   scan(target, 0);
   return roots;
+}
+
+/** Each link BETWEEN a checkout's `node_modules` and the install it finally resolves to. A worker worktree links to an
+ *  engine tree's `node_modules`, itself a link to the canonical install: with only the final target mounted, the
+ *  middle hop is absent inside the sandbox and the checkout's own link dangles there. Each hop is bound read-only and
+ *  resolves to that same install, so no new content is exposed. */
+function intermediateModuleLinks(start: string, target: string, checkout: string): string[] {
+  const hops: string[] = [];
+  const seen = new Set<string>([start]);
+  for (let link = start; ; ) {
+    let next: string;
+    try {
+      if (!lstatSync(link).isSymbolicLink()) break;
+      next = resolve(dirname(link), readlinkSync(link));
+    } catch (error) {
+      break; // an unreadable hop: the chain realpathSync resolved stops here, and the final target is mounted anyway
+    }
+    if (seen.has(next) || isWithin(next, target)) break;
+    seen.add(next);
+    if (!isWithin(next, checkout)) hops.push(next);
+    link = next;
+  }
+  return hops;
 }
 
 export interface ProofSandboxArgvInput {
@@ -2123,14 +2198,18 @@ function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutM
   });
 }
 
-/** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
+/** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. W1-T9651: `timeout` is a
+ *  loop-available budget, and a child stopped at it is a failure even when it exits 0 after the signal. */
 function execFileAsync(
   command: string,
   args: readonly string[],
   options: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number; killSignal?: NodeJS.Signals; maxBuffer?: number },
 ): Promise<string> {
+  const { timeout, killSignal, ...rest } = options;
   return new Promise((resolve, reject) => {
-    execFile(command, args as string[], { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
+    const child = execFile(command, args as string[], { ...rest, encoding: "utf8" }, (execError, stdout, stderr) => {
+      bound?.cancel();
+      const error = bound?.timedOut ? bound.timeoutError([command, ...args].join(" "), { stdout, stderr }) : execError;
       if (!error) return resolve(stdout);
       const code = (error as NodeJS.ErrnoException).code;
       const failure = Object.assign(error, {
@@ -2141,6 +2220,7 @@ function execFileAsync(
       });
       reject(failure);
     });
+    const bound = timeout !== undefined && timeout > 0 ? boundChildByLoopTime(child, timeout, { killSignal }) : undefined;
   });
 }
 
@@ -2225,7 +2305,12 @@ export function ensureDeps(
   try {
     // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
     // outlive its timeout and hold the reviewer the way a wedged proof did.
-    exec("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    const root = configuredDependencySeedRoot();
+    const command = root && !existsSync(nodeModules) ? process.execPath : "npm";
+    const args = root && !existsSync(nodeModules)
+      ? ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)), "prime", cwd, "--proof", "--root", root]
+      : PROOF_INSTALL_ARGS;
+    exec(command, args, { cwd, env: proofInstallEnv(), stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
   } catch {
     /* best-effort priming; see doc comment above */
   }
@@ -2251,7 +2336,12 @@ export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string):
   }
   if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
   if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
-  const install = execFileAsync("npm", PROOF_INSTALL_ARGS, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
+  const root = configuredDependencySeedRoot();
+  const command = root && !existsSync(nodeModules) ? process.execPath : "npm";
+  const args = root && !existsSync(nodeModules)
+    ? ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)), "prime", cwd, "--proof", "--root", root]
+    : PROOF_INSTALL_ARGS;
+  const install = execFileAsync(command, args, { cwd, env: proofInstallEnv(), timeout: 120_000, killSignal: "SIGKILL" }).then(
     () => undefined,
     () => undefined, // Best effort; the runner check below decides availability.
   );
@@ -2857,7 +2947,9 @@ export function certainHeadRefusals(
   const refusals: CertainHeadRefusal[] = [];
   for (const c of visibleCriteria([...criteria])) {
     const proof = (c.proof ?? "").trim();
-    const w = c.satisfied_by ? null : parseWhitelistedProof(proof);
+    // W1-T9860: a cited test path that moved is judged at its unique basename's file, as the reviewer judges it.
+    const resolved = c.satisfied_by ? undefined : resolveProofTestPath(proof, cwd);
+    const w = resolved === undefined ? null : parseWhitelistedProof(resolved.proof);
     if (!w) continue;
     let why: string | undefined;
     let blocking = false;
@@ -2870,7 +2962,7 @@ export function certainHeadRefusals(
         why = `"${w.label}" appears under test/ only in comments (${resolution.files.join(", ")}), never as a test name`;
       }
     } else if (w.kind === "test" && !w.nameFiltered && w.runner !== "vitest") {
-      if (!existsSync(join(cwd, w.label))) why = `the test file ${w.label} does not exist`;
+      if (!existsSync(join(cwd, w.label))) why = `the test file ${w.label} does not exist${unresolvedBasenameClause(resolved)}`;
     } else if (w.kind === "grep" && dialectGrepTargetPath(w) !== undefined) {
       try {
         if (exec(w, cwd) !== "pass") {
@@ -2884,6 +2976,16 @@ export function certainHeadRefusals(
     if (why) refusals.push({ claim: c.claim, proof, why, ...(blocking ? { blocking: true as const } : {}) });
   }
   return refusals;
+}
+
+/** Why the basename fallback did not rescue an absent cited test path, for a refusal's `why` (W1-T9860). */
+function unresolvedBasenameClause(r: ResolvedProofText | undefined): string {
+  if (r?.resolution === undefined || !("unresolved" in r.resolution)) return "";
+  return r.resolution.unresolved === "ambiguous"
+    ? `, and its basename names ${r.resolution.candidates.join(", ")} — ambiguous, not guessed`
+    : r.resolution.reason !== undefined
+      ? `, and its basename was not looked up (${r.resolution.reason})`
+      : ", and no test under test/ carries its basename";
 }
 
 /** W1-T227's command builder: swap the full {@link TEST_GLOB} in a compiled `baseArgs` for the candidates {@link
@@ -3086,8 +3188,9 @@ export function execWhitelistedProof(
   const shownArgs = withoutProofJudge(args);
   args = withProofJudge(whitelisted, args);
   delete whitelisted.failureOutput;
+  delete whitelisted.failureTail;
   const recordFailure = (status: number, stdout: string, stderr = ""): "fail" => {
-    whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, shownArgs, status, stdout, stderr);
+    recordFailureTail(whitelisted, shownArgs, status, stdout, stderr);
     return "fail";
   };
   try {
@@ -3182,14 +3285,33 @@ function outputText(value: string | Buffer | null | undefined): string {
 export const PROOF_FAILURE_EXCERPT_LINES = 40;
 export const PROOF_FAILURE_EXCERPT_CHARS = 3000;
 
+/** The redacted last {@link PROOF_FAILURE_EXCERPT_LINES} non-blank lines of stdout then stderr, capped at
+ *  {@link PROOF_FAILURE_EXCERPT_CHARS} characters and led by an omitted-lines note when it cut; `""` when
+ *  the run printed nothing. */
+export function proofFailureTail(stdout: string, stderr = ""): string {
+  return formatTail(stdout, stderr, PROOF_FAILURE_EXCERPT_LINES, PROOF_FAILURE_EXCERPT_CHARS);
+}
+
+/** Record a graded-`"fail"` run's own output on the proof: the full excerpt as `failureOutput` and the bare output
+ *  tail as `failureTail`, which the criterion verdict then carries. */
+export function recordFailureTail(
+  whitelisted: WhitelistedProof,
+  shownArgs: readonly string[],
+  status: number,
+  stdout: string,
+  stderr = "",
+): void {
+  whitelisted.failureOutput = proofFailureExcerpt(whitelisted.command, shownArgs, status, stdout, stderr);
+  const tail = proofFailureTail(stdout, stderr);
+  if (tail !== "") whitelisted.failureTail = tail;
+}
+
 /** A failed proof's bounded, reproducible record: the argv, the exit status, and the last
  *  {@link PROOF_FAILURE_EXCERPT_LINES} lines of stdout then stderr. It rides the verdict into the
  *  `review.posted` row and the reviewer-unmet fix prompt, so a fix worker sees what the reviewer saw. */
 export function proofFailureExcerpt(command: string, args: readonly string[], status: number, stdout: string, stderr = ""): string {
   const argv = [command, ...args].join(" ");
-  const lines = [stdout, stderr].join("\n").split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
-  const tail = lines.slice(-PROOF_FAILURE_EXCERPT_LINES).join("\n");
-  const kept = tail.length > PROOF_FAILURE_EXCERPT_CHARS ? `…${tail.slice(-PROOF_FAILURE_EXCERPT_CHARS)}` : tail;
+  const kept = proofFailureTail(stdout, stderr);
   return [
     `$ ${argv.length > 400 ? `${argv.slice(0, 400)}…` : argv}`,
     `exit ${status}`,
@@ -3727,6 +3849,28 @@ export function proofFormCorrection(proof: string, execCtx: ProofExecContext): s
   );
 }
 
+/** The proof a head-resolved criterion re-runs at the merge base (W1-T9860): each tree resolves the CITED path in its
+ *  own index. No fallback at the head leaves the base run exactly as it was. A base that cannot resolve the cited path
+ *  re-runs the head's resolved proof, the same as if the plan had cited the moved path itself. */
+function baseProofFor(
+  proof: string,
+  headProof: WhitelistedProof,
+  headResolution: ResolvedProofText,
+  baseCwd: string,
+  target: SuiteRegistryTarget | undefined,
+): WhitelistedProof {
+  if (headResolution.note === undefined) return headProof;
+  const atBase = resolveProofTestPath(proof, baseCwd, { target });
+  if (atBase.resolution === undefined || !("path" in atBase.resolution)) return headProof;
+  return parseWhitelistedProof(atBase.proof, target) ?? headProof;
+}
+
+/** The note for a cited test path that is absent and whose basename names two files: never guessed, said aloud. */
+function ambiguousResolutionNote(r: ResolvedProofText): string | undefined {
+  if (r.resolution === undefined || !("unresolved" in r.resolution) || r.resolution.unresolved !== "ambiguous") return undefined;
+  return `cited test path ${r.cited} is absent and its basename names ${r.resolution.candidates.join(", ")} — ambiguous, not guessed`;
+}
+
 export function judgeCriterion(
   criterion: AcceptanceCriterion,
   reportTokens: Set<string>,
@@ -3841,11 +3985,16 @@ export function judgeCriterion(
   let proofExec: ProofExecOutcome = "not_executable";
   let loadError: string | undefined;
   let proofFailureOutput: string | undefined;
+  let failureTail: string | undefined;
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof that never PARSED
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
+  // W1-T9860: a cited test path absent at the head is resolved by its unique basename, and the verdict says so.
+  let resolutionNote: string | undefined;
   if (execCtx) {
-    const whitelisted = parseWhitelistedProof(criterion.proof, execCtx.target);
+    const headResolution = resolveProofTestPath(criterion.proof, execCtx.cwd, { target: execCtx.target });
+    resolutionNote = headResolution.note ?? ambiguousResolutionNote(headResolution);
+    const whitelisted = parseWhitelistedProof(headResolution.proof, execCtx.target);
     if (whitelisted) {
       if (whitelisted.nameFiltered && whitelisted.runner === "vitest") {
         whitelisted.diffTestFiles = [...(execCtx.diffFiles ?? [])].filter((file) =>
@@ -3914,7 +4063,7 @@ export function judgeCriterion(
               let missingExportNote: string | undefined;
               const baseOutcome =
                 execCtx.baseCwd !== undefined
-                  ? classifyBaseProofOutcome(whitelisted, exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
+                  ? classifyBaseProofOutcome(baseProofFor(criterion.proof, whitelisted, headResolution, execCtx.baseCwd, execCtx.target), exec, execCtx.baseCwd, execCtx.baseUnreadablePaths, execCtx.baseIsCheckout, execCtx.addedTestFiles, execCtx.cwd, (note) => {
                       missingExportNote = note;
                     })
                   : undefined;
@@ -4032,6 +4181,7 @@ export function judgeCriterion(
             met = false;
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
             proofFailureOutput = whitelisted.failureOutput;
+            failureTail = whitelisted.failureTail;
           }
         } catch (e) {
           if (e instanceof ProofCannotLoadError) {
@@ -4108,6 +4258,8 @@ export function judgeCriterion(
     reason = `${keywordReason} — NOTE: ${PROOF_FORM_ADVISORY}: ${proofForm}; keyword floor applied`;
   }
 
+  if (resolutionNote !== undefined) reason = `${reason} — NOTE: ${resolutionNote}`;
+
   // W1-T178 (verdict stability): capture the DETERMINISTIC floor's own verdict — keyword coverage, overridden by
   // whitelisted execution where applicable — BEFORE the semantic layer below can downgrade it.
   const floorMet = met;
@@ -4133,7 +4285,8 @@ export function judgeCriterion(
 
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
-    ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}), floorMet, holdout: !!criterion.holdout,
+    ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
+    ...(proofExec === "executed_fail" && failureTail ? { failureTail } : {}), floorMet, holdout: !!criterion.holdout,
   };
 }
 
@@ -5573,7 +5726,7 @@ export async function judgeReviewAsync(
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
   const unsandboxedBefore = unsandboxedProofSpawns;
   type Observation =
-    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string }
+    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string }
     | { error: unknown };
   const observed = new Map<string, Observation>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
@@ -5591,6 +5744,7 @@ export async function judgeReviewAsync(
         whitelisted.matchedLines = prior.matchedLines;
         whitelisted.loadError = prior.loadError;
         whitelisted.failureOutput = prior.failureOutput;
+        whitelisted.failureTail = prior.failureTail;
         return prior.outcome;
       }
       pending.set(key, { whitelisted, cwd });
@@ -5603,6 +5757,7 @@ export async function judgeReviewAsync(
         const outcome = await asyncExec(whitelisted, cwd);
         observed.set(key, {
           outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError, failureOutput: whitelisted.failureOutput,
+          failureTail: whitelisted.failureTail,
         });
       } catch (error) {
         // Preserve this exact proof error for the next deterministic verdict fold.
@@ -5739,6 +5894,41 @@ export function reviewLedgerKeyFor(taskId: string | undefined, prNumber: number)
  *  `armLedgerLinesForPr` keeps it. This is also the transition: rows already written as `unfiled` carry their url. */
 export function reviewRowNamesPr(line: Record<string, unknown>, key: string | undefined, prUrl: string): boolean {
   return typeof line.pr_url === "string" ? line.pr_url === prUrl : key !== undefined && line.task_id === key;
+}
+
+/** W1-T9681: the newest `review.posted` row {@link reviewRowNamesPr} matches with a verdict — by URL, so a plan filing or
+ *  hand PR with no task id finds its own. The live file answers first; on a miss the archive union does. */
+export async function priorPostedReviewRow(
+  ledgerPath: string,
+  taskId: string | undefined,
+  prUrl: string,
+): Promise<Record<string, unknown> | undefined> {
+  const names = (line: Record<string, unknown>): boolean =>
+    line.step === "review.posted" && reviewRowNamesPr(line, taskId, prUrl) && Boolean(line.decision_verdict);
+  const live = readLiveLedgerRecords(ledgerPath).filter(names).at(-1);
+  if (live) return live;
+  const key = taskId === undefined ? "" : `|"task_id":${JSON.stringify(taskId)}`;
+  const pattern = new RegExp(`"pr_url":${JSON.stringify(prUrl)}${key}`.replace(/[.*+?^${}()[\]\\]/g, "\\$&"));
+  const union = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { pattern, step: "review.posted", requireArchives: true, refuseIncomplete: true });
+  return union.rawLines.flatMap((raw) => {
+    try {
+      return [JSON.parse(raw) as Record<string, unknown>];
+    } catch {
+      return []; // a torn archived row names no verdict; the union reports it, this lookup skips it
+    }
+  }).filter(names).at(-1);
+}
+
+/** W1-T9681: the one reuse fact a discriminate-only review could not read, so each fallback row names its cause. */
+export function missingReviewReuseFact(
+  prior: ReviewVerdict | undefined,
+  inputs: { currentOwnDiffDigest?: unknown; currentMergeBaseSha?: unknown },
+): string | undefined {
+  if (!prior) return "no-prior-verdict";
+  if (prior.state !== "success" && prior.state !== "failure") return "prior-not-terminal";
+  if (!Array.isArray(prior.criteria)) return "criteria-unreadable";
+  if (inputs.currentOwnDiffDigest === undefined) return "own-diff-digest-unread";
+  return inputs.currentMergeBaseSha === undefined ? "merge-base-unread" : undefined;
 }
 
 /** Recover the most recent `review.posted` verdict for `taskId` from ledger lines, last one wins — the same scanning
@@ -6616,6 +6806,25 @@ export function postedArmFactsFromLedger(
 const STATUS_DESC_MAX = 140;
 const FAIL_PREFIX = "remudero-review: FAIL — ";
 
+/** W1-T9674: the failed step an UNKNOWN ownership reason names, short enough for the 140-character status. */
+export function unknownReservationStep(reason: string): string {
+  const timedOut = /timed out/.test(reason) ? " (timed out)" : "";
+  const step: Record<string, string> = {
+    "head-ref-unavailable": "no head ref", "head-checkout-unavailable": "no head checkout",
+    "base-unreadable": "base read timed out", "baseline-unreadable": "baseline read timed out",
+  };
+  const verb = /^(ls-remote|fetch|log) failed\b/.exec(reason);
+  if (verb) return `${verb[1] === "log" ? "anchor log" : verb[1]} failed${timedOut}`;
+  return step[reason.split(":")[0]] ?? (reason.trim() || "no reason recorded");
+}
+
+const clipTo = (text: string, room: number): string => (text.length > room ? `${text.slice(0, Math.max(1, room - 1))}…` : text);
+
+/** W1-T9674: each UNKNOWN finding's id and full reason, for the `review.post_refused` row a withheld verdict writes. */
+export function unknownReservationReads(findings: readonly TaskIdOwnershipFinding[] | undefined): { id: string; reason: string }[] {
+  return (findings ?? []).flatMap((f) => (f.kind === "unknown" ? [{ id: f.id, reason: f.reason }] : []));
+}
+
 /** Build a failure summary that TEACHES: it NAMES the first unmet criterion rather than a bare count (the W1-T2/#18
  * refusal said "1 criterion/criteria unmet" and cost a human round-trip), truncating with an ellipsis and `(+N more)`
  * inside the status-description limit, with the full list in the `review.posted` line and the PR review comment.
@@ -6662,10 +6871,12 @@ export function failSummary(
   const owned = idOwnership.find((f) => f.kind !== "unknown") ?? idOwnership[0];
   if (owned) {
     const more = idOwnership.length > 1 ? ` (+${idOwnership.length - 1} more)` : "";
-    if (owned.kind !== "foreign") {
-      const why = owned.kind === "unreserved" ? "is not reserved — mint it with rmd next-task-id --prefix" : "reservation unreadable (UNKNOWN) — verdict withheld";
-      return `${FAIL_PREFIX}id ${owned.id} ${why}${more}`.slice(0, STATUS_DESC_MAX);
+    if (owned.kind === "unknown") {
+      const head = `${FAIL_PREFIX}id ${owned.id} reservation unreadable (UNKNOWN): `;
+      const tail = ` — verdict withheld${more}`;
+      return `${head}${clipTo(unknownReservationStep(owned.reason), STATUS_DESC_MAX - head.length - tail.length)}${tail}`;
     }
+    if (owned.kind === "unreserved") return `${FAIL_PREFIX}id ${owned.id} is not reserved — mint it with rmd next-task-id --prefix${more}`.slice(0, STATUS_DESC_MAX);
     const tail = `, not this PR — renumber${more}`;
     const room = STATUS_DESC_MAX - `${FAIL_PREFIX}id ${owned.id} is reserved by ${tail}`.length;
     const holder = owned.holder.length > room ? `${owned.holder.slice(0, Math.max(1, room - 1))}…` : owned.holder;
@@ -7852,21 +8063,17 @@ export function gitBlobRunnerAsync(repoDir: string, opts: { timeoutMs?: number; 
   const timeoutMs = opts.timeoutMs ?? REVIEW_BASE_READ_GIT_TIMEOUT_MS;
   return (args, stdin) =>
     new Promise((resolve, reject) => {
-      let timedOut = false;
       const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout, stderr) => {
-        clearTimeout(timer);
+        bound.cancel();
+        // W1-T9651: a git stopped at its bound is a timeout even when it exits 0 after the signal.
+        if (bound.timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
         if (!err) return resolve(stdout);
-        if (timedOut) return reject(new ReviewGitTimeout(`git ${args[0]} timed out after ${timeoutMs}ms and was killed`));
         reject(new Error(`git ${args[0]} failed: ${stderr.trim() || err.message}`));
       });
       // A git that exits before reading stdin makes the write EPIPE; its exit status above is the outcome.
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(stdin ?? "");
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killAfterGrace(child, opts.graceMs);
-      }, timeoutMs);
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
     });
 }
 
@@ -8389,6 +8596,8 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   "^src/lib/review\\.ts$",
   "^src/lib/security-merge-admission\\.ts$",
   "^\\.github/workflows/",
+  // Semgrep source/engine trust policy controls which artifacts the security gate accepts.
+  "^\\.github/semgrep/source-build-policy\\.json$",
   "^scripts/[^/]*-ratchet\\.mjs$",
   "^scripts/diff-coverage\\.mjs$",
   "^scripts/[^/]*-baseline\\.json$",
@@ -8682,6 +8891,9 @@ export const ENFORCEMENT_DATA_EXCLUSIONS: Readonly<Record<string, string>> = {
     "recorded decision entries — provenance the DECISIONS floor validates, not a gate's own thresholds",
   "plan/tasks.yaml":
     "the task monolith, the same paperwork as a shard; denying it the carve-out would tax every filing",
+  "plan/seeds/inbox-recommendations-2026-10-13.json":
+    "W1-T8950's operator-session recommendations, imported once as the inbox items' suggested decisions; " +
+    "no gate reads them, and every action they suggest still goes through the inbox route's own tier and auth",
 };
 
 /** The enforcement-data paths a changed-file list touches, in diff order (W1-T427) — the OBSERVED EVIDENCE named on

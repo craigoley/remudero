@@ -1,0 +1,90 @@
+- id: W1-T9800
+  title: "A WATCHDOG TICK THAT NEVER EXITS IS KILLED AT A DEADLINE, NOT WAITED ON FOREVER — rmd-console-fleet-watchdog.service sat in activating from 2026-10-13 12:16:45Z until a hand kill at 2026-10-16 11:29:40Z (~71 h): its deploy-run child wrote deploy.skip at 12:17:42Z and never exited, the oneshot has no TimeoutStartSec, so its 5-minute timer never fired again and console got no deploy tick, unit converge or recycle for three days"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, how long one host watchdog tick may run before it is ended and named; the tick's decisions are unchanged
+  band_meaning: blast-radius
+  origin: 'operator session 2026-10-16: the console watchdog oneshot hung ~71 h until the operator ran systemctl kill at ~11:29Z; coordinator brief batch1016 item 1'
+  plan_refs: [W1-T2877, W1-T3245, W1-T3269, W1-T5688, W1-T6249, W1-T9409, W1-T9645]
+  files:
+    - deploy/install-host-units.sh
+    - test/a-watchdog-tick-that-never-exits-is-killed-at-a-deadline.test.ts
+    - test/host-units-install.test.ts
+    - test/fixtures/azure-host-units/rmd-fleet-watchdog.service
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 on the Azure host (read-only: journalctl -u rmd-console-fleet-watchdog.service,
+    systemctl show, the console ledger /mnt/rmd/remudero-console-state/state):
+    - 12:16:45Z 10-13: "Starting rmd-console-fleet-watchdog.service". 12:17:20Z: "remudero-console-daemon healthy --
+      asking the supervisor whether a RECYCLE is due." The unit's journal is then silent until 11:29:40Z 10-16:
+      "Sent signal SIGTERM to main process 38095 (bash) on client request", SIGTERM to 56139 and 56180
+      (MainThread), "Failed with result 'signal'", "Consumed 18.278s CPU time, 799.7M memory peak".
+    - The console ledger holds `deploy.skip` at 2026-10-13T12:17:42.402Z with actor_pid 56180, run_id
+      DEPLOY-1791893862402 ("daemon running stale code ... the recycle tick does not restart on mount
+      staleness"). The pid that wrote the tick's terminal decision is the pid systemd killed 71 h later: deploy-run
+      DECIDED in 22 s and then never exited.
+    - Process chain reported by the operator at kill time: bash -> node -> node -> esbuild ZOMBIE.
+    - `systemctl show -p TimeoutStartUSec`: infinity for rmd-fleet-watchdog, rmd-site-fleet-watchdog and
+      rmd-console-fleet-watchdog alike.
+    - Effects while hung: no console deploy tick; console's daemon-install stayed at f734801db; a DRIFTED
+      /usr/local/bin/rmd-scratch-mounts rendered. The first tick after the kill (11:29:40Z) converged the units
+      ("units DRIFTED at ec0eb2ce2 -- converging") and deployed (deploy.ok at 11:32:46Z) in 3 min 6 s.
+    - Tick durations, journal Starting -> Finished/Failed, 2026-10-09 00:00Z to 2026-10-16 11:40Z: core 1,005
+      ticks p50 31 s, p99 728 s, max 3,158 s; site 1,032 ticks p50 30 s, p99 361 s, max 1,582 s; console 191 ticks
+      p50 27 s, p99 1,970 s, max 256,375 s (the hang). Legitimate ticks reach ~53 min (recycles with a drain wait;
+      deploy.recycle_wait_derived reported wait_s 1802 on 10-16).
+    READ at origin/main ec0eb2ce2 (deploy/install-host-units.sh; symbols, not lines):
+    - render_watchdog_service renders `Type=oneshot` with no TimeoutStartSec. All three instances render it (the
+      UNITS table names `${UNIT_DIR}/${WATCHDOG_SERVICE_NAME}:render_watchdog_service`; the registry rows only
+      rename it), so core, site and console share the defect. render_acr_login_service already carries
+      `TimeoutStartSec=5min`; the watchdog does not.
+    - render_watchdog_timer uses `OnUnitActiveSec=5min`. A oneshot still activating never re-arms it, so one hung
+      tick silences every later tick of that instance.
+    - The launcher bounds its other node steps with `timeout 120` (live_edits_ladder, read_progress_verdict,
+      host_alert) or `timeout 60`/`30`, but the `"$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only` call in the
+      healthy-daemon arm has no bound. Its output is captured by command substitution, so a deploy-run that
+      decides and then hangs prints NOTHING to the journal; the decision is visible only in the ledger.
+    INFERRED, not proven: the deploy-run node process blocked synchronously after its decision. A zombie child
+    means its parent never reaped it, and node reaps children on its event loop, so the loop was not turning.
+    The builder should look for the blocking call after the deploy.skip write (a sync wait, a lock, a spawnSync).
+    That root cause is a separate fix; this task makes ANY such hang bounded and named.
+  design: |
+    1. Bound the unit: render_watchdog_service carries `TimeoutStartSec=<value>` (and the matching kill mode
+       systemd needs to end the whole tick cgroup), for every instance. Systemd then ends a hung tick, logs "start
+       operation timed out", and the timer re-arms. The captured Azure fixture and test/host-units-install.test.ts
+       move with the render.
+    2. Bound the step: the launcher runs deploy-run under `timeout -k <grace> <deadline>`, the same
+       `command -v timeout` pattern its other node steps use. On exit 124 or 137 it prints one journal line naming
+       the step and the deadline ("deploy-run -- no exit after <N>s; killed"), appends
+       `<ts> watchdog-step-timeout step=deploy-run deadline_s=<N>` to REVIVAL_LOG beside the existing watchdog-*
+       rows, and raises the existing deploy-run-problem host alert. Before killing, it prints the stuck tree's
+       pid/ppid/stat/comm (a `Z` stat names the zombie) so the next hang carries its own evidence. The step
+       deadline sits under the unit timeout, so the named step line is written before systemd's backstop.
+    3. A deploy-run that wrote its decision row and then hangs is the shape to test: a stub `bin/rmd` that prints
+       a deploy.skip line and sleeps.
+    4. OPERATOR DECISIONS: the unit TimeoutStartSec and the deploy-run deadline. Both must exceed the longest
+       legitimate tick (measured max 3,158 s on core, a recycle with its drain wait). The PR proposes values from
+       the journal distribution above, names them as operator decisions, and adds no env var or threshold beyond
+       those two.
+    5. Proof in production: after the fix's install, every watchdog unit reports a finite TimeoutStartUSec, and
+       no tick runs past the bound (journal Starting -> Finished).
+    Tests go in test/a-watchdog-tick-that-never-exits-is-killed-at-a-deadline.test.ts, titled verbatim as in the
+    proofs.
+  acceptance:
+    - claim: "the rendered watchdog service of core, site and console each carries a finite TimeoutStartSec"
+      proof: 'grep: test("W1-T9800: every instance watchdog service carries a bounded start timeout" in test/a-watchdog-tick-that-never-exits-is-killed-at-a-deadline.test.ts'
+    - claim: "a deploy-run that wrote its decision and never exits is killed at its deadline, and the tick names the step in the journal and REVIVAL_LOG"
+      proof: 'grep: test("W1-T9800: a deploy-run that never exits is killed at its deadline and named" in test/a-watchdog-tick-that-never-exits-is-killed-at-a-deadline.test.ts'
+    - claim: "a timed-out deploy-run raises the deploy-run-problem host alert instead of passing as a clean tick"
+      proof: 'grep: test("W1-T9800: a timed-out deploy-run raises the deploy-run-problem alert" in test/a-watchdog-tick-that-never-exits-is-killed-at-a-deadline.test.ts'
+  falsifier: |
+    On origin/main, render the units for core, site and console: no watchdog service has a TimeoutStartSec line, so
+    the first test fails. Run the rendered launcher's healthy-daemon arm with a stub bin/rmd whose deploy-run
+    prints a deploy.skip line and sleeps: the launcher never returns, so the second test fails on its own timeout
+    and no step line or REVIVAL_LOG row exists; no host alert is raised, so the third fails.

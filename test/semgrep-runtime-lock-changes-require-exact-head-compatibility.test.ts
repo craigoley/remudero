@@ -1,0 +1,366 @@
+import assert from 'node:assert/strict';
+import {mkdtempSync,readFileSync,rmSync,mkdirSync,symlinkSync,unlinkSync,writeFileSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {test} from 'node:test';
+import {parse} from 'yaml';
+import {ghShim} from './helpers/gh-shim.js';
+import {gitRepo} from './helpers/git-repo.js';
+// @ts-expect-error — shared trusted-metadata companion is plain ESM.
+import {readSecurityMergeDecision,readSecurityMergeDecisionSync,publishSecurityMergeDecision} from '../src/lib/code-scanning-merge-adapter.mjs';
+// @ts-expect-error — producer is plain ESM outside tsconfig roots.
+import {runSecurityMergeProducer} from '../scripts/security-merge-producer.mjs';
+// @ts-expect-error — metadata companion is plain ESM outside tsconfig roots.
+import {semgrepRuntimeMetadataRequests} from '../src/lib/semgrep-runtime-merge-policy.mjs';
+// @ts-expect-error — shared read-only CLI argument mapping is plain ESM.
+import {securityMetadataGhArgs} from '../src/lib/security-metadata-gh-args.mjs';
+
+const head='a'.repeat(40),base='b'.repeat(40),blob='c'.repeat(40),foreign='d'.repeat(40);
+const workflow='.github/workflows/semgrep-runtime-compatibility.yml',context='semgrep-runtime-compatibility';
+const auditUnitStep='Test Semgrep artifact audit policy';
+const prefix='repos/craigoley/remudero',prPath=prefix+'/pulls/11468';
+const target={owner:'craigoley',repo:'remudero',prNumber:11468,expectedHead:head};
+function fixture(){
+ const pr:any={state:'open',head:{sha:head},base:{sha:base,ref:'main',repo:{full_name:'craigoley/remudero'}},changed_files:1};
+ const files:any[]=[{filename:'.github/semgrep/requirements.txt'}];
+ const security:any={id:11,name:'CodeQL',head_sha:head,status:'completed',conclusion:'success',
+  app:{id:57789,slug:'github-advanced-security',owner:{login:'github'}},
+  output:{title:'No new alerts in code changed by this pull request',summary:'[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A11468+tool%3ACodeQL+is%3Aopen).'}};
+ const runtime:any={id:22,name:context,head_sha:head,status:'completed',conclusion:'success',
+  app:{id:15368,slug:'github-actions',owner:{login:'github'}},check_suite:{id:33},
+  details_url:'https://github.com/craigoley/remudero/actions/runs/44/job/55'};
+ const checks:any[]=[security,runtime];
+ const run:any={id:44,node_id:'WFR_runtime_fixture_44',repository:{full_name:'craigoley/remudero'},event:'pull_request',head_sha:head,
+  path:workflow,workflow_id:66,run_attempt:1,check_suite_id:33,status:'completed',conclusion:'success',
+  pull_requests:[{number:11468,head:{sha:head},base:{sha:base,repo:{url:'https://api.github.com/repos/craigoley/remudero'}}}]};
+ const job:any={id:55,run_id:44,run_attempt:1,head_sha:head,name:context,
+  check_run_url:'https://api.github.com/'+prefix+'/check-runs/22',status:'completed',conclusion:'success',
+  steps:['Detect runtime lock changes','Set up pinned Python','Create neutral private audit root',
+   auditUnitStep,
+   'Download original artifacts without candidate execution','Audit original artifact metadata before candidate execution',
+   'Build only approved Peewee after original audit','Audit built Peewee metadata and destinations before install',
+   'Install only audited hash-bound wheel set','Verify installed pip closure and scanner bootstrap additionally']
+   .map((name,i)=>({name,number:i+1,status:'completed',conclusion:'success'}))};
+ const trusted:any={type:'file',path:workflow,sha:blob,size:4096},proposed:any={...trusted};
+ const executed:any={data:{node:{__typename:'WorkflowRun',url:'https://github.com/craigoley/remudero/actions/runs/44',runAttempt:1,file:{path:workflow,
+  repositoryName:'craigoley/remudero',repositoryFileUrl:'https://github.com/craigoley/remudero/blob/'+foreign+'/'+workflow,
+  run:{url:'https://github.com/craigoley/remudero/actions/runs/44',runAttempt:1}}}}};
+ const reads:string[]=[];
+ const read=(path:string):any=>{
+  reads.push(path);
+  if(path===prPath)return structuredClone(pr);
+  if(path===prPath+'/files?per_page=100&page=1')return files;
+  if(path===prefix+'/commits/'+head+'/check-runs?filter=all&per_page=100&page=1')return {total_count:checks.length,check_runs:checks};
+  if(path===prefix+'/actions/runs/44')return run;
+  if(path===prefix+'/actions/jobs/55')return job;
+  if(path==='security-workflow-source:'+run.node_id)return executed;
+  if(path===prefix+'/contents/'+workflow+'?ref='+base)return trusted;
+  if(path===prefix+'/contents/'+workflow+'?ref='+head)return proposed;
+  if(path===prefix+'/contents/'+workflow+'?ref='+foreign)return trusted;
+  throw Error('unexpected metadata read: '+path);
+ };
+ return {pr,files,security,runtime,checks,run,job,trusted,proposed,executed,reads,read};
+}
+
+test('runtime metadata helper has an explicit unchanged-lock fast path and refuses incomplete identity',()=>{
+ assert.deepEqual(semgrepRuntimeMetadataRequests({files:[{filename:'docs/a.md'}]}).next(),
+  {value:{state:'not-applicable',mergeAllowed:true,reason:'semgrep-runtime-lock-unchanged'},done:true});
+ for(const input of [{headSha:foreign,baseSha:base,prNumber:0,checksComplete:true,checks:[]},
+  {headSha:'invalid',baseSha:base,prNumber:11468,checksComplete:true,checks:[]},
+  {headSha:head,baseSha:base,prNumber:11468,checksComplete:false,checks:[]},
+  {headSha:head,baseSha:base,prNumber:11468,checksComplete:true,checks:null}]){
+  const row=semgrepRuntimeMetadataRequests({...input,files:[{filename:'.github/semgrep/requirements.txt'}]}).next();
+  assert.equal(row.done,true);assert.equal(row.value.mergeAllowed,false);
+ }
+});
+
+test('workflow-source metadata mapping can issue only its fixed read-only query and preserves ordinary REST reads',()=>{
+ assert.deepEqual(securityMetadataGhArgs('repos/craigoley/remudero/pulls/11468'),['api','repos/craigoley/remudero/pulls/11468']);
+ const args=securityMetadataGhArgs('security-workflow-source:WFR_fixture_123');
+ assert.deepEqual(args.slice(0,3),['api','graphql','-f']);assert.ok(args[3].startsWith('query=query{node(id:"WFR_fixture_123")'));
+ assert.equal(args[3].includes('mutation'),false);assert.equal(args[3].includes('databaseId'),false);
+ assert.ok(args[3].includes('repositoryFileUrl'));
+ for(const input of [null,'security-workflow-source','security-workflow-source:short','security-workflow-source:WFR_12345\n',
+  'security-workflow-source:WFR_bad"}mutation{x}','security-workflow-source:'+('x'.repeat(201))]){
+  assert.throws(()=>securityMetadataGhArgs(input));
+ }
+});
+
+test('runtime lock changes require trusted workflow bytes and exact-head run/job closure in both merge effectors',async()=>{
+ const f=fixture(),sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
+ assert.deepEqual(sync,asyncResult);
+ assert.deepEqual(sync.decision,{state:'safe',mergeAllowed:true,reason:'trusted-exact-head-security-and-runtime-compatible'});
+ assert.equal(f.reads.filter(p=>p.includes('/actions/runs/')).length,2);
+ assert.equal(f.reads.filter(p=>p.includes('/contents/')).length,6);
+ for(const filename of ['.github/semgrep/requirements.txt','.github/semgrep/build-requirements.txt']){
+  const renamed=fixture();renamed.files[0]={filename:'docs/retired.txt',previous_filename:filename};renamed.checks.pop();
+  assert.equal(readSecurityMergeDecisionSync(target,renamed.read).decision.mergeAllowed,false);
+ }
+});
+
+test('unchanged runtime locks preserve existing CodeQL and advisory findings policy without extra Actions reads',()=>{
+ for(const filename of ['src/product.ts','docs/runtime.md','.github/workflows/semgrep.yml']){
+  const f=fixture();f.files[0]={filename};f.checks.pop();
+  const result=readSecurityMergeDecisionSync(target,f.read);
+  assert.equal(result.decision.mergeAllowed,true);
+  assert.equal(f.reads.some(p=>p.includes('/actions/')||p.includes('/contents/')),false);
+ }
+ const f=fixture();f.checks.pop();f.files[0]={filename:'docs/runtime.md',previous_filename:'src/old.ts'};
+ assert.equal(readSecurityMergeDecisionSync(target,f.read).decision.state,'safe');
+});
+
+const mutations:[string,(f:ReturnType<typeof fixture>)=>void][]=[
+ ['missing check',f=>{f.checks.pop();}],['old-head success',f=>{f.runtime.head_sha=foreign;}],
+ ['wrong app ID',f=>{f.runtime.app.id=1;}],['wrong app slug',f=>{f.runtime.app.slug='attacker';}],
+ ['wrong app owner',f=>{f.runtime.app.owner.login='attacker';}],['pending',f=>{f.runtime.status='in_progress';}],
+ ['invalid generation',f=>{f.runtime.id=0;}],['duplicate generation',f=>{f.checks.push({...f.runtime});}],
+ ['newer pending generation',f=>{f.checks.push({...f.runtime,id:23,status:'queued'});}],
+ ['foreign run link',f=>{f.runtime.details_url='https://github.com/attacker/repo/actions/runs/44/job/55';}],
+ ['missing suite',f=>{delete f.runtime.check_suite;}],['unsafe numeric run',f=>{f.runtime.details_url='https://github.com/craigoley/remudero/actions/runs/99999999999999999/job/55';}],
+ ['wrong run ID',f=>{f.run.id=45;}],['foreign run repo',f=>{f.run.repository.full_name='attacker/repo';}],
+ ['privileged trigger',f=>{f.run.event='pull_request_target';}],['wrong run head',f=>{f.run.head_sha=foreign;}],
+ ['same-name other workflow',f=>{f.run.path='.github/workflows/spoof.yml';}],['invalid workflow ID',f=>{f.run.workflow_id=0;}],
+ ['missing run attempt',f=>{delete f.run.run_attempt;}],['wrong suite',f=>{f.run.check_suite_id=34;}],
+ ['wrong job ID',f=>{f.job.id=56;}],['wrong job run',f=>{f.job.run_id=45;}],
+ ['old job attempt',f=>{f.job.run_attempt=2;}],['wrong job head',f=>{f.job.head_sha=foreign;}],
+ ['wrong job name',f=>{f.job.name='Scan';}],['wrong check link',f=>{f.job.check_run_url='https://api.github.com/'+prefix+'/check-runs/23';}],
+ ['unfinished job',f=>{f.job.status='in_progress';}],['job conclusion mismatch',f=>{f.job.conclusion='failure';}],
+ ['changed workflow bytes',f=>{f.proposed.sha=foreign;}],['changed workflow size',f=>{f.proposed.size++;}],
+ ['workflow symlink',f=>{f.proposed.type='symlink';}],['missing trusted workflow',f=>{f.trusted.sha='';}],
+ ['wrong content path',f=>{f.trusted.path='other.yml';}],['oversized workflow',f=>{f.trusted.size=f.proposed.size=65537;}],
+ ['empty workflow',f=>{f.trusted.size=f.proposed.size=0;}],['unclosed run',f=>{f.run.status='in_progress';}],
+ ['run conclusion mismatch',f=>{f.run.conclusion='failure';}],['skipped check',f=>{f.runtime.conclusion=f.job.conclusion=f.run.conclusion='skipped';}],
+ ['missing base identity',f=>{delete f.pr.base.sha;}],
+ ['other PR',f=>{f.run.pull_requests[0].number++;}],
+ ['old associated head',f=>{f.run.pull_requests[0].head.sha=foreign;}],['missing PR association',f=>{f.run.pull_requests=[];}],
+ ['ambiguous PR association',f=>{f.run.pull_requests.push(f.run.pull_requests[0]);}],
+ ['foreign associated base',f=>{f.run.pull_requests[0].base.repo.url='https://api.github.com/repos/attacker/repo';}],
+ ['missing steps',f=>{delete f.job.steps;}],['installation skipped',f=>{f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set').conclusion='skipped';}],
+ ['duplicate installation step',f=>{f.job.steps.push({...f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set')});}],
+ ['unfinished installation step',f=>{f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set').status='in_progress';}],
+ ['invalid step number',f=>{f.job.steps.find((s:any)=>s.name==='Install only audited hash-bound wheel set').number=0;}],
+ ['generation bound',f=>{for(let i=0;i<8;i++)f.checks.push({...f.runtime,id:30+i});}],
+ ['missing workflow node',f=>{delete f.run.node_id;}],['malformed workflow node',f=>{f.run.node_id='bad" query';}],
+ ['GraphQL errors',f=>{(f.executed as any).errors=[{message:'unavailable'}];}],
+ ['wrong source run',f=>{f.executed.data.node.url='https://github.com/craigoley/remudero/actions/runs/45';}],['wrong source attempt',f=>{f.executed.data.node.runAttempt=2;}],
+ ['wrong source type',f=>{f.executed.data.node.__typename='Commit';}],['wrong source path',f=>{f.executed.data.node.file.path='other.yml';}],
+ ['wrong source repo',f=>{f.executed.data.node.file.repositoryName='attacker/repo';}],
+ ['mutable source URL',f=>{f.executed.data.node.file.repositoryFileUrl='https://github.com/craigoley/remudero/blob/main/'+workflow;}],
+ ['wrong source parent run',f=>{f.executed.data.node.file.run.url='https://github.com/craigoley/remudero/actions/runs/45';}],
+ ['wrong source parent attempt',f=>{f.executed.data.node.file.run.runAttempt=2;}],
+];
+for(const [label,mutate] of mutations)test('runtime compatibility refuses '+label,()=>{
+ const f=fixture();mutate(f);const result=readSecurityMergeDecisionSync(target,f.read);
+ assert.equal(result.decision.state,'unknown');assert.equal(result.decision.mergeAllowed,false);
+});
+
+for(const name of ['Audit original artifact metadata before candidate execution',
+ 'Audit built Peewee metadata and destinations before install']){
+ for(const disposition of ['missing','skipped','duplicate'])test('runtime compatibility independently requires '+name+' '+disposition,()=>{
+  const f=fixture(),step=f.job.steps.find((s:any)=>s.name===name);
+  if(disposition==='missing')f.job.steps=f.job.steps.filter((s:any)=>s.name!==name);
+  else if(disposition==='skipped')step.conclusion='skipped';
+  else f.job.steps.push({...step});
+  assert.deepEqual(readSecurityMergeDecisionSync(target,f.read).decision,
+   {state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
+ });
+}
+
+test('artifact audit policy unit success is required in the trusted exact-head job for both merge effectors',async()=>{
+ const f=fixture(),steps=f.job.steps.filter((s:any)=>s.name===auditUnitStep);
+ assert.equal(steps.length,1);
+ assert.equal(steps[0].status,'completed');assert.equal(steps[0].conclusion,'success');
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
+ assert.deepEqual(sync,asyncResult);
+ assert.deepEqual(sync.decision,{state:'safe',mergeAllowed:true,reason:'trusted-exact-head-security-and-runtime-compatible'});
+});
+
+const auditUnitMutations:[string,(f:ReturnType<typeof fixture>,step:any)=>void][]=[
+ ['missing',(f)=>{f.job.steps=f.job.steps.filter((s:any)=>s.name!==auditUnitStep);}],
+ ['skipped',(_f,step)=>{step.conclusion='skipped';}],
+ ['duplicate',(f,step)=>{f.job.steps.push({...step});}],
+ ['duplicate with failure',(f,step)=>{f.job.steps.push({...step,conclusion:'failure'});}],
+ ['failure',(_f,step)=>{step.conclusion='failure';}],
+ ['error',(_f,step)=>{step.conclusion='error';}],
+ ['cancelled',(_f,step)=>{step.conclusion='cancelled';}],
+ ['neutral',(_f,step)=>{step.conclusion='neutral';}],
+ ['missing conclusion',(_f,step)=>{delete step.conclusion;}],
+ ['queued',(_f,step)=>{step.status='queued';}],
+ ['in progress',(_f,step)=>{step.status='in_progress';}],
+ ['missing status',(_f,step)=>{delete step.status;}],
+ ['zero step number',(_f,step)=>{step.number=0;}],
+ ['fractional step number',(_f,step)=>{step.number=1.5;}],
+ ['missing step number',(_f,step)=>{delete step.number;}],
+];
+for(const [label,mutate] of auditUnitMutations)test('artifact audit policy unit metadata refuses '+label+' despite a green job',async()=>{
+ const f=fixture(),step=f.job.steps.find((s:any)=>s.name===auditUnitStep);mutate(f,step);
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
+ assert.deepEqual(sync,asyncResult);
+ assert.deepEqual(sync.decision,{state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
+});
+
+test('a successful audit policy check outside the trusted runtime job cannot replace the mandatory unit step',async()=>{
+ const f=fixture();f.job.steps=f.job.steps.filter((s:any)=>s.name!==auditUnitStep);
+ f.checks.push({...f.runtime,id:23,name:auditUnitStep});
+ const sync=readSecurityMergeDecisionSync(target,f.read),asyncResult=await readSecurityMergeDecision(target,async (p:string)=>f.read(p));
+ assert.deepEqual(sync,asyncResult);
+ assert.deepEqual(sync.decision,{state:'unknown',mergeAllowed:false,reason:'semgrep-runtime-required-step-not-successful'});
+});
+
+test('a genuine incompatible runtime is blocked but compatibility does not waive security alerts',()=>{
+ const f=fixture();f.runtime.conclusion=f.run.conclusion=f.job.conclusion='failure';
+ assert.deepEqual(readSecurityMergeDecisionSync(target,f.read).decision,
+  {state:'blocked',mergeAllowed:false,reason:'semgrep-runtime-incompatible-or-install-failed'});
+ const high=fixture();high.security.output.summary=' * 1 high\n';high.security.conclusion='failure';
+ assert.equal(readSecurityMergeDecisionSync(target,high.read).decision.reason,'new-high-or-critical-security-alert');
+ assert.equal(high.reads.some(p=>p.includes('/actions/')),false);
+});
+
+test('unavailable compatibility metadata or head drift cannot publish a reusable green decision',async()=>{
+ const f=fixture(),writes:any[]=[];
+ const unavailable=await publishSecurityMergeDecision(target,{read:async(p:string)=>{
+  if(p.includes('/actions/jobs/'))throw Error('unavailable');return f.read(p);
+ },status:async(s:any)=>writes.push(s)});
+ assert.equal(unavailable.decision.mergeAllowed,false);assert.equal(writes[0].state,'error');assert.equal(writes[0].sha,head);
+ let n=0;const drift=fixture();
+ const changed=await publishSecurityMergeDecision(target,{read:async(p:string)=>{
+  const value=drift.read(p);if(p===prPath&&++n===3)value.head.sha=foreign;return value;
+ },status:async(s:any)=>writes.push(s)});
+ assert.equal(changed.published,false);assert.equal(writes.length,1);
+ let baseReads=0;const baseDrift=fixture();
+ const movedBase=await publishSecurityMergeDecision(target,{read:async(p:string)=>{
+  const value=baseDrift.read(p);if(p===prPath&&++baseReads===3)value.base.sha=foreign;return value;
+ },status:async(s:any)=>writes.push(s)});
+ assert.equal(movedBase.published,false);assert.equal(writes.length,1);
+});
+
+test('a verified other-workflow name collision cannot mask the newest genuine runtime generation',()=>{
+ const f=fixture(),collision={...f.runtime,id:23,details_url:'https://github.com/craigoley/remudero/actions/runs/77/job/88',check_suite:{id:99}};
+ f.checks.push(collision);
+ const read=(p:string)=>p===prefix+'/actions/runs/77'?{...f.run,id:77,check_suite_id:99,path:'.github/workflows/other.yml'}:f.read(p);
+ assert.equal(readSecurityMergeDecisionSync(target,read).decision.mergeAllowed,true);
+ f.runtime.status='in_progress';
+ assert.equal(readSecurityMergeDecisionSync(target,read).decision.reason,'semgrep-runtime-compatibility-pending');
+});
+
+test('a changed association base cannot substitute for immutable executed workflow bytes or force an unnecessary head refresh',()=>{
+ const f=fixture();f.run.pull_requests[0].base.sha=foreign;
+ assert.equal(readSecurityMergeDecisionSync(target,f.read).decision.mergeAllowed,true);
+ const actual={...f.trusted,sha:head};
+ const read=(p:string)=>p===prefix+'/contents/'+workflow+'?ref='+foreign?actual:f.read(p);
+ assert.equal(readSecurityMergeDecisionSync(target,read).decision.mergeAllowed,false);
+});
+
+test('runtime completion wakes the trusted policy producer using metadata only',async()=>{
+ const f=fixture(),writes:any[]=[];
+ const results=await runSecurityMergeProducer('workflow_run',{repository:{full_name:'craigoley/remudero'},
+  workflow_run:{name:'Semgrep runtime compatibility',head_sha:head}},
+ {read:async(p:string)=>p===prefix+'/commits/'+head+'/pulls?per_page=100'?[{number:11468,state:'open',head:{sha:head}}]:f.read(p),
+  status:async(s:any)=>writes.push(s)});
+ assert.equal(results[0].published,true);assert.equal(writes[0].state,'success');assert.equal(writes[0].sha,head);
+});
+
+test('runtime compatibility uses the real producer CLI and preserves genuine installation failure as a denied status',t=>{
+ const f=fixture(),dir=mkdtempSync(join(tmpdir(),'rmd-runtime-policy-'));
+ t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ const eventPath=join(dir,'event.json');
+ writeFileSync(eventPath,JSON.stringify({repository:{full_name:'craigoley/remudero'},pull_request:{number:11468,head:{sha:head}}}));
+ const shim=ghShim([{when:'POST',stdout:'{}'},{when:'/files?',stdout:JSON.stringify(f.files)},
+  {when:'/check-runs?',stdout:JSON.stringify({total_count:2,check_runs:f.checks})},
+  {when:'/actions/runs/44',stdout:JSON.stringify(f.run)},{when:'/actions/jobs/55',stdout:JSON.stringify(f.job)},
+  {when:'graphql',stdout:JSON.stringify(f.executed)},{when:'/contents/',stdout:JSON.stringify(f.trusted)},{when:'GET',stdout:JSON.stringify(f.pr)}]);
+ t.after(()=>rmSync(shim.dir,{recursive:true,force:true}));
+ const run=()=>spawnSync(process.execPath,[new URL('../scripts/security-merge-producer.mjs',import.meta.url).pathname],
+  {env:{...process.env,PATH:shim.dir+':'+process.env.PATH,GH_TOKEN:'',GITHUB_EVENT_PATH:eventPath,
+   GITHUB_EVENT_NAME:'pull_request_target',GITHUB_RUN_ID:'99'},encoding:'utf8',timeout:10000});
+ const good=run();assert.equal(good.status,0,good.stderr);assert.equal(JSON.parse(good.stdout).results[0].decision.mergeAllowed,true);
+ assert.ok(shim.calls().some(call=>call.includes('/actions/jobs/55')));
+ for(const item of [f.runtime,f.run,f.job])item.conclusion='failure';
+ shim.addRoute({when:'/check-runs?',stdout:JSON.stringify({total_count:2,check_runs:f.checks})});
+ shim.addRoute({when:'/actions/runs/44',stdout:JSON.stringify(f.run)});shim.addRoute({when:'/actions/jobs/55',stdout:JSON.stringify(f.job)});
+ const from=shim.calls().length,bad=run();assert.equal(bad.status,0,bad.stderr);
+ assert.equal(JSON.parse(bad.stdout).results[0].decision.state,'blocked');
+ const writes=shim.calls().slice(from).filter(call=>call.includes('/statuses/'+head));
+ assert.equal(writes.length,1);assert.ok(writes[0].includes('state=failure'));
+});
+
+test('runtime workflow is unprivileged exact-head closure-only and never makes scan findings required',()=>{
+ const text=readFileSync(new URL('../.github/workflows/semgrep-runtime-compatibility.yml',import.meta.url),'utf8'),flow=parse(text);
+ assert.deepEqual(Object.keys(flow.on),['pull_request']);assert.equal(flow.on.pull_request['paths-ignore'],undefined);
+ assert.deepEqual(flow.permissions,{contents:'read'});
+ const job=flow.jobs['runtime-compatibility'];assert.equal(job.name,context);assert.equal(job['timeout-minutes'],10);
+ assert.equal(job['runs-on'],'ubuntu-24.04');assert.equal(job.permissions,undefined);
+ assert.equal(job.steps[0].with.ref,'${{ github.event.pull_request.head.sha }}');assert.equal(job.steps[0].with['persist-credentials'],false);
+ const auditor=readFileSync(new URL('../.github/semgrep/runtime-compatibility-audit.py',import.meta.url));
+ assert.equal(job.env.AUDITOR_SHA256,createHash('sha256').update(auditor).digest('hex'));
+ const phases=[['Download original artifacts without candidate execution','download'],
+  ['Audit original artifact metadata before candidate execution','original'],['Build only approved Peewee after original audit','build'],
+  ['Audit built Peewee metadata and destinations before install','built'],['Install only audited hash-bound wheel set','install'],
+  ['Verify installed pip closure and scanner bootstrap additionally','verify']];
+ let previous=-1;
+ for(const [name,phase] of phases){
+  const index=job.steps.findIndex((s:any)=>s.name===name),step=job.steps[index];
+  assert.ok(index>previous);previous=index;
+  assert.equal(step.env.AUDIT_PHASE,phase);assert.equal(step['continue-on-error'],undefined);
+  assert.ok(step.run.includes('python -I -S -'));assert.ok(step.run.includes('git("cat-file", "blob", blob)'));
+  assert.ok(step.run.includes('hashlib.sha256(raw).hexdigest() == expected'));
+  assert.ok(step.run.includes('os.execv(sys.executable'));
+ }
+ const code=auditor.toString();assert.ok(code.includes('"-m", "pip", "check"'));
+ assert.ok(code.includes('SemgrepCore.executable_path()'));assert.ok(code.includes('--require-hashes'));
+ assert.ok(code.includes('--no-index'));assert.ok(code.includes('scan_approved_peewee_sdist'));
+ assert.equal(text.includes('security-events: write'),false);assert.equal(text.includes('secrets.'),false);
+ assert.equal(text.includes('scripts/'),false);assert.equal(text.includes('semgrep scan'),false);
+ for(const step of job.steps.filter((s:any)=>s.run)){
+  const result=spawnSync('bash',['-n'],{input:step.run,encoding:'utf8',timeout:1000});assert.equal(result.status,0,result.stderr);
+ }
+ const producer=parse(readFileSync(new URL('../.github/workflows/security-merge-policy.yml',import.meta.url),'utf8'));
+ assert.ok(producer.on.workflow_run.workflows.includes('Semgrep runtime compatibility'));
+ assert.equal(producer.jobs.metadata.permissions.actions,'read');assert.equal(producer.jobs.metadata.steps[0].with.ref,'main');
+});
+
+test('real isolated Python stages only digest-bound committed auditor bytes and rejects PR module shadowing',t=>{
+ const flow=parse(readFileSync(new URL('../.github/workflows/semgrep-runtime-compatibility.yml',import.meta.url),'utf8'));
+ const install=flow.jobs['runtime-compatibility'].steps.find((s:any)=>s.name==='Download original artifacts without candidate execution');
+ const match=/<<'PY'\n([\s\S]*?)\nPY\n/.exec(install.run);assert.ok(match);
+ const script=match[1],dir=mkdtempSync(join(tmpdir(),'rmd-runtime-inputs-')),fixture=gitRepo({seedCommit:false,kind:'runtime-audit'}),repo=fixture.dir;
+ t.after(()=>{fixture.cleanup();rmSync(dir,{recursive:true,force:true});});mkdirSync(join(repo,'.github','semgrep'),{recursive:true});
+ const invoke=(file:string,args:string[],input?:string)=>spawnSync(file,args,{cwd:repo,encoding:'utf8',input,timeout:10000,
+  env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null'}});
+ const git=(args:string[])=>fixture.git(...args);
+ const bindings=([['runtime_source_recipe.py','SOURCE_RECIPE_SHA256'],['prepare-source-build.py','ASSEMBLER_SHA256'],
+  ['source-build-policy.json','SOURCE_POLICY_SHA256']] as const).map(([name,key])=>{
+  const raw=readFileSync(new URL('../.github/semgrep/'+name,import.meta.url));
+  const expected:string=flow.jobs['runtime-compatibility'].env[key];
+  assert.equal(expected,createHash('sha256').update(raw).digest('hex'));
+  writeFileSync(join(repo,'.github','semgrep',name),raw);return {name,expected};
+ });
+ const sourceHashes=Object.fromEntries(bindings.map(({name,expected})=>[name,expected]));
+ const auditor=join(repo,'.github','semgrep','runtime-compatibility-audit.py');
+ const trusted='import hashlib,json,pathlib,sys\n'+'sources='+JSON.stringify(bindings.map(({name})=>name))+'\n'
+  +'print(json.dumps({"fixture":"STAGED_AUDITOR_FIXTURE","noSite":sys.flags.no_site,"isolated":sys.flags.isolated,'
+  +'"sourceHashes":{name:hashlib.sha256(pathlib.Path(__file__).with_name(name).read_bytes()).hexdigest() for name in sources}}))\n';
+ writeFileSync(auditor,trusted);const digest=createHash('sha256').update(trusted).digest('hex');
+ const marker=join(repo,'shadow-ran');writeFileSync(join(repo,'pathlib.py'),'open("shadow-ran", "w").write("not isolated")\nraise RuntimeError("PR module executed")\n');
+ const commit=()=>{git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','--quiet','--allow-empty','-m','fixture']);};
+ commit();
+ const stage=(isolated:boolean,expected=digest,sourceDigests=bindings.map(({expected})=>expected))=>{const out=mkdtempSync(join(dir,'out-'));
+  const current=invoke('git',['rev-parse','HEAD']).stdout.trim();
+  const r=invoke('python3',[...(isolated?['-I','-S']:[]),'-',current,expected,'download',out,repo,dir,...sourceDigests],script);return {...r,out};};
+ const negative=stage(false);assert.notEqual(negative.status,0);assert.match(negative.stderr,/PR module executed/);
+ assert.equal(readFileSync(marker,'utf8'),'not isolated');unlinkSync(marker);
+ const positive=stage(true);assert.equal(positive.status,0,positive.stderr);
+ assert.deepEqual(JSON.parse(positive.stdout),{fixture:'STAGED_AUDITOR_FIXTURE',noSite:1,isolated:1,sourceHashes});
+ assert.throws(()=>readFileSync(marker),/ENOENT/);
+ for(const [index,{name}] of bindings.entries()){
+  const changed=stage(true,digest,bindings.map((binding,i)=>i===index?'0'.repeat(64):binding.expected));
+  assert.notEqual(changed.status,0,name);assert.match(changed.stderr,/first-party source differs from trusted workflow literal/);
+ }
+ writeFileSync(auditor,'raise RuntimeError("mutable checkout helper executed")\n');
+ assert.equal(stage(true).status,0,'uncommitted checkout bytes must not execute');
+ commit();const changed=stage(true);assert.notEqual(changed.status,0);assert.match(changed.stderr,/first-party source differs from trusted workflow literal/);
+ writeFileSync(join(repo,'outside.txt'),trusted);unlinkSync(auditor);symlinkSync('../../outside.txt',auditor);commit();
+ const linked=stage(true);assert.notEqual(linked.status,0);assert.match(linked.stderr,/AssertionError/);
+});

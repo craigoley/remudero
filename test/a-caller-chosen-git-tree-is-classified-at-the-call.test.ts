@@ -53,9 +53,9 @@ interface CallerRecord {
 
 const RECORDS: readonly CallerRecord[] = [
   {
-    file: "src/lib/affected-suites.ts", helper: "readAffectedSuitesInput", via: ["readAffectedSuitesInput"],
+    file: "src/lib/affected-suites.ts", helper: "readAffectedSuitesInput", via: ["readAffectedSuitesInput", "readAffectedSuitesInputAsync"],
     callers: ["scripts/preflight-author.mjs", "scripts/select-affected-suites.mjs", "scripts/test-tier-manifest.mjs", "src/lib/ci-escalation-judge.ts", "src/lib/ci-parity.ts", "src/lib/selector-shadow-gardener.ts", "src/run-task.ts"],
-    tree: "WORKTREE: run-task.ts coveragePrecheck passes the worker worktree; ci-escalation-judge.ts passes the daemon checkout; the rest (test-tier-manifest.mjs's merge_group selection included) pass a repo root", decision: "leaf",
+    tree: "WORKTREE: async reads take the worker worktree from coveragePrecheck and the daemon checkout from the CI judge; synchronous reads and the remaining callers take repo or harness roots", decision: "leaf",
   },
   {
     file: "src/lib/containment.ts", helper: "defaultExecutor", via: ["probeContainment"], callers: ["src/run-task.ts"],
@@ -95,8 +95,8 @@ const RECORDS: readonly CallerRecord[] = [
   },
   {
     file: "src/lib/status.ts", helper: "buildCommitTrailerIndex", via: ["buildCommitTrailerIndex", "buildGitLogSupersessionSearch"],
-    callers: ["src/run-task.ts"],
-    tree: "CHECKOUT: the process cwd, run-task.ts's repoRoot or <root>/repos/<repo>; buildGitLogSupersessionSearch is unwired",
+    callers: ["src/lib/tick-read-worker.ts", "src/run-task.ts"],
+    tree: "CHECKOUT: the process cwd, run-task.ts's repoRoot or <root>/repos/<repo>, or the tick read's checkoutRoot (the daemon's checkout); buildGitLogSupersessionSearch is unwired",
     decision: "CHECKOUT",
   },
 ];

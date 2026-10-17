@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -54,6 +54,10 @@ function fixture(): Fixture {
   const bin = join(base, "bin");
   const cron = join(base, "crontab.txt");
   mkdirSync(bin);
+  const find = sh(base, "sh", "-c", "command -v find").trim();
+  // A fixture can backdate mtime, not kernel ctime. Positive cases use that
+  // same age for ctime; the real-find metadata control below supplies no shim.
+  writeFileSync(join(bin, "tsx-find-age"), `#!/bin/bash\nargs=(); for arg; do if [ "$arg" = -cmin ]; then args+=(-mmin); else args+=("$arg"); fi; done\nexec '${find}' "\${args[@]}"\n`, { mode: 0o755 });
   writeFileSync(cron, "");
   writeFileSync(join(bin, "crontab"), "#!/bin/bash\n[ \"$1\" = \"-l\" ] || exit 2\n/bin/cat " + JSON.stringify(cron) + "\n", { mode: 0o755 });
   writeFileSync(cwds, "");
@@ -69,7 +73,7 @@ function fixture(): Fixture {
   return { base, root, sessions, cwds, open, lsof, bin, cron };
 }
 
-function reclaim(fx: Fixture, freePct: number, apply = true): { out: string; report: string } {
+function reclaim(fx: Fixture, freePct: number, apply = true, extra: Record<string, string> = {}): { out: string; report: string } {
   const report = join(fx.base, "kept.txt");
   const r = spawnSync("bash", [SCRIPT, ...(apply ? ["--apply"] : [])], {
     encoding: "utf8",
@@ -80,8 +84,10 @@ function reclaim(fx: Fixture, freePct: number, apply = true): { out: string; rep
       RMD_RECLAIM_FREE_PCT: String(freePct),
       RMD_RECLAIM_REPORT: report,
       RMD_RECLAIM_LSOF: fx.lsof,
+      RMD_RECLAIM_TSX_FIND: join(fx.bin, "tsx-find-age"),
       TMPDIR: fx.base, // the tsx-cache pass reads TMPDIR; keep it off the real one
       PATH: fx.bin + ":" + process.env.PATH,
+      ...extra,
     },
   });
   assert.equal(r.status, 0, r.stderr);
@@ -134,6 +140,128 @@ test("scratch is reclaimed, and a running session, any git checkout, or a Claude
     assert.match(report, /protected Claude\/macOS temp name \| .*claude-501/);
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("scheduled cleanup discovers historical nested TSX caches without deleting sibling fixtures or cash data", () => {
+  const fx = fixture();
+  try {
+    const job = join(fx.root, "historical-ci", "run");
+    const cache = join(job, "tsx-501");
+    mkdirSync(cache, { recursive: true });
+    mkdirSync(join(job, "fixture", ".git"), { recursive: true });
+    const cash = join(job, "fixture", "openweight-allowance.json");
+    writeFileSync(cash, '{"reservations":{"held":"unknown"}}\n');
+    const old = join(cache, `17920-${"a".repeat(40)}`);
+    const young = join(cache, `17920-${"b".repeat(40)}`);
+    writeFileSync(old, '{"code":"compiled","map":null,"warnings":[]}');
+    writeFileSync(young, "fresh compiler cache");
+    age(job, HOURS_AGO(8)); age(young, HOURS_AGO(5));
+    const before = readFileSync(cash, "utf8");
+    const { out } = reclaim(fx, 40);
+    assert.equal(existsSync(old), false, out);
+    assert.ok(existsSync(young), out);
+    assert.equal(readFileSync(cash, "utf8"), before);
+    assert.ok(existsSync(join(job, "fixture", ".git")));
+    assert.match(out, /pruned tsx cache files=1.*historical-ci/);
+  } finally { rmSync(fx.base, { recursive: true, force: true }); }
+});
+
+test("nested TSX discovery retains active, Git-owned, seed, linked and unrecognized cache contents", () => {
+  const fx = fixture();
+  try {
+    const caches = ["held", "source", "seed", "unknown"].map(name => join(fx.root, name, "tsx-501"));
+    const hash = `17920-${"c".repeat(40)}`;
+    for (const cache of caches) {
+      mkdirSync(cache, { recursive: true }); writeFileSync(join(cache, hash), "compiled cache");
+      mkdirSync(join(dirname(cache), "fixture", ".git"), { recursive: true });
+    }
+    mkdirSync(join(fx.root, "source", ".git"));
+    writeFileSync(join(fx.root, "seed", ".rmd-dependency-seed-root.json"), "{}");
+    writeFileSync(join(caches[3]!, "reservation.json"), "keep budget state");
+    const outside = join(fx.base, "outside"); mkdirSync(outside); writeFileSync(join(outside, hash), "external");
+    symlinkSync(outside, join(fx.root, "tsx-999"));
+    for (const cache of caches) age(dirname(cache), HOURS_AGO(8));
+    writeFileSync(fx.open, realpathSync(join(caches[0]!, hash)) + "\n");
+    const { out } = reclaim(fx, 40);
+    for (const cache of caches) assert.ok(existsSync(join(cache, hash)), cache + out);
+    assert.equal(readFileSync(join(caches[3]!, "reservation.json"), "utf8"), "keep budget state");
+    assert.ok(existsSync(join(outside, hash)));
+    assert.match(out, /TSX discovery retains Git-owned/);
+    assert.match(out, /TSX discovery contains unrecognized/);
+  } finally { rmSync(fx.base, { recursive: true, force: true }); }
+});
+
+test("real kernel ctime protects backdated TSX cache files on scheduled discovery", () => {
+  const fx = fixture();
+  try {
+    const job = join(fx.root, "historical-ci"); const cache = join(job, "tsx-501");
+    mkdirSync(cache, { recursive: true }); mkdirSync(join(job, "fixture", ".git"), { recursive: true });
+    const file = join(cache, `17920-${"d".repeat(40)}`); writeFileSync(file, "recent metadata");
+    age(job, HOURS_AGO(12));
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_TSX_FIND: "find" });
+    assert.ok(existsSync(file), out);
+    assert.doesNotMatch(out, /pruned tsx cache files=/);
+  } finally { rmSync(fx.base, { recursive: true, force: true }); }
+});
+
+test("real lsof preserves a held nested cache while an idle historical cache is pruned", () => {
+  const fx = fixture(); let fd: number | undefined;
+  try {
+    const files = ["held", "idle"].map(name => {
+      const job = join(fx.root, name); const cache = join(job, "tsx-501");
+      mkdirSync(cache, { recursive: true }); mkdirSync(join(job, "fixture", ".git"), { recursive: true });
+      const file = join(cache, `17920-${"e".repeat(40)}`); writeFileSync(file, "compiled cache"); age(job, HOURS_AGO(8)); return file;
+    });
+    const lsof = sh(fx.base, "sh", "-c", "command -v lsof").trim();
+    fd = openSync(files[0]!, "r");
+    const { out } = reclaim(fx, 40, true, { RMD_RECLAIM_LSOF: lsof });
+    assert.ok(existsSync(files[0]!), out); assert.equal(existsSync(files[1]!), false, out);
+    assert.match(out, /open file or lsof scan uncertain/); assert.match(out, /pruned tsx cache files=1.*idle/);
+  } finally { if (fd !== undefined) closeSync(fd); rmSync(fx.base, { recursive: true, force: true }); }
+});
+
+test("owner is checked before recursive age scans, and stale safe symlink scratch is reclaimable", () => {
+  const fx = fixture();
+  try {
+    const foreign = join(fx.root, "foreign-owned");
+    const internal = join(fx.root, "internal-link-tree");
+    const dangling = join(fx.root, "dangling-temp-link-tree");
+    const external = join(fx.root, "external-link-tree");
+    const externalTarget = join(fx.base, "external-target");
+    mkdirSync(foreign);
+    writeFileSync(join(foreign, "f"), "owned by another account\n");
+    mkdirSync(join(internal, "coverage"), { recursive: true });
+    writeFileSync(join(internal, "coverage", "data"), "regenerable\n");
+    symlinkSync(join(internal, "coverage"), join(internal, "test-link"));
+    mkdirSync(dangling);
+    symlinkSync(join(fx.root, "not-created-node-coverage"), join(dangling, "test-link"));
+    mkdirSync(external);
+    writeFileSync(externalTarget, "must remain\n");
+    symlinkSync(externalTarget, join(external, "node_modules"));
+    for (const path of [foreign, internal, dangling, external]) age(path, HOURS_AGO(8));
+
+    const realStat = spawnSync("/bin/sh", ["-c", "command -v stat"], { encoding: "utf8" }).stdout.trim();
+    assert.ok(realStat, "the platform stat utility exists");
+    writeFileSync(join(fx.bin, "stat"), [
+      "#!/bin/sh",
+      "last=",
+      'for arg do last="$arg"; done',
+      'if [ "${last##*/}" = "foreign-owned" ]; then printf "craigoleyagent\\n"; exit 0; fi',
+      `exec ${JSON.stringify(realStat)} "$@"`,
+    ].join("\n") + "\n", { mode: 0o755 });
+
+    const applied = reclaim(fx, 40, true);
+    assert.ok(existsSync(foreign), "a foreign-owned tree is not traversed or deleted");
+    assert.match(applied.report, /owned by craigoleyagent; age check requires owner account.*foreign-owned/);
+    assert.doesNotMatch(applied.report, /age scan unavailable.*foreign-owned/);
+    assert.equal(existsSync(internal), false, "an old candidate with only an in-tree link can be removed");
+    assert.equal(existsSync(dangling), false, "a dangling alias to a temp-root path can be removed");
+    assert.ok(existsSync(external), "a live external symlink target keeps its candidate");
+    assert.ok(existsSync(externalTarget), "removing a candidate never deletes its external target");
+    assert.match(applied.report, /contains symlink outside cleanup root: .*external-link-tree/);
+  } finally {
+    rmSync(fx.base, { recursive: true, force: true });
   }
 });
 

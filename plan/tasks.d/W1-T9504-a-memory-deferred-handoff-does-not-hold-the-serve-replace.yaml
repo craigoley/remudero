@@ -1,0 +1,46 @@
+- id: W1-T9504
+  title: "SERVE IS PINNED ON STALE CODE: a memory-deferred handoff can never fit, and serve-policy convergence reads every deferral as a handoff in flight, so the container replace that is serve's only way onto new code is held forever; a memory deferral closes the in-flight window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which supervisor rows mean a handoff is mid-swap for the replace hold
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: serve held on image drift from 16:03Z; no source handoff since 12:16Z"
+  plan_refs: [W1-T8311, W1-T8873, W1-T6245, W1-T9487]
+  files: [src/lib/serve-policy-convergence.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts, test/a-memory-deferred-handoff-does-not-hold-the-serve-replace.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 (ledger, docker inspect):
+    - remudero-daemon recycled 15:55:51Z onto d36f0e595b52 (build 3fb25c559); ACR :latest is that digest.
+      remudero-serve stays on 30967fc6de13 (build 510cfc997, created 12:16:05Z).
+    - Every serve-policy tick since 16:03Z: deploy.serve_policy_held "serve image drift (...), but a serve handoff is
+      in progress or unreadable".
+    - 75 serve.handoff_deferred today, all hold container_headroom: need 5.15 GB, free 3.4-3.6 GB, active RSS
+      4.2-4.5 GB under a 7680 MiB limit. W1-T8873's tier-2 shed frees ~130 MB (restored, still_short). No
+      serve.handoff_done since serve.supervisor_start 12:16:07Z.
+    READ:
+    - serve-supervisor.ts deferUpgrade: a memory refusal forks no standby, holds no lock and keeps the active
+      generation; it re-requests after retryMs (capped).
+    - serve-policy-convergence.ts HANDOFF_OPEN_STEPS holds serve.handoff_deferred and serve.handoff_shed, so
+      serveHandoffOpen is true from the first deferral until a handoff that never fits completes. That list is
+      #8945's (2026-10-02), before W1-T8311 made a deferral keep the active generation and retry; its test
+      (a-changed-serve-policy-reaches-the-running-console, "a serve handoff is open from its request until the
+      supervisor closes it") pins requested+deferred as open and must change with it.
+    So the replace (stop old, start new, behind the host-memory admission) is held by the very condition it cures.
+    An operator hand replace (~16:53Z, same admission env) was admitted before the pull, then HELD (swap_in 22525
+    pages/s > 256) before docker stop: the launcher's own admission works and leaves serve untouched, so lifting the
+    handoff hold for a deferral adds no unguarded replace.
+  design: |
+    1. serve.handoff_deferred closes the in-flight window: nothing is mid-swap after it.
+    2. A shed (tier 1 or 2) stays open until its own restored row or the deferral that follows it.
+    3. Every other hold, and the launcher's fresh host admission, is unchanged.
+  acceptance:
+    - claim: "a ledger whose newest handoff row is a memory deferral reads no handoff in progress, and a serve replace held only by it proceeds"
+      proof: 'grep: test("W1-T9504: a memory-deferred handoff does not hold the serve replace" in test/a-memory-deferred-handoff-does-not-hold-the-serve-replace.test.ts'
+  falsifier: |
+    Count serve.handoff_deferred as open again: the fixture's replace is held and the test fails.

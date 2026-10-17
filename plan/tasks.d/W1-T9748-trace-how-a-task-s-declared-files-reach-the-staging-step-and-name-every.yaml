@@ -1,0 +1,41 @@
+- id: W1-T9748
+  title: Trace how a task's declared files reach the staging step, and name every path that still ends in the no-surface-to-stage refusal
+  repo: remudero
+  depends_on:
+    - W1-T7699
+  type: recon
+  verify: human
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=42482fcf9f143f61
+  attempts: 0
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+  acceptance:
+    - claim: "The report names the three refusal sites in src/run-task.ts: the diff-unreadable reason, the fix-has-no-surface reason, and the commit-harness reason that says the task declares no files"
+      proof: "demonstration: the operator reads the report and sees each of the three sites with its line and the caller that reaches it"
+    - claim: For every fix-lane caller the report states whether the declared files come from the task record, the PR diff, or a gate's remedy files, and which callers can reach staging with none
+      proof: "demonstration: the operator reads the report and sees one row per fix-lane caller with its file source and whether it can arrive empty"
+    - claim: The report says whether W1-T4074 and W1-T7699 already cover each remaining path, and recommends a task for any path they do not cover
+      proof: "demonstration: the operator reads the report and sees each remaining path marked covered by a named task or uncovered with a recommended task"
+  origin: followup:W1-T7699-1791708552435:2026-10-11T08:50:17.201Z:0
+  rationale: >-
+    From the 2026-10-11 follow-up on W1-T7699-1791708552435, ratified via rmd approve:
+  
+    follow-up harvest [research]: locate the "no surface to stage" refusal in src/run-task.ts and
+    the fix-lane callers, to see how declared files reach the staging step. — from W1-T7699 (run
+    W1-T7699-1791708552435)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.88
+    reasons:
+      - "The plan record types this as a recon task whose acceptance criteria are all report outputs (refusal sites, caller table, coverage of W1-T4074 and W1-T7699), with nothing touching secrets, auth, deletion, merge/deploy policy, or irreversible actions."
+      - "It was filed by the operator and ratified via rmd approve. Both declared files exist at base, and the family track record is 3 merged and 1 declined (Beta mean 0.67), which is acceptable."
+      - "It only recommends follow-up tasks and requests no operator decision. Its findings are checkable from the report's line references, and the bounded change view shows no unusual shape."
+      - "the judge said proceed, but W1-T9748: at verify: auto it fails lint (proof-dialect)"
+    judged_at: "2026-10-16T17:04:29.782Z"
+    pin: "a19a37c0425841c269d3c9b03141e70ab5e3c0c478650f82d98a07871c801327"

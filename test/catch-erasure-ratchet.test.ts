@@ -394,7 +394,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/drain.ts": 1,
   "src/lib/escalate.ts": 2,
   "src/lib/feedback-docket.ts": 1,
-  "src/lib/feedback-landing.ts": 4,
+  "src/lib/feedback-landing.ts": 2,
   "src/lib/feedback.ts": 5,
   "src/lib/fleet-control.ts": 2,
   "src/lib/fs-race-safe.ts": 1,
@@ -441,7 +441,7 @@ const BASELINE_BARE_CATCH_COUNTS: Record<string, number> = {
   "src/lib/worker-containment.ts": 5,
   "src/lib/worker-home.ts": 3,
   "src/lib/worker.ts": 11,
-  "src/run-task.ts": 50,
+  "src/run-task.ts": 49,
   "src/spike.ts": 1,
 };
 

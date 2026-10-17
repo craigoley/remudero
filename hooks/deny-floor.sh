@@ -15,6 +15,9 @@ input="$(cat)"
 # .claude/settings.json does not, so rule 14 below binds workers only.
 confine_file_tools=0
 case "${1:-}" in --confine-file-tools) confine_file_tools=1 ;; esac
+# W1-T9643: the same flag names the lane. Only settings/worker.json passes it, so `worker_lane=1` is a worker and
+# `worker_lane=0` an operator session. Rule 5 reads it: the operator ruled (2026-10-15) never to block a merge.
+worker_lane=$confine_file_tools
 
 # Pull the fields we police out of the tool-call JSON. Bash carries `command`;
 # Write/Edit/Read carry `file_path`. Fall back to raw input if jq is absent.
@@ -222,11 +225,12 @@ fi
 #    holding the ordinary GH_TOKEN could merge its own green PR without leaving the orchestrator's
 #    automerge receipts. Cover the CLI command and its two common `gh api` equivalents. This stays
 #    a tripwire, not a credential boundary: an indirectly assembled request can evade command-text
-#    matching, exactly as the file header documents.
-if printf '%s' "$cmd" | grep -Eq 'gh([[:space:]]+(-R|--repo)(=|[[:space:]])[^[:space:]]+)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+#    matching, exactly as the file header documents. W1-T9643: the worker lane only; an operator session's
+#    merge always passes (operator ruling 2026-10-15: never block merges).
+if [ "$worker_lane" -eq 1 ] && printf '%s' "$cmd" | grep -Eq 'gh([[:space:]]+(-R|--repo)(=|[[:space:]])[^[:space:]]+)*[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
   deny "a worker may author or repair a PR, but only the orchestrator may merge or arm it"
 fi
-if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api([[:space:]]|$)'; then
+if [ "$worker_lane" -eq 1 ] && printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api([[:space:]]|$)'; then
   if printf '%s' "$cmd" | grep -Eq '(-X|--method)(=|[[:space:]])PUT([[:space:]]|$)' &&
      printf '%s' "$cmd" | grep -Eq 'repos/[^[:space:]]+/pulls/[0-9]+/merge([?[:space:]]|$)'; then
     deny "gh api PUT to a pull-request merge endpoint"
@@ -739,6 +743,8 @@ fi
 #    --dry-run and passes. host: kill/pkill/killall (not `kill -0`/`-l`), docker restart/stop/kill/rm/rmi/
 #    down/prune/pause, systemctl restart/stop/kill, rm -r/-f and `git worktree prune` sent to `ssh remudero`,
 #    also via `sh -c`, `docker exec`, a heredoc, a here-string or a pipe into it. Read-only queries pass.
+#    W1-T9238: host WRITES too: a write redirect to a path (not /dev/null or `2>&1`) or `tee <file>` inside the remote
+#    command; a redirect outside it is the Mac's. A `>` glued mid-word (`ps>x`, `awk '$3>5'`) is not judged.
 #    Judged at the PROGRAM position of each quote-aware simple command, so text that only NAMES a shape (a
 #    grep, an echo, a commit message) runs. Bash tool only; inert without jq; a tripwire (file header).
 #    OPERATOR OVERRIDE, A CHOICE ON THE RECORD: RMD_HOUSE_RULE_OVERRIDE=<stash|no-verify|host>[,...] in the
@@ -820,6 +826,49 @@ hr_refuse() {  # $1 = rule (stash|no-verify|host), $2 = message. deny exits; an 
 }
 hr_host_refuse() {  # $1 = the destructive command as parsed
   hr_refuse host "destructive process control sent to the fleet host over ssh (\`$1\`): $HR_HOST. Read-only queries (ps, docker ps/inspect/logs, systemctl status, journalctl, cat, ls) still run. Report to the operator with the exact command you would have run, and stop."
+}
+hr_host_write_refuse() {
+  hr_refuse host "file write on the fleet host over ssh (\`$1\`): $HR_HOST, no \`>\` or \`tee\` into /tmp, /dev/shm, ~ or anywhere else there. Stream the output back to the Mac instead (\`ssh remudero '<query>' > <local file>\`); if a host write is truly needed, report the exact command to the operator, and stop."
+}
+hr_host_redirects() {
+  local k=1 w r rest tgt dup
+  while [ "$k" -lt "$n" ]; do
+    w="${t[$k]}"
+    k=$((k + 1))
+    case "$w" in $'\036'*) continue ;; '<<<') k=$((k + 1)); continue ;; esac
+    r="${w#"${w%%[!0-9]*}"}"
+    dup=0
+    case "$r" in
+      '&>>'*) rest="${r#&>>}" ;;
+      '&>'*) rest="${r#&>}" ;;
+      '>>'*) rest="${r#>>}" ;;
+      '>&'*) rest="${r#>&}"; dup=1 ;;
+      '>|'*) rest="${r#>|}" ;;
+      '>'*) rest="${r#>}" ;;
+      *) continue ;;
+    esac
+    tgt="$rest"
+    if [ -z "$tgt" ]; then tgt="${t[$k]-}"; k=$((k + 1)); w="$w $tgt"; fi
+    [ -n "$tgt" ] || { hr_host_write_refuse "$w"; continue; }  # `>|` tokenizes as `>` then a pipe: the target is not in this segment
+    [ "$tgt" != /dev/null ] || continue
+    if [ "$dup" -eq 1 ]; then case "$tgt" in *[!0-9-]*) ;; *) continue ;; esac; fi
+    hr_host_write_refuse "$w"
+  done
+  return 0
+}
+hr_host_tee() {
+  local k="$i" w opts=1
+  while [ "$k" -lt "$n" ]; do
+    w="${t[$k]}"
+    k=$((k + 1))
+    case "$w" in $'\036'*) continue ;; esac
+    if [ "$opts" -eq 1 ]; then
+      case "$w" in --) opts=0; continue ;; -?*) continue ;; esac
+    fi
+    case "$w" in *'>'*|*'<'*) continue ;; /dev/null) continue ;; esac
+    hr_host_write_refuse "tee $w"
+  done
+  return 0
 }
 hr_is_hookspath() {  # config keys are case-insensitive
   case "$1" in [cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]) return 0 ;; esac
@@ -1174,6 +1223,7 @@ hr_segment() {  # $1 = one hr_tokens line, $2 = the previous line, $3 = local|ho
   local n i=1 w prog k c
   IFS=$'\037' read -r -a t <<< "$1"
   n=${#t[@]}
+  if [ "$3" = host ]; then hr_host_redirects; fi
   for w in "${t[@]}"; do
     case "$w" in
       GIT_CONFIG*=*[cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]*) hr_refuse no-verify "$HR_HOOKSPATH" ;;
@@ -1213,6 +1263,7 @@ hr_segment() {  # $1 = one hr_tokens line, $2 = the previous line, $3 = local|ho
   case "$prog" in
     kill) case "${t[$i]-}" in -0|-l|-L) ;; *) hr_host_refuse "kill $(hr_rest)" ;; esac ;;
     pkill|killall) hr_host_refuse "$prog $(hr_rest)" ;;
+    tee) hr_host_tee ;;
     docker) hr_docker "$4" ;;
     systemctl)
       while [ "$i" -lt "$n" ]; do
@@ -1312,7 +1363,11 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
       gh_lock="$gh_stamp.lock"
       gh_lock_owned=0
       gh_lock_started="$gh_now"
-      while ! mkdir "$gh_lock" 2>/dev/null; do
+      while :; do
+        if mkdir "$gh_lock" 2>/dev/null; then
+          gh_lock_owned=1
+          break
+        fi
         gh_lock_mtime="$(stat -c %Y "$gh_lock" 2>/dev/null || true)"
         case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime="$(stat -f %m "$gh_lock" 2>/dev/null || true)" ;; esac
         case "$gh_lock_mtime" in ''|*[!0-9]*) gh_lock_mtime=0 ;; esac
@@ -1327,7 +1382,7 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
         fi
         sleep 0.025
       done
-      [ -d "$gh_lock" ] && gh_lock_owned=1
+      # Existence is not ownership: after the bounded wait this may still be a sibling's lock.
       gh_now="$(date +%s 2>/dev/null || echo 0)"
       gh_prev=0
       if [ -f "$gh_stamp" ]; then

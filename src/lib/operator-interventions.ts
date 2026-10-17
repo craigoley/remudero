@@ -35,7 +35,7 @@ export const CONTROL_INTERVENTION_VERBS: ReadonlySet<string> = new Set([
 ]);
 
 /** Actors that are fleet automation. Every other actor (operator_*, unknown, historical `operator`) is a hand. */
-const FLEET_AUTOMATION_ACTORS: ReadonlySet<string> = new Set(["daemon", "service", "worker", "test", "host_automation"]);
+const FLEET_AUTOMATION_ACTORS: ReadonlySet<string> = new Set(["daemon", "service", "worker", "test", "host_automation", "run_child"]);
 
 export type InterventionSurface = "control" | "pr";
 

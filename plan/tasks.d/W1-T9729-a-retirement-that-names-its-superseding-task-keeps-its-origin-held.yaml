@@ -1,0 +1,73 @@
+- id: W1-T9729
+  title: "A RETIREMENT THAT NAMES ITS SUPERSEDING TASK STILL REOPENS ITS ORIGIN — the flake-incident gardener's openTaskFor treats any task with `retirement:` set as closed, so #12091 retiring W1-T9668 'superseded by W1-T9551' (still unmerged) let the gardener re-file the same origin as W1-T9707 70 minutes later; the superseding id lives only in a YAML comment no reader sees, and the flow and gate gardeners read retirement the same way"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a retirement that names a superseding task holds its origin until that task lands; what a retirement means to the drain, the linter and every other reader is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 filing agent F4 lead 1: W1-T9668 retired by #12091 (6b938114d, 18:28Z), re-filed as W1-T9707 (#12147, bc6eff57b, flake_incident.filed 19:38:10Z)"
+  plan_refs: [W1-T9668, W1-T9707, W1-T9551, W1-T6406, W1-T1287, W1-T9708]
+  files:
+    - src/lib/plan.ts
+    - src/lib/task-linter.ts
+    - src/lib/flake-incident-gardener.ts
+    - src/lib/flow-gardener.ts
+    - src/lib/gate-gardener.ts
+    - test/a-retirement-that-names-its-superseding-task-keeps-its-origin-held.test.ts
+  status: merged
+  priority: 1  # operator-2026-10-15: every operator retirement of a machine record on a still-live origin is undone by the next gardener pass
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf (2026-10-15):
+    - src/lib/flake-incident-gardener.ts `runFlakeIncidentGardener`, its `openTaskFor` closure:
+      `tasks.find((t) => sameFile(t.origin) && !closed.has(t.status ?? "") && t.retirement === undefined)`. A
+      retired task never holds its origin, whatever the retirement says.
+    - plan/tasks.d/w1-t9668-flake-incident.yaml reads `retirement: retired  # not a flake: ... superseded by
+      W1-T9551 ...`. RETIREMENT_REASONS (src/lib/plan.ts) is `["retired", "closed", "withdrawn"]`. The superseding
+      id is in a YAML comment, which the loader drops, so no code can read it.
+    - Core ledger: `flake_incident.filed` W1-T9668 at 15:49:58Z; #12091 merged the retirement at 18:28:11Z;
+      `flake_incident.filed` W1-T9707 for the same origin at 19:38:10Z (#12147). W1-T9551 has no merged
+      `Remudero-Task:` trailer on main.
+    - The same reading elsewhere:
+      - src/lib/flow-gardener.ts `fileRegressions`: `closed = (t) => ... || t.retirement !== undefined`, then
+        `planned = tasks.find((t) => t.origin === origin(stat.key) && !closed(t))`;
+      - src/lib/gate-gardener.ts: `queued = ... .filter((t) => t.status === "queued" && !t.retirement)`.
+      The ci-friction remedy (`ci-friction-remedy.ts`, "a retirement is a decision, never re-drafted") and the
+      flow-remedy gardener already hold a retired origin. They need no change.
+    - The W1-T9708 filing (plan-file-1792092476441, open) retires W1-T7532 and W1-T7765 "superseded by W1-T9708"
+      the same way. Once it lands, both origins reopen on the next pass.
+  design: |
+    1. THE FIELD. A task may carry `superseded_by: <task id>` beside `retirement:`. task-linter refuses it on a
+       task with no `retirement:`, and refuses an id that is not in the plan. RETIREMENT_REASONS is unchanged.
+    2. ONE PREDICATE. src/lib/plan.ts exports a pure `retirementHoldsOrigin(task, isLanded)`. It is true for a
+       retired task whose `superseded_by` names a task that has not landed. "Landed" is the caller's merged-credit
+       reading, not the shard's `status:` (a shard's status is not a completion signal).
+    3. THE READERS. flake-incident-gardener's `openTaskFor` returns the superseding id while the predicate holds,
+       and logs `flake_incident.skipped` with reason `superseded-by <id>`. flow-gardener's `fileRegressions` and
+       gate-gardener's `queued` set count such a record as open the same way. A retirement with no
+       `superseded_by` reads as today.
+    4. Not in this task: rule 15 keeps plan records out of an implement PR's files. A follow-up plan-only PR adds
+       `superseded_by:` to W1-T9668 (W1-T9551), to W1-T7532 and W1-T7765 if they are on main by then (W1-T9708),
+       and retires the duplicate W1-T9707 the same way.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - a flake origin whose only plan record is retired with `superseded_by` naming an unlanded task is skipped
+         and files nothing; with the superseding task landed, it files as today;
+       - a retirement with no `superseded_by` still reopens its origin (today's behaviour, positive control);
+       - the flow gardener holds a superseded origin;
+       - task-linter refuses `superseded_by` without a retirement, and refuses an unknown id.
+  acceptance:
+    - claim: "a retired flake record superseded by an unlanded task keeps its origin from being filed again"
+      proof: 'grep: test("W1-T9729: a retirement superseded by an unlanded task holds its flake origin" in test/a-retirement-that-names-its-superseding-task-keeps-its-origin-held.test.ts'
+    - claim: "once the superseding task lands, or when no superseding task is named, the origin reopens as today"
+      proof: 'grep: test("W1-T9729: a landed or unnamed superseding task reopens the origin" in test/a-retirement-that-names-its-superseding-task-keeps-its-origin-held.test.ts'
+    - claim: "the flow gardener holds a superseded origin the same way"
+      proof: 'grep: test("W1-T9729: the flow gardener holds a superseded origin" in test/a-retirement-that-names-its-superseding-task-keeps-its-origin-held.test.ts'
+    - claim: "the linter refuses superseded_by without a retirement or naming an id outside the plan"
+      proof: 'grep: test("W1-T9729: the linter refuses a superseded_by it cannot honour" in test/a-retirement-that-names-its-superseding-task-keeps-its-origin-held.test.ts'
+  falsifier: |
+    At origin/main, runFlakeIncidentGardener over a plan whose only record for the origin is
+    `{retirement: "retired", superseded_by: "W1-T1"}`, with W1-T1 queued and unmerged and three fresh PRs, files a
+    new incident, so the first test fails.

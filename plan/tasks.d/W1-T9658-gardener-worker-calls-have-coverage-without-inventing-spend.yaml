@@ -1,0 +1,134 @@
+- id: W1-T9658
+  title: "Gardener worker calls have scoped coverage without inventing spend"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  status: merged
+  attempts: 0
+  author_class: machine
+  origin: "console-follow-up:gardener-worker-call-coverage-2026-10-15"
+  principles: {tdd: strict}
+  priority: 2.5
+  budget_usd: 12.00
+  plan_refs: [W1-T8484, W1-T8667, W1-T9494, W1-T4553, W1-T4578, W1-T4580, W1-T9109, W1-T9387, W1-T5073]
+  files: [src/lib/gardener-spend.ts, src/lib/analytics-view.ts, openapi/daemon.yaml, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts, test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts]
+  note: |
+    Machine-authored; the operator explicitly approved this exact telemetry scope
+    in the parent chat on 2026-10-16: "Approve this exact telemetry scope".
+    This is real operator approval, not a model risk verdict. The native model
+    judgment remained UNAVAILABLE, not adverse. The pinned operator ruling below
+    was prepared locally with renderRuledShard/taskRulingPin; rmd approve was not
+    run and no live ledger or operator-release state was written.
+    Scope, acceptance, high/span sizing, the USD 12 budget, monetary dedup and
+    explicit unknown prices, permissions, providers, service settings and all
+    review/CI gates remain unchanged. Publication and producer implementation
+    require the normal filing, merge and claims checks.
+    The operator subsequently answered "Approve this narrow aggregation-file addition".
+    That approval adds only src/lib/analytics-view.ts so its existing cached aggregation
+    reserves the unchanged monetary allocation before optional usage coverage. A real
+    twelve-repository fixture reproduced valid priced subtotals disappearing when the
+    extra coverage exhausted the shared response budget. The USD 12 budget, high/span
+    sizing, money values, 64-KiB limit, permissions, providers and service settings stay
+    unchanged. The separate implementation must pass this regression and all gates.
+    The operator subsequently answered "Approve this test-only scope addition".
+    Add only the existing bounded-cost-summary fixture so monetary comparisons and
+    overflow populations exclude removable optional usage bytes. Preserve all money,
+    replay, overflow, unknown-price and CI assertions; add explicit usage controls.
+  rationale: |
+    The complete retained 2026-10-15T11:44:56.391Z through 13:14:15.420Z window has three
+    machine-judge worker.attempt rows with valid gardener origin, observed assignment,
+    and exact same-repository/generation parent evidence. All three are subscription
+    calls without reported prices. The window's daemon identity SHA256 is
+    dfa3a6f2d56301c8621cefae9602793b4a3f7db2352638e59c7194fb9b9b8bf2.
+    The controlled union opened both selected archives and live, with no unread or
+    malformed rows. This is retained exposure, not the current generation or invoice data.
+    At core f2134da2a676b1b6880b6f1d666037b17f0324d9 the gardener collector observes only
+    parent rows and canonical produced spend steps; worker.attempt is deliberately not
+    monetary production because callers can already emit their own cost producer rows.
+    Changing spendRoleOf globally would double-count those callers, not repair coverage.
+
+    The 2026-10-15T13:59:55Z SUBJECT sweep read every field of every task shard in current
+    main, all 27 recorded open PR heads and one newly advertised changed owner head:
+    29 immutable trees, 3870 unique blobs, per-head W8484/W8667/W9494 positive controls.
+    No changed exact gardener-call coverage task was found. Private/unpushed/later work
+    remains outside that audit. W8484/W8667 already own monetary parent attribution and
+    bounded aggregation; W9494 owns default origin propagation. W4553/W4578/W4580 own
+    generic worker evidence and W9109/W9387 own other caller price gaps. This slice
+    reuses their adopted source without duplicate credit or new unbuilt dependencies.
+  design: |
+    Add optional bounded worker-call coverage inside the existing off-loop gardener
+    capture and cached Analytics/OpenAPI shape, using only the declared existing files.
+    Reuse its ONE ledger union pass, validated origin, scoped parent and fingerprint
+    deduplication. No new HTTP scan, full-corpus pass, timer, exporter or network call.
+    Capture only bounded assignment/attempt metadata in the private join index. Match
+    actual worker.assignment to worker.attempt by immutable assignment ID and the same
+    gardener, pass, repository and generation. Handle arbitrary parent/child ordering.
+    Missing, malformed, wrong-scope and conflicting identities remain explicit gaps.
+    A duplicate rotated row or conflicting restated attempt cannot create an extra call.
+
+    Expose observed assignment, matched/missing/orphan/conflict, reported-price coverage
+    and API/subscription/unknown-billing counts, scoped to repository gardens. An observed
+    call is not task success or proof its running/interrupted parent completed. Keep
+    API reported estimates, subscription notional and invoices conceptually separate.
+    DO NOT add worker attempts to monetary producers, infer price from absent/default
+    fields, reconstruct historical parentage, or turn unpriced/legacy data into dollars
+    or a zero-call measurement. Old source snapshots without usage capture say unknown.
+    Keep canonical existing monetary totals and dedup behavior byte-for-byte compatible
+    where feasible, and test equality with and without the extra attempt receipts.
+
+    Preserve the existing 32-garden, 64-KiB response and bounded identity limits. Optional
+    coverage overflow or failure must preserve independently valid money subtotals and
+    ordinary Analytics, while naming affected usage coverage unavailable/partial rather
+    than dropping evidence and claiming complete. Keep source window, capture and
+    materialization clocks distinct. No raw IDs, prompts, worker envelopes, credentials
+    or unbounded labels enter the public response. Use generated parent/assignment
+    fixtures and actual gzip/plain/live files, not a fake collector's returned counts.
+    The real worker refresh and authenticated cached HTTP read must carry the result
+    without reading ledger files on a GET; extend the existing strict OpenAPI control.
+    In analytics-view.ts, allocate the existing monetary payload across all repositories
+    first, then fit optional call coverage into remaining bytes. A coverage failure or
+    omission means unknown, never zero, and cannot evict another repository's valid
+    monetary data. Keep the shared 64-KiB response cap and ordinary Analytics coverage.
+
+    Research: current OpenTelemetry inference-token conventions distinguish aggregate
+    usage from operation distributions, which are not total-usage or cost measures:
+    https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-token-metrics.md
+    Borrow the distinction, not an SDK/exporter migration or a missing-value default.
+    This internal nullable evidence contract remains authoritative. Console consumption
+    is a separate follow-up pinned to the actual merged producer contract. No provider,
+    billing, permission, routing, host resource, service lifecycle, gardener activation,
+    Inbox disposition, Field Trials or review/merge-policy change is authorized here.
+  acceptance:
+    - claim: "default collection exposes exact-parent assignment-linked unpriced garden calls without manufacturing money"
+      proof: "unit test: W1-T9658: default gardener capture observes unpriced assigned calls"
+    - claim: "worker coverage preserves canonical monetary dedup and explicit accounting modes"
+      proof: "unit test: W1-T9658: gardener call coverage never duplicates canonical spend"
+    - claim: "scope conflict missingness replay and partial-source controls cannot fabricate call coverage"
+      proof: "unit test: W1-T9658: gardener call coverage preserves scoped evidence gaps"
+    - claim: "real worker and the existing cached HTTP contract expose bounded coverage while legacy and overflow preserve independent data"
+      proof: "unit test: W1-T9658: cached gardener usage survives the real materialization boundary"
+  falsifier: |
+    Remove only assignment/attempt admission: the real default collector reports no calls
+    although generated scoped parents and worker assignments are observed, failing the
+    first test. Remove exact scope/assignment or dedup checks: foreign or conflicting
+    records and rotation replays falsely increase coverage or spend, failing their tests.
+    Restore the exact committed tree and require complete TAP over verified physical
+    test paths, literal canonical proof resolution, native head/base discrimination,
+    instrumented same-tree source coverage, author gate, stored body and governed CI.
+    Filing, implementation merge, source adoption, current-run usage and actual price
+    coverage are separate receipts. No fabricated paid test or invoice claim qualifies.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "The operator explicitly answered \"Approve this exact telemetry scope\" in the parent chat, approving assignment-linked gardener call counts, billing-mode and reported-price coverage in the existing collector, OpenAPI contract and tests."
+      - "Approval preserves monetary totals and explicit unknown prices, permissions, providers, the USD 12 budget, service settings and all review/CI gates."
+      - "The native model attempt was unavailable, not adverse. This is the actual operator decision, not a model verdict; rmd approve was not run and no live release state was written. This prepares filing only."
+      - "The operator subsequently answered \"Approve this narrow aggregation-file addition\", authorizing only src/lib/analytics-view.ts to reserve monetary data before optional worker-call coverage, preserving the 64-KiB limit and all existing money, security, provider, service, budget and review/CI constraints."
+      - "The operator subsequently answered \"Approve this test-only scope addition\", authorizing only test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts to separate optional usage from unchanged monetary comparisons and overflow sizing, preserving money, replay, overflow, unknown-price and CI assertions and adding explicit usage controls."
+    judged_at: "2026-10-16T13:32:03.990Z"
+    pin: "27a6e96ef6bfe26ea67b3cf07bbc83357d500ef7e8242c950555f9ce6af7ba4e"

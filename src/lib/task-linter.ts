@@ -32,6 +32,7 @@ import { BRE_CONSTRUCT_AFTER_BACKSLASH, breMetacharsIn } from "./bre-metachars.j
 export { breMetacharsIn };
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
 import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
+import { unresolvedDoctrineCitations, type DoctrineCitationFacts } from "./doctrine-citations.js";
 
 /** Deterministic task linter (MASTER-PLAN §5C Layer A).
  *  A PURE function over a loaded {@link Task}/{@link Plan}: no LLM, no I/O, no side effects. Every
@@ -97,7 +98,9 @@ export type LintCheck =
   | "proof-test-only-discrimination"
   | "new-shard-rule-suite"
   | "shard-shape"
-  | "unminted-task-id";
+  | "unminted-task-id"
+  | "superseded-by"
+  | "doctrine-citation-unresolved";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -1330,8 +1333,10 @@ export function proofScopeViolations(task: Task, opts: LintOpts = {}): LintViola
         `refused: judgeCriterion (review.ts) can only carve this proof out as not_yet_built when ` +
         `"${path}" is a member of this task's declared files: — since it is not, if "${path}" is ` +
         "still absent when this is reviewed, the criterion grades executed_fail instead, which " +
-        `overrides keyword coverage and fails the PR. Add "${path}" to files: or rewrite the proof ` +
-        "to name a path already in scope.",
+        "overrides keyword coverage and fails the PR. " + (opts.moduleExists && absentAtHead
+          ? `"${path}" does not exist in the tree, so do NOT add it to files: — name an existing ` +
+            "in-scope path in the proof, or drop the criterion (W1-T9307)."
+          : `Add "${path}" to files: or rewrite the proof to name a path already in scope.`),
     });
   });
   return violations;
@@ -2229,6 +2234,20 @@ export function blockedWithoutDispositionViolations(task: Task, plan: Plan): Lin
         `unpark. Record a \`retirement:\` ruling (one of ${legalValues}), or return it to \`status: queued\`.`,
     },
   ];
+}
+
+/** W1-T9729: `superseded_by` hands a RETIRED record's origin to another task, so it is refused on a
+ *  record with no `retirement:`, and on an id `planTaskIds` (when known) does not carry. */
+export function supersededByViolations(task: Task, planTaskIds?: Pick<ReadonlySet<string>, "has">): LintViolation[] {
+  if (task.superseded_by === undefined) return [];
+  const refuse = (message: string): LintViolation => ({ check: "superseded-by", severity: "block", message });
+  if (task.retirement === undefined) {
+    return [refuse(`task ${task.id} names superseded_by ${task.superseded_by} but carries no \`retirement:\` — only a retired record hands its origin on`)];
+  }
+  if (planTaskIds !== undefined && !planTaskIds.has(task.superseded_by)) {
+    return [refuse(`task ${task.id} is superseded_by ${task.superseded_by}, which is not in the plan`)];
+  }
+  return [];
 }
 
 /** Context the CALLER resolves via I/O and injects through {@link LintOpts} — see the section
@@ -3359,9 +3378,11 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
     return { pattern, path };
   };
   const proofs = (task.acceptance ?? []).map(parsedGrepCallProof).filter((p): p is { pattern: string; path: string } => !!p);
-  const createdCovered = created.length === 0 || proofs.some((p) => !created.includes(p.path));
+  // W1-T9307: a caller the tree does not hold is not a call site — only an existing src file counts.
+  const heldProofs = proofs.filter((p) => opts.moduleExists!(p.path));
+  const createdCovered = created.length === 0 || heldProofs.some((p) => !created.includes(p.path));
   const missingExports = addedExports.filter(
-    (e) => !proofs.some((p) => p.path !== e.path && p.pattern.includes(`${e.symbol}(`)),
+    (e) => !heldProofs.some((p) => p.path !== e.path && p.pattern.includes(`${e.symbol}(`)),
   );
 
   if (createdCovered && missingExports.length === 0) return [];
@@ -3381,7 +3402,9 @@ export function callSiteViolations(task: Task, opts: LintOpts = {}): LintViolati
         `task ${task.id} adds ${subjects.join(", ")} but no acceptance criterion proves a CALL SITE ` +
         `for it. Add one of the form: grep: <symbol>( in <the file that calls it> — the open paren is ` +
         `required (a bare symbol name passes on a comment), and the path must be a different src/ ` +
-        `file.${testNote} WHAT "UNREACHED" MEANS HERE, because the word names three different sets and a ` +
+        `file that EXISTS in the tree today; never invent a caller file or add one to files:. A task ` +
+        `that adds no src module (a recon or docs task) removes the src path from files: and drops ` +
+        `the claim.${testNote} WHAT "UNREACHED" MEANS HERE, because the word names three different sets and a ` +
         `count without its definition is unusable: MEASURED across src/ at 167c6844, ZERO modules ` +
         `have no importer at all, THREE have only TEST importers, and 77 of 2081 exported values ` +
         `are referenced nowhere outside their own file (43 of those are SCREAMING_CASE constants). ` +
@@ -3627,6 +3650,9 @@ export interface LintOpts {
   machineFilingAdmission?: MachineFilingAdmissionContext;
   /** Repository names a task's `repo:` may carry. Absent ⇒ {@link shardShapeViolations}' repo rule is silent. */
   knownRepos?: ReadonlySet<string>;
+  /** The checkout's doctrine sections and resolver. Absent ⇒ {@link doctrineCitationViolations} is silent; lint-plan
+   *  supplies it on its changed-tasks pass only, so a new or edited shard is judged and the standing plan is not. */
+  doctrineCitations?: DoctrineCitationFacts;
 }
 
 /** Lint one task, aggregating every check below. The hard checks — sizing, headless-fitness,
@@ -3701,6 +3727,22 @@ export function downgradeBuildVerificationForRetired(task: Task, violations: Lin
   );
 }
 
+/** #12389 — a shard citing `doctrine/<section>/<page>.md` that neither exists nor is aliased is refused at filing, unless
+ *  its own `files:` declares the page: then its build creates it, and the citation is a forward reference. */
+export function doctrineCitationViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const facts = opts.doctrineCitations;
+  if (!facts) return [];
+  const own = new Set(task.files ?? []);
+  const missing = unresolvedDoctrineCitations([JSON.stringify(task)], facts.sections, (path) => own.has(path) || facts.resolves(path));
+  return missing.map((path) => ({
+    check: "doctrine-citation-unresolved",
+    severity: "block" as const,
+    message:
+      `cites ${path}, which is not on disk and not aliased in doctrine/merged-rules.json. Cite a page that exists, or ` +
+      `declare it in this shard's files: when its build creates it; the census of doctrine citations turns main red otherwise`,
+  }));
+}
+
 export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   const violations: LintViolation[] = [];
   const sizing = sizingViolation(task, opts);
@@ -3757,6 +3799,8 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...deferredFollowUpViolations(task));
   violations.push(...shardShapeViolations(task, opts));
   violations.push(...unmintedTaskIdViolations(task, opts));
+  violations.push(...supersededByViolations(task));
+  violations.push(...doctrineCitationViolations(task, opts));
   if (opts.mountMaxTurns !== undefined) {
     const warn = budgetSanityWarning(opts.mountMaxTurns, opts.calibration);
     if (warn) violations.push(warn);
@@ -3808,8 +3852,8 @@ export function lintPlan(
     const opts = optsFor(task);
     const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
     const base = lintTask(task, withSurfaces);
-    const blockedWithoutDisposition = blockedWithoutDispositionViolations(task, plan);
-    const violations = blockedWithoutDisposition.length > 0 ? [...base.violations, ...blockedWithoutDisposition] : base.violations;
+    const planOnly = [...blockedWithoutDispositionViolations(task, plan), ...(task.retirement === undefined ? [] : supersededByViolations(task, plan.byId))];
+    const violations = planOnly.length > 0 ? [...base.violations, ...planOnly] : base.violations;
     out.set(task.id, { ok: base.ok && violations.every((v) => v.severity !== "block"), violations });
   }
   return out;

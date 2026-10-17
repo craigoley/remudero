@@ -497,6 +497,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd next-task-id --reserve / rmd run-task / rmd drain",
     note: "W1-T1055: the push IS the claim, so two concurrent minters cannot leave holding the same number.",
   },
+  // ── src/lib/task-id-release.ts ───────────────────────────────────────────────────────────
+  {
+    id: "task-id-reservation-ref-release",
+    action: "delete a `refs/rmd-id/<id>` reservation this run pushed and never filed",
+    module: "src/lib/task-id-release.ts",
+    symbol: "releaseTaskIdReservation",
+    boundary: "git-push",
+    gate: "always",
+    ledgerSteps: ["task_id.reservation_released", "task_id.reservation_release_skipped"],
+    verb: "garden filings, rmd approve",
+    note: "Leased on the sha the run pushed (--force-with-lease=<ref>:<sha>), so another writer's claim is never deleted. Each push passes assertClaimRefPushAllowed.",
+  },
   // ── src/lib/branch-reaper.ts ─────────────────────────────────────────────────────────────
   {
     id: "prune-deletable-branches",
@@ -554,28 +566,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   },
   // ── src/lib/head-rehome.ts ───────────────────────────────────────────────────────────────
   {
-    id: "head-rehome-open-replacement-pr",
-    action: "create a conforming run-<task>-<epoch> branch ref at the same head sha and open a replacement PR from it",
+    id: "head-identity-trailer-commit",
+    action: "push one empty commit carrying a Remudero-Task trailer onto a head-identity-red PR's own branch",
     module: "src/lib/head-rehome.ts",
-    symbol: "createHeadRehomePorts(...).openReplacement",
-    boundary: "gh-pr-create",
+    symbol: "createHeadRehomePorts(...).appendIdentityCommit",
+    boundary: "git-push",
     gate: "sweep-rung",
-    ledgerSteps: ["pr.rehome.started", "pr.rehomed", "pr.rehome.refused"],
-    verb: "rmd drain (sweep head-identity re-home rung)",
+    ledgerSteps: ["pr.identity_trailer.started", "pr.identity_trailered", "pr.identity_trailer.refused"],
+    verb: "rmd drain (sweep head-identity trailer rung)",
     note:
-      "W1-T7448: fires only when head-identity-gate is the PR's sole red; refuses when other reds are present, " +
-      "reuses an already-opened replacement, and creates the branch ref at the original head sha (no new content).",
-  },
-  {
-    id: "head-rehome-close-original-pr",
-    action: "comment on and close the original non-conforming PR once its replacement exists",
-    module: "src/lib/head-rehome.ts",
-    symbol: "createHeadRehomePorts(...).closeOriginal",
-    boundary: "gh-pr-close",
-    gate: "sweep-rung",
-    ledgerSteps: ["pr.rehomed"],
-    verb: "rmd drain (sweep head-identity re-home rung)",
-    note: "W1-T7448: runs only after the replacement PR is confirmed; the original's head sha is verified unchanged first.",
+      "W1-T9055: fires only when head-identity-gate is the PR's sole red with checks finished, on a quiet, same-repository " +
+      "head; the commit reuses the observed tree with that head as its parent and fast-forwards the ref (force=false) only " +
+      "while it still equals the observed sha. Replaces W1-T7448's replacement-PR and close-original rows.",
   },
   // ── src/lib/panel-actions.ts ─────────────────────────────────────────────────────────────
   {

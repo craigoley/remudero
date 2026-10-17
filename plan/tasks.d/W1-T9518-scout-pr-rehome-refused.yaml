@@ -1,0 +1,30 @@
+- id: W1-T9518
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — pr.rehome.refused landed 34 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:pr.rehome.refused"
+  files:
+    - test/scout-pr-rehome-refused.test.ts
+  acceptance:
+    - claim: "pr.rehome.refused stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9518: pr.rehome.refused no longer recurs\" in test/scout-pr-rehome-refused.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step pr.rehome.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 31 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared file is a single new test file (test/scout-pr-rehome-refused.test.ts). That is not secrets, auth, deletion, merge/deploy/review policy, or an irreversible action, based on the filed plan record.; on the change's description/files alone, no diff was read — The acceptance is a grep proof on a test name, and the task is a verifiable implement type. It requires no operator-only decision (priority, budget, policy), and its PR still passes CI and review.; on the change's description/files alone, no diff was read — The rationale says the rows name no file and the code writing the step must be located first. That leaves the fix's actual scope uncertain, and the declared single test file may understate it. The gap lowers my confidence but does not itself indicate a high-risk action.; on the change's description/files alone, no diff was read — The scout family has a weak record (0 merged, 1 declined, Beta mean 0.33), and the evidence cites no PRs. This calls for scrutiny in review, but it does not fall under the escalation criteria."
+    judged_at: "2026-10-15T00:53:40.120Z"
+    pin: "6d06e422cfc5286a09e559f7f925a23efe581acb740fb181b884255fac14841e"

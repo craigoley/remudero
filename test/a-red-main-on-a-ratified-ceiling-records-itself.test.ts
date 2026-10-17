@@ -41,6 +41,7 @@ import {
   runNpmScriptAsync,
 } from "../src/run-task.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
+import { identityGateVerdicts } from "./helpers/identity-gates.js";
 
 const OWNER = "craigoley";
 const REPO = "remudero";
@@ -192,6 +193,8 @@ function rig(w: World, lane: MainRepairLane, ledgerPath: string, shardLog: reado
         ],
       };
     }
+    // W1-T9690: the red head's own run teaches the rung that "ci" carries the required check.
+    if (path === `repos/${OWNER}/${REPO}/actions/runs/3/jobs?per_page=100`) return { jobs: [{ id: 30, name: "ci", status: "completed", conclusion: w.ci }] };
     if (path === `repos/${OWNER}/${REPO}/commits/${RED_MERGE}`) return { files: [{ filename: "src/lib/daemon.ts", additions: 9, deletions: 0 }] };
     const pull = /^repos\/craigoley\/remudero\/pulls\/(\d+)$/.exec(path)?.[1];
     if (pull && w.prs.has(pull)) return { state: w.prs.get(pull)!.state, merged: w.prs.get(pull)!.merged, head: { sha: "f".repeat(40) } };
@@ -508,6 +511,7 @@ function openerFixture(openPrs: readonly OpenPr[] = []) {
     closed,
     scriptsRun,
     mainBefore,
+    originDir: origin.dir,
     strayWrites: () => {
       strayWrite = true;
     },
@@ -570,10 +574,42 @@ test("an open hand fix carrying the ceiling (#10712's shape) stands the opener d
 });
 
 test("an older recorded-baseline PR of the lane that no longer covers is closed as superseded", async () => {
-  const fx = openerFixture([{ number: 10715, ref: `${MAIN_RATCHET_RECORD_BRANCH_PREFIX}aaaaaaaaaaaa-1`, row: 1755 }]);
+  const fx = openerFixture([
+    { number: 10715, ref: `${MAIN_RATCHET_RECORD_BRANCH_PREFIX}aaaaaaaaaaaa-1`, row: 1755 },
+    { number: 11831, ref: "main-repair-ratchet-7d510a2ff698-1792017976611", row: 1755 }, // #11831's head, cut before the run- prefix
+  ]);
   try {
     assert.deepEqual(await fx.run(), { opened: LANE_PR });
-    assert.deepEqual(fx.closed, [`repos/${OWNER}/${FIXTURE_REPO}/pulls/10715`]);
+    assert.deepEqual(fx.closed, [`repos/${OWNER}/${FIXTURE_REPO}/pulls/10715`, `repos/${OWNER}/${FIXTURE_REPO}/pulls/11831`]);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("W1-T9583: a legacy-shaped lane PR that covers the ceiling is superseded, never stood on", async () => {
+  const fx = openerFixture([
+    { number: 11831, ref: "main-repair-ratchet-7d510a2ff698-1792017976611", row: 2000 }, // covers, but can never pass head-identity-gate
+  ]);
+  try {
+    assert.deepEqual(await fx.run(), { opened: LANE_PR }, "the lane replaces its unmergeable PR instead of standing down on it");
+    assert.deepEqual(fx.closed, [`repos/${OWNER}/${FIXTURE_REPO}/pulls/11831`]);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("W1-T9583: a ratchet-record PR head passes head-identity-gate and worker-branch-shape", async () => {
+  const fx = openerFixture();
+  try {
+    assert.deepEqual(await fx.run(), { opened: LANE_PR });
+    const [branch] = fx.laneBranches();
+    const { headIdentity, branchShape, headMessage } = await identityGateVerdicts(fx.originDir, branch!);
+    assert.equal(headIdentity.ok, true, headIdentity.message);
+    assert.equal(branchShape.ok, true, branchShape.message);
+    // The head CLAIMS its id by trailer, so worker-branch-shape judged the ref rather than exempting a claimless head.
+    assert.match(branchShape.message, /carries the run-<taskId>-<epochMs> shape/);
+    assert.match(headMessage, /^Remudero-Task: main-repair-ratchet-688f222c0000$/m);
+    assert.match(fx.created[0]!.body, /^Remudero-Task: main-repair-ratchet-688f222c0000$/m, "the body names the same id the commit and ref do");
   } finally {
     fx.cleanup();
   }

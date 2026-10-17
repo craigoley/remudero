@@ -1,0 +1,69 @@
+- id: W1-T9633
+  title: "A SECURITY ARM REFUSAL NAMES ITS HOLD, NOT AWAITING-ARM: on 2026-10-15 #11936 and #11910 sat green and reviewed for 2+ hours while every sweep.disposed row read mergeable / awaiting-arm / owner arm and said 'arming auto-merge', yet each automerge.arm_failed row said 'security merge unknown: security-analysis-failed-or-unrecognized' or 'security merge blocked: new-high-or-critical-security-alert'; the pr.stuck row and escalation #11969 named the stall awaiting-arm and guessed 'duplicate build'. The blocker, its owner, the disposed reason and the stage-stall escalation now carry the security policy's verdict"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which blocker a green, reviewed PR names when the security merge policy refused its arm at this head
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: orphan-PR sweep of #11906/#11910/#11936 (evidence in ~/Remudero-notes/orphan-prs-2026-10-15/)"
+  plan_refs: [W1-T5537, W1-T5633, W1-T8233]
+  files:
+    - src/lib/pr-blocker.ts
+    - src/lib/sweep.ts
+    - test/a-security-arm-refusal-names-its-hold.test.ts
+    - test/every-open-pr-names-one-blocker-and-its-owner.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 in the core ledger (read-only):
+    - 08:06:48Z and 08:20:28Z automerge.arm_failed for PR-11936 at head fdd23555, outcome arm-error-ignored,
+      error "security merge unknown: security-analysis-failed-or-unrecognized". 08:19:55Z the same step for PR-11910 at
+      c6cb1818 with "security merge blocked: new-high-or-critical-security-alert".
+    - Every sweep.disposed row for #11936 from 08:21:40Z read disposition mergeable, blocker awaiting-arm, blocker_owner
+      arm, reason "review success, required checks green — arming auto-merge".
+    - 10:36:19Z pr.stuck for #11936 named blocker awaiting-arm (age 8,082,188 ms). 10:42:49Z escalation #11969 for #11906
+      named "awaiting-arm for 154 minutes; DIAGNOSIS: duplicate build".
+    READ at origin/main da9af5ecc:
+    - src/lib/security-merge-admission.ts SecurityMergeRefused throws "security merge <blocked|unknown>: <reason>";
+      arm-auto-merge.ts armFailureAction classifies that text "retryable", so no dedup is seeded and the next pass retries.
+    - src/lib/pr-blocker.ts finalBlocker returns awaiting-arm for every mergeable, unarmed PR that has no operator hold.
+      Nothing reads the arm_failed row's error, so the security verdict never reaches the blocker, the owner, the
+      disposed reason or reportStuckStage's diagnosis.
+    - The notes-only CodeQL summary that produced #11936's UNKNOWN is already classified safe on main by #11976
+      (code-scanning-merge-policy.mjs, test "a trusted quality-only CodeQL note does not strand an otherwise safe PR").
+      This task does not touch the policy. It makes the next unrecognized shape or real high alert visible by name.
+    INFERRED: a hold that looks like an arm in progress gets the wrong remedy. Nobody repairs the policy, and the
+    escalation's guess sends the operator after a duplicate build that does not exist.
+  design: |
+    - pr-blocker.ts: add two blockers. security-alert-hold (owner fix-lane) is the policy's "blocked" verdict: a new high
+      or critical alert, which W1-T5633's code-scanning gate routes to a fix round. security-unknown-hold (owner
+      security-policy) is the policy's "unknown" verdict, which no lane can move.
+    - A pure reader securityArmRefusalAtHead(lines, prNumber, headSha) walks the automerge.armed / arm_skipped /
+      arm_failed rows for that PR AND head. It returns {state, reason} only when the NEWEST is an arm_failed whose error
+      matches ^security merge (blocked|unknown): <reason>. A later armed row at the head, or a refusal at another head,
+      returns undefined.
+    - BlockerFacts gains securityArmRefusal. finalBlocker returns the matching security blocker for a mergeable, unarmed
+      PR after the operator-hold check. blockerFields takes an optional cause and records it as blocker_cause.
+    - A pure securityHoldReason(refusal, alerts?) gives the disposed reason, naming the policy verdict. When the PR's
+      codeqlHeadAlerts were read at this head, it also names each alert number, rule and path:line.
+    - sweep.ts (minimal, no new comment lines; the file sits at its comment ceiling): pass the reader's result into
+      finalBlocker's facts, blockerFields' cause and the shown reason. Add a 30-minute BACKSTOP stage bound for each new
+      blocker. reportStuckStage puts blocker_cause first in its diagnoses, so pr.stuck and the escalation name the
+      verdict.
+    - Unchanged: the policy, arming, armFailureAction's retry and the W1-T5633 gate.
+  acceptance:
+    - claim: "a mergeable, unarmed PR whose newest arm at this head failed 'security merge unknown' names security-unknown-hold, owner security-policy, with the verdict in its reason and blocker_cause, never awaiting-arm"
+      proof: "grep: W1-T9633: a security merge unknown arm refusal names a security-unknown-hold owned by the security policy in test/a-security-arm-refusal-names-its-hold.test.ts"
+    - claim: "a 'security merge blocked' refusal names security-alert-hold, owner fix-lane, and names the head's observed alert"
+      proof: "grep: W1-T9633: a new high alert arm refusal names a security-alert-hold owned by the fix lane and the alert in test/a-security-arm-refusal-names-its-hold.test.ts"
+    - claim: "a security hold past its backstop escalates with the policy verdict as its diagnosis, not awaiting-arm or a duplicate-build guess"
+      proof: "grep: W1-T9633: a stalled security hold escalates with the policy verdict in test/a-security-arm-refusal-names-its-hold.test.ts"
+    - claim: "an arm that succeeded after the refusal at the same head, or a refusal at another head, leaves the PR on awaiting-arm"
+      proof: "grep: W1-T9633: a later arm or another head's refusal leaves awaiting-arm in test/a-security-arm-refusal-names-its-hold.test.ts"
+  falsifier: |
+    Drop securityArmRefusal from finalBlocker's facts in sweep.ts. The four W1-T9633 tests fail: #11936's shape reads
+    awaiting-arm / arm again, and the escalation has no verdict.

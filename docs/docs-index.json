@@ -140,6 +140,12 @@
       "grepHint": "Worktree base provisioning — a read-only forensic pass (2026-09-02)"
     },
     {
+      "path": "docs/author-gate-accounting.md",
+      "title": "Whole-gate cost and dependency provenance",
+      "summary": "The author gate checks installed dependency metadata and real tool bytes before",
+      "grepHint": "Whole-gate cost and dependency provenance"
+    },
+    {
       "path": "docs/base-ref-contract.md",
       "title": "Base-ref contract",
       "summary": "BASE-REF CONTRACT: every diff base this repository's executable surface resolves is",
@@ -614,6 +620,18 @@
       "grepHint": "Forensics: src/lib/task-linter.ts"
     },
     {
+      "path": "docs/forensics/test-slot-private-capacity.md",
+      "title": "Staged private ownership / peer capacity protocol",
+      "summary": "Source-only redesign for #11906. No live path, permission, flag, daemon, review,",
+      "grepHint": "Staged private ownership / peer capacity protocol"
+    },
+    {
+      "path": "docs/forensics/tick-read-worker.md",
+      "title": "Forensics: src/lib/tick-read-worker.ts",
+      "summary": "Every measured fact, incident and design argument the longest comment blocks in `src/lib/tick-read-worker.ts`",
+      "grepHint": "Forensics: src/lib/tick-read-worker.ts"
+    },
+    {
       "path": "docs/forensics/triage.md",
       "title": "Forensics: src/lib/triage.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/triage.ts` used to",
@@ -660,6 +678,12 @@
       "title": "Bounded heavy READY reservations, v2",
       "summary": "This is an opt-in, host-local, single-account reader/producer foundation, not a",
       "grepHint": "Bounded heavy READY reservations, v2"
+    },
+    {
+      "path": "docs/instance-registry-selection-contract.md",
+      "title": "Instance registry selection contract",
+      "summary": "W1-T9435 supplies an additive public read/binding contract and an explicitly opted-in",
+      "grepHint": "Instance registry selection contract"
     },
     {
       "path": "docs/knowledge-garden-log.md",
@@ -834,6 +858,12 @@
       "title": "Console views: `GET /v1/views/<name>`",
       "summary": "A view is one read per console surface, computed in core. The console renders it; it does not",
       "grepHint": "Console views: `GET /v1/views/<name>`"
+    },
+    {
+      "path": "docs/worker-mcp-isolation.md",
+      "title": "Staged worker MCP isolation",
+      "summary": "This policy is default off: no production caller supplies `mcpIsolation` today. It changes neither",
+      "grepHint": "Staged worker MCP isolation"
     }
   ]
 }

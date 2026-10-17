@@ -7,11 +7,12 @@ import { relative } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execFileSync } from "node:child_process";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import type { Escalation } from "./escalate.js";
+import { ghIssueGateway, type Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { GardenEffectsUnreadableError, GardenStateUnreadableError, gardenEffectsPath, gardenStatePath, readGardenEffects, readGardenState, writeGardenEffects, type GardenEffect, type PrState } from "./gardener.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { GARDENER_RUNTIME_FILE, parseGardenerRuntime } from "./gardener-runtime.js";
 
 /**
  * lib/gardener-overseer.ts (W1-T4802) — the gardener that watches every gardener.
@@ -21,7 +22,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
  * each merge crediting its class. The overseer is ONE reader over the evidence they already leave —
  * `<name>.scorecard`, `.gardener_failed`, `.garden_filing_failed`, `.garden_filing_escalated`,
  * `.gardener_judged` ledger rows and `state/<name>-gardener.json` — read through the ledger union.
- * No gardener list is hard-coded: a new gardener is watched from its first row.
+ * The registry inventory also exposes gardens that have left no pass row.
  *
  * LIVENESS answers in three self-healing tiers, one per pass of an episode, with no fixed thresholds:
  * NOTICE (ledger), HEAL (clear `lastCheap` and a `lastPass` that landed nothing, so the next pass
@@ -51,7 +52,7 @@ export const OVERSEER_LEDGER_WINDOW_MS = 14 * DAY_MS;
 export const OVERSEER_MIN_INTERVAL_MS = HOUR_MS;
 
 /** The ledger lines the overseer reads — a raw-line prefilter, so the union is not parsed whole. */
-export const OVERSEER_STEP_PATTERN = /"step":"[^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|evidence_coverage\.pass|selector-shadow\.report)"/;
+export const OVERSEER_STEP_PATTERN = /"step":"[^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|garden\.(pass|due_failed)|evidence_coverage\.pass|selector-shadow\.report|flow\.report|fixlane\.report|machine_judge\.failed|host_resource\.failed)"/;
 
 type EventKind = "pass" | "failed" | "filing_failed" | "filing_escalated" | "judged";
 const KIND_BY_SUFFIX: Record<string, EventKind> = {
@@ -61,6 +62,11 @@ const KIND_BY_SUFFIX: Record<string, EventKind> = {
   garden_filing_escalated: "filing_escalated",
   gardener_judged: "judged",
 };
+
+const legacyName = (name: string): string => ({
+  "machine-judge": "machine_judge", "host-resource": "host_resource",
+  "evidence-coverage": "evidence_coverage", "selector-shadow": "flake_incident",
+} as Record<string, string>)[name] ?? name;
 
 interface GardenerEvent {
   at: number;
@@ -75,6 +81,9 @@ export function classifyGardenerStep(step: unknown): { name: string; kind: Event
   if (step === "evidence_coverage.pass") return { name: "evidence_coverage", kind: "pass" };
   // This producer reports collection success even while selector calibration remains insufficient.
   if (step === "selector-shadow.report") return { name: "selector-shadow", kind: "pass" };
+  if (step === "flow.report") return { name: "flow", kind: "pass" };
+  if (step === "machine_judge.failed") return { name: "machine_judge", kind: "failed" };
+  if (step === "host_resource.failed") return { name: "host_resource", kind: "failed" };
   const dot = step.lastIndexOf(".");
   const name = step.slice(0, dot);
   const suffix = step.slice(dot + 1);
@@ -118,6 +127,9 @@ export interface EffectReading {
   verdict?: "credit" | "debit";
   /** Why, for the ledger row. */
   reason?: string;
+  /** W1-T9060: the remedy task the reading judges. A reading that names one is recorded once per REMEDY (`effect:v3:<taskId>`),
+   *  not once per filing PR, so a re-filed or re-merged remedy cannot be credited twice. */
+  taskId?: string;
 }
 
 export interface TrackedGardenerPr {
@@ -132,6 +144,7 @@ export interface GardenerOverseerPorts {
   stateDir: string;
   /** Every gardener ledger row in the look-back window, read through the ledger union. */
   readRows: () => Row[];
+  registeredGardenNames?: () => readonly string[] | undefined;
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** Raises a persisting failure to a person (escalate.ts); absent, the tier is ledgered only. */
   escalate?: (escalation: Escalation) => string;
@@ -142,6 +155,11 @@ export interface GardenerOverseerPorts {
   effectReading?: (pr: TrackedGardenerPr & { mergedAt: string }, rows: readonly Row[]) => EffectReading | undefined;
   /** When the gardener's own state file last changed (ms); an idle pass still touches it. */
   stateMtime?: (name: string) => number | undefined;
+  /** W1-T8866: closes an issue with a citing comment (escalate.ts's gateway); absent, a recovery closes nothing. */
+  closeIssue?: (url: string, comment: string) => void;
+  /** W1-T8866: this overseer's own `escalated` and `cleared` ledger rows; THROWS when they cannot be read,
+   *  and an unreadable read closes nothing. */
+  readEscalationRows?: () => Row[];
 }
 
 interface Episode {
@@ -169,6 +187,8 @@ export interface OverseerState {
   prs: Record<string, TrackedGardenerPr>;
   verdicts: IssuedVerdict[];
   churnEscalated: Record<string, string>;
+  unobservedEscalated?: Record<string, string>;
+  stalledEscalated?: Record<string, string>;
   lastScorecardAt?: string;
   nextVerdictSequence?: number;
   pendingTelemetry?: Array<{ step: string; extra: Record<string, unknown> }>;
@@ -221,6 +241,8 @@ function readOverseerState(path: string): OverseerState {
       (e.failuresAtHeal !== undefined && !isCount(e.failuresAtHeal)) ||
       (e.owned !== undefined && typeof e.owned !== "boolean")) ||
     Object.values(parsed.churnEscalated).some((at) => !isDate(at)) ||
+    [parsed.unobservedEscalated, parsed.stalledEscalated].some((history) => history !== undefined &&
+      (!isRecord(history) || Object.values(history).some((at) => !isDate(at)))) ||
     parsed.verdicts.some((v: unknown) => !isRecord(v) || typeof v.id !== "string" || typeof v.gardener !== "string" ||
       typeof v.actionClass !== "string" || (v.verdict !== "credit" && v.verdict !== "debit") ||
       (v.kind !== "effect" && v.kind !== "churn") || !isDate(v.at) ||
@@ -280,32 +302,52 @@ interface Health {
   silenceMs?: number;
 }
 
-function groupEvents(rows: readonly Row[]): Map<string, GardenerEvent[]> {
+function groupEvents(rows: readonly Row[], registered: readonly string[] | undefined): Map<string, GardenerEvent[]> {
   const byName = new Map<string, GardenerEvent[]>();
   for (const row of rows) {
-    const c = classifyGardenerStep(row.step);
+    const registry = row.step === "garden.pass" || row.step === "garden.due_failed";
+    const heap = row.heap_exhausted === true || (typeof row.error === "string" && row.error.startsWith("heap_exhausted"));
+    const c = registry
+      ? typeof row.name === "string" && row.name !== "overseer" && (registered === undefined || registered.includes(row.name))
+        ? { name: row.name, kind: row.step === "garden.due_failed" || heap || (typeof row.exit === "number" && row.exit !== 0) || typeof row.error === "string"
+          ? "failed" as const : row.exit === 0 ? "pass" as const : "judged" as const }
+        : undefined
+      : classifyGardenerStep(row.step);
     const at = tsOf(row);
-    if (!c || Number.isNaN(at)) continue;
+    if (!c || Number.isNaN(at) || c.name === "overseer") continue;
     // A scorecard written beside a failed filing is a measurement, not a healthy pass: counting it
     // would hide the filing streak it sits next to.
-    if (c.kind === "pass" && row.filing_failed !== undefined) continue;
-    const list = byName.get(c.name) ?? [];
-    list.push({ at, kind: c.kind, row });
-    byName.set(c.name, list);
+    const name = legacyName(c.name);
+    const list = byName.get(name) ?? [];
+    list.push({ at, kind: c.kind === "pass" && row.filing_failed !== undefined ? "judged" : c.kind, row });
+    byName.set(name, list);
   }
-  for (const list of byName.values()) list.sort((a, b) => a.at - b.at);
+  for (const list of byName.values()) {
+    list.sort((a, b) => a.at - b.at);
+    let dueFailed = false;
+    for (const event of list) {
+      if (event.row.step === "garden.due_failed") dueFailed = true;
+      if (event.row.step !== "garden.pass") continue;
+      // A successful child cannot repair the due probe that failed immediately before it.
+      if (dueFailed && event.kind === "pass") event.kind = "judged";
+      dueFailed = false;
+    }
+  }
   return byName;
 }
 
 function judgeHealth(events: readonly GardenerEvent[], nowMs: number, mtimeMs: number | undefined): { health?: Health; cadence?: number } {
   const cadence = gardenerCadenceMs(events.map((e) => e.at));
-  const lastPassAt = events.reduce((m, e) => (e.kind === "pass" ? Math.max(m, e.at) : m), Number.NEGATIVE_INFINITY);
+  const registryPasses = events.filter(e => e.row.step === "garden.pass");
+  const passEvents = registryPasses.length > 0 ? registryPasses : events;
+  const lastPassAt = passEvents.reduce((m, e) => (e.kind === "pass" ? Math.max(m, e.at) : m), Number.NEGATIVE_INFINITY);
   const since = events.filter((e) => e.at > lastPassAt);
   const failed = since.filter((e) => e.kind === "failed");
   const filing = since.filter((e) => e.kind === "filing_failed");
   if (failed.length + filing.length > 0) {
     const last = [...failed, ...filing].sort((a, b) => a.at - b.at).at(-1)!;
-    const lastError = String(last.row.error ?? last.row.reason ?? "");
+    const lastError = String(last.row.error ?? last.row.reason ?? (last.row.heap_exhausted === true ? "heap_exhausted" :
+      last.row.step === "garden.pass" ? `garden.pass exited ${String(last.row.exit)}` : ""));
     const owned = failed.length === 0 && since.some((e) => e.kind === "filing_escalated");
     return { cadence, health: { kind: "failure", failures: failed.length + filing.length, lastError, owned } };
   }
@@ -414,7 +456,8 @@ function scorecardRow(
       }
     }
     gardeners[name] = {
-      passes: week.filter((e) => e.kind === "pass").length,
+      passes: (week.some(e => e.row.step === "garden.pass") ? week.filter(e => e.row.step === "garden.pass") : week)
+        .filter(e => e.kind === "pass").length,
       failures: week.filter((e) => e.kind === "failed" || e.kind === "filing_failed").length,
       longest_silence_ms: longest,
       prs_opened: prs.length,
@@ -429,12 +472,90 @@ function scorecardRow(
   return { window_days: 7, gardeners, rows_read: rows.length };
 }
 
+/** The issue a gardener's episode opened, from the durable ledger — never memory: the latest `escalated` row naming it
+ *  unless a later delivered `cleared` row already closed it. `null` when there is nothing left to close. */
+function openEscalationUrl(rows: readonly Row[], name: string): string | null {
+  const ordered = rows.map((row, i) => ({ row, i })).sort((a, b) => {
+    const ta = typeof a.row.ts === "string" ? a.row.ts : "";
+    const tb = typeof b.row.ts === "string" ? b.row.ts : "";
+    return ta < tb ? -1 : ta > tb ? 1 : a.i - b.i;
+  });
+  let url: string | null = null;
+  for (const { row } of ordered) {
+    if (row.gardener !== name) continue;
+    if (row.step === `${OVERSEER_NAME}.escalated`) url = typeof row.issue_url === "string" && row.issue_url !== "" ? row.issue_url : null;
+    else if (row.step === `${OVERSEER_NAME}.cleared` && row.delivered !== false) url = null;
+  }
+  return url;
+}
+
 /** Gardener state files present on disk: `<name>-gardener.json`. */
 function gardenerNamesOnDisk(stateDir: string): string[] {
   if (!existsSync(stateDir)) return [];
   return readdirSync(stateDir)
     .map((f) => /^(.+)-gardener\.json$/.exec(f)?.[1])
     .filter((n): n is string => n !== undefined);
+}
+
+interface LadderReading {
+  cause: string;
+  cost: number;
+  unit: "minutes" | "hours";
+  settled: string[];
+}
+
+function ladderReading(row: Row): LadderReading | undefined {
+  if (!Array.isArray(row.ladder)) return undefined;
+  const ladder = row.ladder.filter(isRecord);
+  const settledStates = new Set(["resolved", "retired", "delegated", "in_progress", "measuring", "escalated"]);
+  const settled = ladder.filter(line => settledStates.has(String(line.state))).map(line => String(line.cause));
+  const above: string[] = [];
+  const prices = Array.isArray(row.priced) ? row.priced.filter(isRecord) : ladder;
+  for (const price of prices) {
+    const cause = typeof price.cause === "string" ? price.cause : typeof price.key === "string" ? price.key :
+      isRecord(price.cause) && typeof price.cause.kind === "string" && typeof price.cause.name === "string"
+        ? `${price.cause.kind}:${price.cause.name}` : undefined;
+    if (!cause) continue;
+    if (settled.includes(cause)) { above.push(cause); continue; }
+    const line = ladder.find(item => item.cause === cause);
+    const minutes = price.minutes ?? line?.minutes;
+    const hours = price.hours ?? line?.hours ?? (row.causes === 1 ? row.total_pr_hours : undefined);
+    if (isCount(minutes)) return { cause, cost: minutes, unit: "minutes", settled: above };
+    if (isCount(hours)) return { cause, cost: hours, unit: "hours", settled: above };
+    return undefined;
+  }
+  return undefined;
+}
+
+function stalledCause(events: readonly GardenerEvent[], rows: readonly Row[], name: string): { reading: LadderReading; costs: number[] } | undefined {
+  const history = events.filter(e => typeof e.row.step === "string" && e.row.step.endsWith(".scorecard"));
+  const cards = history.slice(-3);
+  if (cards.length !== 3 || cards.some(e => e.row.filing_failed !== undefined || typeof e.row.pr_url === "string" || typeof e.row.awaiting === "string" ||
+    (typeof e.row.actions === "number" && e.row.actions > 0) || (Array.isArray(e.row.acting) && e.row.acting.length > 0))) return undefined;
+  const readings = cards.map(e => {
+    if (name !== "fix-lane") return ladderReading(e.row);
+    const previous = history[history.indexOf(e) - 1]?.at ?? Number.NEGATIVE_INFINITY;
+    const prices = rows.filter(row => row.step === "fixlane.report" && typeof row.class === "string" &&
+      tsOf(row) > previous && tsOf(row) <= e.at).map(row => ({ key: row.class, hours: row.hours }))
+      .sort((a, b) => Number(b.hours) - Number(a.hours));
+    return ladderReading(prices.length > 0 ? { ...e.row, priced: prices } : e.row);
+  });
+  const latest = readings[2];
+  if (!latest || readings.some(r => !r || r.cause !== latest.cause || r.unit !== latest.unit)) return undefined;
+  const costs = readings.map(r => r!.cost);
+  return cards[0]!.at < cards[1]!.at && cards[1]!.at < cards[2]!.at && costs[0]! < costs[1]! && costs[1]! < costs[2]!
+    ? { reading: latest, costs } : undefined;
+}
+
+function observationEscalation(name: string, condition: "unobserved" | "stalled_cause", detail: string): Escalation {
+  return {
+    class: "BLOCKED", taskId: `${name}-gardener-${condition}`,
+    summary: `the ${name} gardener is ${condition === "unobserved" ? "unobserved" : "stalled"}`,
+    detail, headDedup: "independent",
+    options: [{ label: "repair-gardener", detail: "restore its pass evidence or remedy selection" },
+      { label: "inspect-inputs", detail: "check the named ledger evidence and inventory" }],
+    recommendation: "repair-gardener",
+  };
 }
 
 export interface OverseerPass {
@@ -477,30 +598,101 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
       throw new OverseerReceiptUnavailableError(gardenStatePath(deps.stateDir, name));
     }
   }
-  const rows = deps.readRows();
-  const events = groupEvents(rows);
+  const registered = deps.registeredGardenNames?.();
+  const rows = deps.readRows().filter(row => tsOf(row) >= nowMs - OVERSEER_LEDGER_WINDOW_MS && tsOf(row) <= nowMs);
+  const events = groupEvents(rows, registered);
   for (const [name, list] of events) {
     if (!receipts.has(name) && list.some((e) => e.kind === "pass" && typeof e.row.pr_url === "string" &&
       Array.isArray(e.row.acting) && typeof e.row.acting[0] === "string")) readReceipt(name);
   }
-  const diskNames = gardenerNamesOnDisk(deps.stateDir);
-  const names = new Set<string>([...events.keys(), ...diskNames]);
+  const diskNames = gardenerNamesOnDisk(deps.stateDir).map(legacyName);
+  const registeredNames = (registered ?? []).filter(name => name !== "overseer").map(legacyName);
+  const names = new Set<string>([...events.keys(), ...diskNames, ...registeredNames]);
+  for (const name of Object.keys(state.episodes)) {
+    if (legacyName(name) !== name && names.has(legacyName(name))) names.add(name);
+  }
   const mtimeOf = deps.stateMtime ?? ((name: string) => {
     const path = gardenStatePath(deps.stateDir, name);
     return existsSync(path) ? statSync(path).mtimeMs : undefined;
   });
   const cadences = new Map<string, number | undefined>();
 
-  // LIVENESS — notice, then heal, then escalate once per episode.
-  for (const name of names) {
+  state.unobservedEscalated ??= {};
+  state.stalledEscalated ??= {};
+  for (const name of registeredNames) {
     const list = events.get(name) ?? [];
-    const { health, cadence } = judgeHealth(list, nowMs, mtimeOf(name));
+    if (list.some(e => e.row.step === "garden.pass" || e.kind === "pass")) {
+      delete state.unobservedEscalated[name];
+    } else if (state.unobservedEscalated[name] === undefined) {
+      const detail = `No pass for ${name} was observed in the ${OVERSEER_LEDGER_WINDOW_MS / DAY_MS}-day ledger window. Check the registered garden's scheduling and pass telemetry.`;
+      const issueUrl = deps.escalate?.(observationEscalation(name, "unobserved", detail));
+      if (issueUrl !== undefined) state.unobservedEscalated[name] = clock.iso();
+      recordTelemetry(`${OVERSEER_NAME}.unobserved`, { gardener: name, issue_url: issueUrl ?? null, window_ms: OVERSEER_LEDGER_WINDOW_MS });
+    }
+  }
+  for (const name of ["ci-friction", "flow-remedy", "fix-lane"]) {
+    const list = events.get(name) ?? [];
+    const stalled = stalledCause(list, rows, name);
+    if (!stalled) {
+      const latest = list.filter(e => e.row.step === `${name}.scorecard`).at(-1)?.row;
+      if (name === "flow-remedy" && latest && typeof latest.causes === "number" && latest.causes > 1 &&
+        !Array.isArray(latest.priced) && Array.isArray(latest.ladder) && latest.ladder.some(line => isRecord(line) &&
+          (line.state === "draft" || line.state === "escalate"))) {
+        recordTelemetry(`${OVERSEER_NAME}.stalled_unmeasured`, { gardener: name, reason: "scorecard omits per-cause prices", causes: latest.causes });
+      }
+      continue;
+    }
+    const { reading, costs } = stalled;
+    const key = JSON.stringify([name, reading.cause]);
+    if (state.stalledEscalated[key] !== undefined) continue;
+    const detail = `Cause ${reading.cause} grew across three successive scorecards (${costs.join(" -> ")} ${reading.unit}) while nothing was drafted or filed. Settled causes above it: ${reading.settled.join(", ") || "none"}.`;
+    const escalation = observationEscalation(name, "stalled_cause", detail);
+    escalation.taskId += `:${reading.cause}`;
+    escalation.summary += ` on ${reading.cause}`;
+    const issueUrl = deps.escalate?.(escalation);
+    if (issueUrl !== undefined) state.stalledEscalated[key] = clock.iso();
+    recordTelemetry(`${OVERSEER_NAME}.stalled_cause`, { gardener: name, cause: reading.cause, costs, unit: reading.unit,
+      settled_causes: reading.settled, issue_url: issueUrl ?? null });
+  }
+
+  // LIVENESS — notice, then heal, then escalate once per episode.
+  let closedThisPass = false;
+  for (const name of names) {
+    const list = events.get(legacyName(name)) ?? [];
+    const { health, cadence } = judgeHealth(list, nowMs, mtimeOf(legacyName(name)));
     cadences.set(name, cadence);
     if (!health) {
+      const recovered = state.episodes[name];
+      if (recovered?.escalatedAt !== undefined && deps.closeIssue && deps.readEscalationRows) {
+        // W1-T8866: the producer closes the issue it opened. One close per pass; the episode is KEPT (so the next pass
+        // retries) when the cap is spent or the ledger or the close could not be read, never closed on a guess.
+        if (closedThisPass) continue;
+        let url: string | null;
+        try {
+          url = openEscalationUrl(deps.readEscalationRows(), name);
+        } catch (error) {
+          deps.log(`${OVERSEER_NAME}.clear_unreadable`, { gardener: name, error: String((error as Error)?.message ?? error) });
+          continue;
+        }
+        if (url !== null) {
+          const healedMs = Date.parse(recovered.healedAt ?? recovered.since);
+          const passAt = list.find((e) => e.kind === "pass" && e.at >= healedMs) ?? [...list].reverse().find((e) => e.kind === "pass");
+          const recoveredAt = passAt ? fixedClock(passAt.at).iso() : clock.iso();
+          closedThisPass = true;
+          try {
+            deps.closeIssue(url, `Recovered: first passing scorecard at ${recoveredAt}. Closing automatically; a relapse opens its own issue.`);
+          } catch (error) {
+            deps.log(`${OVERSEER_NAME}.clear_failed`, { gardener: name, issue_url: url, error: String((error as Error)?.message ?? error) });
+            continue;
+          }
+          deps.log(`${OVERSEER_NAME}.cleared`, { gardener: name, kind: recovered.kind, issue_url: url, recovered_at: recoveredAt, delivered: true });
+        }
+      }
       delete state.episodes[name];
       continue;
     }
     const episode = state.episodes[name];
+    if (!episode && Object.keys(state.episodes).some(other => other !== name && legacyName(other) === legacyName(name))) continue;
     if (!episode || episode.kind !== health.kind) {
       state.episodes[name] = { kind: health.kind, since: clock.iso(), ...(health.owned ? { owned: true } : {}) };
       deps.log(health.owned ? `${OVERSEER_NAME}.deferred` : `${OVERSEER_NAME}.noticed`, {
@@ -518,7 +710,7 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
       continue;
     }
     if (episode.healedAt === undefined) {
-      const healed = healGardener(deps.stateDir, name);
+      const healed = healGardener(deps.stateDir, legacyName(name));
       episode.healedAt = clock.iso();
       episode.failuresAtHeal = health.failures;
       deps.log(`${OVERSEER_NAME}.healed`, { gardener: name, kind: health.kind, cleared: healed.cleared, unreadable: healed.unreadable ?? null });
@@ -572,14 +764,17 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   for (const pr of merged) {
     // ci-friction's effect is judged by the remedy's share of fix rounds (ci-friction-remedy.ts) from
     // 2026-10-02; the old decayed-minutes verdicts stand under their own id and these are new ones.
-    const id = pr.gardener === "ci-friction" ? `effect:v2:${pr.url}` : `effect:${pr.url}`;
-    if (hasVerdict(id)) continue;
+    const legacyId = pr.gardener === "ci-friction" ? `effect:v2:${pr.url}` : `effect:${pr.url}`;
+    if (hasVerdict(legacyId)) continue;
     const reading = deps.effectReading?.({ ...pr, mergedAt: pr.info.mergedAt }, rows);
     if (!reading) continue;
+    // W1-T9060: a reading that names its remedy task is keyed by it; the PR-keyed id stays for gardeners with no task.
+    const id = reading.taskId ? `effect:v3:${reading.taskId}` : legacyId;
+    if (hasVerdict(id)) continue;
     const verdict = reading.verdict ?? (reading.before - reading.after > reading.se ? "credit" : reading.after - reading.before > reading.se ? "debit" : undefined);
     if (!verdict) continue;
     issue({ id, gardener: pr.gardener, actionClass: pr.actionClass, verdict, kind: "effect" });
-    recordTelemetry(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}), ...(reading.opportunityMeasurement ? { opportunity_measurement: reading.opportunityMeasurement } : {}) });
+    recordTelemetry(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, ...(reading.taskId ? { task_id: reading.taskId } : {}), verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}), ...(reading.opportunityMeasurement ? { opportunity_measurement: reading.opportunityMeasurement } : {}) });
   }
 
   // CHURN — near-identical merges from one gardener and class, landing faster than its metric could move.
@@ -617,7 +812,7 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
     }
   }
   if (state.lastScorecardAt === undefined || nowMs - Date.parse(state.lastScorecardAt) >= WEEK_MS) {
-    recordTelemetry(`${OVERSEER_NAME}.scorecard`, scorecardRow(rows, events, state, deps.stateDir, nowMs, churnEpisodes, diskNames));
+    recordTelemetry(`${OVERSEER_NAME}.scorecard`, scorecardRow(rows, events, state, deps.stateDir, nowMs, churnEpisodes, [...names]));
     state.lastScorecardAt = clock.iso();
   }
   for (const name of new Set(state.verdicts.map((v) => v.gardener))) {
@@ -689,12 +884,12 @@ export function ciFrictionEffectReading(
   const mergedAtMs = Date.parse(remedy?.mergedAt ?? "");
   if (!remedy || !Number.isFinite(mergedAtMs)) return undefined;
   if (isDocOnlyRemedy(remedy)) {
-    return { before: 0, after: 0, se: 0, verdict: "debit", reason: `${remedy.id} was built as a docs-only record, which changes no code path` };
+    return { before: 0, after: 0, se: 0, verdict: "debit", taskId: remedy.id, reason: `${remedy.id} was built as a docs-only record, which changes no code path` };
   }
   const effect = ciFrictionRemedyEffect(rounds(), parsed.key, mergedAtMs, nowMs);
   if (effect.verdict !== "credit" && effect.verdict !== "debit") return undefined;
   const share = (w: { k: number; n: number }) => (w.n > 0 ? w.k / w.n : 0);
-  return { before: share(effect.before), after: share(effect.after), se: 0, verdict: effect.verdict, reason: `${remedy.id}: ${effect.reason}` };
+  return { before: share(effect.before), after: share(effect.after), se: 0, verdict: effect.verdict, taskId: remedy.id, reason: `${remedy.id}: ${effect.reason}` };
 }
 
 /** The production wiring: the ledger union, GitHub REST for PRs, and the ci-friction remedies file. */
@@ -706,7 +901,9 @@ export function productionGardenerOverseerPorts(opts: {
   fetch: (args: string[]) => unknown;
   log: GardenerOverseerPorts["log"];
   escalate?: GardenerOverseerPorts["escalate"];
+  closeIssue?: GardenerOverseerPorts["closeIssue"];
   clock?: Clock;
+  registeredGardenNames?: GardenerOverseerPorts["registeredGardenNames"];
 }): GardenerOverseerPorts {
   const clock = opts.clock ?? systemClock;
   // Read lazily and once per pass: only a merged ci-friction filing awaiting its verdict needs them.
@@ -741,9 +938,21 @@ export function productionGardenerOverseerPorts(opts: {
     log: opts.log,
     escalate: opts.escalate,
     clock,
+    registeredGardenNames: opts.registeredGardenNames ?? (() => {
+      try {
+        return parseGardenerRuntime(JSON.parse(readFileSync(join(opts.stateDir, GARDENER_RUNTIME_FILE), "utf8")))
+          .gardens.filter(garden => garden.enabled).map(garden => garden.name);
+      } catch (error) {
+        opts.log(`${OVERSEER_NAME}.registry_unreadable`, { error: String((error as Error)?.message ?? error) });
+        return undefined;
+      }
+    }),
     readRows: () => {
       const since = fixedClock(clock.now() - OVERSEER_LEDGER_WINDOW_MS).iso();
-      return readLedgerUnionRecordsSync(opts.stateDir, { since, pattern: OVERSEER_STEP_PATTERN, rotationWindowMs: OVERSEER_LEDGER_WINDOW_MS, minRotations: 2 }).rows;
+      const read = readLedgerUnionRecordsSync(opts.stateDir, { since, pattern: OVERSEER_STEP_PATTERN,
+        rotationWindowMs: OVERSEER_LEDGER_WINDOW_MS, minRotations: 2, refuseIncomplete: true });
+      if (!read.ok) throw new Error(`overseer ledger union incomplete: ${read.unread.length} file(s) unread`);
+      return read.rows;
     },
     prInfo: (url) => {
       const n = /\/pull\/(\d+)/.exec(url)?.[1];
@@ -760,5 +969,18 @@ export function productionGardenerOverseerPorts(opts: {
       }
     },
     effectReading: (pr, rows) => ciFrictionEffectReading(pr, rows, remedyFor, roundsOnce, clock.now()),
+    closeIssue: opts.closeIssue ?? ((url, comment) => {
+      const gateway = ghIssueGateway(opts.owner, opts.repo);
+      if (!gateway.closeWithComment) throw new Error("issue gateway cannot close issues");
+      gateway.closeWithComment(url, comment);
+    }),
+    readEscalationRows: () => {
+      const read = readLedgerUnionRecordsSync(opts.stateDir, {
+        since: fixedClock(clock.now() - KEEP_MS).iso(), step: [`${OVERSEER_NAME}.escalated`, `${OVERSEER_NAME}.cleared`],
+        rotationWindowMs: KEEP_MS, minRotations: 2, refuseIncomplete: true,
+      });
+      if (!read.ok) throw new Error(`the ledger union was incomplete: ${read.unread.length} file(s) unread`);
+      return read.rows;
+    },
   };
 }

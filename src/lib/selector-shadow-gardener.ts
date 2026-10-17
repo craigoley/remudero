@@ -9,7 +9,7 @@ import { callerReachableSuites } from "./ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
-import type { GardenCheckout, GardenCheckoutAsync, GardenerDeps } from "./gardener.js";
+import { prepareGardenTaskIds, releaseGardenTaskIds, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenTaskIdMinter, type GardenTaskIdRelease } from "./gardener.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { linkWorktreeNodeModules } from "./worker.js";
@@ -17,6 +17,7 @@ import { loadPlan, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { machineShardHeaderLines, machineShardLandingGuard } from "./machine-filing.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { sameTestFile } from "./test-path-resolver.js";
 
 /** W1-T4439: evidence from the full coverage shards before W1-T4406 may narrow PR CI. */
 // PRIMARY CONTROL: the live window one pass reads. Since W1-T5925 the verdict folds every stored
@@ -78,6 +79,8 @@ export interface SelectorShadowRecord {
   narrowSize?: number;
   impactSize?: number;
   impactFallback?: string;
+  /** Commits the run's base was past the impact map's sha, when the selector knew it. */
+  impactDistance?: number;
   failures: SelectorShadowFailure[];
 }
 
@@ -88,6 +91,8 @@ export interface SelectorShadowMiss {
   prNumber?: number;
   selection: "floor" | "narrow" | "impact";
   file: string;
+  /** An impact miss: how far the map was behind, so misses can be read against the staleness bound. */
+  impactDistance?: number;
 }
 
 /** A miss the gate does not charge to the selector, with the reason the operator can audit. */
@@ -142,6 +147,10 @@ function validImpactFields(size: unknown, fallback: unknown): boolean {
     (fallback === undefined || (size !== undefined && typeof fallback === "string" && fallback.trim().length > 0));
 }
 
+function validImpactDistance(size: unknown, distance: unknown): boolean {
+  return distance === undefined || (size !== undefined && nonnegativeInteger(distance));
+}
+
 function validImpactVerdict(size: unknown, verdict: unknown): boolean {
   return size === undefined ? verdict === undefined : isSelectorShadowVerdict(verdict);
 }
@@ -158,7 +167,8 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
     const row = value as Record<string, unknown>;
     if (typeof row.fullRun !== "boolean" || !nonnegativeInteger(row.floorSize) ||
         (row.narrowSize !== undefined && !nonnegativeInteger(row.narrowSize)) ||
-        !validImpactFields(row.impactSize, row.impactFallback) || !Array.isArray(row.failures)) {
+        !validImpactFields(row.impactSize, row.impactFallback) || !validImpactDistance(row.impactSize, row.impactDistance) ||
+        !Array.isArray(row.failures)) {
       throw new Error("selector shadow: invalid record sizes or failures");
     }
     const failures = row.failures.map((entry: unknown): SelectorShadowFailure => {
@@ -179,7 +189,8 @@ export function parseSelectorShadowLines(log: string): SelectorShadowRecord[] {
     records.push({ fullRun: row.fullRun, floorSize: row.floorSize as number,
       ...(row.narrowSize === undefined ? {} : { narrowSize: row.narrowSize as number }),
       ...(row.impactSize === undefined ? {} : { impactSize: row.impactSize as number }),
-      ...(row.impactFallback === undefined ? {} : { impactFallback: row.impactFallback as string }), failures });
+      ...(row.impactFallback === undefined ? {} : { impactFallback: row.impactFallback as string }),
+      ...(row.impactDistance === undefined ? {} : { impactDistance: row.impactDistance as number }), failures });
   }
   return records;
 }
@@ -596,6 +607,7 @@ export interface SelectorShadowObservation {
   narrowSize?: number;
   impactSize?: number;
   impactFallback?: string;
+  impactDistance?: number;
   failures: SelectorShadowFailure[];
   recovered: number;
 }
@@ -608,7 +620,8 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
   const records = parseSelectorShadowLines(run.log);
   if (records.length !== SELECTOR_SHADOW_SHARDS) return { kind: "incomplete" };
   const impact = records[0]!;
-  if (records.some((record) => record.impactSize !== impact.impactSize || record.impactFallback !== impact.impactFallback)) {
+  if (records.some((record) => record.impactSize !== impact.impactSize || record.impactFallback !== impact.impactFallback ||
+      record.impactDistance !== impact.impactDistance)) {
     throw new Error("selector shadow: inconsistent impact evidence across shards");
   }
   const jobs = shardEvidence(run.log);
@@ -632,7 +645,8 @@ function selectorShadowReading(run: SelectorShadowRun, source: SelectorShadowObs
     source, fullRun: records.some((record) => record.fullRun), floorSize: median(records.map((record) => record.floorSize))!,
     ...(narrowSize === null ? {} : { narrowSize }),
     ...(impact.impactSize === undefined ? {} : { impactSize: impact.impactSize }),
-    ...(impact.impactFallback === undefined ? {} : { impactFallback: impact.impactFallback }), failures, recovered,
+    ...(impact.impactFallback === undefined ? {} : { impactFallback: impact.impactFallback }),
+    ...(impact.impactDistance === undefined ? {} : { impactDistance: impact.impactDistance }), failures, recovered,
   } };
 }
 
@@ -686,6 +700,7 @@ function foldSelectorShadowObservations(observations: readonly SelectorShadowObs
           ...(run.baseSha === undefined ? {} : { baseSha: run.baseSha }),
           ...(run.prNumber === undefined ? {} : { prNumber: run.prNumber }),
           selection, file: failure.file,
+          ...(selection === "impact" && run.impactDistance !== undefined ? { impactDistance: run.impactDistance } : {}),
         } : undefined;
         // An unattributed miss is neither a selection nor a miss: it leaves the gate's arithmetic.
         if (miss !== undefined && reason !== undefined) {
@@ -757,6 +772,7 @@ function selectorShadowObservationRow(o: SelectorShadowObservation): Record<stri
     ...(o.narrowSize === undefined ? {} : { narrow_size: o.narrowSize }),
     ...(o.impactSize === undefined ? {} : { impact_size: o.impactSize }),
     ...(o.impactFallback === undefined ? {} : { impact_fallback: o.impactFallback }),
+    ...(o.impactDistance === undefined ? {} : { impact_distance: o.impactDistance }),
     failures: o.failures, recovered: o.recovered,
   };
 }
@@ -765,7 +781,8 @@ function selectorShadowObservationFromRow(row: Record<string, unknown>): Selecto
   if (!nonnegativeInteger(row.ci_run_id) || typeof row.head_sha !== "string" || (row.source !== "live" && row.source !== "replay") ||
       typeof row.full_run !== "boolean" || !nonnegativeInteger(row.floor_size) || !nonnegativeInteger(row.recovered) ||
       (row.narrow_size !== undefined && !nonnegativeInteger(row.narrow_size)) ||
-      !validImpactFields(row.impact_size, row.impact_fallback) || !Array.isArray(row.failures)) return undefined;
+      !validImpactFields(row.impact_size, row.impact_fallback) || !validImpactDistance(row.impact_size, row.impact_distance) ||
+      !Array.isArray(row.failures)) return undefined;
   const failures: SelectorShadowFailure[] = [];
   for (const entry of row.failures as unknown[]) {
     const f = entry as Record<string, unknown> | null;
@@ -786,6 +803,7 @@ function selectorShadowObservationFromRow(row: Record<string, unknown>): Selecto
     ...(row.narrow_size === undefined ? {} : { narrowSize: row.narrow_size as number }),
     ...(row.impact_size === undefined ? {} : { impactSize: row.impact_size as number }),
     ...(row.impact_fallback === undefined ? {} : { impactFallback: row.impact_fallback as string }),
+    ...(row.impact_distance === undefined ? {} : { impactDistance: row.impact_distance as number }),
     failures, recovered: row.recovered,
   };
 }
@@ -1129,7 +1147,7 @@ export async function selectorShadowPlanTasksAsync(repoRoot: string): Promise<Se
 
 export type SelectorShadowTaskIdMinter = ((filingBranch: string) => string | Promise<string>) & {
   async?: (filingBranch: string) => Promise<string>;
-};
+} & GardenTaskIdRelease;
 
 export function selectorShadowMissKey(miss: SelectorShadowMiss): string {
   return `selector-shadow:${miss.headSha}:${miss.selection}:${miss.file}`;
@@ -1421,10 +1439,11 @@ export async function runSelectorShadowGardener(
       const file = selectorShadowCauseOf(task.origin);
       if (file === undefined) continue;
       const isStructural = task.origin?.startsWith("selector-shadow-structural:") === true;
-      const held = planned.get(file);
+      const key = [...planned.keys()].find((path) => sameTestFile(path, file)) ?? file;
+      const held = planned.get(key);
       const better = !held || (isStructural && !held.structural) ||
         (!isStructural && !held.structural && held.retired && task.retirement === undefined);
-      if (better) planned.set(file, { id: task.id, retired: task.retirement !== undefined, structural: isStructural });
+      if (better) planned.set(key, { id: task.id, retired: task.retirement !== undefined, structural: isStructural });
       if (isStructural) structural[file] ??= task.id;
     }
   }
@@ -1439,9 +1458,10 @@ export async function runSelectorShadowGardener(
   /** Land one plan-task file for a miss, returning the PR url and the id minted for it. */
   const land = async (miss: SelectorShadowMiss, build: (taskId: string) => { contents: string; title: string; body: (relativePath: string) => string }) => {
     const workspace = await deps.openWorkspace();
+    let unfiled = "the filing ended before its PR opened";
     try {
       if (!workspace.branch) throw new Error("selector shadow: filing workspace has no branch for task-id reservation");
-      const taskId = await (mintTaskId.async ?? mintTaskId)(workspace.branch);
+      const [taskId] = await prepareGardenTaskIds(workspace, 1, mintTaskId as GardenTaskIdMinter, true) as string[];
       const name = `${taskId.toLowerCase()}-selector-shadow-miss.yaml`;
       const relativePath = join("plan", "tasks.d", name);
       const made = build(taskId);
@@ -1450,8 +1470,12 @@ export async function runSelectorShadowGardener(
       if (refused !== undefined) throw new Error(`selector shadow: missed-edge task failed lint-plan's machine-filing admission: ${refused}`);
       const prUrl = await workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) });
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
-      return { taskId, prUrl };
+      return { taskId: taskId!, prUrl };
+    } catch (e) {
+      unfiled = String((e as Error)?.message ?? e);
+      throw e;
     } finally {
+      await releaseGardenTaskIds(workspace, `selector-shadow gardener: ${unfiled}`, true);
       await workspace.dispose();
     }
   };
@@ -1459,10 +1483,11 @@ export async function runSelectorShadowGardener(
   let edgeReads = 0;
   for (const miss of unseen) {
     const key = selectorShadowMissKey(miss);
-    const plannedHome = planned.get(miss.file);
-    const home = structural[miss.file] ?? causes[miss.file] ?? plannedHome?.id;
+    const plannedHome = [...planned].find(([path]) => sameTestFile(path, miss.file))?.[1];
+    const structuralHome = Object.entries(structural).find(([path]) => sameTestFile(path, miss.file))?.[1];
+    const home = structuralHome ?? Object.entries(causes).find(([path]) => sameTestFile(path, miss.file))?.[1] ?? plannedHome?.id;
     // A suite that already has its one structural task only ever gains evidence.
-    const escalate = home !== undefined && structural[miss.file] === undefined && plannedHome?.structural !== true &&
+    const escalate = home !== undefined && structuralHome === undefined && plannedHome?.structural !== true &&
       plannedHome?.retired !== true && repaired(home, miss.file);
     if (home !== undefined && !escalate) {
       let paths: string[] = [];

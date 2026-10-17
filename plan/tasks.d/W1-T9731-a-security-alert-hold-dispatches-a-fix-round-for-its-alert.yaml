@@ -1,0 +1,70 @@
+- id: W1-T9731
+  title: "A SECURITY-ALERT-HOLD NEVER DISPATCHES A FIX ROUND — W1-T9633 names the hold 'owner fix-lane', but W1-T5633's code-scanning fix path reads a head's alerts only when its CodeQL check FAILED, so #12088 sat mergeable, unarmed and green from 17:59Z to past 20:33Z behind 'security merge blocked: new-high-or-critical-security-alert' with acted:false, no code_scanning row ever written and no alert named, until a session hand-fixed CodeQL #400 (js/file-system-race, src/lib/main-health-rung.ts:1213)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a security merge refusal at a head feeds that head's alerts into W1-T5633's existing judge-and-fix path; the policy, the judge and the fix dispatch are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-15 filing agent F4 lead 2: #12088 (W1-T9551) security-alert-hold 19:36Z-20:33Z+, repeat_streak 12, stand_down 'arm outcome: arm-error-ignored'"
+  plan_refs: [W1-T9633, W1-T5633, W1-T9673, W1-T100]
+  files:
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - src/lib/pr-blocker.ts
+    - test/a-security-alert-hold-dispatches-a-fix-round-for-its-alert.test.ts
+  status: merged
+  priority: 1  # operator-2026-10-15: a real high alert held a green PR for hours with nothing acting on it
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf (2026-10-15):
+    - src/run-task.ts `openPrViewSteps` hydrates `codeqlHeadAlerts` (W1-T5633) only for
+      `codeqlCheckFailed(pr.statusCheckRollup) && !codeScanningHeadSettled(...)`. `codeqlCheckFailed`
+      (src/lib/open-prs-rest.ts) is true only when the newest `CodeQL` check's conclusion is FAILURE.
+    - src/lib/sweep.ts `codeScanningGateForHead` returns `proceed` when `pr.codeqlHeadAlerts` is unread, so the
+      `mergeable` arm goes on to arm. `securityMergeHeadAsync` (src/lib/security-merge-admission.ts) then refuses
+      with `security merge blocked: new-high-or-critical-security-alert`. The arm row is `automerge.arm_failed`,
+      outcome `arm-error-ignored`, "left for the next sweep pass", and the next pass does the same.
+    - W1-T9633 (#12044) reads that row back (`securityArmRefusalAtHead`) and names the blocker
+      `security-alert-hold`, owner `fix-lane`. `securityHoldReason` names each alert only when `codeqlHeadAlerts`
+      was read at this head, which it never is on this path.
+    - Core ledger for #12088 at head 4d0406d30: `automerge.arm_failed` "security merge blocked:
+      new-high-or-critical-security-alert" at 17:59:39Z (review lane) and eight sweep passes to 20:33:26Z; the last
+      `sweep.disposed` reads blocker `security-alert-hold`, blocker_since 19:36:21Z, repeat_streak 12, acted false,
+      blocker_cause naming no alert, arm_evidence checksGreen true. The live ledger holds zero `code_scanning.*` rows.
+    - The alert was real: CodeQL #400, high, js/file-system-race at src/lib/main-health-rung.ts:1213, hand-fixed on
+      run-W1-T9551-1792082362617 (76b81bf33).
+    - W1-T100 shares sweep.ts and run-task.ts as a broad routing task. This task adds only the refusal-driven alert
+      read and the hold's alert naming.
+  design: |
+    1. HYDRATE ON THE REFUSAL. `openPrViewSteps` also reads the head's alerts for a PR whose newest arm row at this
+       head is a `security merge blocked` refusal (`securityArmRefusalAtHead`), with the same
+       `codeScanningHeadSettled` skip and the same hydration cap. A failed CodeQL check still qualifies as today.
+    2. THE EXISTING PATH ACTS. With alerts read at the head, `codeScanningGateForHead` judges them and a `fix`
+       ruling dispatches through W1-T5633's existing fix branch: `codeScanningFixCiFailures` carries each alert's
+       number, rule, severity, path:line and message as the red. No second dispatch path is added.
+    3. NAME THE ALERT. The hold's `blocker_cause` and shown reason name each alert's number, rule, path:line and
+       message (`securityHoldReason` gains the message, bounded as the hydration already bounds it).
+    4. NOTHING SITS SILENT. If the policy refused but the head read finds no classified alert, or the head is not an
+       rmd-owned run branch, the reason says which. The second case escalates once per head, as W1-T5633's
+       unfixable branch already does.
+    5. sweep.ts sits at its comment ceiling: no new comment lines there.
+    6. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - a mergeable PR whose CodeQL check passed, with a `security merge blocked` arm row at its head and one high
+         alert at that head, gets its alerts read, and the next pass dispatches a code-scanning fix whose evidence
+         names the alert;
+       - the disposed row's blocker_cause names alert number, rule, path:line and message;
+       - a refusal at another head reads nothing (positive control).
+  acceptance:
+    - claim: "a security merge refusal at a head reads that head's alerts and dispatches a code-scanning fix round"
+      proof: 'grep: test("W1-T9731: a security-alert-hold dispatches a fix round for its alert" in test/a-security-alert-hold-dispatches-a-fix-round-for-its-alert.test.ts'
+    - claim: "the hold's blocker_cause and reason name the alert's number, rule, path:line and message"
+      proof: 'grep: test("W1-T9731: the security hold names its alert" in test/a-security-alert-hold-dispatches-a-fix-round-for-its-alert.test.ts'
+    - claim: "a refusal recorded at another head hydrates nothing"
+      proof: 'grep: test("W1-T9731: a refusal at another head reads no alerts" in test/a-security-alert-hold-dispatches-a-fix-round-for-its-alert.test.ts'
+  falsifier: |
+    At origin/main, openPrViewSteps over a PR whose CodeQL check concluded SUCCESS and whose newest arm row at its head
+    is `security merge blocked`, with a fetcher serving one high alert, never requests the code-scanning listing.
+    codeqlHeadAlerts stays undefined and no code_scanning.fix_dispatch row is written, so the first test fails.

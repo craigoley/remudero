@@ -1,0 +1,30 @@
+- id: W1-T9628
+  title: "THE clock-sweep-report (merge the shards, classify, deliver) GATE REFUSED 1 PULL REQUEST IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: merged
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver)"
+  ci_learning_prs: [11896]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the clock-sweep-report (merge the shards, classify, deliver) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver) in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver). The clock-sweep-report (merge the shards, classify, deliver) gate went red on #11896 and was repaired; the repair touched .github/workflows/acceptance-author-gate.yml, .github/workflows/ci.yml, .github/workflows/clock-sweep.yml, .github/workflows/codeql.yml, .github/workflows/coverage-nightly.yml, .github/workflows/coverage-session-blanking.yml, .github/workflows/dependency-review.yml, .github/workflows/docs-index-check.yml, .github/workflows/fleet-heartbeat-watch.yml, .github/workflows/gate-monotonic.yml, .github/workflows/head-identity-gate.yml, .github/workflows/main-plan-guard.yml, .github/workflows/main-tripwire.yml, .github/workflows/merge-queue-review-attest.yml, .github/workflows/mutation-nightly.yml, .github/workflows/osv-scanner-pr.yml, .github/workflows/pr-title-lint.yml, .github/workflows/proof-discrimination-gate.yml, .github/workflows/recovery-drill.yml, .github/workflows/scorecard.yml, .github/workflows/semgrep.yml, .github/workflows/unwired-gate.yml, deploy/package-lock.json, deploy/package.json, package-lock.json, package.json, plan/tasks.d/W1-T9544-the-ci-judges-floor-reads-its-suites-off-the-loop.yaml, src/lib/arm-auto-merge.ts, src/lib/gardener-spend.ts, src/lib/plan-pr-merge-safety.ts, src/lib/sweep.ts, src/lib/worktree-git.ts, src/run-task.ts, test/a-behind-pr-is-not-direct-merged-when-main-changed-its-own-files.test.ts, test/a-fix-round-checks-its-edits-from-a-harness-git-snapshot.test.ts, test/a-fix-rounds-pre-commit-snapshot-reads-git-off-the-loop.test.ts, test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts, test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts, test/coverage-merged-artifact.test.ts, test/every-claude-worker-spawn-refuses-the-account-connectors.test.ts, test/fleet-runtime-health-console.test.ts, test/many-gardener-receipts-fit-a-bounded-cost-summary.test.ts, test/mkdtemp-callsite-ci-wiring.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, test/semgrep-native-install.test.ts, test/the-haiku55-image-pins-match-its-sdk.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared files touched is a single file, learnings/ci.yaml, which is guidance/learnings content and not secrets, auth, deploy, merge policy, or data deletion."
+      - "The acceptance is a single grep check for a ci-learning entry in learnings/ci.yaml, which is verifiable from what is shown and is reversible."
+      - "The long list of files in the note describes the earlier repair on #11896, not what this task will change; the remedy surface is stated as learnings/*.yaml."
+      - "The ci-learning family has a good track record (28 merged, 1 declined, Beta mean 0.94), and the task is machine-authored and parked, so its PR still passes CI and review."
+    judged_at: "2026-10-16T15:56:02.121Z"
+    pin: "ae5914e69d4f2de736445d5a2fb0cbd54acfa88b60d95913c9f1516dc69fcbfd"

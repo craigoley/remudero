@@ -65,13 +65,23 @@ export interface ShadowReadingSpec {
   fields?: readonly string[];
 }
 
+export interface ViewRequestFailure {
+  error: string;
+  status?: number;
+  detail?: string;
+  restartRequired?: true;
+  snapshotKey?: string;
+}
+
 export interface ViewDefinition<T = unknown> {
   name: string;
   version: number;
   /** Per data path, the reading (or each reading) it is copied from ({@link ShadowReadingSpec}): the shadow pairs the two reads by it. */
   shadowReadings?: Readonly<Record<string, ShadowReadingSpec | readonly ShadowReadingSpec[]>>;
   /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
-  compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
+  compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | ViewRequestFailure;
+  /** A maintained page may reject a cursor before a held body or its ETag can answer. Memory only. */
+  validateRequest?: (params: URLSearchParams, source?: ViewBodySource) => ViewRequestFailure | undefined;
   /** Per data path, the source (or every source) its value is computed from wholly: the shadow pairs the two sides' reads of each (view-shadow.ts). */
   shadowSources?: Readonly<Record<string, string | readonly string[]>>;
 }
@@ -91,7 +101,7 @@ export function renderView<T>(
   view: ViewDefinition<T>,
   clock: Clock = systemClock,
   params: URLSearchParams = new URLSearchParams(),
-): { body: ViewBody<T>; etag: string } | { error: string } {
+): { body: ViewBody<T>; etag: string } | ViewRequestFailure {
   const computed = view.compute(params);
   if ("error" in computed) return computed;
   const { data, sources } = computed;
@@ -160,6 +170,10 @@ export interface ViewBodyEntry {
   key: string;
   version: number;
   generation: number;
+  /** Trusted producer contract identity, persisted separately from the public body and projector counter. */
+  qualificationGeneration?: string;
+  /** A stored body remains readable, but malformed/mismatched qualification metadata is explicitly unknown. */
+  qualificationReason?: string;
   etag: string;
   body: ViewBody;
   /** When the build that produced it began (its first bounded step); absent on a stored or slow-lane body. Not persisted. */
@@ -181,6 +195,8 @@ export interface ViewBodySource {
   onBody?(listener: (entry: ViewBodyEntry) => void): () => void;
   /** Each `auto` view's effective mode as the main thread last resolved it; unknown readiness holds it. */
   autoMode?(view: string): EffectiveViewMode | undefined;
+  /** The current producer's required shadow qualification, independent of any warm body's provenance. */
+  qualificationGeneration?(view: string): string | undefined;
 }
 
 /** `auto` serves exactly while the view's shadow readiness reads ready, and is `shadow` otherwise. */
@@ -189,11 +205,16 @@ export type EffectiveViewMode = Exclude<ViewSwitchMode, "auto">;
 /** The read model's own status view, whose body carries every shadowed view's persisted readiness. */
 export const READ_MODEL_STATUS_VIEW = "read-model";
 /** The fields of view-shadow.ts's `ShadowReadiness` an `auto` switch reads (a type import of it would be a cycle). */
-export type ShownReadiness = { ready: boolean; reason: string; samples: number | null; lastRealMs: number | null };
+export type ShownReadiness = { ready: boolean; reason: string; samples: number | null; lastRealMs: number | null; qualificationGeneration?: string };
 
 /** `view`'s readiness as the status body last showed it; `undefined` when it shows none, which is UNKNOWN, not not-ready. */
-export function shownReadiness(readModel: Pick<ViewBodySource, "body"> | undefined, view: string): ShownReadiness | undefined {
-  return (readModel?.body(READ_MODEL_STATUS_VIEW)?.body.data as { shadow?: Array<ShownReadiness & { view: string }> } | undefined)?.shadow?.find((r) => r.view === view);
+export function shownReadiness(readModel: Pick<ViewBodySource, "body" | "qualificationGeneration"> | undefined, view: string): ShownReadiness | undefined {
+  const shown = (readModel?.body(READ_MODEL_STATUS_VIEW)?.body.data as { shadow?: Array<ShownReadiness & { view: string }> } | undefined)?.shadow?.find((r) => r.view === view);
+  const required = readModel?.qualificationGeneration?.(view);
+  if (required !== undefined && shown?.qualificationGeneration !== required) {
+    return { ready: false, reason: `no shadow qualification for current generation ${required}`, samples: 0, lastRealMs: null, qualificationGeneration: required };
+  }
+  return shown;
 }
 
 /**
@@ -206,7 +227,7 @@ export function effectiveViewMode(mode: ViewSwitchMode | undefined, readiness: P
 }
 
 /** A view's effective mode as serve's main thread sees it: its switch, and for `auto` the readiness its status body shows. */
-export function viewMode(readModel: Pick<ViewBodySource, "body" | "switches" | "autoMode"> | undefined, view: string): EffectiveViewMode | undefined {
+export function viewMode(readModel: Pick<ViewBodySource, "body" | "switches" | "autoMode" | "qualificationGeneration"> | undefined, view: string): EffectiveViewMode | undefined {
   const mode = readModel?.switches().views[view];
   return mode === "auto" ? effectiveViewMode(mode, shownReadiness(readModel, view), readModel?.autoMode?.(view)) : mode;
 }
@@ -281,22 +302,34 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
         res.end(JSON.stringify({ error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }));
         return;
       }
-      const mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
+      let mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
       const shadow = opts.shadow;
       if (shadowSampled(opts.readModel?.switches().views[name]) && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
-      const key = viewKey(params);
-      const entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
       const fallback = legacy.get(name);
+      const refused = fallback?.validateRequest?.(params, mode === "serve" ? opts.readModel : undefined);
+      if (refused) {
+        const { status = 400, ...body } = refused;
+        res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(body));
+        return;
+      }
+      const key = viewKey(params);
+      let entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
+      const required = opts.readModel?.qualificationGeneration?.(name);
+      const qualificationRefused = mode === "serve" && opts.readModel?.switches().views[name] === "auto" && required !== undefined && entry?.qualificationGeneration !== required
+        ? `no matched body for current generation ${required}` : undefined;
+      if (qualificationRefused !== undefined) { mode = "shadow"; entry = undefined; }
       const answer = (served: ViewBodyEntry | undefined): void => {
         const rendered = served && opts.readModel ? judged(opts.readModel, served) : fallback ? renderView(fallback, clock, params) : undefined;
         if (rendered === undefined) {
           res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name }));
+          res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name, ...(qualificationRefused === undefined ? {} : { reason: qualificationRefused }) }));
           return;
         }
         if ("error" in rendered) {
-          res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-          res.end(JSON.stringify({ error: "invalid_request", detail: rendered.error }));
+          res.writeHead(rendered.status ?? 400, { "content-type": "application/json; charset=utf-8" });
+          const { status: _status, ...failure } = rendered;
+          res.end(JSON.stringify(rendered.status === undefined ? { error: "invalid_request", detail: rendered.error } : failure));
           return;
         }
         const { body, etag } = rendered;

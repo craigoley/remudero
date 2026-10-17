@@ -1,0 +1,92 @@
+- id: W1-T9443
+  title: "THE DAEMON READS THE PROPOSAL SHARDS OFF THE LOOP, AND ONLY THE ONES THAT CHANGED — readProposalShards readFileSyncs every inbox-proposals.d file (1,357 on 2026-10-14) on the daemon loop once per full sweep through the draft rung's pruneOrphanedDrafts, and each registry write rewrites every shard, so under host I/O pressure the read sat in two loop stalls of 273 s (08:32Z) and 434 s (12:41Z)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — how the daemon reads and writes the proposal shard population; it runs on the daemon loop
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14 (Craig: \"not sure reviews are happening\"); coordinator brief: file P1 if uncovered; standing rulings: no hard fixed thresholds, automated flow"
+  plan_refs: [W1-T2490, W1-T4118, W1-T9240, W1-T9361, W1-T9390, W1-T9406, W1-T192]
+  files: [src/lib/inbox.ts, src/run-task.ts, test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts]
+  status: merged
+  priority: 1  # P1: each full sweep pays it on the loop; it froze reviews and dispatch for minutes at a time on 2026-10-14
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 (core ledger ~/rmd-state2/state on the Azure host, read-only; today's six rotations plus the live
+    file, copies in ~/Remudero-notes/core-freeze-2026-10-14/):
+      - 24 `daemon.loop_stall_profile` rows today. Two name `readProposalShards` (src/lib/inbox.ts) in their top frames:
+        08:32:58Z lag_ms 272,883 (readFileUtf8 86,957 ms self, readProposalShards 3,273, writeFileUtf8 2,558) and
+        12:41:59Z lag_ms 433,724 (readFileUtf8 158,159, spawn 4,154, writeFileUtf8 3,169, GC 1,471, readProposalShards
+        982). The profile keeps only its newest two chunks and names no caller (W1-T9361), so these are lower bounds.
+      - The 12:41:59 stall followed the core daemon's 29.5-minute stall (loop_lag 1,773,183 ms at 12:34:17Z, a
+        ledger-union parse: parseObject 64,623 ms, readdir 35,235). Between them the light pass wrote no sweep.pass or
+        review row from 11:56Z to 12:43Z, and no review was posted from 11:54:16Z to 12:48:35Z. After the loop came
+        back, seven reviews posted by 12:56Z.
+      - Today's 35 loop-lag rows of 60 s or more cover 12,737 s (about 3.5 h) of frozen loop once overlaps are
+        merged, across 9 core daemon runs from 00:00Z to 12:45Z.
+      - The population: inbox-proposals.d holds 1,357 files (1.25 MB of content, median 664 bytes, largest 9,559) beside
+        a 1.30 MB blob and a 3.80 MB inbox-drafts.json. The bytes are small. The time is the per-file cost: 1,357
+        synchronous open/read/close calls on a host with 7 GB of swap in use and load 15-25. That puts a full read in
+        the minutes.
+      - EVERY SHARD WAS REWRITTEN AT ONCE: all 1,357 shard files carry an mtime in the 11:00Z hour (the blob and the
+        directory both read 11:44:40Z, when an `rmd approve` CLI updated the registry). A write-only-what-changed
+        rule is what makes an incremental read pay off.
+    READ on origin/main b8c183b0c (symbols, not lines):
+      - `readProposalShards` (src/lib/inbox.ts): `listProposalShardFiles` (readdirSync), then `fs.readFileSync` and
+        `JSON.parse` for every file, every call. There is no memo.
+      - `buildInboxDraftHook` (src/run-task.ts) runs at the end of each full sweep (`await draftHook(tickRead)` in
+        the sweep composite). It calls `pruneOrphanedDrafts`. That function runs `updateProposalRegistry` under the
+        registry lock: `readProposalShards`, the blob read, then a read and possible rewrite of inbox-drafts.json, all
+        synchronous on the loop. Today 40 `sweep.credit_backfill.summary` rows (one per full sweep) and 10
+        `inbox.drafts_pruned` rows.
+      - `updateProposalRegistry`'s write half writes a shard for every proposal in `next` that `isNew || hadShard`,
+        whether or not its content changed. So every non-null update rewrites all 1,357 shards, temp file plus rename
+        each, and every write is a new inode.
+    OVERLAP: W1-T9240 (queued) changes only the registry lock's wait bound in the same function; it does not touch
+    the read or the write set. W1-T9390 (merged #11608) and W1-T9406 (merged #11650) moved the ESCALATION TRIAGE's
+    ledger-union reads off the loop with an incremental reader. This task follows that pattern for the proposal
+    shards. W1-T9361 (queued) makes stall rows name callers and will confirm this attribution after it ships.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 374 origin heads (2026-10-14 12:56Z) for
+    readProposalShards, inbox-proposals.d, proposalShardDir, pruneOrphanedDrafts, loadProposalRegistry,
+    updateProposalRegistry and "proposal shard". Control: main reads 25 shards (W1-T2490, W1-T4118 and W1-T9240 among
+    them), and no head adds one main lacks. None moves the shard read off the loop or makes it incremental.
+  design: |
+    No time window and no cap. Every shard stays in the population every pass.
+    1. ONE SHARD MEMO PER DAEMON START. src/lib/inbox.ts gains a proposal-shard reader that keeps, per shard file, the
+       digest (inode, size, mtime in ns from a bigint stat) and the parsed proposal. `refresh()` is async. It lists the
+       directory with fs.promises, stats each entry, and re-reads and re-parses only files whose digest changed or
+       are new. It drops files that are gone. The duplicate-id refusal and the "no valid id" refusal are those of
+       `readProposalShards`, unchanged. An unreadable directory is still a throw, never an empty population. The
+       writes go through temp plus rename, so a rewritten shard always has a new inode and an unchanged one keeps its
+       digest.
+    2. THE DRAFT RUNG READS THROUGH IT. `buildInboxDraftHook` holds one reader, built once per daemon start like
+       W1-T9390's. The orphan prune gets an async form that awaits `refresh()` and the blob and drafts reads
+       (fs.promises) before it takes the registry lock. Under the lock it re-checks only the digests (async stat) and
+       re-reads the files that moved. The drafts rewrite uses `writeAtomicAsync`. The sync `pruneOrphanedDrafts` stays
+       for CLI callers, which are separate processes.
+    3. A WRITE TOUCHES ONLY WHAT CHANGED. In `updateProposalRegistry`'s write half, a proposal that already has a shard
+       is rewritten only when its serialized form differs from the shard's current content. A new proposal is written
+       and a dispositioned one is unlinked, as today. The blob write is unchanged. After this, one update moves one
+       digest, not 1,357.
+    4. TELEMETRY. `proposal_shards.refreshed` {files, read, unchanged, removed, ms} once per refresh. It is what a
+       re-measure reads to confirm the incremental path holds.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Inject the reader's fs seam: a
+    deferred readFile, read counts, a fake stat.
+  acceptance:
+    - claim: "a shard read that has not resolved yet does not block a concurrent timer, and the refresh makes no synchronous fs call"
+      proof: 'grep: test("W1-T9443: a slow shard read does not block a concurrent timer" in test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts'
+    - claim: "a second refresh after one shard changes re-reads exactly that shard and yields the same population as a full read, a removed shard drops, and a duplicate id is still refused"
+      proof: 'grep: test("W1-T9443: a refresh re-reads only the shards that changed" in test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts'
+    - claim: "an update that changes one sharded proposal rewrites only that shard; every other shard keeps its inode"
+      proof: 'grep: test("W1-T9443: an update rewrites only the shard that changed" in test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts'
+    - claim: "the draft rung prunes orphaned drafts through the async reader"
+      proof: 'grep: test("W1-T9443: the draft rung prunes through the off-loop reader" in test/the-daemon-reads-the-proposal-shards-off-the-loop.test.ts'
+    - claim: "the reader ledgers each refresh"
+      proof: 'grep: proposal_shards\.refreshed in src/lib/inbox.ts'
+  falsifier: |
+    Swap `refresh()` back to readProposalShards' readFileSync loop: the first test's timer fires only after the
+    deferred read, and its sync-call spy counts readFileSync. Drop the digest check: the second test counts every
+    shard read again. Restore the `isNew || hadShard` write: the third test sees every shard's inode change.

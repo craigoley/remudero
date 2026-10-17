@@ -229,9 +229,41 @@ that is not a branch on the remote — a sha, a tag — has no `refs/remotes/ori
 through to the exact form, so a pin still means exactly what it says. That distinction is the whole
 point of RMD_REF and it now holds in both directions.
 
-NOTHING IS SILENCED. A checkout that cannot proceed DIES, loudly, rather than continuing on
-whatever HEAD happened to be. Proceeding is the expensive direction: it costs a full run against
-stale code and then a scope-guard refusal whose message names a different cause.
+NOTHING IS SILENCED. A refused checkout is never a quiet HEAD: it is either a named STALE BOOT or
+an exit, and the log says which.
+
+W1-T9631 (2026-10-15): A SYNC WHOSE CHECKOUT REFUSES RUNS THE TREE THAT LAST BOOTED, AS A STALE BOOT.
+This text used to say a checkout that cannot proceed DIES, because proceeding costs a full run
+against stale code and then a scope-guard refusal whose message names a different cause. That cost
+is real, and W1-T9631 accepted it. Dying was worse: no revive changes what makes git refuse, so every
+restart died the same way. On 2026-10-15 the boot checkout refused from 08:22:44 to 10:28:42, 2 h 6 m
+of a crash loop with no daemon, until a hand move.
+
+What `sync_tree` does now, when `try_checkout_target` fails (the target does not resolve, or
+`git checkout --detach` refuses it), is call `stale_boot_on_head`:
+  - It runs HEAD, the tree the last boot checked out, but only if that tree can be vouched for.
+    It still exits through `die` if HEAD does not resolve, if `git status` cannot be read, or if
+    the refused checkout left tracked changes.
+  - It logs `STALE BOOT: CHECKOUT FAILED toward <REF> (<target>) — continuing on HEAD <sha>, the tree
+    that last booted`, after the CHECKOUT FAILED lines that carry git's own refusal text.
+  - It appends an `entrypoint.stale_boot` ledger row with `head`, `target`, `ref`, git's `error` and
+    the reason.
+  - `stale_boot_spool` writes `escalate-entrypoint-stale-boot.json` to the escalation spool, a
+    BLOCKED escalation for task DAEMON. A repeat boot keeps `firstAt` and raises `count`, so it
+    stays one alert.
+  - It exports `RMD_BOOT_CHECKOUT_BLOCKED=<target>`, or unsets it when the ref did not resolve.
+    The daemon reads it as `checkoutBlockedTarget` (src/lib/daemon.ts). A freshness reading whose
+    new sha is that target is treated as not stale and ledgered as `daemon.freshness_blocked`
+    (reason `boot_checkout_blocked`), and the stale-reviewer restart toward that sha is skipped. A
+    restart toward the target the checkout cannot reach would only reboot into the same refusal.
+    Once origin/main moves past it, the reading passes untouched and the next boot tries again.
+
+Recovery is the next boot whose checkout succeeds. `checkout_unblocked` unsets the variable and
+withdraws a pending spool file. If the escalation was already delivered, it spools a
+`close-entrypoint-stale-boot.json` naming the delivered issue.
+
+THE CLONE PATH STILL DIES. A fresh clone has no tree that last booted, so `checkout_target` there
+exits on CHECKOUT FAILED exactly as before.
 
 ## `clear_redundant_untracked` — W1-T1054
 
@@ -252,8 +284,16 @@ paths against the INCOMING diff and only conflicts on the overlap; `rmd sync` (W
 classifies a local path as provably lossless when its bytes equal the origin blob at that path.
 This is that same predicate, in bash, at boot: an untracked path is removable ONLY IF the incoming
 target ADDS that same path AND the local bytes are IDENTICAL to the incoming blob there. Anything
-else — untracked and not in the incoming diff, or in it with different content — is left alone, so
-the checkout below fails exactly as it always has and the operator sees the same diagnosis.
+else — untracked and not in the incoming diff — is left alone.
+
+W1-T9623 (2026-10-15): IN THE INCOMING DIFF WITH DIFFERENT BYTES IS MOVED ASIDE, NOT LEFT. Leaving it
+protected nothing: no later boot could ever check out past it. On 2026-10-15 45 re-captured
+`plan/feedback/incident-*.yaml` files differed from the copies #11901/#11946 had landed, and every
+boot from 08:22:44 died on CHECKOUT FAILED, about a second each, until a hand move at 10:28:42.
+`move_untracked_aside` now moves each such file to `state/recovered-untracked/<stamp>/<path>`, names
+it in the log and in an `entrypoint.untracked_moved_aside` ledger row (both blobs and the reason), and
+the boot proceeds. Nothing is discarded. A move that fails leaves the file in place, and the checkout
+fails exactly as before.
 
 BYTES, NOT TEXT. Comparing content requires reading it into a shell string, which mangles binary
 data and trailing newlines. `git hash-object` on the local path against the incoming blob's own sha

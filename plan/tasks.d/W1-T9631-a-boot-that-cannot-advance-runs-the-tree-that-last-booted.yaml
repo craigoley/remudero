@@ -1,0 +1,42 @@
+- id: W1-T9631
+  title: "A BOOT THAT CANNOT ADVANCE ITS CHECKOUT RUNS THE TREE THAT LAST BOOTED, AND SAYS SO: today any sync failure the entrypoint cannot repair (CHECKOUT FAILED, ref not found) exits 1 on every boot, so one bad input in the checkout takes the daemon down until a human acts (2 h 6 m on 2026-10-15); a sync_tree failure with a HEAD that last booted continues on that HEAD as a named STALE BOOT, ledgers it, and tells the daemon so it does not freshness-restart into the same failure"
+  repo: remudero
+  depends_on: [W1-T9623]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — what the daemon runs when its boot checkout cannot advance
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: core outage 08:22-10:29Z; operator asked that a crash-looping core fall back to the last known-good code and alert"
+  plan_refs: [W1-T9623, W1-T1054, W1-T490, W1-T2965, W1-T2501]
+  files: [deploy/entrypoint.sh, src/lib/daemon.ts, test/entrypoint-boot.test.ts, test/a-boot-that-cannot-advance-runs-the-tree-that-last-booted.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15 on the Azure host (read-only): the core checkout's HEAD stayed at 52c19d0 from 05:38:35 to 10:29:06.
+    That tree had booted and run until 08:22:44. Every boot in between died in the entrypoint's checkout (W1-T9623), so the
+    fleet ran nothing for 2 h 6 m, even though a tree that had just booted was sitting on disk.
+    READ at origin/main 8b45ddbe7, deploy/entrypoint.sh: a failed boot FETCH already continues "on the tree as it stands"
+    and names a STALE BOOT (W1-T2501). A failed CHECKOUT dies instead (`die "cannot check out $REF"`), and so does an
+    unresolvable target. Defect 3 in test/entrypoint-boot.test.ts was a SILENT run on a REGRESSED sha. Running the
+    unchanged HEAD, loudly, is not that defect.
+    INFERRED: W1-T9623 removes the cause seen on 10-15, but any other checkout refusal still has the same shape. The
+    daemon checks freshness at the top of every tick (W1-T2965), so a plain fallback would exit 75 on its first tick and
+    loop. It has to know the tree cannot advance.
+  design: |
+    In sync_tree (never on the clone path), when checkout_target cannot proceed and HEAD resolves, log
+    "STALE BOOT: CHECKOUT FAILED ... continuing on HEAD <sha>", append an entrypoint.stale_boot ledger row (head, target,
+    git's error), and export RMD_BOOT_CHECKOUT_BLOCKED=<target sha> to the daemon. While it is set, the daemon does not
+    exit for freshness toward that same target; it writes a daemon.freshness_blocked row each tick instead. When origin/main
+    moves past that target, it tries one freshness restart again, so a later fix gets picked up. The STALE BOOT row also
+    raises the host alert (crash-loop tier escalation) so a human is told, not just the log.
+  acceptance:
+    - claim: "a boot whose checkout cannot proceed runs the HEAD it already has, names a STALE BOOT, and ledgers entrypoint.stale_boot"
+      proof: "grep: a boot that cannot advance runs the tree that last booted in test/a-boot-that-cannot-advance-runs-the-tree-that-last-booted.test.ts"
+    - claim: "a daemon told its checkout is blocked toward a target does not freshness-exit toward that same target, and does once main moves past it"
+      proof: "grep: a blocked checkout does not freshness-restart into the same target in test/a-boot-that-cannot-advance-runs-the-tree-that-last-booted.test.ts"
+  falsifier: |
+    Keep the `die` in checkout_target: the boot exits 1 and the first test fails. Drop the daemon's check of
+    RMD_BOOT_CHECKOUT_BLOCKED: the daemon exits 75 on its first tick and the second test fails.

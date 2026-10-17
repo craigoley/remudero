@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { censusMembershipCommand } from "../src/run-task.js";
 import {
@@ -11,6 +13,7 @@ import {
   type CensusCandidate,
 } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { discoverSourceTextReaders, type SourceTextReader } from "../src/lib/source-text-readers.js";
 
 function captured(fn: () => number): { code: number; out: string } {
   const lines: string[] = [];
@@ -127,4 +130,67 @@ test("W1-T3238: candidates are a separate section and the named set is byte-iden
     "the named suites still come only from the trusted membership table",
   );
   assert.deepEqual(after.candidateCoverage, [candidate], "the candidate rides beside the named set");
+});
+
+// ── 2026-10-15: a suite that reads a changed path AS TEXT joins it, whatever its walk idiom ──────
+// #12019 (W1-T9426) and #12104 (W1-T9667) each passed census-membership and went red in CI on a
+// suite the verb never named: one walks test/*.test.ts through `git grep`, one reads src/run-task.ts
+// through a single readFileSync. Neither spells a directory-walk idiom the recognizer admits.
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+let treeReaders: SourceTextReader[] | undefined;
+const realReaders = () => (treeReaders ??= discoverSourceTextReaders(REPO_ROOT));
+
+function membershipFiles(changedPaths: readonly string[]): { out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  const log = console.log;
+  const error = console.error;
+  console.log = (...a: unknown[]) => void out.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => void err.push(a.map(String).join(" "));
+  try {
+    const code = censusMembershipCommand(["--files"], { repoRoot: REPO_ROOT, changedPaths, spawn: listSpawn([]), readers: realReaders });
+    assert.equal(code, 0, "census-membership is report-only");
+  } finally {
+    console.log = log;
+    console.error = error;
+  }
+  return { out, err };
+}
+
+test("census-membership --files selects the suite #12104 reddened for a src/run-task.ts diff", () => {
+  const { out } = membershipFiles(["src/run-task.ts"]);
+  assert.ok(
+    out.includes("test/a-generic-route-has-an-explicit-tool-bound.test.ts"),
+    `a suite that reads src/run-task.ts as text joins a diff to it; --files printed:\n${out.join("\n")}`,
+  );
+});
+
+test("census-membership --files selects the suite #12019 reddened for a diff adding a test file", () => {
+  // #12019's own changed paths (squash 30c455efa): one added test file, two scripts and ci.yml.
+  const { out } = membershipFiles([
+    ".github/workflows/ci.yml",
+    "scripts/pure-test-pool.mjs",
+    "scripts/test-tier-manifest.mjs",
+    "test/a-hung-leak-locate-probe-ends-inside-the-shard-budget.test.ts",
+  ]);
+  assert.ok(
+    out.includes("test/a-wall-clock-bound-declares-itself.test.ts"),
+    `a suite that walks test/*.test.ts through git grep joins a diff adding a test; --files printed:\n${out.join("\n")}`,
+  );
+});
+
+test("census-membership --files keeps a plain text reader off the run list and names it on stderr", () => {
+  const { out, err } = membershipFiles(["src/run-task.ts"]);
+  const textOnly = err.filter((l) => l.startsWith("reads-as-text: ")).map((l) => l.slice("reads-as-text: ".length));
+  assert.ok(textOnly.length > 0, "src/run-task.ts is read as text by suites that are not censuses");
+  for (const file of textOnly) assert.ok(!out.includes(file), `${file} is named on stderr, not run as a census`);
+});
+
+test("census-membership renders the joined source-text censuses in its human report", () => {
+  const r = captured(() =>
+    censusMembershipCommand([], { repoRoot: REPO_ROOT, changedPaths: ["src/run-task.ts"], spawn: listSpawn([]), readers: realReaders }),
+  );
+  assert.match(r.out, /SOURCE-TEXT census suite\(s\) that read a changed path/);
+  assert.match(r.out, /-> test\/a-generic-route-has-an-explicit-tool-bound\.test\.ts/);
 });

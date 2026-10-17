@@ -6,7 +6,7 @@
 // main revision (buildIntoStore, a child process), and childEntryArgv copies a stored build into a tree that has
 // no current bundle (materializeFromStore). Every stored and staged payload is judged by
 // scripts/build-child-entries.mjs's own childEntryIsCurrent, never by a second guard here.
-import { execFile } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import {
   constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync,
 } from "node:fs";
@@ -16,13 +16,14 @@ import { isAbsolute, join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 
 interface Currency { current: boolean; reason: string; bundle?: string }
-interface StoredManifest { sourceHash?: unknown; entries?: unknown }
+interface StoredManifest { sourceHash?: unknown; entries?: unknown; workers?: unknown }
 interface BuildScript {
   OUT_DIR: string;
   MANIFEST_NAME: string;
   sourceHash(root: string): string;
   readChildEntryManifest(root: string, outDir?: string): unknown;
   childEntryIsCurrent(root: string, name: string, opts?: { outDir?: string; treeHash?: string }): Currency;
+  workerBundle(root: string, module: string, opts?: { outDir?: string; treeHash?: string }): Currency;
 }
 /** Loaded on demand for the reason child-entry-argv.ts gives: a tree may carry src/ but not scripts/. */
 const loadBuildScript = (): BuildScript => createRequire(import.meta.url)("../../scripts/build-child-entries.mjs") as BuildScript;
@@ -74,11 +75,21 @@ function storedBuildRefusal(script: BuildScript, dir: string, treeRoot: string, 
     const verdict = script.childEntryIsCurrent(treeRoot, String(entry?.name), { outDir: dir, treeHash });
     if (!verdict.current) return verdict.reason;
   }
+  // W1-T8777: a build's worker bundles are judged as its entries are, so a materialized copy never lacks one.
+  for (const worker of storedWorkers(manifest)) {
+    const verdict = script.workerBundle(treeRoot, String(worker?.module), { outDir: dir, treeHash });
+    if (!verdict.current) return `worker ${String(worker?.module)}: ${verdict.reason}`;
+  }
   return null;
 }
 
-const bundleNames = (script: BuildScript, dir: string): string[] =>
-  ((script.readChildEntryManifest(dir, ".") as StoredManifest).entries as { bundle: string }[]).map((e) => e.bundle);
+const storedWorkers = (manifest: StoredManifest): Array<{ module?: unknown; bundle?: unknown }> =>
+  Array.isArray(manifest.workers) ? manifest.workers as Array<{ module?: unknown; bundle?: unknown }> : [];
+
+const bundleNames = (script: BuildScript, dir: string): string[] => {
+  const manifest = script.readChildEntryManifest(dir, ".") as StoredManifest;
+  return [...(manifest.entries as { bundle: string }[]), ...storedWorkers(manifest)].map((e) => String(e.bundle));
+};
 
 function touch(path: string): void {
   const now = systemClock.date();
@@ -161,13 +172,11 @@ export type StoreBuildResult =
 /** Runs `node <script> ...args` in a CHILD process and resolves its stdout; rejects on a non-zero exit. */
 export type RunBuildScript = (script: string, args: readonly string[], cwd: string) => Promise<string>;
 export const runBuildScriptInChild: RunBuildScript = (script, args, cwd) =>
-  new Promise((done, fail) => {
-    execFile(process.execPath, [script, ...args], { cwd, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 10 * 60 * 1000 }, (err, stdout, stderr) => {
-      // The script's own stderr names why it failed; the spawn error's message is only the command line.
-      if (err) fail(new Error(String(stderr).trim().slice(-400) || err.message));
-      else done(stdout);
-    });
-  });
+  execFileLoopBounded(process.execPath, [script, ...args], { cwd, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: 10 * 60 * 1000 }).then(
+    ({ stdout }) => stdout,
+    // The script's own stderr names why it failed; the spawn error's message is only the command line.
+    (err: { stderr?: unknown; message: string }) => { throw new Error(String(err.stderr ?? "").trim().slice(-400) || err.message); },
+  );
 
 export interface BuildIntoStoreOptions {
   storeRoot: string;
@@ -247,7 +256,9 @@ export function buildIntoStore(treeRoot: string, opts: BuildIntoStoreOptions): P
   const pass = buildIntoStoreUnlogged(resolve(treeRoot), opts)
     .catch((err: unknown): StoreBuildResult => ({ kind: "failed", reason: String((err as Error)?.message ?? err).slice(0, 400) }))
     .then((result) => {
-      if (result.kind === "built") log("child_entry.store_built", { hash: result.hash, ms: result.ms, bytes: result.bytes });
+      if (result.kind === "built") log("child_entry.store_built", { reason: "new-build", hash: result.hash, ms: result.ms, bytes: result.bytes });
+      if (result.kind === "present") log("child_entry.store_present", { reason: "source-hash-already-present", hash: result.hash });
+      if (result.kind === "skipped") log("child_entry.store_build_skipped", { reason: result.reason });
       if (result.kind === "failed") log("child_entry.store_build_failed", { reason: result.reason, hash: result.hash });
       if (result.kind !== "skipped") prune(opts, log);
       return result;
@@ -255,6 +266,46 @@ export function buildIntoStore(treeRoot: string, opts: BuildIntoStoreOptions): P
     .finally(() => inFlight.delete(key));
   inFlight.set(key, pass);
   return pass;
+}
+
+/**
+ * W1-T9601: what one request to fill the store for a tree answered. `requested` started a build, `joined` found one
+ * running for the same hash, and `already-tried` found one this process already finished for it.
+ */
+export type OwnTreeFill = "requested" | "joined" | "already-tried";
+
+export interface OwnTreeFillOptions extends Omit<BuildIntoStoreOptions, "liveTrees"> {
+  /** Who asked, ledgered as `source` on child_entry.store_build_requested. */
+  source: string;
+  /** The build. Default: {@link buildIntoStore}, which never rejects. */
+  build?: (treeRoot: string, opts: BuildIntoStoreOptions) => Promise<StoreBuildResult>;
+}
+
+/** Per (store, tree, source hash): the build still running, or `settled` once it finished, whatever its outcome. */
+const ownTreeFills = new Map<string, Promise<StoreBuildResult> | "settled">();
+
+/**
+ * W1-T9601: build `treeRoot` into the store at most once per (store, tree, source hash) in this process, unawaited.
+ * `hash` is what the missed lookup computed. A `store-empty` miss computed none, so it keys on the tree alone until
+ * the build reports a hash, and that hash is then marked too. A finished build is never retried at its hash, even
+ * a failed one: only a miss at a different hash asks again. Retention after it keeps the hash the tree runs (`liveTrees`).
+ */
+export function fillStoreForOwnTree(treeRoot: string, hash: string | undefined, opts: OwnTreeFillOptions): OwnTreeFill {
+  const tree = resolve(treeRoot);
+  const base = `${resolve(opts.storeRoot)}\0${tree}\0`;
+  const key = base + (hash ?? "");
+  const seen = ownTreeFills.get(key);
+  if (seen !== undefined) return seen === "settled" ? "already-tried" : "joined";
+  opts.log?.("child_entry.store_build_requested", { source: opts.source, tree, hash: hash ?? null });
+  const build = opts.build ?? buildIntoStore;
+  const buildOpts: BuildIntoStoreOptions = { storeRoot: opts.storeRoot, log: opts.log, runScript: opts.runScript, clock: opts.clock, liveTrees: () => [tree] };
+  const pass = build(tree, buildOpts).then((result) => {
+    ownTreeFills.set(key, "settled");
+    if ("hash" in result && result.hash !== undefined) ownTreeFills.set(base + result.hash, "settled");
+    return result;
+  });
+  ownTreeFills.set(key, pass);
+  return "requested";
 }
 
 /** The source hash a tree's own published manifest names, if any: what that live tree runs, read without hashing. */

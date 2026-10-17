@@ -219,7 +219,8 @@ read_instance_registry() {
       sub(/:$/, "", key)
       value=$0
       sub(/^    [A-Za-z_]+:[[:space:]]*/, "", value)
-      gsub(/^"|"$/, "", value)
+      if (key == "mode") sub(/[[:space:]]+$/, "", value)
+      else gsub(/^"|"$/, "", value)
       print key "=" value
     }
   ' "$registry_file"
@@ -251,8 +252,14 @@ if [ -n "$INSTANCE_NAME" ]; then
   fi
   repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
   max_old_space_mb=""; gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
+  instance_mode_seen=0
   while IFS='=' read -r key value; do
     case "$key" in
+      mode)
+        [ "$instance_mode_seen" = 0 ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' declares duplicate mode." >&2; exit 2; }
+        instance_mode_seen=1
+        [ "$value" = shadow ] || [ "$value" = live ] || [ "$value" = '"shadow"' ] || [ "$value" = '"live"' ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' mode must be shadow or live." >&2; exit 2; }
+        ;;
       repo) repo="$value" ;;
       state_dir) state_dir="$value" ;;
       container_name) container_name="$value" ;;
@@ -420,7 +427,21 @@ RECYCLE_PAUSE_BODY=""
 # (5910s), and remains a full 2.4x under HUNG_WORKER_AGE_S (7200s) — so this widens ONLY how long a
 # HEALTHY run is waited for before refusing; it does not move what this script treats as hung, and
 # `RMD_RECYCLE_WAIT_S` still overrides it exactly as before.
-WAIT_SECONDS="${RMD_RECYCLE_WAIT_S:-3000}"
+#
+# W1-T8138: THE SCRIPT NO LONGER OWNS A SIZED WAIT. The deploy supervisor (src/lib/deployer.ts,
+# deriveDrainWait) computes the wait from the lanes actually in flight — each lane's remaining time read
+# from the observed `implement.done` worker_duration_ms distribution, conditioned on that lane's age — and
+# passes it here as RMD_RECYCLE_WAIT_S, ledgering `deploy.recycle_wait_derived`. The 3000s below is what
+# remains when NO caller supplies one (an operator's hand run, or a supervisor with no run history to read):
+# it is the NO-HISTORY FALLBACK, sized once from the 115-row population above, and every message that
+# prints the wait says which of the two it is.
+if [ -n "${RMD_RECYCLE_WAIT_S:-}" ]; then
+  WAIT_SECONDS="${RMD_RECYCLE_WAIT_S}"
+  WAIT_SOURCE="caller-supplied RMD_RECYCLE_WAIT_S"
+else
+  WAIT_SECONDS=3000
+  WAIT_SOURCE="no-history fallback (nothing supplied RMD_RECYCLE_WAIT_S)"
+fi
 POLL_INTERVAL_S="${RMD_RECYCLE_POLL_S:-5}"
 
 # The distribution above, in the exact words a refusal below reuses — an operator reading a timeout
@@ -561,8 +582,28 @@ fi
 # a first deploy impossible. FIRST_BOOT (RMD_RECYCLE_FIRST_BOOT=1 or --first-boot, above) is the
 # operator's explicit word that this run IS that first boot. It is NEVER inferred from the directory
 # being empty or absent — only this flag turns the refusal off.
+#
+# W1-T9617 — A RECORDED SCRATCH CHECKOUT IS A RE-CLONE, NOT AN EMPTY STATE DIR. With the hot
+# checkouts on scratch (deploy/scratch-mounts.sh), the checkout this launch binds is DAEMON_CHECKOUT,
+# and a deallocate empties it; entrypoint.sh re-clones into the empty bind. So the repo marker also
+# holds when DAEMON_CHECKOUT has a .git, or is a scratch dir an earlier launch recorded in
+# <state-dir>/.scratch-mounts. The state/ marker is required exactly as before.
+DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+RECYCLE_OUTGOING_READS=""
+if [ -f "${SCRIPT_DIR:-}/scratch-mounts.sh" ]; then
+  . "${SCRIPT_DIR}/scratch-mounts.sh"
+  DAEMON_CHECKOUT="$(scratch_daemon_checkout "${STATE_DIR}" "${CONTAINER_NAME}")" || DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+fi
 STATE_DIR_CHECKOUT_MARKER="${STATE_DIR}/state"
 STATE_DIR_REPO_MARKER="${STATE_DIR}/remudero/.git"
+if [ ! -e "${STATE_DIR_REPO_MARKER}" ] && [ "${DAEMON_CHECKOUT}" != "${STATE_DIR}/remudero" ] &&
+   { [ -e "${DAEMON_CHECKOUT}/.git" ] || grep -qxF -- "${DAEMON_CHECKOUT}" "${STATE_DIR}/.scratch-mounts" 2>/dev/null; }; then
+  STATE_DIR_REPO_MARKER="${DAEMON_CHECKOUT}/.git"
+  if [ ! -e "${STATE_DIR_REPO_MARKER}" ]; then
+    STATE_DIR_REPO_MARKER="${STATE_DIR}/.scratch-mounts"
+    echo "recycle-container: ${DAEMON_CHECKOUT} is a recorded scratch checkout with no .git — the boot re-clones it"
+  fi
+fi
 if [ "${FIRST_BOOT}" != "1" ]; then
   if [ ! -d "${STATE_DIR}" ] || [ ! -d "${STATE_DIR_CHECKOUT_MARKER}" ] || [ ! -e "${STATE_DIR_REPO_MARKER}" ]; then
     echo "recycle-container: REFUSING — STATE_DIR resolved to ${STATE_DIR} (${STATE_DIR_RESOLUTION})," >&2
@@ -714,7 +755,8 @@ fi
 # with no network to origin right now is not proof the checkout is safe, but this script cannot
 # tell the difference between that and a git that is simply absent, and refusing on undecidable
 # input would turn a network hiccup into a self-inflicted outage this guard exists to prevent.
-DAEMON_TREE="${STATE_DIR}/remudero"
+# W1-T9617: the checkout the replacement binds — on scratch when the hot checkouts moved it.
+DAEMON_TREE="${DAEMON_CHECKOUT}"
 DIRTY_TRACKED_PATHS=()
 INCOMING_PATHS=()
 BLOCKING_PATHS=()
@@ -812,9 +854,13 @@ CAPTURED_get() { local ref="CAPTURED__$1"; printf '%s' "${!ref-}"; }
 CAPTURED_SOURCE_set() { printf -v "CAPTURED_SOURCE__$1" '%s' "$2"; }
 CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}"; }
 
+# W1-T9500: RMD_INSTANCE_NAME is THIS script's own derived name, set from --instance at the
+# replacement `docker run` below and never captured: a container carrying it is one a recycle
+# named, not drift. It is not in deploy/runtime-env-vars.sh, whose lists are pass-through and
+# scratch-derived names.
 is_declared_runtime_var() {
   local needle="$1" candidate
-  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}"; do
+  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}" RMD_INSTANCE_NAME; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
   return 1
@@ -1219,6 +1265,14 @@ release_host_recycle_lock() {
 RECYCLE_TMPDIR="${TMPDIR:-/tmp}"
 PULL_LOG=""
 recycle_cleanup_tmp() {
+  local exit_status=$?
+  # W1-T9409: an ERROR exit while nothing has been stopped takes this run's own PAUSE with it, as a
+  # signal already does (W1-T5281). On 2026-10-14 a `set -e` abort (rc=2) in the wait left the PAUSE
+  # holding core dispatch for ~2h45m. A no-op unless the file still holds the exact body this run wrote.
+  if [ "${exit_status}" -ne 0 ] && [ "${RECYCLE_SIGNAL_PHASE:-}" = "waiting" ] && [ -n "${RECYCLE_PAUSE_BODY:-}" ] &&
+     [ "$(cat "${PAUSE_FILE}" 2>/dev/null)" = "${RECYCLE_PAUSE_BODY}" ]; then
+    clear_own_pause "recycle-container: pause removed — the recycle exited ${exit_status} before stopping ${CONTAINER_NAME}, which is untouched and still running" >&2
+  fi
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
   [ -n "${COMMISSION_PROBE_FILE}" ] && rm -f "${COMMISSION_PROBE_FILE}"
   release_host_recycle_lock
@@ -1387,7 +1441,13 @@ mkdir -p "$(dirname "${PAUSE_FILE}")"
 if [ -e "${PAUSE_FILE}" ] && ! grep -qF -- "\"reason\":\"${RECYCLE_PAUSE_REASON}\"" "${PAUSE_FILE}" 2>/dev/null; then
   echo "recycle-container: PAUSE already engaged by someone else — left in place, and never removed by this recycle"
 else
-  RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\"}"
+  # W1-T9409: the body also names the container this run would stop, the writer's own start time and
+  # its phase, so the watchdog tick (deploy/release-orphan-recycle-pause.sh) can PROVE a dead writer
+  # stopped nothing — the one case no trap covers (SIGKILL). `reason` is unchanged: W1-T5127 and
+  # W1-T5804 key on it. The start time is C-locale UTC, the exact form the release check re-reads.
+  RECYCLE_PAUSE_CONTAINER_ID="$(docker inspect --format '{{.Id}}' "${CONTAINER_NAME}" 2>/dev/null | head -n 1 | tr -d '"\\' || true)"
+  RECYCLE_WRITER_START="$(LC_ALL=C TZ=UTC ps -o lstart= -p $$ 2>/dev/null | tr -s ' \t' '  ' | sed 's/^ *//; s/ *$//' | tr -d '"\\' || true)"
+  RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\",\"container\":\"${RECYCLE_PAUSE_CONTAINER_ID}\",\"containerName\":\"${CONTAINER_NAME}\",\"writerStart\":\"${RECYCLE_WRITER_START}\",\"phase\":\"waiting\"}"
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
@@ -1409,14 +1469,43 @@ fi
 # THE ASYMMETRY SETS THE DEFAULT: killing a live worker loses unrecorded spend, so anything this
 # cannot positively classify as hung is waited for and then REFUSED, exactly as before.
 worker_lines() {
-  # `procps` is installed in the image (deploy/Dockerfile), so this is real ps, not the busybox
-  # applet. Include the detached automated retro's node child: it has no dispatch lock, and
-  # stopping the container during its synthesis or preflight loses the entire pass. A failure
-  # here yields NO lines, which reads as "no lane-less worker" — deliberately the
-  # conservative direction for the *kill* decision, and harmless for the *wait* decision because the
-  # lock count below is independent of it.
-  docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
-    | grep -E -- 'claude --output-format|codex exec|node .*run-task[.]ts[[:space:]]+retro([[:space:]]|$)' || true
+  # Keep the outermost matching ancestor, including across non-worker intermediaries. Its age
+  # covers the whole invocation; the codex native child is part of its node wrapper's worker.
+  # Only multiple matches need ancestry. Missing parent links leave workers independent and busy.
+  local wpid wage wargs cwd lane parents processes
+  processes="$(docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
+    | grep -E -- 'claude --output-format|codex exec|node .*run-task[.]ts[[:space:]]+retro([[:space:]]|$)' || true)"
+  parents=""
+  case "${processes}" in
+    *$'\n'*) parents="$(docker exec "${CONTAINER_NAME}" ps -eo pid,ppid --no-headers 2>/dev/null || true)" ;;
+  esac
+  while read -r wpid wage wargs; do
+    [ -n "${wpid:-}" ] || continue
+    cwd="$(docker exec "${CONTAINER_NAME}" readlink "/proc/${wpid}/cwd" 2>/dev/null || true)"
+    lane="$(worker_lane "${cwd}")"
+    printf '%s %s %s %s\n' "${wpid}" "${wage}" "${lane:-lane-less}" "${wargs}"
+  done <<WORKER_ROOTS
+$(printf '%s\n%s\n%s\n' "${parents}" WORKER_ROWS "${processes}" | awk '
+    $0 == "WORKER_ROWS" { rows = 1; next }
+    !rows { parent[$1] = $2; next }
+    rows && NF {
+      worker[$1] = 1
+      pid = $1; age = $2; $1 = $2 = ""
+      sub(/^[[:space:]]+/, "")
+      row[pid] = pid " " age " " $0
+    }
+    END {
+      for (pid in worker) {
+        ancestor = parent[pid]; duplicate = 0
+        for (seen in visited) delete visited[seen]
+        while (ancestor != "" && !visited[ancestor]++) {
+          if (ancestor in worker) { duplicate = 1; break }
+          ancestor = parent[ancestor]
+        }
+        if (!duplicate) print row[pid]
+      }
+    }' || true)
+WORKER_ROOTS
 }
 
 # ── W1-T2556: A LOCK NAMING A CONTAINER THAT NO LONGER EXISTS IS RECLAIMED, NOT WAITED ON ────────
@@ -1599,14 +1688,24 @@ pid_ledger_activity() {
 
 # The worktree(s) a lock's holder was using: checked out at the claimed branch for a
 # `fix-branch--<owner>--<repo>--<branch>` claim, or named `run-|sweep-<taskId>-*` for a task lock.
+#
+# W1-T9410: EVERY READ HERE IS BEST-EFFORT, as in lock_host_field. OBSERVED 2026-10-14: all six
+# worktree dirs on the host named a git admin dir that had been pruned, so `sed` on "${gitdir}/HEAD"
+# exited 2 (GNU; BSD exits 1), the unguarded assignment tripped `set -e`, and the STALLED recycle died
+# mid-reclaim with its lock unmoved and its PAUSE on disk. An unreadable `.git` file, or a gitdir with
+# no HEAD, now gives an empty ref: the worktree cannot match a fix-branch claim and is skipped there,
+# while a task lock still matches by the worktree's NAME, which needs no admin dir.
 holder_worktrees() {
   local key d gitdir ref found=""
   key="$(basename "$1" .lock)"
   for d in "${STATE_DIR}/worktrees"/*; do
     [ -f "${d}/.git" ] || continue
-    gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1)"
+    gitdir="$(sed -n 's/^gitdir: //p' "${d}/.git" 2>/dev/null | head -1 || true)"
     case "${gitdir}" in "${STATE_MOUNT_DEST}"/*) gitdir="${STATE_DIR}${gitdir#"${STATE_MOUNT_DEST}"}" ;; esac
-    ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g')"
+    ref=""
+    if [ -n "${gitdir}" ] && [ -f "${gitdir}/HEAD" ]; then
+      ref="$(sed -n 's#^ref: refs/heads/##p' "${gitdir}/HEAD" 2>/dev/null | head -1 | sed 's#[/\\]#__#g' || true)"
+    fi
     case "${key}" in
       fix-branch--*) [ -n "${ref}" ] && [ "${key%"--${ref}"}" != "${key}" ] || continue ;;
       *) case "$(basename "${d}")" in "run-${key}-"*|"sweep-${key}-"*) : ;; *) continue ;; esac ;;
@@ -1615,6 +1714,29 @@ holder_worktrees() {
   done
   [ -n "${found}" ] || found="worktree: none found under ${STATE_DIR}/worktrees for ${key}"$'\n'
   printf '%s' "${found}"
+}
+
+# Attribute only by cwd in a counted lock's worktree, never by the lock's pid: it may be the
+# daemon, whose other children (reviews included) still need to block independently.
+worker_lane() {
+  local cwd="$1" f tree
+  [ -n "${cwd}" ] || return 0
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    [ -e "${f}" ] || continue
+    while IFS= read -r tree; do
+      tree="${tree#worktree: }"
+      case "${tree}" in "${STATE_DIR}/worktrees/"*) : ;; *) continue ;; esac
+      tree="${STATE_MOUNT_DEST}${tree#"${STATE_DIR}"}"
+      case "${cwd}" in
+        "${tree}"|"${tree}"/*) basename "${f}" .lock; return 0 ;;
+      esac
+    done <<HOLDER_TREES
+$(holder_worktrees "${f}")
+HOLDER_TREES
+  done <<COUNTED_LOCKS
+${counted_locks}
+COUNTED_LOCKS
 }
 
 reclaim_frozen_daemon_holdings() {
@@ -1656,15 +1778,18 @@ reclaim_frozen_daemon_holdings() {
     reclaimed_dir="${INFLIGHT_DIR}/reclaimed"
     mkdir -p "${reclaimed_dir}"
     reclaimed_path="${reclaimed_dir}/$(basename "${f}").recycle-$$"
+    # W1-T9410: the reason is written to a `.partial` name and renamed only AFTER the lock has moved,
+    # so a write that dies part-way can never leave a `.reason` beside a lock that was never moved.
     {
       printf 'reclaimed by recycle-container.sh (W1-T6597) pid %s at %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
       printf 'verdict: %s\nholder: pid %s host %s — the drain.lock holder, no ledger row in %ss\n' \
         "${RECYCLE_VERDICT}" "${dpid}" "${dhost}" "${STALL_BOUND_S}"
       holder_worktrees "${f}"
       printf 'kept: worktrees, worker homes and logs are untouched — recover the work from the worktree above\n'
-    } > "${reclaimed_path}.reason"
+    } > "${reclaimed_path}.reason.partial"
     mv "${f}" "${reclaimed_path}"
-    sed 's/^/    /' "${reclaimed_path}.reason" >&2
+    mv "${reclaimed_path}.reason.partial" "${reclaimed_path}.reason"
+    sed 's/^/    /' "${reclaimed_path}.reason" >&2 2>/dev/null || true
   done
   while read -r cpid cppid; do
     [ "${cppid:-}" = "${dpid}" ] || continue
@@ -1702,7 +1827,7 @@ epoch_of_started_at() {
 }
 
 oldest_inflight_age_s() {
-  local max=0 f started_at started_epoch age now_epoch wpid wage wargs
+  local max=0 f started_at started_epoch age now_epoch wpid wage wlane wargs
   now_epoch="$(date -u +%s 2>/dev/null || true)"
   [ -n "${now_epoch}" ] || return 0
   if [ -d "${INFLIGHT_DIR}" ]; then
@@ -1716,13 +1841,66 @@ oldest_inflight_age_s() {
       if [ "${age}" -gt "${max}" ] 2>/dev/null; then max="${age}"; fi
     done
   fi
-  while read -r wpid wage wargs; do
+  while read -r wpid wage wlane wargs; do
     [ -n "${wpid:-}" ] || continue
     if [ "${wage}" -gt "${max}" ] 2>/dev/null; then max="${wage}"; fi
   done <<WORKERS
-$(worker_lines)
+${worker_snapshot}
 WORKERS
   printf '%s' "${max}"
+}
+
+# W1-T8138: THE REFUSAL NAMES ITS BLOCKERS, machine-readably. One `recycle-blockers-json:` line on stderr,
+# a JSON array: each lock as {"kind":"lock","task_id","run_id","age_s"} and each busy lane-less worker as
+# {"kind":"worker","pid","age_s","worker_kind"} (review | retro | fix-rung | unknown). The supervisor
+# parses it (parseDrainBlockers) and retries when every one has settled, instead of on a timer.
+json_escape() {
+  printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+worker_kind_of() {
+  case "$1" in
+    *sweep-fix-settings-*) printf 'fix-rung' ;;
+    *run-task.ts*retro*) printf 'retro' ;;
+    *review*) printf 'review' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+lock_run_id_field() {
+  grep -ao '"run_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"([^"]*)"[[:space:]]*$/\1/' || true
+}
+
+drain_blockers_json() {
+  local out="" f started_at started_epoch now_epoch age task_id wpid wage wlane wargs
+  now_epoch="$(date -u +%s 2>/dev/null || true)"
+  if [ -d "${INFLIGHT_DIR}" ]; then
+    for f in "${INFLIGHT_DIR}"/*.lock; do
+      [ -e "${f}" ] || continue
+      task_id="$(basename "${f}" .lock)"
+      age=0
+      started_at="$(lock_started_at_field "${f}")"
+      if [ -n "${started_at}" ] && [ -n "${now_epoch}" ]; then
+        started_epoch="$(epoch_of_started_at "${started_at}")"
+        [ -z "${started_epoch}" ] || age=$((now_epoch - started_epoch))
+      fi
+      out="${out:+${out},}{\"kind\":\"lock\",\"task_id\":\"$(json_escape "${task_id}")\",\"run_id\":\"$(json_escape "$(lock_run_id_field "${f}")")\",\"age_s\":${age}}"
+    done
+  fi
+  while read -r wpid wage wlane wargs; do
+    [ -n "${wpid:-}" ] || continue
+    [ "${wlane}" = "lane-less" ] || continue
+    case "${FROZEN_DAEMON_CHILDREN}" in *" ${wpid} "*) continue ;; esac
+    case "${wargs}" in
+      *sweep-fix-settings-*) [ "${wage}" -lt "${HUNG_WORKER_AGE_S}" ] 2>/dev/null || continue ;;
+    esac
+    out="${out:+${out},}{\"kind\":\"worker\",\"pid\":${wpid//[!0-9]/},\"age_s\":${wage//[!0-9]/},\"worker_kind\":\"$(worker_kind_of "${wargs}")\"}"
+  done <<WORKERS
+${worker_snapshot}
+WORKERS
+  printf '[%s]' "${out}"
 }
 
 # ── THE FROZEN-DAEMON PROOF IS RE-EVALUATED ON THE DRAIN WAIT'S POLLS, NOT ONCE AT ITS START ──────
@@ -1775,28 +1953,41 @@ waited=0
 while :; do
   reclaim_dead_inflight_locks
   n=0
-  if [ -d "${INFLIGHT_DIR}" ]; then
-    n="$(find "${INFLIGHT_DIR}" -maxdepth 1 -name '*.lock' 2>/dev/null | wc -l | tr -d ' ')"
-  fi
+  counted_locks=""
+  for f in "${INFLIGHT_DIR}"/*.lock; do
+    [ -e "${f}" ] || [ -L "${f}" ] || continue
+    n=$((n + 1))
+    counted_locks="${counted_locks}${f}"$'\n'
+  done
 
   # Lane-less workers, split by age. `busy` blocks the recycle exactly like a lock does; `hung` does
   # not, because it never will.
   lane_less_busy=0
   lane_less_hung=""
-  while read -r wpid wage wargs; do
+  worker_snapshot="$(worker_lines)"
+  busy_worker_lines=""
+  while read -r wpid wage wlane wargs; do
     [ -n "${wpid:-}" ] || continue
+    if [ "${wlane}" != "lane-less" ]; then
+      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane ${wlane}  ${wargs}"$'\n'
+      continue
+    fi
     case "${FROZEN_DAEMON_CHILDREN}" in *" ${wpid} "*) continue ;; esac
     case "${wargs}" in
       *sweep-fix-settings-*) : ;;
-      *) lane_less_busy=$((lane_less_busy + 1)); continue ;;
+      *)
+        lane_less_busy=$((lane_less_busy + 1))
+        busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
+        continue ;;
     esac
     if [ "${wage}" -ge "${HUNG_WORKER_AGE_S}" ] 2>/dev/null; then
       lane_less_hung="${lane_less_hung}${wpid} ${wage}"$'\n'
     else
       lane_less_busy=$((lane_less_busy + 1))
+      busy_worker_lines="${busy_worker_lines}  pid ${wpid}  age ${wage}s  lane-less  ${wargs}"$'\n'
     fi
   done <<WORKERS
-$(worker_lines)
+${worker_snapshot}
 WORKERS
 
   if [ "${n}" -eq 0 ] && [ "${lane_less_busy}" -eq 0 ]; then
@@ -1828,7 +2019,11 @@ WORKERS
   if [ "${waited}" -ge "${WAIT_SECONDS}" ]; then
     OLDEST_AGE_S="$(oldest_inflight_age_s)"
     echo "recycle-container: REFUSING — ${n} lane-holding and ${lane_less_busy} lane-less worker(s) still in flight after ${WAIT_SECONDS}s." >&2
-    echo "  WAIT_SECONDS=${WAIT_SECONDS} was sized against ${RECYCLE_WAIT_DISTRIBUTION_NOTE}." >&2
+    echo "  WAIT_SECONDS=${WAIT_SECONDS} — source: ${WAIT_SOURCE}." >&2
+    case "${WAIT_SOURCE}" in
+      no-history*) echo "  the no-history fallback was sized against ${RECYCLE_WAIT_DISTRIBUTION_NOTE}." >&2 ;;
+    esac
+    echo "  recycle-blockers-json: $(drain_blockers_json)" >&2
     [ -z "${STALL_PROOF_FAILED}" ] || echo "  STALLED verdict, but frozen-daemon ownership was not proven — ${STALL_PROOF_FAILED} (W1-T6597)." >&2
     if [ -n "${OLDEST_AGE_S}" ] && [ "${OLDEST_AGE_S}" -gt 0 ] 2>/dev/null; then
       echo "  the oldest in-flight work this run observed was ${OLDEST_AGE_S}s old — a wait of at" >&2
@@ -1841,12 +2036,9 @@ WORKERS
         sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
       done
     fi
-    # A LANE-LESS WORKER UNDER THE AGE BOUND IS REPORTED AND STILL REFUSED. It holds no lock, so
-    # nothing above names it, and before this change it was not merely unreported — it was invisible,
-    # and the recycle removed the container out from under it.
-    if [ "${lane_less_busy}" -gt 0 ]; then
-      echo "  lane-less worker(s) under the ${HUNG_WORKER_AGE_S}s age bound — busy, not hung:" >&2
-      worker_lines | sed 's/^/    /' >&2 || true
+    if [ -n "${busy_worker_lines}" ]; then
+      echo "  in-flight worker trees — busy, not hung (lane workers are included in their lock count):" >&2
+      printf '%s' "${busy_worker_lines}" >&2
     fi
     echo "  ${CONTAINER_NAME} is untouched — killing it now would lose this work and strand these" >&2
     echo "  locks. Widen the wait with RMD_RECYCLE_WAIT_S, or re-run once these finish." >&2
@@ -2034,6 +2226,33 @@ echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 
 COMMISSION_PHASE="replace"
 
+record_recycled_cadence_child() {
+  local state run_id pid attempt status at
+  [ -r "${STATE_DIR}/state/measurement-cadence-child.json" ] || return 0
+  state="$(tr '\n' ' ' < "${STATE_DIR}/state/measurement-cadence-child.json" 2>/dev/null)" || return 0
+  run_id="$(printf '%s\n' "${state}" | sed -n 's/.*"runId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  pid="$(printf '%s\n' "${state}" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
+  attempt="$(printf '%s\n' "${state}" | sed -n 's/.*"attempt"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p')"
+  status="$(printf '%s\n' "${state}" | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  [ "${status}" = running ] || return 0
+  case "${run_id}" in ''|*[!a-zA-Z0-9_-]*) return 0 ;; esac
+  case "${pid}:${attempt}" in *[!0-9:]*|:*|*:) return 0 ;; esac
+  [ "${pid}" -gt 0 ] && [ "${attempt}" -gt 0 ] || return 0
+  docker exec "${CONTAINER_NAME}" ps -eo pid,etimes,args --no-headers 2>/dev/null \
+    | awk -v pid="${pid}" -v run="${run_id}" '
+        $1 == pid { for (i = 3; i <= NF - 2; i++)
+          if ($i == "--measurement-cadence-child" && $(i + 2) == run) found = 1 }
+        END { exit !found }
+      ' || return 0
+  at="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" || return 0
+  printf '{"runId":"%s","pid":%s,"container":"%s","at":"%s","by":"deploy/recycle-container.sh"}\n' \
+    "${run_id}" "${pid}" "${CONTAINER_NAME}" "${at}" \
+    > "${STATE_DIR}/state/measurement-cadence-child.recycled.json" 2>/dev/null || true
+  printf '{"ts":"%s","run_id":"RECYCLE-%s","task_id":"RECYCLE","step":"recycle.cadence_child_killed","lane":"deploy","cadence_run_id":"%s","cadence_pid":%s,"attempt":%s,"container":"%s"}\n' \
+    "${at}" "$$" "${run_id}" "${pid}" "${attempt}" "${CONTAINER_NAME}" \
+    >> "${LEDGER_FILE}" 2>/dev/null || true
+}
+
 # ── 6. STOP + REMOVE THE OLD CONTAINER, CLEAR THE PAUSE, START THE NEW ONE ──────────────────────
 # `docker stop` (not `-f`/`kill`) sends SIGTERM first, giving the daemon's own signal handler a
 # chance to release the drain lock cleanly before this script ever removes the container — the
@@ -2046,7 +2265,22 @@ COMMISSION_PHASE="replace"
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   # W1-T5281: from here a signal leaves PAUSE engaged — the stop may land even if this script does not.
   RECYCLE_SIGNAL_PHASE="stopping"
+  # W1-T9409: and the PAUSE says so BEFORE the stop, so the tick's release check never frees a PAUSE
+  # whose old container may already be down. Only our own body is rewritten, and RECYCLE_PAUSE_BODY
+  # follows it so clear_own_pause below still recognises its own.
+  if [ -n "${RECYCLE_PAUSE_BODY}" ] && [ "$(cat "${PAUSE_FILE}" 2>/dev/null)" = "${RECYCLE_PAUSE_BODY}" ] &&
+     [ "${RECYCLE_PAUSE_BODY%\"phase\":\"waiting\"\}}" != "${RECYCLE_PAUSE_BODY}" ]; then
+    RECYCLE_PAUSE_STOPPING="${RECYCLE_PAUSE_BODY%\"phase\":\"waiting\"\}}\"phase\":\"stopping\"}"
+    printf '%s\n' "${RECYCLE_PAUSE_STOPPING}" > "${PAUSE_FILE}.stopping.$$"
+    mv -f "${PAUSE_FILE}.stopping.$$" "${PAUSE_FILE}"
+    RECYCLE_PAUSE_BODY="${RECYCLE_PAUSE_STOPPING}"
+  fi
+  # W1-T9617: what the outgoing container read from each disk over its life, read before it stops.
+  if command -v scratch_outgoing_reads >/dev/null 2>&1; then
+    RECYCLE_OUTGOING_READS="$(scratch_outgoing_reads "${CONTAINER_NAME}" 2>/dev/null || true)"
+  fi
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
+  record_recycled_cadence_child
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
   run_docker_control rm docker rm "${CONTAINER_NAME}"
@@ -2078,10 +2312,12 @@ echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 # Build one non-empty argv instead: the mandatory daemon/runtime arguments keep its expansion safe,
 # while optional mounts are appended only when their host directories actually exist.
 SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on
+LAUNCH_CHECKOUT="${STATE_DIR}/remudero" # W1-T9617: the checkout this launch binds, for its placement row
 if [ -f "${SCRIPT_DIR:-}/scratch-mounts.sh" ]; then
   . "${SCRIPT_DIR}/scratch-mounts.sh"
   if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}" && scratch_prepare; then
     scratch_fresh_tmp
+    [ -z "${SCRATCH_CODE_DIR:-}" ] || LAUNCH_CHECKOUT="${SCRATCH_CODE_DIR}"
     while IFS='	' read -r scratch_src scratch_dest; do
       RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${scratch_src}" "${scratch_dest}" rw)
     done <<EOF
@@ -2090,6 +2326,8 @@ EOF
   fi
   echo "recycle-container: scratch mounts ${SCRATCH_NOTE}"
 fi
+LAUNCH_CHECKOUT_COLD=false
+[ -e "${LAUNCH_CHECKOUT}/.git" ] || LAUNCH_CHECKOUT_COLD=true
 DOCKER_RUN_ARGS=(
   -d --name "${CONTAINER_NAME}"
   --restart=on-failure:5
@@ -2118,6 +2356,13 @@ fi
 if [ "${#APP_PRIVATE_KEY_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${APP_PRIVATE_KEY_ARGS[@]}")
 fi
+# W1-T9500 — THE CREATOR NAMES THE INSTANCE. Inside the container the state root is
+# /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon
+# could not tell which instance it was and the SRE lane never started on core. A recycle run with
+# --instance holds the name; the legacy no-instance path has none to give and adds nothing.
+if [ -n "${INSTANCE_NAME}" ]; then
+  DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${INSTANCE_NAME}")
+fi
 DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null
 
@@ -2132,6 +2377,11 @@ if [ -z "${STARTED_IMAGE_ID}" ] || [ "${STARTED_IMAGE_ID}" != "${PULLED_IMAGE_ID
   echo "  which does NOT match the digest this run pulled (${PULLED_IMAGE_ID})." >&2
   echo "  A container came up, but not on the image this run obtained — investigate before trusting it." >&2
   exit 1
+fi
+# W1-T9617: where this generation's checkout landed, and what the one it replaced read per disk —
+# recorded whenever the scratch plan is in use, so rows exist on both sides of the checkouts switch.
+if [ "${#SCRATCH_ARGS[@]}" -gt 0 ] && command -v scratch_placement_row >/dev/null 2>&1; then
+  scratch_placement_row "${LEDGER_FILE}" "${CONTAINER_NAME}" "${LAUNCH_CHECKOUT}" "${LAUNCH_CHECKOUT_COLD}" "${RECYCLE_OUTGOING_READS}"
 fi
 # The memory.high annotation is the one policy argument Docker accepts without proving it reached
 # the cgroup — read the kernel's own value back and name a miss in the log (never fatal).

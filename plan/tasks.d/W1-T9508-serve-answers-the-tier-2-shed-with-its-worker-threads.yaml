@@ -1,0 +1,47 @@
+- id: W1-T9508
+  title: "SERVE'S TIER-2 SHED HAS NEVER RUN: the supervisor asks the active generation to shed its worker threads, but no generation registers onShedWorkersRequest, so every ask times out answered:false, frees nothing, and a memory-deferred handoff can never fit; the serve generation answers tier 2 by terminating and later restoring its rebuildable worker threads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — the generation side of W1-T8873's tier-2 shed
+  band_meaning: span
+  origin: "operator session 2026-10-14: serve deferred its handoff 75 times today for container_headroom; tier 2 never answered"
+  plan_refs: [W1-T8873, W1-T8311, W1-T8378, W1-T9504]
+  files: [src/run-task.ts, src/lib/serve.ts, test/serve-answers-the-tier-2-shed-with-its-worker-threads.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 (core ledger, all rotations from 10-13, plus the live file):
+    - 122 serve.handoff_shed rows with tier 2 on 10-13/14; 0 have answered:true. The supervisor's ask times out
+      (phase shed, durationMs ~10002), then restores with reason still_short. The ~130 MB between freeBefore and
+      freeAfter is noise between two reads, not memory the shed freed (W1-T9504's shard misread it as a freed amount).
+    - No serve.handoff_done since 10-12 06:00:59Z. There were 1,660+ container_headroom deferrals since 10-12 07:13Z.
+      Serve moves onto new code only through a container replace.
+    READ at origin/main:
+    - serve-generation.ts exports onShedWorkersRequest(channel, {shed, restore}) (W1-T8873, #11465). Its only
+      callers are in test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts; no src/ file calls it.
+      A sweep of 382 open heads finds none that does.
+    - run-task.ts registers onDrainRequest, onShedRequest (tier 1: the main heap) and onRestoreRequest for a supervised
+      generation, beside serveGeneration(server). It does not register the tier-2 handler.
+    - serve.memory: worker heaps are ~3.3 GB of the generation's ~4.2 GB RSS (heavy views ~1.3 GB, slow lane ~0.6,
+      board ~0.3, fast views ~0.24, oracle 0.1-0.25, read-model ~0.29).
+    INFERRED: terminating the rebuildable workers frees ~2.5-3 GB, putting container free (~3.5 GB) above the 4.9 GB
+    need. W1-T8873's own estimate was ~2.0-2.3 GB.
+  design: |
+    1. Register onShedWorkersRequest beside onShedRequest for a supervised generation. Its hooks come from
+       serveGeneration(server).
+    2. shed terminates the generation's rebuildable worker threads: the read model's views lanes, slow lane and oracle,
+       the board projection worker, and plan reload. It resolves once they have exited, and reports workers and
+       their last-read heap bytes. Serve keeps answering from the bodies it already holds, each carrying its as-of.
+    3. restore starts them again, and is idempotent. A restore with nothing shed is a no-op.
+    4. Nothing else changes: tier 1, admission, the need computation and every limit stay.
+  acceptance:
+    - claim: "a supervised serve generation answers the tier-2 shed request: it terminates its rebuildable worker threads, replies answered with workers > 0, and restores them on request"
+      proof: 'grep: test("W1-T9508: serve answers the tier-2 shed with its worker threads" in test/serve-answers-the-tier-2-shed-with-its-worker-threads.test.ts'
+  falsifier: |
+    Drop the onShedWorkersRequest registration: the fixture generation never answers shed_workers, the request times
+    out answered:false, and the test fails.

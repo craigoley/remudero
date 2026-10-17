@@ -1,0 +1,91 @@
+- id: W1-T9563
+  title: "THE FULL-SWEEP WALL-CLOCK BOUND IS LEARNED FROM PASSES THAT COMPLETED, AND AN ABANDON NO LONGER CLOSES THE PASS'S REVIEW POOL — `sweepWallClockBoundMs` (559 s) was derived from full passes of 61.8 s median and 111.8 s p90, but on 2026-10-14 12-24Z full passes completed in 6.6-35.3 min (p50 16.6 min), 21 were abandoned against 20 completed, and each abandon closed that pass's review admissions"
+  repo: remudero
+  depends_on: [W1-T1044, W1-T2582, W1-T2584, W1-T5931]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what bounds the daemon's wait on a full pass, and whether that bound may close the pass's review pool
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: review-throughput diagnosis (\"figure out why reviews aren't posting efficiently\"); operator approved this filing 2026-10-14. Standing rulings: no hard fixed thresholds, a bound that fires on a healthy condition is the repo's recurring defect"
+  plan_refs: [W1-T1044, W1-T1219, W1-T2582, W1-T2584, W1-T5931, W1-T9558, W1-T9554, W1-T9352, W1-T8172, W1-T7697, W1-T9544, W1-T9556]
+  files: [src/lib/daemon.ts, plan/policy.yaml, test/daemon.test.ts, test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 from the core ledger (2026-10-12 23:45Z to 2026-10-14 22:52Z, deduplicated, read only and streamed
+    to the Mac). A full pass is a `sweep.summary` with `total` above 1. Its start is the `daemon.sweep.retriggered` row, or
+    `ts - elapsed_ms` of its `daemon.sweep.abandoned` row; a pass started at the top of an iteration writes no start row, so
+    149 of 186 full summaries could be paired.
+    - Completed full-pass duration, min / p50 / p90 / max, by 12 h window:
+      10-13 00-12Z 2.0 / 5.7 / 9.8 / 15.0 min (78 completed, 16 abandoned);
+      10-13 12-24Z 2.7 / 8.0 / 17.2 / 26.1 min (47 completed, 23 abandoned);
+      10-14 00-12Z 6.7 / 10.7 / 22.4 / 43.7 min (40 completed, 20 abandoned);
+      10-14 12-24Z 6.6 / 16.6 / 33.7 / 35.3 min (20 completed, 21 abandoned).
+    - No hang was observed. Of 81 abandoned passes, 57 reached their own full `sweep.summary` before the next pass started
+      on the same pid. The other 24 cannot be determined from these rows, because a restart or a missing start row hides
+      the pairing. The diagnosis session's own count of the same window read 61 completed later and 17 undetermined.
+    - Example: retriggered 21:14:26Z, abandoned 21:24:05Z (`elapsed_ms` 579245, `bound_ms` 559000), its `runSweep` walk
+      began 21:35:12Z and its summary landed 21:38:10Z. The pass was healthy and slow, not hung.
+    - The full-pass interval p50 went from 7.7 min (10-13 00-12Z) to 26.6 min (10-14 12-24Z).
+    WHY THE BOUND FIRES ON A HEALTHY PASS:
+    - plan/policy.yaml's `sweepWallClockBoundMs` row derived 559 s as 5x a p90 of 111.8 s, against hangs of 165.5 min or
+      more. That population no longer exists: today's p50 is 9x the old bound.
+    - On abandon, `runGatedSweep` (src/lib/daemon.ts) sets `reviewAdmissionsOpen = false` before it resolves the abandoned
+      arm (W1-T2584). The still-running pass then reaches its review pool after the gate has closed and logs "review
+      admission continuation gate closed — re-derived next pass" (src/lib/sweep.ts). W1-T9558 records 6 of 7 cheap-mode
+      heads on 10-13/14 left unreviewed behind that gate.
+    - W1-T2584 closed the gate so an abandoned pass could not admit reviews beside the next one. Two later mechanisms now
+      cover that: `SweepLiveness` (W1-T2582) declines a second pass while one is in flight, and `reviewAdmissionBound`
+      (W1-T5931, src/lib/sweep.ts) bounds review concurrency process-wide, live at each pull.
+    RELATED, NOT OVERLAPPING:
+    - W1-T9558 (queued, P1) lets the light pass admit discriminate-only and reused heads. It routes around the closed gate;
+      this task removes the gate's healthy-pass trigger. Both are needed: the full pass still owns blocked-fixable,
+      conflicted, dep-review and refused-escalate.
+    - W1-T9554 (queued) learns the loop-lag bound from the loop's own delay. Same learned-bound shape, different bound.
+    - W1-T8172 and the stop path still pass `sweepWallClockBoundMs` to `drainInFlightReviews`. That bounds a review drain,
+      not a pass, and stays on the policy value here.
+    RE-MEASURE: #11818's sync-spawn tasks (W1-T9544 to W1-T9556) will change full-pass length when they land. The learned
+    bound follows them by construction. After they merge, re-read the `daemon.sweep.settled` population and confirm the
+    learned bound is still below the shortest confirmed hang (165.5 min).
+  design: |
+    1. A pass that SETTLES writes its own duration. In `runGatedSweep`'s liveness settle handler, log
+       `daemon.sweep.settled` with `elapsed_ms` (from the pass's own start) and `abandoned: true|false`. It is written
+       for a pass that settles after its bound too, because that pass is the healthy-slow population the bound must
+       learn. A pass that rejects writes no settled row.
+    2. Learn the bound from settled passes. Keep the most recent settled durations in memory, seeded at boot from the
+       ledger's `daemon.sweep.settled` rows (a bounded live-file read, never the union). The bound is an upper quantile
+       of that sample times a headroom factor, both declared beside the learner with their derivation (the precedent is
+       `dispatch.refill_bound`). At 10-14 12-24Z's sample the result must land far above the 33.7 min p90 and below the
+       shortest confirmed hang (165.5 min). Do not clamp the learned value to the policy row's max: no hard fixed
+       ceiling.
+    3. Cold start: with fewer settled samples than the learner needs, use the policy row's value. Re-derive that row
+       from this task's measured population and rewrite its comment, which still says the bound cannot fire on a
+       healthy tick. Its min/max then bound only an operator retune of the cold-start value.
+    4. Every `daemon.sweep.abandoned` row carries `bound_ms` and `bound_basis` (`observed_passes` or
+       `no_history_fallback`) and the sample count. A pass that starts logs the bound it was given.
+    5. An abandon no longer closes the pass's review pool. Remove `reviewAdmissionsOpen = false` from the bound's
+       timer. The continuation gate keeps its STOP and PAUSE re-checks and its `workerAdmissionHold`. Process-wide
+       overlap stays bounded by `reviewAdmissionBound` and `SweepLiveness`. Invert test/daemon.test.ts's
+       "W1-T2584: the daemon sweep bound closes the continuation gate handed to the still-settling sweep" to the new
+       contract, and keep its STOP/PAUSE sibling.
+    6. Out of scope: the full pass's snapshot build (filed beside this task), the light pass's review dispositions
+       (W1-T9558), and the review-drain bound in the stop and restart paths.
+  acceptance:
+    - claim: "a settled full pass writes daemon.sweep.settled with its elapsed_ms, the next pass's bound is learned from those durations with bound_basis observed_passes, a cold start uses the policy value with bound_basis no_history_fallback, and an abandoned pass keeps admitting reviews while STOP and PAUSE still close the gate"
+      proof: "unit test: test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts"
+    - claim: "the suite names the learned bound in a test title"
+      proof: "grep: W1-T9563: the next full pass is bounded by an upper quantile of the passes that settled in test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts"
+    - claim: "the suite names the open review pool after an abandon in a test title"
+      proof: "grep: W1-T9563: an abandoned full pass still admits reviews under the process-wide review bound in test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts"
+    - claim: "the abandon row names the basis of its bound"
+      proof: "grep: bound_basis in src/lib/daemon.ts"
+    - claim: "a settled pass writes its own duration row"
+      proof: "grep: daemon\\.sweep\\.settled in src/lib/daemon.ts"
+  falsifier: |
+    Run `runGatedSweep` with a fake pass that resolves after 20 min of injected time and 10 seeded settled durations of
+    11-35 min. At origin/main the pass is abandoned at 559 s and the continuation gate it was handed reads false. With the
+    change the bound comes from the seeded durations (`bound_basis: observed_passes`), the pass settles inside it and
+    writes `daemon.sweep.settled`, and the gate reads true until STOP or PAUSE is set.

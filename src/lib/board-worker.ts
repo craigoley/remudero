@@ -7,6 +7,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { readInflightLock } from "./inflight-lock.js";
 import type { BoardDeps, GitHub } from "./status.js";
 import { planFilesIdentity, threadPlanPin, threadStrictPlan } from "./thread-plan.js";
+import { startWorker } from "./child-entry-argv.js";
 
 const KIND = "remudero-board-projection";
 export const BOARD_PROJECTION_INTERVAL_MS = 3_000;
@@ -115,6 +116,13 @@ export interface BoardProjectionWorker extends BoardSnapshotSource {
   planIdentity?(): string | undefined;
   start(): void;
   stop(): void;
+  /**
+   * W1-T9508, memory tier 2: terminates the thread, keeping the last snapshot (dated by its `generated_at`), and
+   * resolves once it has exited. True when a thread was running. {@link resume} starts it again.
+   */
+  pause(): Promise<boolean>;
+  /** Starts a thread {@link pause} terminated; a no-op when none was paused. */
+  resume(): void;
   isReady(): boolean;
 }
 
@@ -134,6 +142,7 @@ export function createBoardProjectionWorker(
   let planIdentity: string | undefined;
   let replyPort: MessagePort | undefined;
   let stopped = false;
+  let paused = false;
   let mergedLookup: ((taskId: string) => ReturnType<GitHub["findMergedByTrailer"]>) | null = null;
   const unavailable = (reason: string): void => {
     state = { state: "unavailable", buildStartedAt, checkedAt: clock.iso(), reason };
@@ -162,7 +171,7 @@ export function createBoardProjectionWorker(
         delayMs: options.delayMs ?? 0,
       };
       try {
-        thread = new Worker(options.workerUrl ?? new URL(import.meta.url), { workerData: data, transferList: [port2] });
+        thread = startWorker(import.meta.url, { workerData: data, transferList: [port2] }, { override: options.workerUrl });
       } catch (error) {
         // A spawn failure is not an absent projection: it is surfaced to the caller below with its
         // cause as the `worker_spawn_failed` reason, so the board falls back knowingly.
@@ -172,8 +181,9 @@ export function createBoardProjectionWorker(
         return;
       }
       const wake = new Int32Array(signal);
+      const spawned = thread;
       thread.on("message", (message: FactRequest | ProjectionMessage) => {
-        if (stopped) return;
+        if (stopped || thread !== spawned) return;
         if (message.kind === "fact") {
           let reply: FactReply;
           try {
@@ -201,6 +211,8 @@ export function createBoardProjectionWorker(
       thread.once("error", (error) => unavailable(crash = `worker_crashed: ${error.message}`));
       // 'exit' follows 'error': still unavailable, but naming the crash, not its exit code (#8429).
       thread.once("exit", (code) => {
+        // A paused thread is already replaced by undefined, or by its successor: neither is this exit's to clear.
+        if (thread !== spawned) return;
         if (!stopped) unavailable(crash ?? `worker_exited: ${code}`);
         thread = undefined;
         replyPort?.close();
@@ -211,6 +223,21 @@ export function createBoardProjectionWorker(
       stopped = true;
       void thread?.terminate();
       replyPort?.close();
+    },
+    async pause() {
+      const running = thread;
+      if (stopped || !running) return false;
+      paused = true;
+      thread = undefined;
+      replyPort?.close();
+      replyPort = undefined;
+      await running.terminate();
+      return true;
+    },
+    resume() {
+      if (!paused) return;
+      paused = false;
+      handle.start();
     },
   };
   return handle;

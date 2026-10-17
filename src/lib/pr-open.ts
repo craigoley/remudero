@@ -1,11 +1,12 @@
 import { CHECK_PROOF_CHILD_ENTRY } from "./check-proof.js";
-import { childEntryArgv } from "./child-entry-argv.js";
+import { childEntryArgv, type ChildEntryStoreOptions } from "./child-entry-argv.js";
 import { fileURLToPath } from "node:url";
 import { execFile, spawnSync, type ExecFileException } from "node:child_process";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
 import { join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
-import { killAfterGrace } from "./git-fetch-retry.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { openPrsRestArgs, prFilesRestArgs, type RestPullRow } from "./open-prs-rest.js";
 import { loadPlan } from "./plan.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
@@ -48,8 +49,11 @@ const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
  */
 export function checkProofLaunchArgv(
   proof: string, base: string, root: string = HARNESS_ROOT, extra: readonly string[] = [],
+  store: ChildEntryStoreOptions = {},
 ): string[] {
-  return childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, "--base", base, ...extra]).argv;
+  const launch = childEntryArgv(root, "check-proof-main", CHECK_PROOF_CHILD_ENTRY, [proof, "--base", base, ...extra], undefined, store);
+  store.log?.("pr_open.check_proof_child", { kind: launch.kind, reason: launch.reason });
+  return launch.argv;
 }
 
 const TASK_ID_SHAPE = /^(?:W\d+|[A-Z][A-Z0-9_]*)-T\d+$/;
@@ -63,11 +67,12 @@ export function filedTaskIdFromRunBranch(branch: string): string | undefined {
 /** The argv, env and buffer every proof run shares, so the sync and async runners cannot drift apart. */
 function proofArgs(
   proof: string, mergeBase: string, target?: SuiteRegistryTarget, bin = PROOF_NODE, harnessRoot: string = HARNESS_ROOT,
+  store: ChildEntryStoreOptions = {},
 ): string[] {
   const repo = target ? ["--repo", `${target.owner}/${target.repo}`] : [];
   // Keep the injected launcher seam's command argv; production invokes the narrow Node entry.
   if (bin !== PROOF_NODE) return ["check-proof", proof, "--base", mergeBase, ...repo];
-  return checkProofLaunchArgv(proof, mergeBase, harnessRoot, repo);
+  return checkProofLaunchArgv(proof, mergeBase, harnessRoot, repo, store);
 }
 
 // A PR proof runs on the branch being published. The child already receives its exact base
@@ -83,8 +88,9 @@ export function defaultProofRunner(
   bin: string = PROOF_NODE,
   /** The tree whose check-proof entry runs; the harness itself unless a test supplies a fixture. */
   harnessRoot: string = HARNESS_ROOT,
+  store: ChildEntryStoreOptions = {},
 ): OpenPullRequestProofResult {
-  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin, harnessRoot), {
+  const result = spawnSync(bin, proofArgs(proof, mergeBase, target, bin, harnessRoot, store), {
     cwd: repoRoot,
     encoding: "utf8",
     maxBuffer: PROOF_MAX_BUFFER,
@@ -112,6 +118,7 @@ export const PR_OPEN_PROOF_TIMEOUT_MS = 15 * 60_000;
 
 export interface AsyncProofRunOptions {
   bin?: string;
+  store?: ChildEntryStoreOptions;
   timeoutMs?: number;
   /** How long a SIGTERMed child may linger before SIGKILL. */
   graceMs?: number;
@@ -133,17 +140,18 @@ export function defaultProofRunnerAsync(
 ): Promise<OpenPullRequestProofResult> {
   const timeoutMs = opts.timeoutMs ?? PR_OPEN_PROOF_TIMEOUT_MS;
   return new Promise((resolve) => {
-    let timedOut = false;
     const child = execFile(
       opts.bin ?? PROOF_NODE,
-      proofArgs(proof, mergeBase, target, opts.bin),
+      proofArgs(proof, mergeBase, target, opts.bin, undefined, opts.store),
       { cwd: repoRoot, encoding: "utf8", maxBuffer: PROOF_MAX_BUFFER, env: proofEnv() },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
-        clearTimeout(timer);
+        bound.cancel();
+        const timedOut = bound.timedOut;
         // A numeric code is an exit; a string code (ENOENT, a buffer overflow) is a child that never
         // ran to completion; neither, with a signal, is a kill. Only the second carries `error`.
+        // W1-T9651: a child stopped at its bound never reads as a clean exit, even when it exited 0.
         const code = err?.code;
-        const status = err ? (typeof code === "number" ? code : null) : 0;
+        const status = timedOut ? null : err ? (typeof code === "number" ? code : null) : 0;
         const spawnFailure = typeof code === "string" ? err?.message : undefined;
         resolve({
           status,
@@ -154,11 +162,7 @@ export function defaultProofRunnerAsync(
         });
       },
     );
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killAfterGrace(child, opts.graceMs);
-    }, timeoutMs);
+    const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
   });
 }
 

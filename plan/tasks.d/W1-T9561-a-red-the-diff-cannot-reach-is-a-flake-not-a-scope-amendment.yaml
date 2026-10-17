@@ -1,0 +1,117 @@
+- id: W1-T9561
+  title: "A RED THE PR'S DIFF CANNOT REACH IS A FLAKE, NOT A SCOPE AMENDMENT — the fix harness turns every worker NEEDS_SCOPE into a scope amendment without asking whether the diff reaches the failing test, so #11702's flake in deploy/host-update.sh became an amendment to a learnings task (refused by amended-shard-lint); 33 of 34 path-naming NEEDS_SCOPE refusals 2026-10-04..14 named only paths outside the PR's diff"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, routing a fix round's NEEDS_SCOPE by the red's attribution; high for span: the pure decision in fix-outcome.ts, its wiring in run-task.ts, the worker contract line, and one new test
+  band_meaning: span
+  origin: "operator session 2026-10-14: #11702 (W1-T9000) fix round 21:04-21:06Z answered a test-slow-shard flake with NEEDS_SCOPE deploy/host-update.sh"
+  plan_refs: [W1-T5532, W1-T5534, W1-T6465, W1-T8043, W1-T8396, W1-T6406, W1-T8042]
+  files:
+    - src/lib/fix-outcome.ts
+    - src/run-task.ts
+    - src/lib/prompt-render.ts
+    - test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts
+  status: merged
+  priority: 1.3  # each misrouted round spends a fix strike, a worker run and an amendment attempt on a red the PR did not cause, and drops the flake on the floor
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14, host ledger (ledger.2026-10-14T22-02-56-381Z.ndjson.gz plus the live file), #11702 / W1-T9000, a
+    learnings task whose diff is learnings/ci.yaml, learnings/index.json, a golden-verdict fixture directory and
+    test/golden-verdicts.test.ts:
+      - 20:48:40Z, 20:58:26Z, 20:59:51Z, 21:03:44Z `sweep.base_reproduction`: test/the-state-snapshot-actually-runs-on-this-host.test.ts
+        and test/worker-push-credential-visibility.test.ts both `passes` at main, verdict `clear`.
+      - 21:03:52Z `refresh.clearance` evidence `prefilter`: "main changed no failing test file, no module the failing
+        tests import, and no CI harness path since the head's merge base".
+      - 21:04:42Z `fix.base_refresh_checked`: failing_source_files [], matching_base_files [].
+      - 21:06:51Z `fix.dispatch` with mode ci-log: the red is "with no RMD_STATE_BACKUP_KEEP the nightly rung keeps the newest 2
+        snapshots ... 141 !== 0", a SIGPIPE race in deploy/host-update.sh (filed separately as W1-T9560).
+      - The worker (codex gpt-6-sol) diagnosed it correctly, edited deploy/host-update.sh and reported
+        `FIX_OUTCOME: NEEDS_SCOPE deploy/host-update.sh`.
+      - 21:06:51Z `fix.scope_needed`, then 21:06:52Z `fix.scope_amendment` refused `amended-shard-lint` ("spans 2 distinct
+        subsystems/concerns (ci, host-update) at risk:low ..."), then `fix.commit_refused` "non-test paths need scope".
+    So the harness had three independent signals that this PR did not cause the red: it passed at main, main changed
+    nothing reaching it, and the PR's diff reaches neither the test nor the script it spawns. It still tried to graft
+    a host-script fix onto a learnings task. The refusal was right, but nothing else happened: no rerun, no flake
+    evidence, and no incident. The flake is invisible to W1-T6406's flake-incident gardener, because the host ledger
+    holds 155 `test.flake_retry` rows for 2026-10-13..14 and none for this file.
+    WHERE, on origin/main 47bf1df1e (symbols, not lines):
+      - src/lib/fix-outcome.ts `decideFixOutcomeAction(outcome, { admitTests })`. NEEDS_SCOPE maps to `scope-needed`
+        whenever any named path is not under test/. Its only fact is `admitTests`, and it has no notion of whether
+        the red belongs to the diff.
+      - src/run-task.ts calls it twice (`let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests })`
+        and the re-decision after the harness commit). The `fixAction.kind === "scope-needed"` arm goes straight to
+        `mainOwnedPaths` then `amendScope`. The `rerun-once` arm (FLAKE) already requeues the failing jobs, refunds the
+        strike only on green (`fix.strike_refunded` reason flake-confirmed) and records `flake_claim`.
+      - The attribution inputs already exist in run-task.ts: `buildImportClosureRead` (W1-T8396, the failing tests'
+        import closure at main and head), `mainPathsReachingRed` and `isCiHarnessPath` (src/lib/base-reproduction.ts,
+        src/lib/sweep.ts), and the sweep's `sweep.base_reproduction` verdicts (`probeCacheFromLedger`).
+      - src/lib/prompt-render.ts's fix footer offers NEEDS_SCOPE for any out-of-scope edit, with no word about who
+        caused the red.
+    HOW OFTEN, host ledger union 2026-10-04..14 (106 archives plus the live file, all opened, 31 with rows): 35 fix rounds
+    were refused "non-test paths need scope" or carried fix_outcome NEEDS_SCOPE. For each round's head sha (all
+    fetched; 34 rounds named paths, 1 named none), the named paths were compared with `git diff --name-only $(git merge-base <head> origin/main) <head>`:
+    33 named only paths OUTSIDE the PR's own diff, and 1 (W1-T7090, src/lib/read-model-worker.ts) named a path inside
+    it, which is the positive control that the classifier can say "inside". Outside-the-diff alone does NOT prove the
+    PR is innocent: a PR can legitimately need a neighbour file. That is why the mechanism below asks whether the
+    diff REACHES the failing test, not whether the named path is in the diff. Of the 60 `fix.scope_amendment` rows
+    in the same archives, 15 were created, 27 refused (10 no-task-trailer, 4 shard-not-found, 4 path-not-changed,
+    3 main-owned, 3 instrument-path, 2 plan-path, 1 amended-shard-lint), 2 resumed, 1 branch_update_requested, and 15
+    carried no outcome field.
+    NOT COVERED ELSEWHERE: W1-T5532 (typed outcomes), W1-T5534 and W1-T6465 (a needed scope gets its amendment),
+    W1-T8043 (run-unfiled NEEDS_SCOPE routing) and W1-T1095 (blockers outside the diff) all make the amendment path
+    work. None asks whether the amendment should happen at all. W1-T8042 is a red inherited from MAIN across PRs,
+    where the test fails at main, and here it passes. W1-T9551 (open head plan-file-1792014056374) is the opposite
+    misroute: a main-inherited red called a flake. W1-T9450, W1-T9533 and W1-T9250 are unrelated. Swept the added
+    lines of 49 open PR heads touching plan/tasks.d or src/lib/fix-outcome.ts, and found no NEEDS_SCOPE or flake
+    rerouting (control: 493 added lines read on plan-file-1792012587813).
+  design: |
+    Decide a NEEDS_SCOPE by the red's attribution, from evidence, not by a count. One pure decision, wired at both
+    call sites.
+    1. src/lib/fix-outcome.ts: add `redAttribution(input)`. It returns `{ kind: "diff-reaches" | "diff-cannot-reach" |
+       "unknown", reached: string[] }` from: the failing test files (`failingTestFilesFromCiFailures`), the PR's
+       changed paths (merge base to head), the failing tests' import closure (`ImportClosureRead`), `isCiHarnessPath`,
+       and the base verdict for those files at main. A changed path REACHES the red when it is a failing test file, a
+       member of a failing test's closure, a CI harness path, or a root-level file. A test/ helper or fixture reaches
+       it only when a failing test's closure contains it or a file in that closure names its directory (for example
+       `fixtures/golden-verdicts`). A blanket test/ rule would have counted #11702's own fixture against it.
+       `diff-cannot-reach` needs all three: a readable diff, every failing file's closure known, and every failing file
+       recorded `passes` at main. Anything missing gives `unknown`.
+    2. `decideFixOutcomeAction` takes the attribution as a fact. A NEEDS_SCOPE whose attribution is
+       `diff-cannot-reach` becomes `{ kind: "rerun-once" }`, the existing FLAKE arm. `diff-reaches` and `unknown` keep
+       today's `scope-needed`, so an unreadable input can never reroute a real PR-caused red.
+    3. src/run-task.ts computes the attribution before each `decideFixOutcomeAction` call, from inputs it already has.
+       It writes `fix.scope_rerouted` with `{ paths, attribution, reached, failing_test_files, head_sha }` when it
+       reroutes, and the reason travels into the flake arm's `flake_claim`. After the rerun, write one
+       `test.flake_retry` row per failing file in the shape `selectorShadowFlakeLedger` writes, with `source:
+       "fix-round"`, `retry_outcome` recovered or also_failed from the requeue's CI, `pr_numbers` and `head_sha`. Then
+       W1-T6406's flake-incident gardener counts the flake across unrelated PRs through its own tiered policy, with
+       no new threshold. Keep the worker's diagnosis: put the report's first paragraph and the saved out-of-scope
+       paths on `fix.scope_rerouted` so the incident it feeds carries the root cause. Never commit those edits to
+       this PR.
+    4. src/lib/prompt-render.ts, the fix footer's NEEDS_SCOPE line: NEEDS_SCOPE is for a red this PR's diff causes. A
+       red in a file the diff does not touch or reach, which passes at main, is FLAKE. The harness enforces this in
+       step 2 either way, and the line only stops the worker spending the round on an edit it cannot land.
+    A wrong `diff-cannot-reach` costs one requeue and no strike refund (the flake arm refunds only on green), and the
+    next round runs as today. That self-correction is why the decision needs no tuning threshold.
+  acceptance:
+    - claim: "a NEEDS_SCOPE for a red the PR's diff cannot reach, which passes at main, is routed to the flake rerun and never to a scope amendment"
+      proof: "unit test: W1-T9561: a NEEDS_SCOPE red the diff cannot reach reruns as a flake"
+    - claim: "that test exists under its own title"
+      proof: 'grep: W1-T9561: a NEEDS_SCOPE red the diff cannot reach reruns as a flake in test/a-red-the-diff-cannot-reach-is-a-flake-not-a-scope-amendment.test.ts'
+    - claim: "a NEEDS_SCOPE whose failing test imports a module the diff changed still goes to scope amendment"
+      proof: "unit test: W1-T9561: a NEEDS_SCOPE red the diff reaches still asks for scope"
+    - claim: "a NEEDS_SCOPE with an unreadable closure or no base verdict still goes to scope amendment"
+      proof: "unit test: W1-T9561: an unknown attribution keeps the scope amendment"
+    - claim: "the reroute writes a fix-round test.flake_retry row the flake-incident gardener reads"
+      proof: "unit test: W1-T9561: a rerouted flake leaves a fix-round flake retry row"
+  falsifier: |
+    Drop the attribution fact from decideFixOutcomeAction, which is today's behaviour. The first test's fixture is
+    #11702's shape: diff learnings/ci.yaml plus test/fixtures/golden-verdicts/... plus test/golden-verdicts.test.ts,
+    failing test/the-state-snapshot-actually-runs-on-this-host.test.ts passing at main, and the worker reporting
+    NEEDS_SCOPE deploy/host-update.sh. It then reads scope-needed, and the fifth test finds no test.flake_retry row.
+    Count every test/ path as reaching: the first test reads scope-needed because of the fixture directory. Treat
+    `unknown` as cannot-reach: the fourth test reroutes.

@@ -16,7 +16,7 @@ import { renderDoctrinePreamble } from "./learnings.js";
 import { isInPlanScope, outOfPlanScopeFiles } from "./plan-architect.js";
 import type { Task } from "./plan.js";
 import { citation } from "./provenance.js";
-import { workerProofTitles, type CriterionVerdict } from "./review.js";
+import { REFUSAL_REASON_CLASSES, workerProofTitles, type CriterionVerdict } from "./review.js";
 import {
   describeCiLogUnavailable,
   ADDITIVE_REGISTRATION_SURFACES,
@@ -625,8 +625,13 @@ export function renderFixPrompt(opts: {
     "FIX_OUTCOME: BASE_RED — the failing tests also fail at origin/main's tip; the harness verifies before refunding a strike.",
     "FIX_OUTCOME: FLAKE — rerun the failing jobs once on this head; only green CI refunds the strike.",
     "FIX_OUTCOME: NEEDS_SCOPE <path>[,<path>...] — name repo-relative paths with no ..; non-test paths go to scope escalation. " +
+      "NEEDS_SCOPE is for a red this PR's diff causes: a red in a file the diff does not touch or reach, which passes at main, is FLAKE, and the harness reruns it as one either way. " +
       "Leave those out-of-scope edits saved (uncommitted) in the worktree when you report — never revert them: the scope amendment admits only paths this round actually changed.",
     "FIX_OUTCOME: NEEDS_DESIGN <reason> — name the design blocker in at most 500 characters; no second round runs on this head.",
+    // W1-T9792: the implement contract's grammar, so the sweep's refusal drafter can read it.
+    "If the blocker is that an acceptance criterion cannot be met as written, put this block above the FIX_OUTCOME line, one line per criterion:",
+    "REFUSED:",
+    `<criterion index>. [${REFUSAL_REASON_CLASSES.join("|")}] <one concrete sentence>`,
     ...(!planOnlyTask ? ["Files under test/ may be added or edited although undeclared (R1); weakened assertions are judged by the reviewer's test-theater and assertion-discrimination gates."] : []),
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
     // W1-T136/W1-T137 class: the fix rung authors its OWN commit message and, until now, was
@@ -1292,4 +1297,18 @@ export function renderImplementPrompt(
     task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart, harnessCommits,
     capabilityContextPart,
   ).prompt;
+}
+
+/**
+ * W1-T6166: whether a `reviewer-unmet` fix round is worth dispatching at all. A round whose evidence
+ * names no unmet criterion, no gate failure and an empty review summary hands a worker nothing to act
+ * on, so it is prevented rather than retried. PURE; any other mode is never judged here.
+ */
+export function reviewerUnmetPrevention(
+  evidence: FixEvidence,
+): { dispatch: true } | { dispatch: false; reason: string } {
+  if (deriveFixMode(evidence) !== "reviewer-unmet") return { dispatch: true };
+  if ((evidence.review?.unmetCriteria.length ?? 0) > 0) return { dispatch: true };
+  if ((evidence.review?.summary ?? "").trim().length > 0) return { dispatch: true };
+  return { dispatch: false, reason: "reviewer-unmet evidence is empty: no unmet criterion and no review summary" };
 }

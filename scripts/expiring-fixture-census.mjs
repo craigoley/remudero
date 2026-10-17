@@ -27,7 +27,7 @@
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
-import { require as tsRequire } from "tsx/cjs/api";
+import { tsImport } from "tsx/esm/api";
 
 /** Days of warning before a fixture actually expires. One CI-week: long enough that the failure
  *  lands as a named warning someone can act on, short enough not to flag half the corpus. */
@@ -94,7 +94,7 @@ export const AGED_FIELDS = [
     // buildOpenPrViews copies it to lastActivityAt, which deriveDisposition ages.
     field: "updatedAt",
     threshold: "sweep.staleDays (updatedAt -> lastActivityAt)",
-    source: "src/run-task.ts",
+    source: "src/lib/tick-read-worker.ts",
     evidence: ["lastActivityAt: pr.updatedAt"],
     offsetDays: STALE_DAYS_OFFSET,
   },
@@ -707,7 +707,20 @@ function baseFileReader(execFile, baseRef) {
   };
 }
 
-export function main({
+let gateGardener;
+
+/** W1-T9565: the gardener loads as ESM, lazily and once. tsx/cjs/api's require compiled it and its src graph
+ *  as CommonJS, whose esbuild `import.meta` define put `SF:src/lib/<define:import.meta>` in every coverage
+ *  shard that reached the near-crossing path, and coverage-merge-ratchet refused an unrelated PR (#11757).
+ *  Under an active tsx resolver (the suites) a plain import shares the instance already loaded; the bare
+ *  `node` CLI gets tsImport, whose namespace would otherwise reload the graph on every call. */
+function loadGateGardener() {
+  const url = new URL("../src/lib/gate-gardener.ts", import.meta.url).href;
+  gateGardener ??= import.meta.resolve(url.replace(/\.ts$/, ".js")) === url ? import(url) : tsImport(url, import.meta.url);
+  return gateGardener;
+}
+
+export async function main({
   execFile = execFileSync,
   readFile = (p) => readFileSync(p, "utf8"),
   now = () => Date.now(),
@@ -751,7 +764,7 @@ export function main({
     readBaseFile,
   });
   if (result.reported.some((r) => r.daysLeft > 0 && r.daysLeft * 24 < NEAR_CROSSING_HOURS)) {
-    const shared = tsRequire("../src/lib/gate-gardener.ts", import.meta.url);
+    const shared = await loadGateGardener();
     proveNearCrossings(result.reported, runSuite ?? ((file, days) => shared.runSuiteShiftedMeasured(repoRoot, file, days)), shared.DEFUSE_CONTROL_SHIFT_DAYS);
   }
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
@@ -764,4 +777,4 @@ export function main({
   return blocked ? 1 : 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main({ argv: process.argv.slice(2) }));
+if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(await main({ argv: process.argv.slice(2) }));

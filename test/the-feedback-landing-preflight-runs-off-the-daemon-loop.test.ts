@@ -9,8 +9,8 @@
 // THE OBSERVATION is event-loop turns, never a wall-clock bound: a ticker set before the rung starts reads the
 // script's marks, and sees the check running only if the loop turns while the child is alive.
 //
-// The control runs the boot rung, which keeps the sync form by design (as the falsifier wires it back into the
-// per-poll rung). Its ticker must never see the check running; without it, a ticker that fires proves nothing.
+// The control runs the sync sweep (the form the falsifier wires back into the per-poll rung; the boot rung awaits
+// since W1-T9695). Its ticker must never see the check running; without it, a ticker that fires proves nothing.
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -134,11 +134,10 @@ test("W1-T5620: the daemon's per-poll feedback-landing rung runs its preflight c
   assert.deepEqual(f.heads(), ["main"]);
 });
 
-test("W1-T5620 control: the boot rung keeps the sync preflight, which holds the loop for the whole check", async () => {
+test("W1-T5620 control: the sync sweep's preflight holds the loop for the whole check", async () => {
   const f = slowLandingFixture("boot");
-  const rungs = feedbackLandingSweepRungs(f.clone.dir, { gh: f.gh, log: f.log });
 
-  const { result, sawCheckRunning } = await observeLoop(f.marks, () => withLiveWritesAllowed(() => rungs.atBoot()));
+  const { result, sawCheckRunning } = await observeLoop(f.marks, () => withLiveWritesAllowed(() => landing.sweepFeedbackLanding(f.clone.dir, { gh: f.gh, log: f.log })));
 
   assert.equal(f.marksRead(), "started\ndone\n", "the same slow check ran");
   assert.equal(sawCheckRunning, false, "no tick can land while spawnSync holds the thread");
@@ -180,7 +179,7 @@ test("W1-T5620: a preflight that throws is read the same by the sync and the awa
 
   for (const [f, r] of [[sync, r1], [awaited, r2]] as const) {
     assert.equal(r.landed, false, JSON.stringify(r));
-    assert.match(r.error ?? "", /^refused to force-replace feedback-landing: .*\(preflight could not start\); original failure: preflight could not start$/);
+    assert.match(r.error ?? "", /^feedback-landing was not pushed, and no lease was lost, so nothing was re-derived: preflight could not start$/);
     assert.deepEqual(f.heads(), ["main"], "a throwing preflight pushes nothing");
     assert.equal(f.creates().length, 0);
   }

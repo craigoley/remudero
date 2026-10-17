@@ -33,6 +33,7 @@ import {
   type ImpactArmInput,
 } from "./test-impact-map.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { resolveTestPath, type ResolveTestPathOptions } from "./test-path-resolver.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
 export { stripComments };
@@ -67,6 +68,9 @@ export interface AffectedSelection {
    *  was supplied; on a fallback it equals `narrow` (else the floor) and `impactFallback` says why. */
   impact?: string[];
   impactFallback?: string;
+  /** Commits the base is past the impact map's sha, when known: the shadow record carries it so the
+   *  arm's miss rate can be read by distance and IMPACT_MAP_STALENESS_BOUND set from it. */
+  impactDistance?: number;
   /** W1-T6084 — set when a read map was asked for and cannot speak for this change (missing, stale,
    *  not an ancestor of the base): census membership and the non-code full-run triggers then follow
    *  today's rules, and this says why. */
@@ -98,7 +102,7 @@ const MODELLED = /^(?:src|scripts|bin|test|docs|doctrine|plan)\/|^[^/]+\.md$/;
 const CONTRACT_FILE = /^(?:openapi\/daemon\.yaml|packages\/api-client\/src\/schema\.d\.ts)$/;
 
 /** The non-code files whose readers the read map OBSERVES: the contract and deploy trees, and json. */
-const READ_MAPPED = /^(?:openapi|deploy)\/|\.json$/;
+const READ_MAPPED = /^(?:(?:openapi|deploy)\/[\s\S]*|[\s\S]*\.json)$/;
 
 /** The two modelled contracts use content readers; other contract-tree paths force a full run.
  *  Other {@link READ_MAPPED} paths force one only when `readMapUsable` is false. */
@@ -111,13 +115,14 @@ export function fullRunTrigger(changed: readonly string[], readMapUsable = false
   });
 }
 
-export const READ_MAP_FORMAT = "rmd-read-map-v1";
+export const READ_MAP_FORMAT = "rmd-read-map-v2";
 
 /** One test file's record, as test/setup/read-map.ts writes it. */
 export interface ReadMapRecord {
   suite: string;
   reads: readonly string[];
   listed: readonly string[];
+  unknownDescriptors?: boolean;
 }
 
 /** Main's merged read map: for each non-code path, the suites that read it (indices into `suites`),
@@ -129,6 +134,7 @@ export interface ReadMap {
   suites: string[];
   reads: Record<string, number[]>;
   listed: Record<string, number[]>;
+  unknownDescriptorSuites: string[];
 }
 
 /** What the selector decides from beside the map: why it is absent, and its drift against the base. */
@@ -142,7 +148,9 @@ export interface ReadMapInput {
 /** Merges per-suite records into one map keyed by `sha`. A suite named twice (a retry) is unioned. */
 export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: string }): ReadMap {
   const merged = new Map<string, { reads: Set<string>; listed: Set<string> }>();
+  const unknownDescriptorSuites = new Set<string>();
   for (const r of records) {
+    if (r.unknownDescriptors !== false) unknownDescriptorSuites.add(r.suite);
     const into = merged.get(r.suite) ?? { reads: new Set<string>(), listed: new Set<string>() };
     for (const p of r.reads) into.reads.add(p);
     for (const p of r.listed) into.listed.add(p);
@@ -156,7 +164,7 @@ export function buildReadMap(records: readonly ReadMapRecord[], opts: { sha: str
     for (const p of [...entry.reads].sort()) (reads[p] ??= []).push(i);
     for (const p of [...entry.listed].sort()) (listed[p] ??= []).push(i);
   });
-  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed };
+  return { format: READ_MAP_FORMAT, sha: opts.sha, suites, reads, listed, unknownDescriptorSuites: [...unknownDescriptorSuites].sort() };
 }
 
 /** The records one full run left in `dir` (test/setup/read-map.ts's files). A file that is not a
@@ -166,11 +174,11 @@ export function readReadRecords(dir: string): { records: ReadMapRecord[]; proble
   const problems: string[] = [];
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
     const value = JSON.parse(readFileSync(join(dir, name), "utf8")) as Partial<ReadMapRecord> & { format?: string };
-    if (value.format !== "rmd-read-record-v1" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed)) {
+    if (value.format !== "rmd-read-record-v2" || typeof value.suite !== "string" || !Array.isArray(value.reads) || !Array.isArray(value.listed) || typeof value.unknownDescriptors !== "boolean") {
       problems.push(`${name} is not a read record`);
       continue;
     }
-    records.push({ suite: value.suite, reads: value.reads, listed: value.listed });
+    records.push({ suite: value.suite, reads: value.reads, listed: value.listed, unknownDescriptors: value.unknownDescriptors });
   }
   return { records, problems };
 }
@@ -185,7 +193,8 @@ export function readReadMap(path: string, read: (p: string) => string = (p) => r
   }
   const object = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
   if (value?.format !== READ_MAP_FORMAT || typeof value.sha !== "string" || !Array.isArray(value.suites) ||
-      !object(value.reads) || !object(value.listed)) {
+      !object(value.reads) || !object(value.listed) || !Array.isArray(value.unknownDescriptorSuites) ||
+      !value.unknownDescriptorSuites.every(suite => typeof suite === "string" && value!.suites!.includes(suite))) {
     return { problem: `read map ${path} is not a ${READ_MAP_FORMAT} file` };
   }
   return { map: value as ReadMap };
@@ -204,6 +213,9 @@ export function readMapProblem(input: ReadMapInput | undefined): string | undefi
   if (!input) return "no read map supplied";
   const map = input.map;
   if (!map) return `no read map (${input.mapProblem ?? "none supplied"})`;
+  if (!Array.isArray(map.unknownDescriptorSuites) || map.unknownDescriptorSuites.length > 0) {
+    return "read map descriptor coverage is incomplete";
+  }
   if (input.drift.distance === undefined) {
     return `read map ${map.sha.slice(0, 12)} is not an ancestor of the base (${input.drift.problem ?? "unknown"})`;
   }
@@ -397,136 +409,145 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     for (const next of importers.get(file) ?? []) queue.push({ file: next, root });
   }
 
+  // Resolve against this input's tree, keeping the selector independent of the checkout and git.
+  const suitePathOptions: ResolveTestPathOptions = {
+    root: "", tree: "input", cache: new Map(),
+    git: { treeSha: () => "input", listTestTree: () => [...input.files.keys()] },
+  };
+  const suitePath = (cited: string): string => {
+    const resolved = resolveTestPath(cited, suitePathOptions);
+    return "path" in resolved ? resolved.path : cited;
+  };
   const pathReaders = [...input.pathReaders];
   // The mkdtemp census scans tracked src/, scripts/ and test/ .ts/.mjs files outside the maps.
-  const mkdtempCensus = "test/mkdtemp-allowlist-rekey.test.ts";
+  const mkdtempCensus = suitePath("test/mkdtemp-allowlist-rekey.test.ts");
   if (input.files.has(mkdtempCensus) && files.some((f) => /^(?:src|scripts|test)\/.*\.(?:ts|mjs)$/.test(f))) {
     pathReaders.push(mkdtempCensus);
   }
   const changedSrcTypeScript = files.some((f) => f.startsWith("src/") && f.endsWith(".ts"));
-  const declaredSenderCensus = "test/every-message-names-one-declared-sender.test.ts";
+  const declaredSenderCensus = suitePath("test/every-message-names-one-declared-sender.test.ts");
   if (input.files.has(declaredSenderCensus) && changedSrcTypeScript) {
     pathReaders.push(declaredSenderCensus);
   }
   // This census greps tracked src/**/*.ts in a child process, outside the import and read maps.
-  const errorCensus = "test/error-subclass-census.test.ts";
+  const errorCensus = suitePath("test/error-subclass-census.test.ts");
   if (input.files.has(errorCensus) && changedSrcTypeScript) {
     pathReaders.push(errorCensus);
   }
   // This census reads tracked src TypeScript through git ls-files, outside the import/read maps.
-  const dependencyCensus = "test/dependency-declarations-match-use.test.ts";
+  const dependencyCensus = suitePath("test/dependency-declarations-match-use.test.ts");
   if (input.files.has(dependencyCensus) && changedSrcTypeScript) {
     pathReaders.push(dependencyCensus);
   }
-  const gitLeafCensus = "test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts";
+  const gitLeafCensus = suitePath("test/the-git-leaf-check-sees-a-cwd-option-spawn.test.ts");
   if (input.files.has(gitLeafCensus) && changedSrcTypeScript) {
     pathReaders.push(gitLeafCensus);
   }
   // W1-T5557: this suite scans tracked src/**/*.ts for env literals through git ls-files, outside the maps.
-  const envRegistry = "test/env-var-registry.test.ts";
+  const envRegistry = suitePath("test/env-var-registry.test.ts");
   if (input.files.has(envRegistry) && changedSrcTypeScript) {
     pathReaders.push(envRegistry);
   }
   // W1-T4994: a coverage shard failed on this suite at 39737b73 and the narrow selector missed it. The suite
   // drives runSweep and buildSweepEffects, so a change to the sweep, status or run-task seams must select it.
-  const verdictReuse = "test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts";
+  const verdictReuse = suitePath("test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts");
   const verdictReuseSeams = ["src/lib/sweep.ts", "src/lib/status.ts", "src/run-task.ts"];
   if (input.files.has(verdictReuse) && files.some((f) => verdictReuseSeams.includes(f))) {
     pathReaders.push(verdictReuse);
   }
-  const claimsCheck = "test/claims-check.test.ts";
-  const claimsCheckEdges = ["src/lib/plan.ts", "src/run-task.ts", "test/one-bad-plan-shard-never-takes-the-daemon-down.test.ts"];
+  const claimsCheck = suitePath("test/claims-check.test.ts");
+  const claimsCheckEdges = ["src/lib/plan.ts", "src/run-task.ts", suitePath("test/one-bad-plan-shard-never-takes-the-daemon-down.test.ts")];
   if (input.files.has(claimsCheck) && files.some((f) => claimsCheckEdges.includes(f))) {
     pathReaders.push(claimsCheck);
   }
-  const runTaskGitLeaf = "test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts";
+  const runTaskGitLeaf = suitePath("test/run-task-git-calls-into-a-worker-worktree-go-through-the-leaf.test.ts");
   const runTaskGitLeafEdges = [
     "src/run-task.ts",
-    "test/check-proof-grep-cause.test.ts",
-    "test/check-proof-warns-when-its-target-differs-from-head.test.ts",
+    suitePath("test/check-proof-grep-cause.test.ts"),
+    suitePath("test/check-proof-warns-when-its-target-differs-from-head.test.ts"),
   ];
   if (input.files.has(runTaskGitLeaf) && files.some((f) => runTaskGitLeafEdges.includes(f))) {
     pathReaders.push(runTaskGitLeaf);
   }
-  const precheckParity = "test/every-ci-census-is-asked-before-the-push.test.ts";
-  const precheckParityEdges = ["scripts/affected-reach-baseline.json", "src/lib/affected-suites.ts", "test/the-affected-suite-reach-ratchet.test.ts"];
+  const precheckParity = suitePath("test/every-ci-census-is-asked-before-the-push.test.ts");
+  const precheckParityEdges = ["scripts/affected-reach-baseline.json", "src/lib/affected-suites.ts", suitePath("test/the-affected-suite-reach-ratchet.test.ts")];
   if (input.files.has(precheckParity) && files.some((f) => precheckParityEdges.includes(f))) {
     pathReaders.push(precheckParity);
   }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
-  const viewSchemas = "test/every-view-body-matches-its-schema.test.ts";
-  const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", "test/repo-settings-report-their-effective-values.test.ts"];
+  const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
+  const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
   if (input.files.has(viewSchemas) && files.some((f) => viewSchemaEdges.includes(f))) {
     pathReaders.push(viewSchemas);
   }
-  const viewEtags = "test/view-etags-are-deterministic.test.ts";
-  const viewEtagsEdges = ["src/lib/repo-dashboard-route.ts", "test/repo-settings-report-their-effective-values.test.ts"];
+  const viewEtags = suitePath("test/view-etags-are-deterministic.test.ts");
+  const viewEtagsEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
   if (input.files.has(viewEtags) && files.some((f) => viewEtagsEdges.includes(f))) {
     pathReaders.push(viewEtags);
   }
-  const proofExecTmpHygiene = "test/proof-exec-tmp-hygiene.test.ts";
+  const proofExecTmpHygiene = suitePath("test/proof-exec-tmp-hygiene.test.ts");
   const proofExecTmpHygieneEdges = [
     "src/lib/ci-parity.ts",
-    "test/the-coverage-entry-shards-the-way-ci-does.test.ts",
-    "test/the-local-coverage-shard-count-equals-cis.test.ts",
+    suitePath("test/the-coverage-entry-shards-the-way-ci-does.test.ts"),
+    suitePath("test/the-local-coverage-shard-count-equals-cis.test.ts"),
   ];
   if (input.files.has(proofExecTmpHygiene) && files.some((f) => proofExecTmpHygieneEdges.includes(f))) {
     pathReaders.push(proofExecTmpHygiene);
   }
   // W1-T6783: a coverage shard failed on this suite (run 37877770799) and the narrow selector missed it.
-  const coverageMode = "test/preflight-coverage-mode.test.ts";
+  const coverageMode = suitePath("test/preflight-coverage-mode.test.ts");
   const coverageModeEdges = [
     "src/lib/ci-parity.ts",
-    "test/the-coverage-entry-shards-the-way-ci-does.test.ts",
-    "test/the-local-coverage-shard-count-equals-cis.test.ts",
+    suitePath("test/the-coverage-entry-shards-the-way-ci-does.test.ts"),
+    suitePath("test/the-local-coverage-shard-count-equals-cis.test.ts"),
   ];
   if (input.files.has(coverageMode) && files.some((f) => coverageModeEdges.includes(f))) {
     pathReaders.push(coverageMode);
   }
-  const nowViewRederives = "test/now-view-rederives-only-dirtied-tasks.test.ts";
+  const nowViewRederives = suitePath("test/now-view-rederives-only-dirtied-tasks.test.ts");
   const nowViewRederivesEdges = [
     "src/lib/read-model-db.ts",
-    "test/read-model-readers-never-contend-with-the-writer.test.ts",
+    suitePath("test/read-model-readers-never-contend-with-the-writer.test.ts"),
   ];
   if (input.files.has(nowViewRederives) && files.some((f) => nowViewRederivesEdges.includes(f))) {
     pathReaders.push(nowViewRederives);
   }
-  const promptRender = "test/prompt-render.test.ts";
+  const promptRender = suitePath("test/prompt-render.test.ts");
   const promptRenderEdges = [
     "src/lib/prompt-render.ts",
     "src/run-task.ts",
-    "test/the-prerequisite-split-contract-has-no-optional-seam.test.ts",
+    suitePath("test/the-prerequisite-split-contract-has-no-optional-seam.test.ts"),
   ];
   if (input.files.has(promptRender) && files.some((f) => promptRenderEdges.includes(f))) {
     pathReaders.push(promptRender);
   }
   // W1-T7475: a coverage shard failed on this suite at 49b4c36c and the narrow selector missed it.
-  const redBranchStrike = "test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts";
+  const redBranchStrike = suitePath("test/a-red-branch-behind-its-base-spends-a-strike-first.test.ts");
   const redBranchStrikeEdges = [
     "src/lib/sweep.ts",
-    "test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts",
+    suitePath("test/the-sweep-reads-a-glossed-diff-coverage-line.test.ts"),
   ];
   if (input.files.has(redBranchStrike) && files.some((f) => redBranchStrikeEdges.includes(f))) {
     pathReaders.push(redBranchStrike);
   }
   // W1-T4894: a coverage shard failed on this suite (run 36693671413, PR #7998) and the narrow selector missed it.
-  const wallClockBound = "test/a-wall-clock-bound-declares-itself.test.ts";
+  const wallClockBound = suitePath("test/a-wall-clock-bound-declares-itself.test.ts");
   const wallClockBoundEdges = [
     "src/lib/board.ts",
     "src/lib/github-transport.ts",
     "src/lib/serve.ts",
     "src/lib/status.ts",
-    "test/board-github-off-loop.test.ts",
+    suitePath("test/board-github-off-loop.test.ts"),
   ];
   if (input.files.has(wallClockBound) && files.some((f) => wallClockBoundEdges.includes(f))) {
     pathReaders.push(wallClockBound);
   }
   // W1-T7763: a coverage shard failed on this suite (run 38063468054, PR #10671) and the narrow selector missed it.
-  const refusalAmendment = "test/a-worker-refusal-becomes-a-plan-amendment.test.ts";
+  const refusalAmendment = suitePath("test/a-worker-refusal-becomes-a-plan-amendment.test.ts");
   const refusalAmendmentEdges = [
     "src/lib/in-tree-budget.ts",
     "src/lib/plan-pr-emitter.ts",
-    "test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts",
+    suitePath("test/a-starved-plan-pr-preflight-leg-times-out-and-is-asked-again.test.ts"),
   ];
   if (input.files.has(refusalAmendment) && files.some((f) => refusalAmendmentEdges.includes(f))) {
     pathReaders.push(refusalAmendment);
@@ -603,6 +624,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     selection.impact = arm.suites;
     selection.recentOnly.impact = arm.recentOnly;
     if (arm.fallback !== undefined) selection.impactFallback = arm.fallback;
+    if (input.impact.map && input.impact.drift.distance !== undefined) selection.impactDistance = input.impact.drift.distance;
   }
   return selection;
 }
@@ -892,7 +914,10 @@ export interface ShadowFailure {
  *  This is the evidence W1-T4406 needs before any selection may skip a suite. */
 export function shadowRecord(
   selection: AffectedSelection, failedFiles: readonly string[], retried: Readonly<Record<string, "recovered" | "failed">> = {},
-): { fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; failures: ShadowFailure[] } {
+): {
+  fullRun: boolean; floorSize: number; narrowSize?: number; impactSize?: number; impactFallback?: string; impactDistance?: number;
+  failures: ShadowFailure[];
+} {
   const floor = new Set(selection.suites);
   const narrow = selection.narrow ? new Set(selection.narrow) : undefined;
   const recentOnlyFloor = new Set(selection.recentOnly.floor);
@@ -910,6 +935,7 @@ export function shadowRecord(
     ...(narrow ? { narrowSize: narrow.size } : {}),
     ...(impact ? { impactSize: impact.size } : {}),
     ...(selection.impactFallback === undefined ? {} : { impactFallback: selection.impactFallback }),
+    ...(selection.impactDistance === undefined ? {} : { impactDistance: selection.impactDistance }),
     failures: [...new Set(failedFiles)].sort().map((file) => ({
       file,
       floor: verdict(floor, recentOnlyFloor, file),

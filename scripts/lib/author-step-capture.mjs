@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, fsyncSync, linkSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { performance } from 'node:perf_hooks';
 import { isMainModule } from './argv.mjs';
 
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -30,6 +31,7 @@ export function captureStepSync(file, args, { cwd, env = process.env, stdoutPath
     outcome = { status: transport.status, signal: transport.signal, error: { message: error.message, code: error.code }, outputComplete: false };
   }
   return { status: outcome.status, signal: outcome.signal,
+    durationMs: outcome.durationMs, startedAt: outcome.startedAt, finishedAt: outcome.finishedAt,
     ...(outcome.error ? { error: Object.assign(new Error(outcome.error.message), { code: outcome.error.code }) } : {}),
     stdout: existsSync(stdoutPath) ? readFileSync(stdoutPath, 'utf8') : '',
     stderr: existsSync(stderrPath) ? readFileSync(stderrPath, 'utf8') : '',
@@ -41,6 +43,7 @@ async function spool(config) {
   if (![config.maxBytes, config.runtimeMs].every((n) => Number.isSafeInteger(n) && n > 0)) {
     throw new Error('capture byte and runtime bounds must be positive safe integers');
   }
+  const startedAt=new Date().toISOString(),started=performance.now();
   const out = openSync(config.stdoutPath, 'wx', 0o600);
   let err;
   try { err = openSync(config.stderrPath, 'wx', 0o600); }
@@ -90,6 +93,7 @@ async function spool(config) {
   try { fsyncSync(out); fsyncSync(err); }
   finally { closeSync(out); closeSync(err); }
   writeFileSync(config.resultPath + '.pending', JSON.stringify({ version: 1, status: spawnFailed ? null : native.status,
+    startedAt, finishedAt:new Date().toISOString(), durationMs:Math.ceil(performance.now()-started),
     signal: native.signal, spawnCloseCode: spawnFailed ? native.status : null, error: error ?? null,
     outputComplete: !error && !native.signal, storedBytes, observedBytes }) + '\n', { mode: 0o600, flag: 'wx', flush: true });
   // Publish complete JSON atomically and exclusively; a reader never sees a half-written result.

@@ -14,7 +14,7 @@ import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { shortPathWhenTooLong } from "./short-path-root.js";
-import { acquireTestSlot, lowPriorityCommand, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import { acquireTestSlot, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -1181,6 +1181,7 @@ export function testWithCoverageLeaf(
     writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
     // The per-checkout lock above guards THIS scratch; the host-wide slot bounds every checkout's runs.
     slot = acquireTestSlot("coverage-ratchet:test-with-coverage", { perFileBytes: TEST_FILE_PEAK_BYTES, ...testSlot });
+    if (!testSlotExecutionAllowed(slot)) return { ok: false, detail: `coverage: NOT_RUN (${slot.note})` };
     const shards = testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"), slot, testSlot, chosen.note);
     // A pass already names the root; a refusal names it too, so the operator sees which volume was weighed.
     return shards.ok ? shards : { ...shards, detail: `${shards.detail}\n(${chosen.note})` };
@@ -1892,6 +1893,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
   { job: "coverage-ratchet-required", mirrored: false, reason: "GitHub-only LCOV artifact aggregator; the coverage-ratchet entry below evaluates the equivalent complete surface locally" },
   {
+    job: "coverage-ledger",
+    mirrored: false,
+    reason:
+      "W1-T9448 — GitHub-only immutable run artifact coordination; the local coverage-ratchet " +
+      "entry uses one local committed ledger, with no independent network choice per shard",
+  },
+  {
     job: "coverage-ratchet",
     mirrored: true,
     run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined) => {
@@ -2166,6 +2174,12 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     job: "recovery-drill",
     mirrored: false,
     reason: "scheduled recovery drill with issue delivery and a multi-minute fixture exercise, deliberately outside the bounded pre-push surface",
+  },
+  {
+    workflow: "semgrep-runtime-compatibility.yml",
+    job: "runtime-compatibility",
+    mirrored: false,
+    reason: "hash-locked CPython 3.12 Linux installation on the exact GitHub PR head; a local substitute cannot certify that hosted runtime or run identity",
   },
   {
     workflow: "semgrep.yml",
@@ -2666,6 +2680,39 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "a",
     "`execFileSync('git', ['ls-files', 'test'])` is scoped to test/ only, never src/",
   ),
+  // W1-T9872: these five suites enumerate the TEST corpus with `git ls-files` (so they keep seeing every file when a
+  // suite moves into a subfolder of test/). The enumeration walks test/, never src/; the `src/` text the recognizer
+  // also sees is the source those suites read or spawn against, not a population they walk.
+  refusedForPredicate(
+    "test/architecture-fitness.test.ts",
+    "a",
+    "W1-T9872: its `git ls-files` lists tracked test/**/*.test.ts (test/, never src/) as the corpus for three text sweeps; " +
+      "its depcruise and layering checks assert one aggregate result over src/, not a per-file property with a baseline table",
+  ),
+  refusedForPredicate(
+    "test/host-capability-fixtures.test.ts",
+    "a",
+    "W1-T9872: its `git ls-files` lists tracked test/ files (never src/) as the corpus the host-capability audit reads; the " +
+      "`src/` strings the recognizer sees are fixture lines fed to the audit",
+  ),
+  refusedForPredicate(
+    "test/mutation-ratchet.test.ts",
+    "a",
+    "W1-T9872: its `git ls-files` lists tracked test/ files (never src/) to find classify.ts importers; the `src/` strings " +
+      "are the stryker scope paths and fixture reports it drives",
+  ),
+  refusedForPredicate(
+    "test/orphan-sweep-names-the-third-party.test.ts",
+    "a",
+    "W1-T9872: its `git ls-files` lists tracked test/ files (never src/) to compute which fixtures hold the sweep lock; " +
+      "the `src/` strings are the one worker-containment.ts read and fixture paths",
+  ),
+  refusedForPredicate(
+    "test/the-mutant-loader-resolves-every-relative-import.test.ts",
+    "a",
+    "W1-T9872: its `git ls-files` lists tracked test/ files (never src/) to refuse a hand-rolled import rewrite; the `src/` " +
+      "strings are the mutant-module fixtures it exercises",
+  ),
   // W1-T2809's own suite. Same self-reference shape as its siblings: it is ABOUT the recognizer,
   // so it necessarily carries both idiom tokens and `src/` in its own text.
   refusedForPredicate(
@@ -2765,6 +2812,15 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
   // The nested-preflight census (#9724). Its one real `git ls-files` is scoped to `test/*.ts`, the
   // TEST corpus; the `src/` text the recognizer sees is its fixture import line. Same route as above.
+  // W1-T9860's basename-uniqueness check. SCOPE NOTE: the task's `files:` does not name this file;
+  // the row is here because `censusPopulationDrift` refuses an undisclosed census-shaped file, and
+  // that gate cannot be satisfied from inside the declared paths. One refusal row, no behaviour.
+  refusedForPredicate(
+    "test/every-test-basename-is-unique.test.ts",
+    "a",
+    "W1-T9860's basename-uniqueness check. Its `git ls-files -- test/` and its directory walk both read the TEST " +
+      "corpus, never src/; its `src/` text is the import of src/lib/test-path-resolver.js, the rule it applies",
+  ),
   refusedForPredicate(
     "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
     "a",
@@ -2853,6 +2909,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "W1-T5522's light-gates fixture. The `ls-files` the recognizer sees is the pinned argv of the fold-debt collect " +
       "step (W1-T7853), which it runs against stub tools in a temp dir; it walks no tracked population and asserts no " +
       "per-file property. The `src/` strings are its own import paths.",
+  ),
+  refusedForPredicate(
+    "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
+    "a",
+    "W1-T9565's own suite. The `ls-files` the recognizer sees is a stubbed execFile answer inside a temp-dir census " +
+      "runner, and its readdirSync walks scripts/ (no module loads tsx/cjs/api) and a child's coverage dir, never the " +
+      "tracked src/ population. The `src/` strings are its import path and the gardener path it expects mapped.",
   ),
 ];
 
@@ -2996,6 +3059,9 @@ export const CENSUS_DIR_WALK_STOPGAP =
   "making discovery an exact import query that retires both matchers. Adopting the seam across " +
   "the measured ~84 dir-walk suites is its own filing, not a rider on this task.";
 
+/** The enumeration idiom a census-shaped suite carries: the probe below greps it, {@link censusWalksOf} re-tests it. */
+const CENSUS_ENUMERATION_IDIOM = "ls-files|readdirSync|globSync";
+
 /** THE ONE PROBE, exported so a test asserts the real argv rather than restating it. An
  *  ALTERNATION kept to a SINGLE `git grep` spawn: the idiom is decided from each hit's own text,
  *  which the `src/` filter had to read anyway — one recognizer with two idioms. */
@@ -3019,7 +3085,7 @@ export const CENSUS_DISCOVERY_PROBE_ARGV: readonly string[] = [
   // is NOT returned), so scratch files cannot enter the population.
   "--untracked",
   "-lE",
-  "ls-files|readdirSync|globSync",
+  CENSUS_ENUMERATION_IDIOM,
   "--",
   "test/*.test.ts",
 ];
@@ -3375,6 +3441,14 @@ export const CENSUS_MEMBERSHIP_SUITES: readonly KnownCensusSuite[] = [
   ...CENSUS_WALKED_POPULATION_SUITES,
   ...REGISTRY_CENSUS_SUITES,
 ];
+
+/** W1-T9708 — the prefixes `testFile` walks as a census, or [] when it walks none: its
+ *  {@link CENSUS_MEMBERSHIP_SUITES} row's, else the candidate recognizer's, as `rmd census-membership` reports. */
+export function censusWalksOf(testFile: string, text: string | undefined): readonly string[] {
+  const modelled = CENSUS_MEMBERSHIP_SUITES.find((s) => s.testFile === testFile);
+  if (modelled !== undefined) return modelled.walks;
+  return text !== undefined && new RegExp(CENSUS_ENUMERATION_IDIOM).test(text) ? censusCandidateWalks(text) : [];
+}
 
 /** A changed path and the job names it enters — `suites` is `[]` when it joins none, never omitted. */
 export interface CensusMembershipEntry {

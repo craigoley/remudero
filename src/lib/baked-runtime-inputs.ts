@@ -1,5 +1,6 @@
 /** Source executed by the image-resident serve supervisor; the closure test holds this list current. */
 export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
+  "src/lib/actor-evidence.ts",
   "src/lib/baked-runtime-inputs.ts",
   "src/lib/clock.ts",
   "src/lib/config-schema.ts",
@@ -12,6 +13,7 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/fs-race-safe.ts",
   "src/lib/git-fetch-retry.ts",
   "src/lib/git-lock-reclaim.ts",
+  "src/lib/host-identity.ts",
   "src/lib/install-hash.ts",
   "src/lib/ledger-carry.ts",
   "src/lib/ledger-path.ts",
@@ -19,6 +21,7 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/ledger.ts",
   "src/lib/live-write-guard.ts",
   "src/lib/log-rotation.ts",
+  "src/lib/loop-bounded-child.ts",
   "src/lib/plan-scope.ts",
   "src/lib/producer-identity.ts",
   "src/lib/repo-layout.ts",

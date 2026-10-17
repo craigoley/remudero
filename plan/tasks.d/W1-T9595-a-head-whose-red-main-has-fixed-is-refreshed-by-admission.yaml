@@ -1,0 +1,151 @@
+- id: W1-T9595
+  title: "A HEAD WHOSE RED MAIN HAS FIXED IS REFRESHED BY ADMISSION, NOT ONE SLOT PER PASS — the W1-T4351 base-red branch shares one `baseRedRefreshPr` slot per full pass across the base-red, base-fixed and stalled-stage rungs, and both light-pass calls wire `updateBranch: undefined`, so #11776 and #11777 were held on 13 dispositions each, 20:20-21:56Z on 2026-10-14, while the slot went to one other PR per full pass"
+  repo: remudero
+  depends_on: [W1-T9584]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern — how a head held on a red main gets onto main once main is green; high for blast radius: it decides how many update-branch presses, CI runs and voided reviews follow a main fix
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: W1-T9533 (machine-filed by the flow gardener against src/lib/fix-lane-gardener.ts) traced to src/lib/sweep.ts's refresh slot; operator approved the replacement 2026-10-14 (\"keep going with any recommended next steps\"). Standing ruling: no hard thresholds, so the bound is an observed signal, not a constant"
+  plan_refs: [W1-T4351, W1-T6405, W1-T8396, W1-T528, W1-T7214, W1-T7735, W1-T9533, W1-T9584, W1-T9585, W1-T100]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-head-whose-red-main-has-fixed-is-refreshed-by-admission.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    REPLACES W1-T9533, retired in the same PR. The flow gardener filed W1-T9533 against src/lib/fix-lane-gardener.ts
+    because its owner search matched the class text "required checks red". fix-lane-gardener.ts is a once-a-day remedy
+    filer that never touches a PR. The hold that W1-T9533 measured is produced in src/lib/sweep.ts. The owner-search
+    defect is filed as its own task (W1-T9597).
+
+    READ on origin/main (f87f7907c), src/lib/sweep.ts:
+      - `let baseRedRefreshPr: number | undefined` is declared once per `runSweep` pass. Three arms test it and set it:
+        - the W1-T4351 base-red arm (`decideBaseRed` returns `refresh` with main green);
+        - the W1-T6405 / W1-T8396 base-reproduction arm (reproduction clear, or the head's tests already fixed on main);
+        - the stalled-stage arm (an own-red whose failing test files pass at main's tip).
+        The first head walked takes the slot, and every other qualifying head that pass stands down with
+        "this pass's one branch refresh is spent or unwired — no fix dispatched".
+      - The same reason text covers two different causes: the slot was taken by another PR, or `deps.updateBranch`
+        is absent. Nothing records which PR took the slot.
+    READ on origin/main, src/run-task.ts: both `runSweepLightPass` calls in the light hook pass `updateBranch: undefined`.
+    W1-T528 did this so a per-PR fan-out cannot press update-branch N times. So no light pass can refresh a held head,
+    and every light pass also reports "spent or unwired".
+
+    MEASURED 2026-10-14 from the core ledger union (extracts in the operator notes: w1-t9533-rows.ndjson,
+    w1-t9533-refresh-rows.ndjson):
+      - #11776 and #11777 each have 13 `sweep.disposed` rows with that reason, from 20:20:03Z to 21:56:22Z:
+        - one from the base-reproduction arm at 20:20Z;
+        - twelve from the base-red arm, 20:28-21:56Z: "base red: coverage-shard (5/8) was held while main was red;
+          main is green, but this pass's one branch refresh is spent or unwired".
+      - In the same window `sweep:refresh` update-branch requests went to #11705 (20:37Z), #11783 (20:40Z),
+        #11710 (21:04Z) and #11774 (21:37Z). That is one per full pass, while both held heads waited.
+      - #11777 got onto main at 22:57Z through the general `distance-unknown` rung, not the base-red arm.
+    A slot of one per pass is a fixed cap, which the operator's standing ruling forbids. Main's fix had already
+    landed, so each pass the held heads waited bought nothing.
+
+    WHY NOT "REFRESH THEM ALL". Doctrine `never-fan-out-update-branch` (CLAUDE.md, CI and merging): protection is not
+    strict, each refresh re-runs about 16 min of CI and voids the review. A main fix that frees a whole board must
+    not press update-branch on every held head in the same second. Admission must be paced by what CI can take.
+
+    COMPOSITION AND ORDER.
+      - DEPENDS ON W1-T9584 (queued, built in PR #11913, branch run-W1-T9584-1792030298049). It edits the same
+        sweep.ts base-red and dep-review region and the same run-task.ts wiring. Build this after #11913 merges.
+        A Dependabot head is refreshed by asking Dependabot to rebase (W1-T9584), so this admission never takes one.
+      - CONFLICTS ON PAPER WITH W1-T7735 (queued). Its COMPOSITION paragraph keeps "W1-T4351's one slot" unchanged.
+        Its design item 4 says no path calls `updateBranch` for more than one PR in a pass. This task replaces that
+        slot. A base-red refresh is a REPAIR: the head's red is main's, and only main can clear it. W1-T7735 itself
+        lets repair-driven paths keep their own triggers. If W1-T7735 builds first, its `decideRefresh` value test
+        sits in front of each admission here, and its at-most-one rule applies to freshness refreshes only.
+        The operator should rule on this before either builds.
+      - W1-T9585 (queued) changes the open-escalation stand-down. It does not touch the refresh slot.
+      - SHARED SURFACE ONLY with W1-T100. It routes blocked_ci to the ci-log fix path in the same two files. This task
+        changes who is refreshed after a base red, not how a red is routed to a fix.
+  design: |
+    1. ADMISSION REPLACES THE SLOT. Remove `baseRedRefreshPr`.
+       - A head qualifies when it would take the slot today:
+         - `decideBaseRed` returns `refresh` with main green, or the base-reproduction or stalled-stage arm reads
+           clear or fixed-on-main; and
+         - `assessRefresh` clears it.
+       - A qualifying head becomes a candidate in one per-pass `refreshAdmission`, never a competitor for a slot.
+       - Candidates are ordered OLDEST-HELD FIRST. The held-since time is the head's earliest
+         `sweep.base_red.stood_down` row, or its `blocker_since` when it has no such row. It is read once per pass
+         from the fold the pass already builds (`baseRedHistoryFromLedger`). Walk order never decides who goes
+         first, so a PR walked early cannot outrank an older hold.
+       - An `assessRefresh` refusal is never admitted. It keeps today's refusal reason, and the head's red is its own.
+    2. PACED BY AN OBSERVED SIGNAL, NEVER A CONSTANT: SLOW START. Operator ruling 2026-10-15: slow start,
+       recommended by the session; "fix all the issues". How many candidates a pass admits comes from CI uptake
+       of this admission's earlier refreshes:
+       - WITH NO PRIOR UPTAKE SIGNAL, ADMIT ONLY THE OLDEST-HELD CANDIDATE, the same as the unreadable case below.
+         There is no prior signal when no earlier admission refreshed a head, or when the latest admission that
+         did is older than the oldest held-since among this pass's candidates (it served an earlier main fix).
+       - A head the latest admission refreshed, whose new head shows no started required check in this pass's
+         snapshot, is still waiting for a runner. While any such head exists, no further candidate is admitted.
+       - Once every head the latest admission refreshed has started CI, admit TWICE AS MANY as it did, oldest-held
+         first. So a board freed by one main fix is fed 1, 2, 4, ... heads per pass as runners take them. It is
+         neither pressed all at once nor capped at one per pass: the width is learned from uptake.
+       - Why: as first built (#12066), a pass with no earlier admission admitted every cleared candidate. After
+         the 2026-10-15 main fix that was about 15 refreshes, so about 15 CI runs in one second, the fan-out
+         doctrine `never-fan-out-update-branch` forbids.
+       - Write the reading on the admission row: admitted PRs, waiting PRs, the PR(s) whose CI has not started,
+         the pass's width, and the oldest held-since.
+       - Do not add a fixed maximum or per-pass N. The one head a board starts with is the unreadable floor,
+         today's behaviour, not a cap. A test drives the signal readings and shows the admitted count follows them.
+       - An unreadable signal (the snapshot carries no check facts for an earlier admission) admits the oldest-held
+         candidate only, and the row says `signal: unreadable`. That is today's behaviour, never worse.
+    3. TWO REASONS, NOT ONE.
+       - Split "this pass's one branch refresh is spent or unwired" into two texts:
+         - unwired: `updateBranch` is absent on this surface. It names the surface (light pass, dry run).
+         - waiting for admission: it names the PR(s) ahead of this head and the signal holding it, e.g.
+           "waiting for refresh admission behind #N (its CI has not started)".
+       - The `sweep.disposed` stand-down reason names the PR that was admitted ahead.
+       - A `sweep.base_red.refresh_admission` row per pass records the full admission: admitted, waiting and
+         refused heads, each with its arm.
+       - Add that step to the rotation-retained steps only if the ledger module requires it for a per-pass row.
+         Never add it without measuring that need.
+    4. THE LIGHT PASS REFRESHES ONLY THROUGH THE SAME ADMISSION.
+       - run-task.ts keeps `updateBranch: undefined` on the per-PR `runSweepLightPass` fan-out (W1-T528's
+         at-most-once contract).
+       - It gains ONE admission call over the light pass's whole snapshot, before the fan-out, as
+         `runLightPassReadyRefresh` does (W1-T7214).
+       - That call reads the same ledger fold, so a head refreshed by either pass is never admitted twice
+         (`baseRedHistory.refreshed`).
+       - An in-flight guard like `lightPassReadyRefreshInFlight` stops overlapping light passes from both admitting.
+    5. OUT OF SCOPE:
+       - the general distance and ready-overlap rungs;
+       - the fix lane's own pre-strike refresh (`fix.base_refreshed`);
+       - `tryPlanRepair`'s refresh;
+       - W1-T7735's value test.
+  acceptance:
+    - claim: "when main fixes, held heads that assessRefresh clears are admitted oldest-held first, one head with no prior uptake signal, then twice as many each pass while CI takes them (slow start, operator ruling 2026-10-15)"
+      proof: "unit test: W1-T9595: slow start admits the oldest-held head first, then twice as many while CI takes them"
+    - claim: "an earlier admission whose CI has not started holds the next candidate, and the hold names that PR"
+      proof: "unit test: W1-T9595: a refresh whose CI has not started holds the next admission and names that PR"
+    - claim: "a light pass refreshes a held head only through one admission over its snapshot, never in the per-PR fan-out"
+      proof: "unit test: W1-T9595: a light pass refreshes a held head only through one admission over its snapshot"
+    - claim: "an unwired surface and a paced admission give different stand-down reasons"
+      proof: "unit test: W1-T9595: an unwired surface and a paced admission give different stand-down reasons"
+    - claim: "the suite exists under its own title"
+      proof: "grep: W1-T9595: slow start admits the oldest-held head first in test/a-head-whose-red-main-has-fixed-is-refreshed-by-admission.test.ts"
+    - claim: "the sweep admits refreshes through one per-pass admission"
+      proof: "grep: refreshAdmission in src/lib/sweep.ts"
+  falsifier: |
+    Fixture:
+      - main is green after a recorded base red;
+      - three heads held on it with stood-down rows at t1 < t2 < t3, walked in the order t3, t1, t2;
+      - an `assessRefresh` that clears all three;
+      - an `updateBranch` stub that records calls;
+      - no earlier admission in the ledger, so there is no prior uptake signal.
+    Slow start (operator ruling 2026-10-15, recommended by the session; "fix all the issues"): the first pass admits
+    t1 only, and t2 and t3 wait with a reason naming t1. A second pass whose snapshot shows t1's refreshed head with
+    a started check admits t2 and t3, twice the first pass's one. At origin/main the first walked head (t3) takes
+    `baseRedRefreshPr`, so the first test fails on the order. As first built in #12066, the first pass admits all
+    three, so the first test fails on the count. Make the snapshot show t1's refresh with no started check: the
+    second test expects t2 held with a reason naming t1, and at base no such reason exists. Run the light-pass
+    builder with the same board: at base `updateBranch` is never called, so the third test fails. Restore the
+    single slot after the change and the first and second tests go red again; drop slow start and the first test
+    goes red again.

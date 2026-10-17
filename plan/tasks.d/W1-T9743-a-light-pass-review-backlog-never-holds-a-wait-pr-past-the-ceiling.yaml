@@ -1,0 +1,67 @@
+- id: W1-T9743
+  title: "A LIGHT PASS'S REVIEW BACKLOG NEVER HOLDS A WAIT-DISPOSED PR PAST pendingCeilingMinutes — startInFlightTicker awaits deps.sweepLight, and on 2026-10-15 one light pass admitted its reviews one at a time for ~105 min, so daemon.alive stopped 20:27-22:15Z and #12122, waiting on a reviewer that died in the 20:21:59 restart, was not re-read for 107 min; seven wait-disposed PRs went unread for 60+ min that day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, how long a wait disposition can go unre-read while a light pass is busy; review admission and the dispositions themselves are unchanged
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): operator session 2026-10-15, PR 12122 silence diagnosis (logs-8864/12122-orphan-notes.md)'
+  plan_refs: [W1-T2379, W1-T9632, W1-T2345, W1-T1272, W1-T484]
+  files:
+    - src/lib/sweep.ts
+    - src/lib/daemon.ts
+    - test/a-light-pass-review-backlog-never-holds-a-wait-pr-past-the-ceiling.test.ts
+  status: merged
+  priority: 1  # operator-2026-10-15: stuck PRs and stalls must not happen
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/lib/daemon.ts startInFlightTicker's loop awaits `deps.sweepLight()` (and `deps.sweepLight({reviewOnly:
+      true})`), and writes daemon.alive once per iteration. While a light pass is in flight, nothing re-reads open PRs.
+    - src/lib/sweep.ts admits light-pass reviews against a width; the in-flight count is
+      lightPassSpawningReservations + fullPassReviewsInFlight. A wait disposition (checks pending) is re-derived only
+      when a pass reads the PR again. The post-review rule (reviewPendingOwnerDead, or reviewPendingIsStale at
+      pendingCeilingMinutes) recovers a PR whose reviewer died, but only once a pass re-reads it.
+    - W1-T2379 (queued) moves the fix rung's CI WAIT out of the awaited light pass and explicitly refuses letting the
+      tick proceed while an action is in flight (its option c). This task's holder is the REVIEW backlog, not the
+      fix rung's CI wait, so W1-T2379 does not cover it.
+    OBSERVED, core ledger 2026-10-15 (live file and ledger.2026-10-15T22-19-41-287Z.ndjson.gz):
+    - The 20:21:59 daemon restart orphaned the review runs of #12119, #12124 and #12122.
+    - daemon.alive at 20:27:44Z, then none until 22:15:05Z. The light pass from that ticker read 39 PRs (sweep.pass
+      20:30:57Z) and disposed #12122 wait / awaiting-ci at 20:31:18Z.
+    - All 18 sweep.review_refilled rows 20:36-22:02Z read width 4, in_flight 3: one review at a time.
+      snapshot_age_ms rose to 5,480,984 (91 min).
+    - The full pass started 20:25:44Z with bound_ms 8,706,363 (~145 min; basis observed_passes, W1-T9632). Earlier
+      passes that day used 559,000. The 22:15:10Z retrigger was skipped: "a full pass is already in flight".
+    - 22:17:39Z next light pass: #12122 review_eligible; 22:18:13Z "owner proven dead"; review.posted 22:21:52Z.
+    - Wait dispositions not re-disposed for 60+ min that day: #11896, #11904, #11916 (04:0x, 85-89 min); #11910,
+      #11956, #11958 (08:22, 140 min); #12122 (20:31, 107 min).
+    OPEN QUESTIONS the builder answers with ledger evidence before choosing a design:
+    - What held the other 3 review slots for the whole pass (lightPassSpawningReservations vs
+      fullPassReviewsInFlight)?
+    - Should W1-T9632's observed full-pass bound cap how long a retrigger may be skipped as "already in flight"?
+  design: |
+    1. A wait-disposed PR is re-read and re-disposed once the snapshot that disposed it is older than
+       pendingCeilingMinutes, whether or not the light pass that read it has returned. Either the ticker stops awaiting
+       the review backlog (reviews admitted by the pass run detached, with their rows and strikes written before the
+       pass returns, as W1-T2379 requires for the fix rung), or the pass re-reads its wait-disposed PRs between
+       review admissions once the ceiling is reached. The builder picks one and states what the other breaks.
+    2. Every disposition row carries `snapshot_age_ms`, so a stale disposition is visible per PR.
+    3. daemon.alive keeps its meaning; if the ticker no longer awaits the backlog, its gap closes as a consequence.
+    4. Any new bound (a cap on the skipped-retrigger time, a re-read interval other than pendingCeilingMinutes) is an
+       OPERATOR DECISION, proposed in the PR with the ledger evidence, not chosen.
+    Tests go in test/a-light-pass-review-backlog-never-holds-a-wait-pr-past-the-ceiling.test.ts, titled verbatim as
+    in the proofs, driving the light pass with fake reviews and an injected clock.
+  acceptance:
+    - claim: "while a fake review runs longer than pendingCeilingMinutes, a wait-disposed PR whose reviewer is dead is re-disposed within the ceiling"
+      proof: 'grep: test("W1-T9743: a long review never holds a wait PR past the ceiling" in test/a-light-pass-review-backlog-never-holds-a-wait-pr-past-the-ceiling.test.ts'
+    - claim: "every disposition row names the age of the snapshot it was derived from"
+      proof: 'grep: test("W1-T9743: a disposition row names its snapshot age" in test/a-light-pass-review-backlog-never-holds-a-wait-pr-past-the-ceiling.test.ts'
+  falsifier: |
+    On origin/main, run a light pass with two PRs: one admitted for a fake review that resolves only after
+    pendingCeilingMinutes + 5 min of injected clock, and one disposed wait whose review owner is dead. The wait PR is
+    not re-disposed until the review resolves, so the first test fails. Re-read the wait PR only after the pass
+    returns: the same failure.

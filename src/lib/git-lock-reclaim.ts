@@ -17,6 +17,7 @@
  * Everything here is async (fs/promises and execFile with a timeout): serve's loop never waits on it.
  */
 import { execFile } from "node:child_process";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join, relative } from "node:path";
@@ -41,12 +42,8 @@ export interface ProcessEntry {
 
 /** Every process on this host, from `ps`, off the loop. */
 export function listProcesses(): Promise<ProcessEntry[]> {
-  return new Promise((resolvePromise, reject) => {
-    execFile("ps", ["-eo", "pid=,args="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: PROCESS_LIST_TIMEOUT_MS }, (err, stdout) => {
-      if (err) reject(err);
-      else resolvePromise(parseProcessList(stdout));
-    });
-  });
+  return execFileLoopBounded("ps", ["-eo", "pid=,args="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: PROCESS_LIST_TIMEOUT_MS })
+    .then(({ stdout }) => parseProcessList(stdout));
 }
 
 export function parseProcessList(stdout: string): ProcessEntry[] {

@@ -1,13 +1,16 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 
 import { fixedClock, systemClock } from "./clock.js";
 import { daemonInstanceRegistryPath, instanceForStateRoot } from "./deployer.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { captureFeedback, listFeedback, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+import { listFeedback, readLandedFeedbackEntry, stageFeedbackCapture, type FeedbackEntry, type FeedbackOrigin, type FeedbackStatus } from "./feedback.js";
+import { overlayQueuedFeedbackEntries } from "./feedback-landing.js";
 import type { FleetLaneDeps } from "./fleet-lane.js";
 import { type FleetFlowDetector, type FleetFlowInput } from "./fleet-flow-detectors.js";
+import { evaluateForeignPauseDetectors, FOREIGN_PAUSE_DETECTOR_ID, foreignPauseDetector } from "./foreign-pause-detector.js";
 import { evaluateIdleCapacityDetectors, idleCapacityDetector } from "./idle-capacity-detector.js";
 import { evaluateStrandedTaskDetectors, STRANDED_TASK_DETECTOR_ID, strandedTaskDetector } from "./stranded-task-detector.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
@@ -33,7 +36,7 @@ import {
 export type { IncidentEvidence } from "./sre-runbooks.js";
 
 /** Individual flow detectors register here when their own tasks land. */
-export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector(), strandedTaskDetector()];
+export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDetector(), strandedTaskDetector(), foreignPauseDetector()];
 
 /**
  * lib/sre-lane.ts (W1-T4385) — the SRE gardener's phase 3, in its OWN lane, not inside the core
@@ -41,7 +44,7 @@ export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDet
  * ruling 2026-09-23). A small own-timer loop (mirrors gardener.ts, fleet-lane.ts) reads incident
  * evidence (W1-T4383 `incident.event`/`incident.sampled`, W1-T4384 invariant findings), dedupes
  * against work the fleet already has open, gathers evidence, and files one `incident#<fingerprint>`
- * entry per pass via {@link captureFeedback} — the existing feedback -> triage -> plan -> build
+ * entry per pass via {@link stageFeedbackCapture} (W1-T9615) — the existing feedback -> triage -> plan -> build
  * pipeline builds the rest.
  *
  * INVARIANT: flow incident rows and filing feedback are this lane's write surfaces besides the allowlisted, reversible
@@ -152,9 +155,9 @@ export function worstOpenIncident(
   evidence: readonly IncidentEvidence[],
   isOpen: (fingerprint: string) => boolean,
 ): IncidentEvidence | undefined {
-  return evidence
-    .filter((e) => !isOpen(e.fingerprint))
-    .sort((a, b) => b.burnPerHour - a.burnPerHour)[0];
+  // Sorted first, then the first not-open one: the same answer as filter-then-sort (the sort is stable),
+  // but `isOpen` runs only until a survivor is found, since W1-T9624's landed check costs a git read.
+  return [...evidence].sort((a, b) => b.burnPerHour - a.burnPerHour).find((e) => !isOpen(e.fingerprint));
 }
 
 // ── dedupe against open work ─────────────────────────────────────────────────────────────────
@@ -171,15 +174,30 @@ export function incidentFeedbackOrigin(fingerprint: string): FeedbackOrigin {
 const CLOSED_FEEDBACK_STATUS: FeedbackStatus = "rejected";
 
 /** Every `incident#<fingerprint>` origin this repo has open feedback for right now — a read over
- *  {@link listFeedback}, the same store {@link captureFeedback} writes into. */
-export function openIncidentFeedbackOrigins(root: string): Set<string> {
+ *  {@link listFeedback}, the same store {@link stageFeedbackCapture} writes into. W1-T9615: given `stateRoot`, the
+ *  records waiting in its landing queue count too, so a filing staged last pass is seen before it lands. */
+export function openIncidentFeedbackOrigins(root: string, stateRoot?: string): Set<string> {
   const origins = new Set<string>();
-  for (const entry of listFeedback(root)) {
+  const entries = listFeedback(root);
+  for (const entry of stateRoot === undefined ? entries : overlayQueuedFeedbackEntries(entries, stateRoot)) {
     if (typeof entry.origin === "string" && entry.origin.startsWith("incident#") && entry.status !== CLOSED_FEEDBACK_STATUS) {
       origins.add(entry.origin);
     }
   }
   return origins;
+}
+
+/** The feedback id this lane files a fingerprint under. */
+export function incidentFeedbackId(fingerprint: string): string {
+  return `incident-${fingerprint.slice(0, 16)}`;
+}
+
+/** W1-T9624: true when origin/main already holds this fingerprint's entry, open. The working tree can lack
+ *  a landed entry while the checkout's HEAD lags main, and {@link openIncidentFeedbackOrigins} reads only
+ *  the working tree. */
+export function landedIncidentOpen(fingerprint: string, readLanded: (id: string) => FeedbackEntry | null): boolean {
+  const landed = readLanded(incidentFeedbackId(fingerprint));
+  return landed !== null && landed.origin === incidentFeedbackOrigin(fingerprint) && landed.status !== CLOSED_FEEDBACK_STATUS;
 }
 
 /** True when `fingerprint` already has open feedback (this repo's own store) or an open plan task
@@ -208,32 +226,37 @@ export function suspectPullRequests(mergedPrs: readonly MergedPrFiles[], frameFi
  *  `sinceSha` (exclusive) — or, with no known deploy sha, the last 24 hours — resolved to its own
  *  PR url via this repo's own squash-merge convention (a subject ending `(#NNNN)`) and the files
  *  that commit touched. A commit whose subject carries no PR number names no suspect — this repo's
- *  squash-merge titles always do, so that is a torn/foreign commit, not evidence to guess from. */
-export function mergedPrsSince(
+ *  squash-merge titles always do, so that is a torn/foreign commit, not evidence to guess from.
+ *  W1-T9637: ONE awaited `git log --name-only` child, never a synchronous `git show` per commit —
+ *  measured 2026-10-15, that per-commit form held the daemon loop 9-16 s a filing (256-259 spawns). */
+export async function mergedPrsSince(
   repoDir: string,
   owner: string,
   repo: string,
   sinceSha: string | undefined,
-  run: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8" }),
-): MergedPrFiles[] {
+  run: (args: string[]) => Promise<string> = defaultGitRead,
+): Promise<MergedPrFiles[]> {
+  const range = sinceSha ? [`${sinceSha}..origin/main`] : ["origin/main", "--since=24 hours ago"];
   try {
-    const logArgs = sinceSha
-      ? ["-C", repoDir, "log", `${sinceSha}..origin/main`, "--first-parent", "--format=%H\u0001%s"]
-      : ["-C", repoDir, "log", "origin/main", "--first-parent", "--since=24 hours ago", "--format=%H\u0001%s"];
-    const lines = run(logArgs).split("\n").filter(Boolean);
-    const out: MergedPrFiles[] = [];
-    for (const line of lines) {
-      const [sha, subject] = line.split("\u0001");
+    const out = await run(["-C", repoDir, "log", ...range, "--first-parent", "--name-only", "--format=%x00%H%x01%s"]);
+    const merged: MergedPrFiles[] = [];
+    for (const chunk of out.split("\0")) {
+      const [head = "", ...files] = chunk.split("\n");
+      const [sha, subject] = head.split("\u0001");
       const match = sha && subject ? /\(#(\d+)\)\s*$/.exec(subject) : null;
-      if (!match) continue;
-      const files = run(["-C", repoDir, "show", "--name-only", "--format=", sha]).split("\n").filter(Boolean);
-      out.push({ url: `https://github.com/${owner}/${repo}/pull/${match[1]}`, files });
+      if (match) merged.push({ url: `https://github.com/${owner}/${repo}/pull/${match[1]}`, files: files.filter(Boolean) });
     }
-    return out;
+    return merged;
   } catch {
     // deliberate: an unreadable merge window names no suspects — never a guessed one.
     return [];
   }
+}
+
+const execFileAsync = promisify(execFile);
+/** The awaited git read {@link mergedPrsSince} spawns by default: the loop keeps turning while it runs. */
+async function defaultGitRead(args: string[]): Promise<string> {
+  return (await execFileAsync("git", args, { encoding: "utf8", maxBuffer: 1 << 26 })).stdout;
 }
 
 // ── pace ─────────────────────────────────────────────────────────────────────────────────────
@@ -293,8 +316,11 @@ function incidentFeedbackRaw(evidence: IncidentEvidence, suspectPrs: readonly st
 /** `stateDir`, `mergedLastDay` and `clock` are fleet-lane.ts's own members — this lane paces and
  *  pauses exactly as that one does — so they are reused from {@link FleetLaneDeps}, not redeclared. */
 export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "clock"> & {
-  /** Repo root — where {@link captureFeedback}/{@link listFeedback} read and write. */
+  /** Repo root — where {@link stageFeedbackCapture}/{@link listFeedback} read and write. */
   root: string;
+  /** W1-T9615: the daemon's state root, whose landing queue the per-poll async sweep drains. A filing is staged there and
+   *  never landed inline. Absent, the entry stays in `root`'s checkout for that sweep's dirty scan. */
+  landingStateRoot?: string;
   /** Every incident.event/incident.sampled row this pass should consider, read-only. */
   readEvents: () => IncidentLedgerEvent[];
   /** True when a plan task already exists for this fingerprint (the plan-side dedupe half). */
@@ -302,13 +328,15 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   /** The in-app frames captured for a fingerprint's recent samples, for suspect-commit matching. */
   framesFor: (fingerprint: string) => IncidentFrameLike[];
   /** Merged PRs (with files) since a deploy sha — `undefined` sha reads the last 24 hours. */
-  mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[];
+  mergedPrsSince: (sinceSha: string | undefined) => MergedPrFiles[] | Promise<MergedPrFiles[]>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** W1-T4386: the runbook pass is composed at the daemon boundary. Absent, incidents file as before. */
   runbookPass?: (incident: IncidentEvidence) => Promise<RunbookPassResult>;
   detectors?: readonly FleetFlowDetector[];
   readFlowRows?: FleetFlowInput["readRows"];
   writeFlowEvent?: FleetFlowInput["writeEvent"];
+  /** W1-T9624 seam: the entry origin/main holds for a feedback id. Absent, {@link readLandedFeedbackEntry}. */
+  readLandedEntry?: (id: string) => FeedbackEntry | null;
 };
 
 export interface SreLanePass {
@@ -334,8 +362,13 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   // W1-T8240: the stranded-task detector takes its bound from the ledger and keeps its own dedupe memory, so the
   // shared evaluator (which rewrites the fleet-flow store whole each pass) never sees it.
   const flowRows = [
-    ...await evaluateIdleCapacityDetectors({ ...flowInput, detectors: detectors.filter((d) => d.id !== STRANDED_TASK_DETECTOR_ID) }),
+    ...await evaluateIdleCapacityDetectors({
+      ...flowInput,
+      detectors: detectors.filter((d) => d.id !== STRANDED_TASK_DETECTOR_ID && d.id !== FOREIGN_PAUSE_DETECTOR_ID),
+    }),
     ...await evaluateStrandedTaskDetectors({ ...flowInput, detectors }),
+    // W1-T8245: a foreign hold is judged by its idle cost against the instance's own automation holds, from the ledger.
+    ...await evaluateForeignPauseDetectors({ ...flowInput, detectors }),
     // W1-T8264: every hand action is a cause-classed intervention, routed as one incident per class.
     ...await routeOperatorInterventions({ ...flowInput, detectors }),
   ];
@@ -346,7 +379,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   const runMatchingRunbook = deps.runbookPass;
   if (room <= 0 && !runMatchingRunbook) return { room };
 
-  const openOrigins = openIncidentFeedbackOrigins(deps.root);
+  const openOrigins = openIncidentFeedbackOrigins(deps.root, deps.landingStateRoot);
   const events = [...deps.readEvents()];
   // An injected or lagging incident reader may not yet see this pass's writes. Include each once.
   for (const row of flowRows) {
@@ -355,18 +388,19 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
     if (event) events.push(event);
   }
   const evidence = aggregateIncidents(events);
-  const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask));
+  const readLanded = deps.readLandedEntry ?? ((id: string) => readLandedFeedbackEntry(deps.root, id));
+  const worst = worstOpenIncident(evidence, (fp) => fingerprintAlreadyOpen(fp, openOrigins, deps.hasOpenTask) || landedIncidentOpen(fp, readLanded));
   if (!worst) return { room };
 
   const runbook = runMatchingRunbook ? await runMatchingRunbook(worst) : undefined;
   if (room <= 0 || (runbook && !runbook.fileFeedback)) return { room, runbook };
 
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
-  const suspectPrs = suspectPullRequests(deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
-  captureFeedback(deps.root, {
+  const suspectPrs = suspectPullRequests(await deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
+  const staged = stageFeedbackCapture(deps.root, deps.landingStateRoot, {
     raw: incidentFeedbackRaw(worst, suspectPrs),
     origin: incidentFeedbackOrigin(worst.fingerprint),
-    id: `incident-${worst.fingerprint.slice(0, 16)}`,
+    id: incidentFeedbackId(worst.fingerprint),
   });
   store[worst.fingerprint] = { ts: fixedClock(now).iso() };
   writeAtomic(sreLaneStorePath(deps.stateDir), JSON.stringify(store) + "\n");
@@ -375,6 +409,8 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
     count: worst.count,
     burn_per_hour: worst.burnPerHour,
     suspect_prs: suspectPrs.length,
+    landing: staged.queued ? "queued" : "checkout",
+    ...(staged.error === undefined ? {} : { landing_error: staged.error }),
   });
   return { filed: worst.fingerprint, room: room - 1, runbook };
 }
@@ -406,9 +442,10 @@ export function startSreLane(deps: SreLaneInput): (pollIntervalMs: number) => { 
 }
 
 /** The daemon's lane input (src/run-task.ts): `readEvents` reads only this daemon's own ledger and
- *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. */
+ *  `hasOpenTask`/`framesFor` answer nothing yet — the module doc's TRAP. W1-T9615: a filing is staged in the landing
+ *  queue of the daemon's state root (the parent of `stateDir` unless named), never landed on the loop. */
 export function daemonSreLaneInput(
-  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string },
+  input: Pick<SreLaneInput, "stateDir" | "root" | "mergedLastDay" | "log" | "runbookPass"> & { ledgerPath: string; owner: string; repo: string; landingStateRoot?: string },
 ): SreLaneInput {
   const instance = resolveSreLaneInstance({
     stateRoot: dirname(input.stateDir),
@@ -418,7 +455,10 @@ export function daemonSreLaneInput(
   return {
     stateDir: input.stateDir,
     root: input.root,
-    detectors: SRE_LANE_DETECTORS.map((detector) => detector.id === "idle-capacity" ? idleCapacityDetector(name) : detector),
+    landingStateRoot: input.landingStateRoot ?? dirname(input.stateDir),
+    detectors: SRE_LANE_DETECTORS.map((detector) =>
+      detector.id === "idle-capacity" ? idleCapacityDetector(name)
+        : detector.id === FOREIGN_PAUSE_DETECTOR_ID ? foreignPauseDetector(name) : detector),
     readEvents: () =>
       readLedgerLines(input.ledgerPath) // ledger-read-intent: live — this lane wants the newest incident rows only.
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
@@ -442,8 +482,15 @@ export function daemonSreLaneInput(
  * `primary: true` row (W1-T4527) is the selector the old opt-in was waiting for.
  */
 export type SreLaneInstance =
-  | ({ resolved: true } & Pick<RegistryInstance, "name" | "live" | "primary">)
-  | { resolved: false; why: string };
+  | ({ resolved: true; resolvedBy?: SreLaneResolvedBy } & Pick<RegistryInstance, "name" | "live" | "primary">)
+  | { resolved: false; why: string; resolvedBy?: SreLaneResolvedBy };
+
+/**
+ * W1-T9500 — how the instance was looked up: `env` is the `RMD_INSTANCE_NAME` the container's
+ * creator passed, `state_root` is W1-T8232's match of the state root against the registry's
+ * `state_dir`. Absent only when the registry itself could not be read or parsed.
+ */
+export type SreLaneResolvedBy = "env" | "state_root";
 
 /** The env names the start decision reads — passed in, never read here, so the predicate is pure. */
 export interface SreLaneEnv {
@@ -484,25 +531,38 @@ export function sreLaneEnabled(input: SreLaneStartInput): boolean {
 /**
  * W1-T8232 — the one ledger row a daemon start writes about the lane, so "is the SRE lane running"
  * is a ledger read and not a container inspect: `sre_lane.started` {instance, enabled_by} or
- * `sre_lane.disabled` {instance, reason}.
+ * `sre_lane.disabled` {instance, reason}. W1-T9500: each also carries `resolved_by` (env or
+ * state_root) whenever the registry was read, so a disabled row says which lookup missed.
  */
 export function sreLaneStartRow(input: SreLaneStartInput): { step: "sre_lane.started" | "sre_lane.disabled"; fields: Record<string, unknown> } {
   const decision = sreLaneDecision(input);
+  const by = input.instance.resolvedBy === undefined ? {} : { resolved_by: input.instance.resolvedBy };
   return decision.enabled
-    ? { step: "sre_lane.started", fields: { instance: decision.instance, enabled_by: decision.enabledBy } }
-    : { step: "sre_lane.disabled", fields: { instance: decision.instance, reason: decision.reason } };
+    ? { step: "sre_lane.started", fields: { instance: decision.instance, enabled_by: decision.enabledBy, ...by } }
+    : { step: "sre_lane.disabled", fields: { instance: decision.instance, reason: decision.reason, ...by } };
 }
 
 /**
- * W1-T8232 — this daemon's registry row, matched on its state root through
- * {@link instanceForStateRoot} (the match W1-T7727's pause target uses: `state_dir` is bind-mounted
- * as the container's `config.root`). An unreadable registry, a registry the parser refuses, and no
- * or an ambiguous match each resolve to `{resolved: false}` naming the reason.
+ * W1-T8232 — this daemon's registry row, or why it could not be resolved. An unreadable registry,
+ * a registry the parser refuses, and no or an ambiguous match each resolve to `{resolved: false}`
+ * naming the reason.
+ *
+ * W1-T9500 — THE CREATOR'S NAME FIRST. W1-T8232 matched the state root against each row's
+ * `state_dir` ({@link instanceForStateRoot}), but those are HOST paths and inside every container
+ * the root is /home/node/Remudero; mountinfo reads the filesystem-relative source (/state2), so the
+ * host path cannot be recovered in there either. MEASURED 2026-10-14: 63 `sre_lane.disabled` rows
+ * and 0 `sre_lane.started` on core. So `deploy/recycle-container.sh --instance` and the installed
+ * launcher pass `RMD_INSTANCE_NAME`, and a set name wins: it must name a parsed row (the parser
+ * refuses a name declared twice), and a name the registry does not hold resolves false naming it —
+ * never a fallback to the root match, which would hide a misconfigured creator. With no name (a
+ * host-side caller), the root match runs as before. `env` defaults to `process.env`: the daemon's callers (src/run-task.ts and
+ * {@link daemonSreLaneInput}) read it from the container's own environment.
  */
 export function resolveSreLaneInstance(input: {
   stateRoot: string;
   registryPath: string;
   readText?: (path: string) => string;
+  env?: { RMD_INSTANCE_NAME?: string };
 }): SreLaneInstance {
   let text: string;
   try {
@@ -510,18 +570,22 @@ export function resolveSreLaneInstance(input: {
   } catch (error) {
     return { resolved: false, why: `the instance registry ${input.registryPath} is unreadable: ${(error as Error).message}` };
   }
-  const name = instanceForStateRoot(text, input.stateRoot);
+  const named = (input.env ?? process.env).RMD_INSTANCE_NAME?.trim() || undefined;
+  const resolvedBy: SreLaneResolvedBy = named === undefined ? "state_root" : "env";
+  const name = named ?? instanceForStateRoot(text, input.stateRoot);
   if (name === undefined) {
-    return { resolved: false, why: `state root ${input.stateRoot} is not exactly one instance's state_dir in ${input.registryPath}` };
+    return { resolved: false, resolvedBy, why: `state root ${input.stateRoot} is not exactly one instance's state_dir in ${input.registryPath}` };
   }
   let row: RegistryInstance | undefined;
   try {
+    // The parser refuses a name declared twice (duplicate_instance), so a found row is the only one.
     row = parseInstanceRegistry(text).instances.find((instance) => instance.name === name);
   } catch (error) {
     return { resolved: false, why: `the instance registry ${input.registryPath} is refused: ${(error as Error).message}` };
   }
-  if (row === undefined) return { resolved: false, why: `instance '${name}' is not a parsed row of ${input.registryPath}` };
-  return { resolved: true, name: row.name, live: row.live, ...(row.primary === undefined ? {} : { primary: row.primary }) };
+  if (row === undefined && named !== undefined) return { resolved: false, resolvedBy, why: `RMD_INSTANCE_NAME '${name}' names no instance in ${input.registryPath}` };
+  if (row === undefined) return { resolved: false, resolvedBy, why: `instance '${name}' is not a parsed row of ${input.registryPath}` };
+  return { resolved: true, resolvedBy, name: row.name, live: row.live, ...(row.primary === undefined ? {} : { primary: row.primary }) };
 }
 
 // ── W1-T8264: hand actions as cause-classed interventions ─────────────────────────────────────

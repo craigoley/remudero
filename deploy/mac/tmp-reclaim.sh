@@ -19,9 +19,24 @@
 # safety check is uncertain.
 set -u
 shopt -s nullglob
+SEED_GUARD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
+  # shellcheck source=deploy/dependency-seed-guard.sh
+  source "$SEED_GUARD_DIR/dependency-seed-guard.sh"
+elif [ -f "$SEED_GUARD_DIR/../dependency-seed-guard.sh" ]; then
+  # shellcheck source=deploy/dependency-seed-guard.sh
+  source "$SEED_GUARD_DIR/../dependency-seed-guard.sh"
+else
+  rmd_dependency_seed_risk() { echo 'dependency seed guard unavailable'; return 0; }
+fi
 
 APPLY=0
-[ "${1:-}" = "--apply" ] && APPLY=1
+TSX_ONLY=0
+for option in "$@"; do
+  case "$option" in --apply) APPLY=1 ;; --dry-run) APPLY=0 ;; --tsx-only) TSX_ONLY=1 ;;
+    *) printf 'unknown cleanup option: %s\n' "$option" >&2; exit 2 ;;
+  esac
+done
 ROOT="${RMD_RECLAIM_ROOT:-/private/tmp}"
 SESSION_ROOT="${RMD_RECLAIM_SESSION_ROOT:-$HOME/Remudero/.session-scratch}"
 REPORT="${RMD_RECLAIM_REPORT:-$HOME/Library/Logs/remudero/tmp-reclaim-kept.txt}"
@@ -58,6 +73,7 @@ esac
 BEFORE_AVAIL_KB=$(df -k "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
 # tsx's transpile cache is regenerable, so it follows the same fixed six-hour window.
 TSX_AGE_MIN=$AGE_MIN
+TSX_FIND="${RMD_RECLAIM_TSX_FIND:-find}"
 LSOF_CMD="${RMD_RECLAIM_LSOF:-$(command -v lsof 2>/dev/null || printf '/usr/sbin/lsof')}"
 if [ -n "${TMPDIR:-}" ]; then
   TSX_TMP_ROOT="${TMPDIR%/}"
@@ -144,18 +160,69 @@ path_is_live_or_unknown() {
   return 1
 }
 
+# Descendant symlinks are never followed. They are safe to unlink with stale
+# scratch only when their target is in the candidate, or when a dangling alias
+# names a path within ROOT. Existing sibling or external targets remain risky.
+symlink_risk() {
+  local tree="$1" tree_real link_scan status
+  [ -d "$tree" ] || return 1
+  tree_real=$(cd "$tree" 2>/dev/null && pwd -P)
+  [ -n "$tree_real" ] || { echo 'symlink parent could not be resolved'; return 0; }
+  # The shell body is intentionally passed literally to find's child process.
+  # shellcheck disable=SC2016
+  link_scan=$(find "$tree" -xdev -type l -exec /bin/sh -c '
+    candidate="$1"; cleanup_root="$2"; shift 2
+    for link do
+      target=$(readlink "$link") || { echo "symlink target unreadable: $link"; exit 1; }
+      case "/$target/" in
+        */../*|*/./*) echo "contains symlink with path traversal: $link -> $target"; exit 1 ;;
+      esac
+      case "$target" in
+        /*) target_path="$target" ;;
+        *)
+          link_parent=$(cd "$(dirname "$link")" 2>/dev/null && pwd -P) || { echo "symlink parent unavailable: $link"; exit 1; }
+          target_path="$link_parent/$target"
+          ;;
+      esac
+      if [ "$cleanup_root" = /private/tmp ]; then
+        case "$target_path" in /tmp/*) target_path="/private/tmp/${target_path#/tmp/}" ;; esac
+      fi
+      target_parent=$(cd "$(dirname "$target_path")" 2>/dev/null && pwd -P) || { echo "symlink target parent unavailable: $link -> $target"; exit 1; }
+      target_real="$target_parent/${target_path##*/}"
+      [ ! -L "$target_path" ] || { echo "symlink chain is unverified: $link -> $target"; exit 1; }
+      case "$target_real" in
+        "$candidate"|"$candidate"/*) ;;
+        "$cleanup_root"|"$cleanup_root"/*)
+          if [ -e "$target_path" ] || [ -L "$target_path" ]; then
+            echo "contains symlink to another live temp entry: $link -> $target"
+            exit 1
+          fi
+          ;;
+        *) echo "contains symlink outside cleanup root: $link -> $target"; exit 1 ;;
+      esac
+    done
+  ' sh "$tree_real" "$ROOT_REAL" {} + 2>&1); status=$?
+  if [ "$status" -ne 0 ]; then
+    [ -n "$link_scan" ] || link_scan='symlink scan unavailable'
+    echo "$link_scan"
+    return 0
+  fi
+  return 1
+}
+
 # Print a reason and return success if a path must be retained.
 artifact_risk() {
   local path="$1" found status owner_name structure_only="${2:-0}"
+  if found=$(rmd_dependency_seed_risk "$path"); then echo "$found"; return 0; fi
   [ ! -L "$path" ] || { echo 'symbolic link'; return 0; }
   owner_name=$(owner "$path" 2>/dev/null)
   [ "$owner_name" = "$ME" ] || { echo "owned by ${owner_name:-unknown}"; return 0; }
   found=$(find "$path" -xdev ! -user "$ME" -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'ownership scan unavailable'; return 0; }
   [ -z "$found" ] || { echo "contains foreign-owned content: $found"; return 0; }
-  found=$(find "$path" -xdev -type l -print -quit 2>/dev/null); status=$?
-  [ "$status" -eq 0 ] || { echo 'symlink scan unavailable'; return 0; }
-  [ -z "$found" ] || { echo "contains symlink: $found"; return 0; }
+  if [ -d "$path" ]; then
+    if found=$(symlink_risk "$path"); then echo "$found"; return 0; fi
+  fi
   found=$(find "$path" -xdev -name .git -print -quit 2>/dev/null); status=$?
   [ "$status" -eq 0 ] || { echo 'Git metadata scan unavailable'; return 0; }
   [ -z "$found" ] || { echo "Git checkout/worktree: $found"; return 0; }
@@ -221,13 +288,30 @@ prune_old_tree_files() {
 # prune only regular, account-owned entries older than the age window. An open-file scan
 # fails closed so an active compiler's cache is not disturbed.
 prune_tsx_cache() {
-  local dir="$1" files owner_name count active
+  local dir="$1" strict="${2:-0}" files owner_name count active parent entry entries
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   owner_name=$(owner "$dir" 2>/dev/null)
   if [ "$owner_name" != "$ME" ]; then
     TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache owned by ${owner_name:-unknown}" "$dir"; return 0
   fi
-  if ! files=$(find "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -print 2>/dev/null); then
+  if [ "$strict" = 1 ]; then
+    parent="$dir"
+    while [ "$parent" != / ]; do
+      if [ -e "$parent/.git" ] || [ -L "$parent/.git" ] || [ -e "$parent/.rmd-janitor-keep" ]; then
+        report_risk 'TSX discovery retains Git-owned or explicitly retained data' "$dir"; return 0
+      fi
+      parent=${parent%/*}; [ -n "$parent" ] || parent=/
+    done
+    if active=$(rmd_dependency_seed_risk "$dir"); then report_risk "$active" "$dir"; return 0; fi
+    entries=$(find -P "$dir" -xdev ! -type d -print 2>/dev/null) || { report_risk 'TSX content scan unavailable' "$dir"; return 0; }
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      if [ ! -f "$entry" ] || [ -L "$entry" ] || [[ ! "${entry##*/}" =~ ^[0-9]+-[0-9a-f]{40}$ ]]; then
+        report_risk 'TSX discovery contains unrecognized or special data' "$dir"; return 0
+      fi
+    done <<< "$entries"
+  fi
+  if ! files=$("$TSX_FIND" "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -cmin "+$TSX_AGE_MIN" -print 2>/dev/null); then
     TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache age scan unverified' "$dir"; return 0
   fi
   [ -n "$files" ] || return 0
@@ -240,7 +324,7 @@ prune_tsx_cache() {
     if active=$(path_is_live_or_unknown "$(cd "$dir" 2>/dev/null && pwd -P)"); then
       TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk "TSX cache $active" "$dir"; return 0
     fi
-    if ! find "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -exec rm -f -- {} +; then
+    if ! "$TSX_FIND" "$dir" -xdev -type f -user "$ME" -mmin "+$TSX_AGE_MIN" -cmin "+$TSX_AGE_MIN" -exec rm -f -- {} +; then
       TSX_SKIPPED=$((TSX_SKIPPED+1)); report_risk 'TSX cache prune incomplete' "$dir"; return 0
     fi
     TSX_PRUNED_N=$((TSX_PRUNED_N+count))
@@ -251,11 +335,33 @@ prune_tsx_cache() {
   fi
 }
 
+prune_node_compile_cache() {
+  local dir="$1" resolved mode
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  if [ ! -f "$SEED_GUARD_DIR/cache-reclaim.py" ] || ! command -v python3 >/dev/null 2>&1; then
+    report_risk 'Node compile-cache helper unavailable; no generic fallback' "$dir"; return 0
+  fi
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P) || { report_risk 'Node cache path unavailable' "$dir"; return 0; }
+  mode=()
+  [ "$APPLY" != 1 ] || mode=(--apply)
+  if ! python3 "$SEED_GUARD_DIR/cache-reclaim.py" --node-compile-cache "$resolved" "${mode[@]+"${mode[@]}"}"; then
+    report_risk 'Node compile-cache cleanup refused or removal verification unavailable' "$dir"
+  fi
+}
+
 process_tmp_entry() {
-  local path="$1" old_check old_status why k
+  local path="$1" old_check old_status why k entry_owner
   [ -e "$path" ] || return 0
   # TSX is a regenerable per-file cache, handled separately; never remove its root.
   case "${path##*/}" in tsx-*) prune_tsx_cache "$path"; return 0;; esac
+  case "${path##*/}" in node-compile-cache) prune_node_compile_cache "$path"; return 0;; esac
+  # Each account owns its own hourly sweep. Check ownership before traversal so
+  # mode-700 paths owned by the other account aren't mislabeled as scan failures.
+  entry_owner=$(owner "$path" 2>/dev/null)
+  if [ "$entry_owner" != "$ME" ]; then
+    report_risk "owned by ${entry_owner:-unknown}; age check requires owner account" "$ROOT_REAL/${path#./}"
+    return 0
+  fi
   old_check=$(find "$path" -xdev -mmin -"$AGE_MIN" -print -quit 2>/dev/null); old_status=$?
   if [ "$old_status" -ne 0 ]; then report_risk 'age scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
   if [ -n "$old_check" ]; then
@@ -304,9 +410,14 @@ session_scratch_risk() {
 }
 
 process_session_scratch_dir() {
-  local path="$1" recent status why k resolved
+  local path="$1" recent status why k resolved entry_owner
   [ -d "$path" ] || return 0
   if [ -L "$path" ]; then report_risk 'session scratch directory is a symlink' "$path"; return 0; fi
+  entry_owner=$(owner "$path" 2>/dev/null)
+  if [ "$entry_owner" != "$ME" ]; then
+    report_risk "owned by ${entry_owner:-unknown}; age check requires owner account" "$path"
+    return 0
+  fi
   resolved=$(cd "$path" 2>/dev/null && pwd -P)
   if [ -z "$resolved" ] || [ "$resolved" != "$path" ]; then
     report_risk 'session scratch path changed or could not be resolved' "$path"; return 0
@@ -334,6 +445,23 @@ process_session_scratch_dir() {
 
 cd "$ROOT" || exit 1
 ROOT_REAL=$(pwd -P)
+discover_tsx_caches() {
+  # Scheduled janitor calls cover each configured root, including historical
+  # job TMPDIRs. Never follow symlinks, enter dependencies/Git/runtime state,
+  # or interpret an incomplete discovery as an empty population.
+  caches=$(find -P "$ROOT_REAL" -xdev -maxdepth 8 \
+    \( -name .git -o -name node_modules -o -name .claude -o -name .codex -o -name .ssh -o -name state -o -name lanes \) -prune -o \
+    -type d -name 'tsx-[0-9]*' -print -prune 2>/dev/null)
+  discovery_status=$?
+  if [ "$discovery_status" -ne 0 ]; then report_risk 'TSX discovery incomplete' "$ROOT_REAL"; fi
+  while IFS= read -r cache; do
+    [ -n "$cache" ] || continue
+    cache_uid=${cache##*/}; cache_uid=${cache_uid#tsx-}
+    case "$cache_uid" in ''|*[!0-9]*) continue ;; esac
+    prune_tsx_cache "$cache" 1
+  done <<< "$caches"
+}
+if [ "$TSX_ONLY" = 0 ]; then
 for p in ./* ./.[!.]*; do
   e=${p#./}
   [ -e "./$e" ] || continue
@@ -349,17 +477,20 @@ for p in ./* ./.[!.]*; do
   fi
   process_tmp_entry "./$e"
 done
+fi
+discover_tsx_caches
 TMP_REAL=$(cd "$TSX_TMP_ROOT" 2>/dev/null && pwd -P)
-if [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
+if [ "$TSX_ONLY" = 0 ] && [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ]; then
   for p in "$TSX_TMP_ROOT"/tsx-*; do
     [ -d "$p" ] && [ ! -L "$p" ] && prune_tsx_cache "$p"
   done
+  prune_node_compile_cache "$TMP_REAL/node-compile-cache"
 fi
 
 # The account-local Remudero session scratch root is opt-in by existence, never created here.
 # Without a test override, insist on the canonical ~/Remudero/.session-scratch location and reject
 # symlinked roots/parents so a path swap cannot redirect cleanup elsewhere.
-if [ -e "$SESSION_ROOT" ] || [ -L "$SESSION_ROOT" ]; then
+if [ "$TSX_ONLY" = 0 ] && { [ -e "$SESSION_ROOT" ] || [ -L "$SESSION_ROOT" ]; }; then
   session_root_ok=1
   if [ -L "$SESSION_ROOT" ] || [ ! -d "$SESSION_ROOT" ]; then
     report_risk 'session scratch root is not a real directory' "$SESSION_ROOT"; session_root_ok=0

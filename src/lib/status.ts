@@ -44,6 +44,7 @@ import { isDeclaredBranchGuard } from "./branch-reaper.js";
 import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 import { infrastructureRefusal, lifetimeInfrastructureRefusal, streakRefusal } from "./non-worker-verdict.js";
+import { startWorker } from "./child-entry-argv.js";
 
 /**
  * Derived task status (MASTER-PLAN v2.1). Merge-state is DERIVED FROM GITHUB, never written back to
@@ -142,6 +143,8 @@ export type Phase = "recon" | "implement" | "review" | "fix-rung";
 export type WorkerRole = "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
 export type WorkerActivityKind = "working" | "tool-executing" | "message";
 export interface WorkerTelemetry {
+  /** Proven by this task's current run start, never inferred from task id or a later event. */
+  runId?: string;
   role?: WorkerRole;
   provider?: string;
   requestedModel?: string;
@@ -1229,9 +1232,9 @@ export interface LedgerIndex {
   /** The exact array this index was built over — identity-compared, never re-read. */
   readonly rows: ReadonlyArray<Record<string, unknown>>;
   /** Rows naming an id in `task_id` OR `task`, in ledger order, each row at most once per id. */
-  readonly byTask: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  readonly byTask: LedgerBuckets;
   /** Rows by `step`, in ledger order — backs the whole-ledger step scans, not the per-task ones. */
-  readonly byStep: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  readonly byStep: LedgerBuckets;
   /** Every `pr_url` carried by a `plan_only: true` `pr.opened` row — `isPlanOnlyFilingPr`'s set. */
   readonly planOnlyFilingPrUrls: ReadonlySet<string>;
   /** Positive plan-only review evidence, tied to the exact PR head so a later implementation push is not refused. */
@@ -1240,6 +1243,18 @@ export interface LedgerIndex {
    *  "now", computed ONCE here rather than re-scanned per task (R-23's own discipline). Undefined
    *  when no row carries a parseable `ts` at all. */
   readonly latestTsMs: number | undefined;
+}
+
+/** W1-T9436: what a {@link LedgerIndex} bucket answers — a lookup by key, never an enumeration — so an index can
+ *  answer a bucket on demand from the read model's fact store instead of holding every row in memory. */
+export interface LedgerBuckets {
+  get(key: string): ReadonlyArray<Record<string, unknown>> | undefined;
+}
+
+/** The index {@link buildLedgerIndex} builds in memory: every bucket held, so it can also be enumerated. */
+export interface InMemoryLedgerIndex extends LedgerIndex {
+  readonly byTask: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
+  readonly byStep: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
 }
 
 /** Append `row` to `id`'s bucket, creating it on first use. */
@@ -1255,7 +1270,7 @@ function pushIndexed(
 
 /** W1-T6253: the row generation an owner of a mutable rows array last registered for it, and the index held for it. */
 const ledgerGenerations = new WeakMap<ReadonlyArray<Record<string, unknown>>, number>();
-const generationIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; index: LedgerIndex }>();
+const generationIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, { generation: number; index: InMemoryLedgerIndex }>();
 let ledgerIndexBuilds = 0;
 
 /** W1-T6253: an owner mutating `rows` in place registers each generation; an unregistered array is indexed every call. */
@@ -1274,7 +1289,7 @@ export function ledgerIndexBuildCount(): number {
 }
 
 /** Build the {@link LedgerIndex} for `rows` in a single pass, or return the one held for its unchanged generation. */
-export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
+export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): InMemoryLedgerIndex {
   const generation = ledgerGenerations.get(rows);
   const held = generation === undefined ? undefined : generationIndexes.get(rows);
   if (held && held.generation === generation) return held.index;
@@ -1284,7 +1299,7 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
   return index;
 }
 
-function computeLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): LedgerIndex {
+function computeLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): InMemoryLedgerIndex {
   const byTask = new Map<string, Array<Record<string, unknown>>>();
   const byStep = new Map<string, Array<Record<string, unknown>>>();
   const planOnlyFilingPrUrls = new Set<string>();
@@ -1711,21 +1726,6 @@ export function lifetimeDispatchTally(
   return { starts, capacityBlocked };
 }
 
-/** Combine independently-read archive and live tallies without making the live file immutable at
- * daemon boot. Exported so the command layer can discard an incomplete archive projection rather
- * than guessing from a partial corpus. */
-export function addLifetimeDispatchTallies(
-  ...tallies: readonly LifetimeDispatchTally[]
-): LifetimeDispatchTally {
-  let starts = 0;
-  let capacityBlocked = 0;
-  for (const tally of tallies) {
-    starts += tally.starts;
-    capacityBlocked += tally.capacityBlocked;
-  }
-  return { starts, capacityBlocked };
-}
-
 /** Capacity receipts cannot outnumber starts in a complete corpus. If they do, retain the old
  * all-starts count: a partial or malformed join must never make a task dispatchable. */
 export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): number {
@@ -1746,7 +1746,7 @@ export function taskAttributableLifetimeDispatches(
   const infrastructureRunIds = new Set<string>();
   for (const line of rows) {
     if (line.task_id === taskId && line.step === "verdict" &&
-        typeof line.run_id === "string" && lifetimeInfrastructureRefusal(line) !== undefined) {
+        typeof line.run_id === "string" && streakRefusal(line) !== undefined) {
       infrastructureRunIds.add(line.run_id);
     }
   }
@@ -3176,7 +3176,7 @@ function deriveRunState(
     const step = typeof rawStep === "string" ? rawStep : undefined;
     if (step !== undefined && LANE_START_STEPS.has(step)) {
       inFlight = true;
-      activeRunId = typeof line.run_id === "string" ? line.run_id : undefined;
+      activeRunId = typeof line.run_id === "string" && line.run_id.trim() !== "" ? line.run_id : undefined;
       activeFixRunId = undefined;
       phase = "recon";
       startedAt = typeof line.ts === "string" ? line.ts : undefined;
@@ -3189,6 +3189,7 @@ function deriveRunState(
       const mountRecord = mount && typeof mount === "object" ? (mount as Record<string, unknown>) : undefined;
       const role = roleForRunStart(line);
       workerTelemetry = {
+        ...(activeRunId ? { runId: activeRunId } : {}),
         ...(role ? { role } : {}),
         ...(typeof line.provider === "string" ? { provider: line.provider } : {}),
         ...(typeof mountRecord?.model === "string" ? { requestedModel: mountRecord.model } : {}),
@@ -3214,6 +3215,7 @@ function deriveRunState(
     // W1-T944: a worker-state row is only appended ON A TRANSITION, so its own `ts` doubles as the transition
     // time. The comparison reads the bare local, for the harvesting reason above.
     if (step === WORKER_STATE_STEP) {
+      if (!isOwnRunActivity) continue;
       const rawState = line.state;
       if (isWorkerState(rawState)) {
         workerState = rawState;
@@ -3222,6 +3224,7 @@ function deriveRunState(
       continue;
     }
     if (step === "worker.activity" || step === WORKER_ACTIVITY_STAND_IN_STEP) {
+      if (!isOwnRunActivity) continue;
       const eventAt = typeof line.event_at === "string" ? line.event_at : typeof line.ts === "string" ? line.ts : undefined;
       const eventKind = isWorkerActivityKind(line.event_kind) ? line.event_kind : undefined;
       if (eventAt && eventKind) {
@@ -5472,7 +5475,7 @@ export function buildBatchedGithub(
     };
     let worker: Worker;
     try {
-      worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: req });
+      worker = startWorker(import.meta.url, { workerData: req }, { override: opts.workerUrl });
     } catch (err) {
       // Spawning itself failed (e.g. no worker_threads support) — fall back to the SAME channel walk
       // synchronously on THIS thread, applied through the SAME bookkeeping a landed message uses. The ONE place

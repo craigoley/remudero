@@ -98,6 +98,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd verdict-calibration` | The correctness join (W1-T424): joins every armed merge's ledgered review verdict (`lib/verdict-calibration.ts`'s `mineVerdictRows`, over the ledger union, never the live file alone) to post-merge git reality, and reports per verdict class (full PASS / keyword floor / degraded arm) the revert rate and follow-up-fix rate over a stated window, each denominator **named** (n of N armed merges) with an UNMEASURABLE arm for rows whose merge sha or verdict class could not be recovered — never a rate over a silently shrunken denominator. Below a minimum population floor a class prints its count and refuses the rate. The attribution window + overlap rule (`ATTRIBUTION_POLICY`) print alongside the figures, so the metric travels with its rule. Host-side only: the ledger lives on the daemon host. Read-only: files nothing, proposes nothing in v1. |
 | `rmd autonomy-rate` | The **quantity** figure beside `verdict-calibration`'s correctness join (W1-T437): the zero-touch merge rate over every `Remudero-Task:`-trailer-bearing merge on the read git history (`lib/autonomy.ts`'s `zeroTouchMergeRate`, over the ledger union, never the live file alone). Each merge is classified zero-touch or human-touched, and every touch that fired is **named** on its own row — not auto-armed, fix-rung strikes, reframe, operator note, capped override, fix-rung human evidence — then split by verdict class (full PASS / keyword floor / degraded arm / unclassified) so the class split shows where the next ratchet notch is safe. Prints the current `decideAutoMergeArm` arming posture beside the measured rate and proposes no policy change. Zero archive files under the state dir reports the window UNMEASURED, naming the reason, never a rate from the live ledger alone. Host-side only: the ledger lives on the daemon host. Read-only: files nothing, proposes nothing. |
 | `rmd hand-worktree <taskId> [--parent <abs dir>]` | Create a hand build's `run-<taskId>-<epochMs>` worktree from fresh origin/main with no upstream, at an absolute path, and node_modules hard-linked (`cp -al`) from a worktree on the same filesystem with an identical package-lock.json. With no such donor it prints `npm ci` as the next step and the free space. See [the CLI reference](cli-reference.md#rmd-hand-worktree). |
+| `rmd pr-checks <pr-number> [--repo <name>]` | Print a pull request head's checks — check runs unioned with commit statuses such as `remudero-review`, latest attempt per name — and exit 1 if any is red, 2 on a failed read (never "no red checks"). An outcome the classifier cannot name prints as pending. See [the CLI reference](cli-reference.md#rmd-pr-checks). |
 | `rmd next-task-id --branch <filing-branch>` | Reserve the next free `W1-T<n>` on origin as `refs/rmd-id/<id>` and record the branch that will file it. A normal invocation claims the id; `--offline` and `--no-reserve` do not. An unreadable source refuses the reservation. See [the CLI reference](cli-reference.md#rmd-next-task-id) for all flags and [minting a task id](#minting-a-task-id) for the host procedure. |
 | `rmd note <id> <text...>` | Record an operator guidance note against a task or proposal, into `plan/operator-notes.ndjson` — the weekly feedback docket's fifth capture surface, gathered across **all** tasks (the task scoping applies to prompt injection only). The text is **positional**: `rmd reframe`'s required `--feedback` flag is why that surface reads zero. Also available as `rmd approve <id> --note "<text>"`, which chains this exact write **after** the ratification lands. State-side only: no git, no gh, no PR. |
 | `rmd retro [--dry-run]` | Sync the plan from the ledger (the Architect retro's deterministic gather half). `--dry-run` prints the gather + calibration table only. |
@@ -1207,6 +1208,75 @@ no launch records anything new, and the restore only re-creates empty directorie
 
 **After a deallocate** nothing is needed: `rmd-scratch.service` re-formats and mounts the NVMe, docker's
 `ExecStartPre` re-creates the directories, and serve rebuilds the read model on its first tick.
+
+#### The hot checkouts (W1-T9617): each container's own code on the NVMe too
+
+**Why.** Memory overcommit evicts the page cache every 60–100 s, and the refaults of each container's
+own code (node_modules, the bundled entries, the checkout's git objects) land on the disk it sits
+on: each build daemon's `<state dir>/remudero` is on the data disk (about 500 IOPS) and serve's
+`~/rmd-serve-repo` on the OS disk (about 120 IOPS, read waits of 187–549 ms measured 2026-10-15).
+With its **own switch** on, `deploy/scratch-mounts.sh` adds one bind per build daemon and moves
+serve's default code dir:
+
+| moves to `/mnt/scratch/rmd/<state dir name>/` | container path |
+|---|---|
+| `remudero` (each build daemon's checkout, node_modules included) | `/home/node/Remudero/remudero` |
+| `serve-repo` (serve's code dir; `serve-container.sh` binds it, an explicit `RMD_SERVE_REPO_DIR` still wins) | `/home/node/Remudero/remudero` in `remudero-serve` |
+
+**The switch, both operator decisions:** the file `/etc/remudero/scratch-checkouts.on`, or
+`RMD_SCRATCH_CHECKOUTS=on|off` for one run. It only adds to a scratch plan that is already on.
+Off, every plan is byte-identical to before, so merging it recycles nothing.
+
+**Cold boot.** A deallocate empties the dirs. Docker's `ExecStartPre` re-creates them (each launch
+records them in `<state dir>/.scratch-mounts`), `deploy/entrypoint.sh` clones into the empty bind
+and runs `npm ci`, and `recycle-container.sh` reads a recorded empty checkout as that re-clone, not
+as a state dir with no checkout. The state dir must still hold `state/`. Nothing durable moves:
+the ledger, lanes, plan, `state/`, the manifest and the live-edit patches stay on `/mnt/rmd`, and
+the old checkouts stay where they are as the rollback.
+
+**Host readers follow it.** The fleet launcher's tick runs `bin/rmd`, reads live edits and
+fast-forwards the checkout the RUNNING container binds (`scratch_live_checkout`), so nothing moves
+before the container does. While a re-clone has no `bin/rmd` yet the tick says so and skips.
+`host-update.sh --reclaim-only` reclaims the checkout the next launch binds, and the janitor never
+sweeps `/mnt/scratch/rmd/*/remudero` or `*/serve-repo`.
+
+**Turn it on.** The fleet converges the units onto main by itself; confirm, then flip:
+
+```sh
+./deploy/install-host-units.sh; for i in site console; do ./deploy/install-host-units.sh --instance "$i"; done   # no DRIFTED
+sudo install -D -m 0644 /dev/null /etc/remudero/scratch-checkouts.on
+```
+
+**Flipping the switch IS the recycle approval for the three build daemons.** Each watchdog tick
+(every 5 min) reads W1-T6110's mount-plan drift on `/home/node/Remudero/remudero` and recycles that
+daemon through `recycle-container.sh`'s pause-and-drain, under its usual holds (STOP, an hour's
+back-off after a failed recycle). To choose the moment yourself, run them right after the flip:
+`./deploy/recycle-container.sh --instance core` (then `console`, `site`). Each replacement's first
+boot clones and installs on the NVMe before the daemon starts. Serve does not move by itself:
+`./deploy/serve-container.sh --dry-run | grep serve-repo`, then `./deploy/serve-container.sh
+--replace`; the console is down while its clone and install run.
+
+**Verify, and let the fleet show the saving.** Every recycle and serve replace with the scratch
+mounts on appends one `recycle.checkout_placement` row to its state dir's ledger: `placement` (scratch or state-disk), the
+`checkout_disk` it sits on, `cold`, and the OUTGOING generation's `outgoing_reads` per whole disk
+(cgroup `io.stat` rios/rbytes) with its `outgoing_age_s`. Rows written before the flip measure the
+data-disk generation; the first rows after the next recycle measure the scratch one. Reads per
+second on a disk is `rios / outgoing_age_s`, so the drop on `nvme0n1` (the data disk) and `nvme0n2`
+(the OS disk) is read straight off the ledger. A cold row's rebuild time is the gap from its `ts` to
+that container's first `daemon.boot` row.
+
+```sh
+rmd ledger-grep 'recycle.checkout_placement'
+docker inspect remudero-daemon --format '{{range .Mounts}}{{.Destination}}<-{{.Source}} {{end}}' | tr ' ' '\n' | grep Remudero/remudero
+```
+
+**Roll back.** `sudo rm /etc/remudero/scratch-checkouts.on`, then recycle each daemon and replace
+serve by hand: with the switch off the plan no longer names the checkout bind, so no drift fires
+and a container keeps its scratch checkout until its next recycle. Before that recycle, check the
+old copy has no tracked edits (`git -C ~/rmd-state2/remudero status --porcelain -uno`); the
+recycle's shared-checkout guard refuses one that would block the boot's checkout. `RMD_SCRATCH_CHECKOUTS=off`
+in front of a launch does the same for that launch only. Once no container binds a scratch checkout,
+`rm -rf /mnt/scratch/rmd/<state dir name>/remudero` (or `serve-repo`) returns its space.
 
 ### Attaching a data disk to the container host
 

@@ -74,3 +74,23 @@ export function clockFromIsoFn(fn?: () => string): Clock {
     iso,
   };
 }
+
+/**
+ * Calls `onExpire` once `budgetMs` of LOOP-AVAILABLE time has passed; the returned function cancels it.
+ * When a stalled loop resumes, Node runs due timers before I/O, so a plain timer fires ahead of a result already
+ * waiting in a pipe or socket. A firing late by a twentieth of the budget or more therefore re-arms for the time the
+ * loop was held, and only a deadline that fires on a free loop expires (#11962's exchange deadline, generalised).
+ */
+export function loopAvailableDeadline(clock: Clock, budgetMs: number, onExpire: () => void): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (ms: number): void => {
+    const dueAt = clock.now() + ms;
+    timer = setTimeout(() => {
+      const late = clock.now() - dueAt;
+      if (late >= budgetMs / 20) arm(Math.min(late, budgetMs));
+      else onExpire();
+    }, ms);
+  };
+  arm(budgetMs);
+  return () => clearTimeout(timer);
+}

@@ -52,7 +52,7 @@ test("native Semgrep locks every build and runtime entry with an exact version a
     sha256: "62c3d93315b1a909360c4b43c3a573b47557a1ec7a4583a71286df2a28d4b72e",
   });
   for (const [name, pin] of build) if (runtime.has(name)) assert.deepEqual(runtime.get(name), pin);
-  assert.equal(runtime.get("mcp")!.version, "1.29.0");
+  assert.equal(runtime.get("mcp")!.version, "1.30.0");
   assert.equal(runtime.get("pyjwt")!.version, "2.15.1");
   for (const name of ["cryptography", "mcp", "pyjwt", "ruamel-yaml-clib", "opentelemetry-sdk"]) {
     assert.ok(runtime.has(name), `transitive/extra missing: ${name}`);
@@ -138,8 +138,27 @@ test("native Semgrep retains all four rule packs, PR-only baseline and SARIF upl
   assert.match(scan.run!, /--baseline-commit \$\{BASELINE_REF\}/);
   assert.match(scan.run!, /--sarif --output semgrep\.sarif/);
   const upload = step("Upload SARIF to code scanning");
-  assert.equal(upload.uses, "github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2");
+  assert.equal(upload.uses, "github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d");
   assert.equal(upload.if, "always()");
   assert.deepEqual(upload.with, { sarif_file: "semgrep.sarif", category: "semgrep" });
   assert.ok(fileURLToPath(root).endsWith("/"));
+});
+
+test("native Semgrep qualification runs in the existing Scan job before the advisory repository scan", () => {
+  const steps = load().jobs.semgrep!.steps;
+  const qualify = step("Qualify native engine, baseline and invalid-rule refusal");
+  assert.match(qualify.run!, /node scripts\/semgrep-native-contract-ratchet\.mjs --receipt "\$RUNNER_TEMP\/semgrep-qualification\.json"/);
+  assert.equal(qualify["continue-on-error"], undefined, "broken control behavior must not be reported as qualified");
+  // step() reparses the document; compare names in this physical source ordering.
+  assert.ok(steps.findIndex(candidate => candidate.name === qualify.name) <
+    steps.findIndex(candidate => candidate.name === "Run Semgrep"));
+  assert.ok(steps.findIndex(candidate => candidate.name === qualify.name) >
+    steps.findIndex(candidate => candidate.name === "Install hash-locked Community Edition"));
+  const scan = step("Run Semgrep");
+  assert.match(scan.run!, /--json-output "\$RUNNER_TEMP\/semgrep-scan\.json"/);
+  assert.match(scan.run!, /exit "\$SCAN_EXIT"/);
+  const inventory = step("Record scan inventory without findings or rule redistribution");
+  assert.equal(inventory["continue-on-error"], true);
+  assert.match(inventory.run!, /--exit "\$SCAN_EXIT"/);
+  assert.doesNotMatch(inventory.run!, /upload|curl|--config/);
 });

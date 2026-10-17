@@ -2,9 +2,10 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import {isMainModule} from './lib/argv.mjs';
 import {publishSecurityMergeDecision, SECURITY_MERGE_CONTEXT} from '../src/lib/code-scanning-merge-adapter.mjs';
+import {securityMetadataGhArgs} from '../src/lib/security-metadata-gh-args.mjs';
 
 /** Runs from the trusted default branch. Never execute the event's head checkout.
- * Network failures and unsupported merge-group evidence cannot produce success.
+ * Network failures and unsupported merge-group evidence cannot produce a successful merge-policy status.
  */
 export async function runSecurityMergeProducer(eventName, event, transport, targetUrl) {
   if (event?.repository?.full_name !== 'craigoley/remudero') throw Error('foreign security event repository');
@@ -22,7 +23,7 @@ export async function runSecurityMergeProducer(eventName, event, transport, targ
     const number=Number(event.inputs?.pr_number);
     if (!Number.isSafeInteger(number) || number < 1) throw Error('invalid dispatch PR number');
     candidates=[{number}];
-  } else if (eventName === 'workflow_run' && event.workflow_run?.name === 'CodeQL') {
+  } else if (eventName === 'workflow_run' && ['CodeQL','Semgrep runtime compatibility'].includes(event.workflow_run?.name)) {
     const sha=event.workflow_run.head_sha;
     if (!/^[a-f0-9]{40}$/.test(sha ?? '')) throw Error('missing workflow head');
     // One bounded association page; at the API page ceiling, never presume it was complete.
@@ -38,8 +39,11 @@ export async function runSecurityMergeProducer(eventName, event, transport, targ
 }
 
 if (isMainModule(import.meta.url)) {
-  const read=path=>JSON.parse(execFileSync('gh',['api','--method','GET',path],
-    {encoding:'utf8',timeout:15000,maxBuffer:2<<20}));
+  const read=path=>{
+    const args=securityMetadataGhArgs(path);
+    if (args[1] !== 'graphql') args.splice(1,0,'--method','GET');
+    return JSON.parse(execFileSync('gh',args,{encoding:'utf8',timeout:15000,maxBuffer:2<<20}));
+  };
   // Fields travel as argv `-f` (raw string) pairs, never a stdin body: a child that exits without
   // draining stdin would otherwise surface a spurious EPIPE instead of its real exit status.
   const status=payload=>{
@@ -51,5 +55,9 @@ if (isMainModule(import.meta.url)) {
   const results=await runSecurityMergeProducer(process.env.GITHUB_EVENT_NAME,event,{read,status},
     `https://github.com/craigoley/remudero/actions/runs/${process.env.GITHUB_RUN_ID}`);
   console.log(JSON.stringify({context:SECURITY_MERGE_CONTEXT,results}));
-  if (results.some(r=>!r.published || !r.decision.mergeAllowed)) process.exitCode=1;
+  // The job reports delivery, not merge permission. A published denied/UNKNOWN decision
+  // stays failure/error on the authoritative SHA-scoped policy status. Failing this
+  // bootstrap job as well leaves a sticky red after CodeQL completion publishes safe
+  // from workflow_run (whose own check belongs to the default-branch commit).
+  if (results.some(r=>r.published !== true)) process.exitCode=1;
 }

@@ -45,3 +45,32 @@ test('security policy permits positively enumerated below-threshold findings but
  x.checks[0]!.output.summary=x.checks[0]!.output.summary.replace('medium','critical');assert.equal(classify(x).state,'blocked');
  x.checks[0]!.output.summary='something new';assert.equal(classify(x).state,'unknown');
 });
+test('a trusted quality-only CodeQL note does not strand an otherwise safe PR',()=>{
+ const x=clean();x.prNumber=11936;x.checks[0]!.id=116310590746;
+ x.checks[0]!.output.title='1 new alert';
+ x.checks[0]!.output.summary='### New alerts in code changed by this pull request\n\n * 1 note\n\nSee annotations below for details.\n\n[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A11936+tool%3ACodeQL+is%3Aopen).';
+ assert.deepEqual(classify(x),{state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'});
+ for(const level of ['error','warning','note'])for(const conclusion of ['success','failure']){
+  const y=clean();y.checks[0]!.conclusion=conclusion;y.checks[0]!.output.title='2 new alerts';
+  y.checks[0]!.output.summary='### New alerts in code changed by this pull request\n\n * 2 '+level+'\n\nSee annotations below for details.\n\n'+y.checks[0]!.output.summary;
+  assert.equal(classify(y).state,'safe',level+' remains quality, not high/critical security');
+ }
+});
+test('headerless CodeQL findings cannot launder security, incomplete evidence or an inconsistent total',()=>{
+ const fixture=()=>{const x=clean();x.checks[0]!.output.title='1 new alert';
+  x.checks[0]!.output.summary='### New alerts in code changed by this pull request\n\n * 1 note\n\nSee annotations below for details.\n\n'+x.checks[0]!.output.summary;return x;};
+ for(const level of ['high','critical']){
+  const x=fixture();x.checks[0]!.output.summary=x.checks[0]!.output.summary.replace('1 note','1 '+level);
+  assert.equal(classify(x).state,'blocked');
+ }
+ for(const mutate of [(x:any)=>x.checks[0].output.title='2 new alerts',
+  (x:any)=>x.checks[0].output.title='1 new alert including 1 high severity security vulnerability',
+  (x:any)=>{x.checks[0].output.title='9007199254740993 new alerts';x.checks[0].output.summary=x.checks[0].output.summary.replace('1 note','9007199254740993 note');},
+  (x:any)=>x.checks[0].output.summary=x.checks[0].output.summary.replace(' * 1 note\n',' * 1 note\n * 1 note\n'),
+  (x:any)=>x.checks[0].output.summary=x.checks[0].output.summary.replace('1 note','1 unknown'),
+  (x:any)=>x.prNumber=99,(x:any)=>x.checks[0].head_sha=other,
+  (x:any)=>x.checks[0].app.id=1,(x:any)=>x.checksComplete=false,
+  (x:any)=>x.checks[0].status='in_progress',(x:any)=>x.checks[0].conclusion='neutral']){
+  const x=fixture();mutate(x);assert.equal(classify(x).state,'unknown');assert.equal(classify(x).mergeAllowed,false);
+ }
+});

@@ -1,3 +1,4 @@
+// @census-reads: src/
 // @source-text-subject: this census's subject is the ledger writes in src/ — it reads each source file's text
 // to find every step written with `pr_url` or `cost_usd`, the way the spend-role census finds cost rows.
 import assert from "node:assert/strict";
@@ -65,6 +66,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.action_failed": A_LANE_RUN_ID,
   "sweep.capped_host_gap_rereview": A_LANE_RUN_ID, // W1-T7837: a sweep-lane row; its run_id is the sweep pass
   "sweep.review_host_gap_rereview": A_LANE_RUN_ID, // W1-T7850: a sweep-lane row; its run_id is the sweep pass
+  "sweep.stale_body_rereview": A_LANE_RUN_ID, // W1-T9124: queued under the sweep pass's run_id
   "sweep.armed_body_guarded": A_LANE_RUN_ID, // a sweep-lane row: an armed PR's edited body re-guarded
   "sweep.armed_stalled": A_LANE_RUN_ID,
   "sweep.check_requeued": A_LANE_RUN_ID,
@@ -269,7 +271,7 @@ test("sweep review telemetry does not change the config gardener's gathered runs
   ];
   const telemetry: LedgerRecord[] = [
     "sweep.review_eligible", "sweep.review_admitted", "sweep.post_review.attempt",
-    "sweep.update_branch.pending_guard",
+    "sweep.update_branch.pending_guard", "sweep.stale_body_rereview",
   ].map(step => ({
     run_id: "SWEEP-1", task_id: "T-1", step, pr_url: "https://github.com/fixture/repo/pull/2",
   }));

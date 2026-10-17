@@ -1,0 +1,16 @@
+id: fb-1792030222975-413a81
+ts: 2026-10-15T02:10:22.975Z
+raw: "[answer to feedback#fb-1789415513337-9950a6] verify-then-close. Verified
+  fixed: remudero-console's `proxy.ts` on main no longer configures
+  `frontendApiProxy` or the `/__clerk` matcher (checked 2026-10-12). Close the
+  feedback; no console task is needed. (Reopened so this answer is applied to
+  the feedback record; the earlier close skipped that.)"
+attachments: []
+origin: issue
+status: rejected
+reply_to: fb-1789415513337-9950a6
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: issue#10150:comment:6124537688
+thread_id: null

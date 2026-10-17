@@ -1,0 +1,51 @@
+- id: W1-T9730
+  title: "A FLAKE INCIDENT REOPENS ON CI RUNS OLDER THAN ITS OWN FILING — the gardener's after-filing rule counts a PR as fresh when its test.flake_retry row was WRITTEN after the last filing, but the selector-shadow gardener writes those rows when it reads a run's log, so #11956, #11991 and #11992's runs (38747185379..38748770066, older than every run W1-T9668 cited) were written at 16:01-16:07Z, after W1-T9668's 15:49:58Z filing, and reopened the same origin as W1-T9707"
+  repo: remudero
+  depends_on: [W1-T9729]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  origin: "operator session 2026-10-15 filing agent F4, found while reproducing lead 1 (W1-T9729): the W1-T9707 re-filing also needed stale evidence to read fresh"
+  plan_refs: [W1-T9668, W1-T9707, W1-T6406, W1-T9729]
+  files:
+    - src/lib/flake-incident-gardener.ts
+    - test/a-flake-incident-reopens-only-on-ci-runs-newer-than-its-filing.test.ts
+  status: merged
+  priority: 2  # with W1-T9729 holding a superseded origin, this is what reopens it again the moment the superseding task lands
+  attempts: 0
+  rationale: |
+    READ at origin/main 5d62727bf (2026-10-15):
+    - src/lib/flake-incident-gardener.ts `runFlakeIncidentGardener`: "After a merged repair, only PRs that failed
+      AFTER the last filing can reopen the incident": `since = lastFiledMs(origin)`, then `fresh =
+      evidence.prs.filter((pr) => (evidence.latestMs.get(pr) ?? 0) > since)`. `latestMs` is the newest `tsMs`, and
+      `observationsOf` takes `tsMs` from the row's own `ts`, which is when the row was written.
+    - Selector-shadow rows are written when the gardener reads a run's coverage-shard log, not when the run failed.
+      Core ledger, `test.flake_retry` for test/a-ci-friction-cause-owned-by-a-test-alone-escalates-as-no-owner.test.ts:
+      - 15:22-15:46Z: runs 38750735314..38756303504 for #11949, #12019, #12039, #12041, #12043..#12046, #12049;
+      - `flake_incident.filed` W1-T9668 at 15:49:58Z, `run_ids` those nine runs;
+      - 16:01:58-16:07:53Z: runs 38748813664 (#12000), 38748770066 (#11991), 38747983882 (#11956) and 38747185379
+        (#11992). Every one is older than the oldest run W1-T9668 cited.
+      Three PRs then read fresh, which meets `filePrs: 3`, and W1-T9707 (19:38:10Z) cites 12 PRs, those three among them.
+    - The filed row already carries `run_ids`, and each selector-shadow observation carries `runId`
+      (`ci_run_id`). GitHub Actions run ids increase over time, so a run can be compared with a filing without a clock.
+  design: |
+    1. A selector-shadow observation is fresh for an origin when its `runId` is greater than the greatest run id
+       in the origin's last `flake_incident.filed` row. A row that is merely written later is not fresh.
+    2. A fix-round observation has no run id. It keeps today's `ts` comparison. A filed row with no `run_ids`
+       (older rows) falls back to `ts` for every observation.
+    3. No count or window changes. `filePrs` and `pendingFilingHoldMs` are untouched.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - an origin filed with runs 100..109 whose task has since merged, then rows for runs 90, 91 and 92 on three new PRs written after the
+         filing: nothing is filed;
+       - the same origin with rows for runs 110, 111 and 112 on three PRs: it files (positive control);
+       - fix-round rows after the filing still count by `ts`.
+  acceptance:
+    - claim: "a CI run older than the last filing's runs never reopens the incident, however late its row is written"
+      proof: 'grep: test("W1-T9730: a run older than the filing does not reopen the incident" in test/a-flake-incident-reopens-only-on-ci-runs-newer-than-its-filing.test.ts'
+    - claim: "a CI run newer than the last filing's runs reopens it as today"
+      proof: 'grep: test("W1-T9730: a run newer than the filing reopens the incident" in test/a-flake-incident-reopens-only-on-ci-runs-newer-than-its-filing.test.ts'
+  falsifier: |
+    At origin/main the first test's three late-written rows for runs 90-92 read fresh by `ts`, reach `filePrs`, and
+    the gardener files a second incident.

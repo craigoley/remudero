@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
-import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,24 @@ import { rewriteRelativeSpecifiers, writeMutantModule } from "./helpers/mutant-m
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(TEST_DIR, "..");
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: TEST_DIR, encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 
 /** True when `source` rewrites import specifiers with its own `.replace(/.../)` regex literal. */
 function hasAdHocImportRewrite(source: string): boolean {
@@ -78,9 +97,10 @@ test("W1-T5028: the census detector flags an ad hoc import rewrite", () => {
 
 test("W1-T5028: no test rewrites import specifiers by hand", () => {
   const skip = new Set(["the-mutant-loader-resolves-every-relative-import.test.ts", "architecture-fitness.test.ts"]);
-  const files = readdirSync(TEST_DIR).filter((f) => f.endsWith(".test.ts") && !skip.has(f));
+  const { dir, files: corpus } = testCorpus();
+  const files = corpus.filter((f) => !skip.has(f.split("/").at(-1)!));
   assert.ok(files.length > 100, `the census must see the test corpus, saw ${files.length}`);
-  const offenders = files.filter((f) => hasAdHocImportRewrite(readFileSync(join(TEST_DIR, f), "utf8")));
+  const offenders = files.filter((f) => hasAdHocImportRewrite(readFileSync(join(dir, f), "utf8")));
   assert.deepEqual(
     offenders,
     [],

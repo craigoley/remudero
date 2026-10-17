@@ -1,0 +1,25 @@
+- id: W1-T9697
+  title: Deduplicate refresh.clearance in DECISION_RELEVANT_LEDGER_STEPS
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 3
+  status: queued
+  # backlog gardener: band=3 evidence=1962fa0c86ca3c33
+  attempts: 0
+  files:
+    - src/lib/ledger.ts
+  acceptance:
+    - claim: refresh.clearance appears only once in DECISION_RELEVANT_LEDGER_STEPS
+      proof: "grep: refresh.clearance appears only once in src/lib/ledger.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-10-12 follow-up on https://github.com/craigoley/remudero/pull/11096, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: `src/lib/ledger.ts` lists `refresh.clearance` three times in
+    `DECISION_RELEVANT_LEDGER_STEPS`. Dedupe it in a separate change; this round's scope is only
+    the proof amendment. — from main-repair-97e3f9136d82 (run DAEMON-1791817925860,
+    https://github.com/craigoley/remudero/pull/11096)

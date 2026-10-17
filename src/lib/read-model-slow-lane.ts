@@ -37,6 +37,7 @@ import { snapshotGeneration, snapshotGithub, snapshotSource } from "./now-view.j
 import type { GitHub } from "./status.js";
 import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
+import { startWorker } from "./child-entry-argv.js";
 import { NO_INSTANCE_RATIFY } from "./instance-gateway.js";
 
 const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
@@ -144,6 +145,7 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
     planPath: config.planPath,
     ledgerPath: config.ledgerPath,
     inboxRoot: config.inboxRoot,
+    inboxAuditScope: { instance: "core", repository: config.repository },
     github: slowLaneTraceGithub,
     statusGithub: seams.statusGithub ?? snapshot!().github,
     ratify: ratifyCliGateway(config.root, join(config.inboxRoot, "state", "logs")),
@@ -376,7 +378,7 @@ export function threadSlowLane(opts: {
   let respawn: NodeJS.Timeout | undefined;
   const spawn = (): void => {
     const data: SlowLaneData = { ...opts.config, kind: SLOW_LANE_KIND };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
+    const spawned = startWorker(import.meta.url, { workerData: data, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } }, { override: opts.workerUrl });
     worker = spawned;
     spawned.unref();
     // What the thread said it was doing, held HERE, so a thread that dies mid-unit still names it.

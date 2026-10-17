@@ -49,7 +49,7 @@ function samplerPorts(procs: Map<number, Proc>, timers: Array<() => void>, cmdli
         cmdlineReads.push(pid);
         return `${p.argv.join("\0")}\0`;
       }
-      return `VmRSS:\t1 kB\nVmHWM:\t${p.hwmKb} kB\n`;
+      return `VmRSS:\t${p.hwmKb} kB\nVmHWM:\t${p.hwmKb} kB\n`;
     },
     setTimer: (fn) => {
       timers.push(fn);

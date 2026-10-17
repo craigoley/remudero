@@ -16,9 +16,11 @@ import { globSync, statSync } from "node:fs";
 import { parseArgs } from "node:util";
 
 import { testFileEstimates, type PeakStoreOptions } from "./host-memory-learning.js";
+import { sampleWorkspaceUsage, workspaceUsageEvidence } from "./workspace-usage.js";
 
 import {
   acquireTestSlotAsync,
+  testSlotExecutionAllowed,
   lowPriorityCommand,
   TEST_SLOT_LEASE_MS,
   testRunArgv,
@@ -110,12 +112,18 @@ const inheritSpawn = (
 /** Run `node <args>` (a `node --test` argv) in a memory-sized host test slot, niced; resolves the runner's exit code. */
 export async function runBoundedTest(args: readonly string[], opts: BoundedTestRunOptions = {}): Promise<number> {
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const workspaceBefore = sampleWorkspaceUsage(process.cwd());
   const slot = await (opts.acquireSlot
     ? opts.acquireSlot(NPM_TEST_SLOT_LABEL)
     : acquireTestSlotAsync(NPM_TEST_SLOT_LABEL, {
       ...(opts.testSlot?.perFileBytes === undefined ? { filePeaks: testFileEstimates(selectedTestFiles(args), opts.peakStore) } : {}),
       ...opts.testSlot,
     }));
+  if (!testSlotExecutionAllowed(slot)) {
+    slot.release();
+    log(JSON.stringify({ step: "test_run.not_run", slot: slot.outcome, note: slot.note }));
+    return 75;
+  }
   // A foreign-container holder is aged by its heartbeat: refresh well inside the lease while the run is live.
   const heartbeat = setInterval(() => slot.refresh(), TEST_SLOT_LEASE_MS / 3);
   heartbeat.unref();
@@ -127,7 +135,14 @@ export async function runBoundedTest(args: readonly string[], opts: BoundedTestR
       command.file, command.args, { ...process.env, ...slot.childEnvironment },
     );
   } finally {
-    clearInterval(heartbeat);
-    slot.release();
+    try {
+      log(JSON.stringify({ step: "test_run.workspace_resources", runId: process.env.REMUDERO_RUN_ID ?? null,
+        nodeVersion: process.versions.node, resources: workspaceUsageEvidence([
+          workspaceBefore, sampleWorkspaceUsage(process.cwd()),
+        ]) }));
+    } finally {
+      clearInterval(heartbeat);
+      slot.release();
+    }
   }
 }

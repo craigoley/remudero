@@ -1,0 +1,62 @@
+- id: W1-T9711
+  title: "A GARDEN PASS ROW NAMES WHAT ITS CHILD COST AND HOW IT STARTED — garden.pass carries only ms, queue and exit, and child_entry.spawned carries the launch kind with no passId, so the bundle-vs-tsx saving W1-T8778/W1-T9601 bought (offline: 0.91 vs 3.8 CPU-s and 180 vs 519 MB per start) cannot be checked in production"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, what the garden.pass row records about its child; when and how a child runs is unchanged
+  band_meaning: span
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): box CPU/memory plan, W1-T9601 (#12083) follow-up 5'
+  plan_refs: [W1-T9601, W1-T8778, W1-T5365, W1-T9117, W1-T9647]
+  files:
+    - src/lib/garden-registry.ts
+    - src/run-task.ts
+    - test/a-garden-pass-row-names-what-its-child-cost.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/lib/garden-registry.ts runPass's settle() writes GARDEN_PASS_STEP (`garden.pass`) with name, passId, ms,
+      queueMs, executionMs, exit and an optional reason or error. Nothing about the child process.
+    - childGardenPassSpawn starts the child with stdio ["ignore", "ignore", "pipe"] and resolves with its exit
+      code. gardenChildNodeArgv logs child_entry.spawned with kind (bundle | tsx) and reason, but no passId, so
+      a pass cannot be joined to its launch kind except by time.
+    - The child's "garden" host-memory reservation samples its tree's peak (openLearnedReservation), but is opened
+      before the launch kind is known and is not split by kind (run children pass entryKind; gardens do not).
+      Its peak goes to the learned-peak store, not to the pass row.
+    - src/run-child-main.ts already reads process.resourceUsage().maxRSS for its own status; nothing does this for
+      a garden child.
+    OBSERVED, core ledger rotation ledger.2026-10-15T19-17-05-587Z (17:18-19:17Z): 49 garden.pass rows with exit 0
+    and 454 deferred (memory-budget-shortfall). 11:22-18:52Z: child_entry.spawned for `garden run *` was bundle 117
+    times and tsx 45 times (tsx reasons: source-changed 35, no-manifest 10).
+    OBSERVED offline by the W1-T9601 builder (run-task help, n=5): bundle 0.94 s, 0.91 CPU-s, 180 MB peak; tsx 5.6 s,
+    3.8 CPU-s, 519 MB peak.
+    INFERRED: ~28% of garden children still start under tsx; with the row, the fleet can read the live per-kind
+    cost and every later entry change (W1-T9117, W1-T9091) can be verified the same way.
+  design: |
+    1. The garden child reports its own process.resourceUsage() when it exits: maxRSS, userCPUTime,
+       systemCPUTime, and its entry kind. The channel is the builder's choice (an extra stdio fd the parent reads,
+       or a small file under the pass's own tmp that the parent reads and removes). It must not depend on stdout,
+       which is ignored, and a child that dies before reporting leaves the field absent with a reason, never zero.
+    2. settle() adds `child: {entry_kind, entry_reason, max_rss_kb, user_cpu_ms, system_cpu_ms}` to garden.pass,
+       or `child_unmeasured: <reason>` (deferred pass, spawn error, killed child, unreadable report).
+    3. gardenChildNodeArgv's launch kind is carried to the pass, so the row names the kind it measured.
+    4. No new step, no constant. The reservation's learned peaks are not changed here (a follow-up may split
+       them by kind once this row shows the difference live).
+    Tests go in test/a-garden-pass-row-names-what-its-child-cost.test.ts, titled verbatim as in the proofs. Include
+    one test that spawns a real node child through childGardenPassSpawn's default path, so the default channel is
+    covered.
+  acceptance:
+    - claim: "a completed garden pass row carries the child's max RSS, user and system CPU and its entry kind"
+      proof: 'grep: test("W1-T9711: a completed garden pass names its child max RSS, CPU and entry kind" in test/a-garden-pass-row-names-what-its-child-cost.test.ts'
+    - claim: "a pass whose child never reported says why, and never writes zero"
+      proof: 'grep: test("W1-T9711: a child that never reports is named unmeasured, never zero" in test/a-garden-pass-row-names-what-its-child-cost.test.ts'
+    - claim: "the default spawn path reads a real child's usage"
+      proof: 'grep: test("W1-T9711: the default garden spawn reads a real child usage" in test/a-garden-pass-row-names-what-its-child-cost.test.ts'
+  falsifier: |
+    On origin/main run a pass through childGardenPassSpawn with a child that allocates 64 MB and exits 0: the
+    garden.pass row has no child field and the first test fails. Kill the child with SIGKILL before it reports: a
+    builder that defaults the fields to 0 writes max_rss_kb 0 and the second test fails.

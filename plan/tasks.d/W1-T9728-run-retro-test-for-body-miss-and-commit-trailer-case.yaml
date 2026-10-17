@@ -1,0 +1,28 @@
+- id: W1-T9728
+  title: Run retro test for body-miss and commit-trailer case
+  repo: remudero
+  depends_on:
+    - W1-T105
+  type: recon
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=f77233a94c884c82
+  attempts: 0
+  files:
+    - test/the-retro-shipped-since-read-runs-off-the-loop.test.ts
+  acceptance:
+    - claim: the retro test file passes, confirming correct handling of body-miss and commit-trailer
+      proof: "unit test: test/the-retro-shipped-since-read-runs-off-the-loop.test.ts"
+      kind: guard
+    - claim: the test file introduces a body-miss and commit-trailer case that is absent at base
+      proof: "grep: body-miss and commit-trailer in test/the-retro-shipped-since-read-runs-off-the-loop.test.ts"
+  origin: architect
+  rationale: >-
+    From the 2026-10-09 follow-up on W1-T5792-1791539568631, ratified via rmd approve:
+  
+    follow-up harvest [research]: Run or read the replay path's tests
+    (`the-retro-shipped-since-read-runs-off-the-loop.test.ts`) for a body-miss plus commit-trailer
+    case. This decides between adding only a regression test and closing the task as already
+    satisfied. — from W1-T5792 (run W1-T5792-1791539568631)

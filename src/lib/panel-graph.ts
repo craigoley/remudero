@@ -1,3 +1,4 @@
+import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
 /**
  * lib/panel-graph.ts — the control panel's plan→task→PR graph and interactive plan adjustment
  * (MASTER-PLAN §7B). A thin Route layer over existing mechanism — lib/feedback.ts's inbox and
@@ -16,10 +17,11 @@
  * docs/forensics/panel-graph.md
  */
 
-import { readPage, readPageRequest, type ReadPageRequest } from "./read-page.js";
+import { readPage, readPageRequest, readSnapshotCursor, snapshotCursor, type ReadPageRequest } from "./read-page.js";
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { inboxBoardReferents } from "./inbox-board-referents.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { basename, dirname, join, relative } from "node:path";
@@ -51,6 +53,7 @@ import {
   type GhFailureReason,
   type GitHub,
   type LedgerLines,
+  type PrRef,
   type StatusProjection,
 } from "./status.js";
 import { buildDrainPreview, dispatchOrder, runnableCandidateIds, workflowPaths, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
@@ -68,6 +71,7 @@ import {
   type FeedbackEntry,
   type FeedbackExpanderDeps,
   type FeedbackExpansion,
+  type FeedbackOrigin,
   type FeedbackStatus,
 } from "./feedback.js";
 import {
@@ -111,6 +115,7 @@ import { judgementFamily } from "./machine-filing-judge.js";
 import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, servePlainOptions, type InboxOptionLane, type PlainInboxMessage, type PlainStore, type ServedPlainInboxMessage } from "./inbox-plain.js";
+import { readRecommendationStore, recommendationFor, recommendationStorePath, type RecommendationStore, type ServedRecommendation } from "./inbox-recommendation.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import {
   listThreadViews,
@@ -155,6 +160,7 @@ import {
 export interface PanelGraphDeps {
   inboxSourceIdentity?: InboxSourceIdentity;
   inboxMayPersist?: () => boolean;
+  inboxAuditScope?: { instance: string; repository: string };
   /** Repo root — where plan/feedback/ lives. */
   /** Computes the feedback inbox's entries and filed tasks off serve's thread (W1-T4454); absent, the route reads them inline. */
   projectFeedback?: (input: FeedbackProjectionInput) => Promise<FeedbackProjectionOutcome>;
@@ -408,11 +414,23 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
 /** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status reads from fetched origin/main, else the
  *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply. */
 function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
+  return replyRefusalFor(root, replyTo, queued, () =>
+    execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" }));
+}
+
+/** {@link replyRefusal}'s judgement, given how to read the record's origin/main blob (a throw: unreadable). The
+ *  daemon-loop GitHub-reply reader (W1-T8511) passes a blob it read asynchronously, so it checks the SAME `grilling`
+ *  status without a synchronous spawn on the loop. */
+export function replyRefusalFor(
+  root: string,
+  replyTo: string,
+  queued: ReadonlyMap<string, QueuedFeedbackRecord>,
+  readMainBlob: () => string,
+): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
   try {
-    const blob = execFileSync("git", ["-C", root, "show", `origin/main:${feedbackEntryRepoPath(replyTo)}`], { encoding: "utf8", stdio: "pipe" });
-    target = parseYaml(blob) as FeedbackEntry;
+    target = parseYaml(readMainBlob()) as FeedbackEntry;
   } catch {
     source = "the checkout (origin/main unreadable)";
     try {
@@ -447,6 +465,56 @@ function readQueueForCheck(deps: PanelGraphDeps, route: string, res: ServerRespo
   }
 }
 
+/** One feedback submission, already validated and refusal-checked by its caller. */
+export interface FeedbackReplyInput {
+  text: string;
+  attachments?: string[];
+  replyTo?: string;
+  expansion?: FeedbackExpansion | null;
+  submissionKey?: string;
+  origin: FeedbackOrigin;
+}
+
+/**
+ * W1-T8511: the reply half of POST /v1/feedback, factored out so an operator's GitHub reply on a
+ * feedback GRILL issue (lib/escalation-answers.ts) answers the record through the SAME writes the
+ * console does. Captures the entry (`reply_to` set when `replyTo` is), flips the `replyTo` record to
+ * `answered` with `answered_by`, and queues both under `inboxRoot` for the landing sweep. The caller
+ * owns validation, the `submissionKey` dedup and the `grilling` check ({@link replyRefusalFor}). `deps` is the checkout,
+ * the landing-queue root and the landing bridge.
+ */
+export function captureFeedbackReply(
+  deps: Pick<PanelGraphDeps, "root" | "inboxRoot" | "feedbackLand">,
+  input: FeedbackReplyInput,
+): { entry: FeedbackEntry; landingError?: string } {
+  const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
+  const land = { stateRoot: deps.inboxRoot };
+  const entry = captureFeedback(deps.root, {
+    raw,
+    attachments: input.attachments ?? [],
+    origin: input.origin,
+    expansion: input.expansion,
+    replyTo: input.replyTo,
+    submissionKey: input.submissionKey,
+    land,
+  });
+  let landingError: string | undefined;
+  try {
+    const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
+    const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
+    if (input.replyTo !== undefined) {
+      setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
+    }
+    const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
+    const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
+    if (unqueued.length > 0) landingError = staged.error ?? `not queued: ${unqueued.join(", ")}`;
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    landingError = reason;
+  }
+  return landingError === undefined ? { entry } : { entry, landingError };
+}
+
 /**
  * POST /v1/feedback — write-scoped. Captures an entry with `origin: ui` always. Ledgers
  * `panel.feedback_submitted`. `replyTo` must name an entry parked `grilling` (404/400
@@ -479,32 +547,8 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
           return;
         }
       }
-      const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
       const origin = bearerTokenId(req);
-      const land = { stateRoot: deps.inboxRoot };
-      const entry = captureFeedback(deps.root, {
-        raw,
-        attachments: input.attachments,
-        origin: "ui",
-        expansion: input.expansion,
-        replyTo: input.replyTo,
-        submissionKey: input.submissionKey,
-        land,
-      });
-      let landingError: string | undefined;
-      try {
-        const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
-        const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
-        if (input.replyTo !== undefined) {
-          setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
-        }
-        const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
-        const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
-        if (unqueued.length > 0) landingError = staged.error ?? `not queued: ${unqueued.join(", ")}`;
-      } catch (error) {
-        const reason = String((error as Error)?.message ?? error);
-        landingError = reason;
-      }
+      const { entry, landingError } = captureFeedbackReply(deps, { ...input, origin: "ui" });
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
@@ -1752,6 +1796,8 @@ export interface InboxReadyItem extends InboxSender {
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   stampLine?: string;
   draftedTasks: InboxDraftedTask[];
 }
@@ -1764,6 +1810,8 @@ export interface InboxDraftingItem extends InboxSender {
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   spawnedAt: string;
 }
 
@@ -1780,6 +1828,8 @@ export interface InboxDeclinedItem extends InboxSender {
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   /** The reason the latest `panel.proposal_declined` row recorded, verbatim. */
   reason: string;
 }
@@ -1789,10 +1839,14 @@ export interface InboxDeclinedItem extends InboxSender {
  *  without attempting an approve. A separate array from `ready`/`drafting`: presence here implies
  *  no affordance, so it never reintroduces the approval fatigue the ready-only list cured. */
 export interface InboxNotReadyItem extends InboxSender {
+  retirement?: InboxClassification["retirement"];
+  needsTriageReason?: string;
   proposalId: string;
   summary: string;
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: ServedPlainInboxMessage;
+  /** W1-T8950: an operator item's current recommended decision, with its route; absent when it has none. */
+  recommendation?: ServedRecommendation;
   reasons: PredicateFailure[];
   state?: "not_ready" | "deferred_with_trigger";
   trigger?: InboxClassification["trigger"];
@@ -1922,6 +1976,7 @@ function prepareInboxPass(
   projection: Map<string, StatusProjection>,
   ledgerLines: LedgerLines,
   grepAnchorTrue: (anchor: EvidenceAnchor) => boolean,
+  boardReferents: ReturnType<typeof inboxBoardReferents>,
   archiveReleases: ReadonlyMap<string, string> = new Map(),
 ): InboxPass {
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
@@ -1945,13 +2000,20 @@ function prepareInboxPass(
   // W1-T3518: the last adoption scan's own output. Same posture as the ledger read — read
   // ONCE per pass here, re-derived every pass that recomputes.
   const adoptionLatest = readAdoptionLatest(adoptionPath);
+  const lifecycleScope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+  const lifecycle = readInboxGardenerStore(join(deps.inboxRoot, "state"), lifecycleScope && { ...lifecycleScope, root: deps.inboxRoot });
+  const lifecycleThreads = lifecycle.state === "absent" ? undefined : readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) });
   const fragmentMemo = inboxClassifyState(deps).fragments;
   beginFragmentPass(fragmentMemo);
 
   const classifyOne = (proposal: Proposal): InboxClassification => {
     const classification = classifyProposal(proposal, drafts[proposal.id], {
+      retirement: p => lifecycle.state !== "absent" && (!lifecycleScope || lifecycleThreads?.status !== "ok")
+        ? { unknown: "owned lifecycle or current operator thread evidence unavailable" }
+        : inboxRetirementFor(lifecycle, p, inboxOperatorIntent(lifecycleThreads?.status === "ok" ? lifecycleThreads.threads.get(inboxThreadId(p.id)) ?? [] : [])),
       plan,
       isMerged,
+      boardReferents,
       depsUnobservable,
       grepAnchorTrue,
       // Every OTHER registry id: one shared set behind a view that excludes this proposal.
@@ -1978,6 +2040,14 @@ function prepareInboxPass(
   return { registryPath, proposals, ledgerLines, classifyOne };
 }
 
+function projectInboxPlan(deps: PanelGraphDeps, plan: Plan, ledgerLines?: LedgerLines) {
+  let openPrs: readonly PrRef[] | undefined;
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
+    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }),
+    observeOpenPrCount: rows => { openPrs = rows; } });
+  return { projection, boardReferents: inboxBoardReferents(projection, openPrs) };
+}
+
 /**
  * Shared read + classify step every /v1/inbox* WRITE route needs, recomputed on every call. `loadPlanFn` defaults to
  * {@link loadPlan}'s torn-read-guarded read (W1-T2220 remedy (a)); `POST /v1/inbox/approve` passes {@link
@@ -1987,10 +2057,10 @@ function prepareInboxPass(
  */
 function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
+  const { projection, boardReferents } = projectInboxPlan(deps, plan);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
-  const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha));
+  const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
   return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines, projection };
 }
 
@@ -2001,11 +2071,11 @@ function planFilesStamp(planPath: string, stat: (path: string) => string | undef
   return JSON.stringify([stat(planPath), shards.map((name) => [name, stat(join(shardDir, name))])]);
 }
 
-/** Only what classifyProposal reads off a projection: merged, and an indeterminate read's reason. */
-function projectionDigest(projection: Map<string, StatusProjection>): string {
+/** What classifyProposal reads: task credit, unavailable dependencies and observed board referents. */
+function projectionDigest(projection: Map<string, StatusProjection>, boardReferents: ReturnType<typeof inboxBoardReferents>): string {
   const parts: string[] = [];
   for (const [id, p] of projection) parts.push(`${id}:${p.merged ? 1 : 0}:${p.indeterminate ? (p.unavailableReason ?? "unknown") : ""}`);
-  return parts.join("|");
+  return JSON.stringify([parts, [...boardReferents.states].sort(([a], [b]) => a.localeCompare(b))]);
 }
 
 /** Exact task-scoped release receipts, not a verdict inferred from proposal prose. */
@@ -2033,6 +2103,7 @@ interface InboxFingerprint {
   plan: Plan;
   planKey?: string;
   projection: Map<string, StatusProjection>;
+  boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
   archiveReleases?: ReadonlyMap<string, string>;
 }
@@ -2046,7 +2117,7 @@ interface InboxFingerprint {
 function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan, archiveReleases?: ReadonlyMap<string, string>): InboxFingerprint {
   const stat = deps.inboxStatFile ?? statStamp;
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
-  const stamps = [registryPath, draftsPath, inflightPath, adoptionPath].map((p) => stat(p) ?? null);
+  const stamps = [registryPath, draftsPath, inflightPath, adoptionPath, inboxGardenerPath(join(deps.inboxRoot, "state")), inboxThreadStorePath(deps.inboxRoot)].map((p) => stat(p) ?? null);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
 
   const ledgerStamp = stat(deps.ledgerPath) ?? null;
@@ -2066,10 +2137,10 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : threadStrictPlan(deps.planPath);
   }
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
+  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
-  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection), archiveKey]);
-  return { key, sha, plan, planKey, projection, ledgerLines, archiveReleases };
+  const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
+  return { key, sha, plan, planKey, projection, boardReferents, ledgerLines, archiveReleases };
 }
 
 /** The previous result, when `fp` names exactly its inputs and the commit is known. Its ledger rows are this pass's. */
@@ -2093,7 +2164,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
   if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
   return result;
@@ -2137,7 +2208,7 @@ export async function classifyAllProposalsSliced(
     ? reused : { ...reused, attentionEvidence };
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases);
   const run = async (): Promise<ClassifiedInbox> => {
     const classifications: InboxClassification[] = [];
     for (let i = 0; i < pass.proposals.length; i += INBOX_CLASSIFY_SLICE) {
@@ -2171,6 +2242,8 @@ export interface InboxStores {
   provenance?: Record<string, InboxProvenance>;
   /** W1-T8831: the archived and still-snoozed items, as of the pass that read them; absent from a file written before triage. */
   triage?: Record<string, InboxTriage>;
+  /** W1-T8950: the stored recommendations; absent from a file written before they were served. */
+  recommendations?: RecommendationStore;
 }
 
 /** W1-T8831: one item the operator set aside. A snooze is carried only while it is still ahead of the pass that read it. */
@@ -2333,7 +2406,7 @@ export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id
   const stateDir = join(inboxRoot, "state");
   const ids = new Set(proposals.map((p) => p.id));
   const narrow = <T>(store: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(store).filter(([id]) => ids.has(id)));
-  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), provenance: inboxProvenance(inboxRoot, proposals, evidence), triage: activeTriage(stateDir, ids, evidence.nowMs ?? systemClock.now()) };
+  return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), recommendations: narrow(readRecommendationStore(recommendationStorePath(stateDir))), provenance: inboxProvenance(inboxRoot, proposals, evidence), triage: activeTriage(stateDir, ids, evidence.nowMs ?? systemClock.now()) };
 }
 
 /** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
@@ -2350,6 +2423,11 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
 
   // W1-T8826: the plain message with each option's intent and, per lane, the route that performs it — attached here, never stored.
   const servedPlain = (proposal: { id: string; summary: string }, lane: InboxOptionLane) => servePlainOptions(plainInboxMessage(proposal, plainStore), lane, proposal.id);
+  // W1-T8950: an operator item's recommended decision, current for its summary and lane, with its route attached here.
+  const recommended = (proposal: { id: string; summary: string }, lane: InboxOptionLane): { recommendation?: ServedRecommendation } => {
+    const recommendation = recommendationFor(proposal, lane, stores.recommendations ?? {});
+    return recommendation ? { recommendation } : {};
+  };
 
   const allReady: InboxReadyItem[] = [];
   const allDrafting: InboxDraftingItem[] = [];
@@ -2365,24 +2443,28 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         proposalId: proposal.id,
         summary: proposal.summary,
         plain: servedPlain(proposal, "ready"),
+        ...recommended(proposal, "ready"),
         stampLine: classification.draft?.stampLine,
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
       });
     } else if (classification.state === "drafting") {
-      allDrafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "drafting"), spawnedAt: classification.draftSpawnedAt ?? "" });
+      allDrafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "drafting"), ...recommended(proposal, "drafting"), spawnedAt: classification.draftSpawnedAt ?? "" });
     } else if (classification.state === "declined") {
       allDeclined.push({
         ...senderOf(proposal.id),
         proposalId: proposal.id,
         summary: proposal.summary,
         plain: servedPlain(proposal, "declined"),
+        ...recommended(proposal, "declined"),
         reason: classification.declinedReason ?? "declined by an operator",
       });
     } else if (classification.state === "not_ready" || classification.state === "deferred_with_trigger") {
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
       allNotReady.push({
-        ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), reasons: classification.reasons,
+        ...(classification.retirement ? { retirement: classification.retirement } : {}),
+        ...(classification.needsTriageReason ? { needsTriageReason: classification.needsTriageReason } : {}),
+        ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "notReady"), ...recommended(proposal, "notReady"), reasons: classification.reasons,
         state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
         resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
       });
@@ -2406,7 +2488,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
   // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
   // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
-  const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+  const restoredForReview = new Set(classifications.filter(c => c.retirement?.state === "restored_for_review").map(c => c.proposalId));
+  const isOperator = (item: { proposalId: string }) => restoredForReview.has(item.proposalId) || inboxOwner({ id: item.proposalId }) === "operator";
   const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)));
   const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
   const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
@@ -2455,13 +2538,47 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
  * be discovered is a mechanism nobody can reach. `rmd approve`/`reframe`/`decline` are wired from
  * the card below, over the same write-token scope every write uses.
  */
+/** Read-only qualification of maintained source evidence; never starts classification or history IO. */
+function qualifyMaintainedInbox(deps: PanelGraphDeps): ReturnType<NonNullable<Route["cacheQualification"]>> {
+  if (!deps.inboxFromSlowLane) return undefined;
+  const planSource = deps.readPlanSource?.();
+  if (planSource?.state === "unavailable") return { status: 503, body: {
+    error: "plan_source_unavailable", detail: "Current plan evidence is unavailable.", planSource,
+  } };
+  if (planSource?.state === "stale") return { status: 503, body: {
+    error: "inbox_snapshot_stale", detail: "Current plan evidence is stale; wait for a qualified maintained classification.", planSource,
+  } };
+  const read = readSlowLaneInbox(deps);
+  if (!read) return { status: 503, body: { error: "inbox_not_ready", detail: "The slow lane has not persisted a classification yet." } };
+  if (!read.snapshotKey) return { status: 503, body: { error: "inbox_snapshot_pending", detail: "A keyed maintained classification is not available yet." } };
+  const age = systemClock.now() - Date.parse(read.classifiedAt ?? "");
+  if (!Number.isFinite(age) || age < 0 || age > INBOX_STALE_AFTER_MS) return {
+    status: 503, body: { error: "inbox_snapshot_stale", detail: "The maintained Inbox classification is not source-verified fresh." },
+  };
+  return { key: read.snapshotKey };
+}
+
 export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+  const qualify: NonNullable<Route["cacheQualification"]> = (req) => {
+    const source = qualifyMaintainedInbox(deps);
+    if (!source || "status" in source) return source;
+    const shape = inboxShapeOf(req.url);
+    if ("error" in shape) return { status: 400, body: { error: "invalid_request", detail: shape.error } };
+    if (shape.section !== undefined && shape.section !== "needsYou") {
+      const cursor = readSnapshotCursor(shape.page.cursor, source.key, shape.section);
+      if ("error" in cursor) { const { status, ...body } = cursor; return { status, body }; }
+    }
+    return source;
+  };
   return {
     method: "GET",
     path: "/v1/inbox",
     scope: "read",
+    cacheQualification: qualify,
     // A read writes nothing: the ratified-row prune and the fleet lane's snapshot (W1-T4089) are the slow lane's (inbox-view.ts).
     handler: async (req, res) => {
+      const qualified = qualify(req);
+      if (qualified && "status" in qualified) { sendJson(res, qualified.status, qualified.body); return; }
       const shape = inboxShapeOf(req.url);
       if ("error" in shape) {
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
@@ -2470,14 +2587,29 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
       if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await inboxRead(deps, readPlanSnapshot);
       if (!read) return void inboxNotReady(res);
+      if (deps.inboxFromSlowLane && !read.snapshotKey) {
+        sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The maintained classification has no shared snapshot identity yet." }); return;
+      }
       const { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, counts } = read.lanes();
       const lanes = { ready, drafting, notReady, declined, fleet, archived, snoozed };
-      const at = { ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
+      const at = { ...(read.snapshotKey ? { snapshotKey: read.snapshotKey } : {}), ...(deps.inboxFromSlowLane && read.classifiedAt !== undefined ? { classifiedAt: read.classifiedAt } : {}), ...withPlanSource(deps, {}) };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, counts, ...at });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts, ...at });
       else {
-        const { items, page } = readPage<{ proposalId: string }>(lanes[shape.section], (item) => item.proposalId, shape.page);
-        sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts, ...at });
+        if (read.snapshotKey) {
+          const cursor = readSnapshotCursor(shape.page.cursor, read.snapshotKey, shape.section);
+          if ("error" in cursor) { const { status, ...body } = cursor; sendJson(res, status, body); return; }
+          const items = lanes[shape.section].slice(cursor.offset, cursor.offset + shape.page.limit);
+          const end = cursor.offset + items.length;
+          const nextCursor = end < lanes[shape.section].length ? snapshotCursor({ snapshotKey: read.snapshotKey, section: shape.section, offset: end }) : undefined;
+          sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, total: lanes[shape.section].length, limit: shape.page.limit,
+            ...(nextCursor ? { nextCursor } : {}) }, counts, ...at });
+        } else {
+          const legacyRequest = readPageRequest(new URL(req.url ?? "/", "http://localhost").searchParams, 100, 500);
+          if ("error" in legacyRequest) { sendJson(res, 400, { error: "invalid_request", detail: legacyRequest.error }); return; }
+          const { items, page } = readPage<{ proposalId: string }>(lanes[shape.section], (item) => item.proposalId, shape.page);
+          sendJson(res, 200, { [shape.section]: items, page: { section: shape.section, ...page }, counts, ...at });
+        }
       }
     },
   };
@@ -2498,7 +2630,11 @@ function inboxShapeOf(
   if (section === "needsYou") return paged ? { error: "needsYou is not paged" } : { section };
   const listSection = INBOX_LIST_SECTIONS.find((s) => s === section);
   if (listSection === undefined) return { error: `section must be one of needsYou, ${INBOX_LIST_SECTIONS.join(", ")}` };
-  const page = readPageRequest(params, 100, 500);
+  const cursor = params.get("cursor");
+  const limitOnly = new URLSearchParams(params);
+  limitOnly.delete("cursor");
+  const page = readPageRequest(limitOnly, 100, 500);
+  if (!("error" in page) && cursor !== null) page.cursor = cursor;
   return "error" in page ? page : { section: listSection, page };
 }
 
@@ -2518,15 +2654,16 @@ const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["st
 
 /** Every operator-owned item with its plain message and state, off the SAME classification
  *  `GET /v1/inbox` renders. */
-function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified: ThreadListInbox = classifyAllProposalsMemo(deps, readPlanSnapshot)): InboxThreadItem[] {
+function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified: ThreadListInbox = classifyAllProposalsMemo(deps, readPlanSnapshot), storedPlain?: PlainStore): InboxThreadItem[] {
   const { proposals, classifications } = classified;
-  const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
+  const plainStore = storedPlain ?? readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
   const items: InboxThreadItem[] = [];
   for (const c of classifications) {
     const state = CLASSIFICATION_TO_THREAD_STATE[c.state];
     const proposal = proposals.find((p) => p.id === c.proposalId);
-    if (!state || !proposal || inboxOwner(proposal) !== "operator") continue;
-    items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state });
+    if (!state || !proposal || inboxOwner(proposal) !== "operator" && !c.retirement) continue;
+    items.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), state,
+      ...(c.retirement?.state === "restored_for_review" ? { requiresReview: true } : {}) });
   }
   return items;
 }
@@ -2594,15 +2731,41 @@ function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHu
       ...(ruling.state === "judged" ? { at: ruling.at?.slice(0, 64) ?? null } : {}) }]) };
 }
 
+/** One slow-lane census over the same owned content the section pages will use. */
+export function materializeInboxAttentionCensus(deps: PanelGraphDeps, classified: ClassifiedInbox, stores: InboxStores, content: unknown,
+  threads = readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) })) {
+  if (threads.status !== "ok") throw new Error("Inbox attention thread evidence is unavailable");
+  const evidence = classified.attentionEvidence;
+  if (!evidence) throw new Error("Inbox attention classification evidence is unavailable");
+  const plan = classified.plan;
+  const releaseReceipts = new Map(evidence.releases);
+  const { registryPath } = inboxInputPaths(deps);
+  const registry = parseProposalRegistryResult(readFileIfExists(registryPath));
+  const state = (stamp: string | undefined) => stamp === undefined || stamp.startsWith("unreadable:") ? "unavailable" as const : "observed" as const;
+  return buildAttentionCensus({
+    retirementSource: (content as { retirementSource?: "observed" | "absent" | "unavailable" }).retirementSource,
+    classificationContent: content,
+    views: listThreadViews(operatorThreadItems(deps, undefined, classified, stores.plainMessages), threads.threads, {}),
+    classifications: classified.classifications,
+    taskFacts: new Map(plan.tasks.map(task => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
+    releasedTaskIds: new Set(releaseReceipts.keys()), releaseReceipts, judgeByTask: new Map(evidence.judges),
+    mergedTaskIds: new Set([...classified.projection].filter(([, value]) => value.merged).map(([id]) => id)),
+    dismissalAudit: (content as { dismissalAudit?: import("./inbox-dismissal-audit.js").InboxDismissalAudit }).dismissalAudit,
+    sources: { plan: deps.readPlanSource?.()?.state === "stale" ? "partial" : "observed",
+      registry: registry.kind === "fault" ? "partial" : state(statStamp(registryPath)), liveLedger: state(statStamp(deps.ledgerPath)),
+      archiveLedger: evidence.archiveLedger,
+      githubProjection: [...classified.projection.values()].some(value => value.indeterminate) || classified.classifications.some(value => value.referentUnverified) ? "partial" : "observed" },
+  });
+}
+
 /** GET /v1/inbox/attention-census — read-only, core-scoped, source-qualified. */
 export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET", path: "/v1/inbox/attention-census", scope: "read",
+    cacheQualification: () => qualifyMaintainedInbox(deps),
     handler: async (_req, res) => {
       res.setHeader("cache-control", "private, no-store");
       if (refusePlanSourceUnavailable(deps, res)) return;
-      const threads = readThreadsOr500(deps, res);
-      if (!threads) return;
       const classified = await inboxRead(deps, readPlanSnapshot);
       if (!classified) return void inboxNotReady(res);
       const builtAtMs = systemClock.now();
@@ -2615,6 +2778,25 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         sendJson(res, 503, { error: "attention_snapshot_stale", detail: "The slow lane's Inbox classification is stale; a fresh classification is required before reporting current attention counts." });
         return;
       }
+      if (deps.inboxFromSlowLane) {
+        if (!classified.attentionEvidence) {
+          sendJson(res, 503, { error: "attention_evidence_pending", detail: "The slow lane has not persisted valid retained evidence yet." }); return;
+        }
+        if (!classified.snapshotKey || !classified.attentionCensus) {
+          sendJson(res, 503, { error: "inbox_snapshot_pending", detail: "The slow lane has not persisted a keyed attention census yet." }); return;
+        }
+        if (deps.readPlanSource?.()?.state === "stale") {
+          sendJson(res, 503, { error: "attention_snapshot_stale", detail: "Current plan evidence is stale; a fresh maintained census is required." }); return;
+        }
+        const builtAt = fixedClock(builtAtMs).iso();
+        sendJson(res, 200, { ...classified.attentionCensus,
+          ...(classified.whyMeFeedback ? { whyMeFeedback: classified.whyMeFeedback } : {}),
+          source: { state: "fresh", classifiedAt: classified.classifiedAt, builtAt, verifiedAt: builtAt, ageMs: builtAtMs - classifiedAtMs },
+          ...withPlanSource(deps, {}) });
+        return;
+      }
+      const threads = readThreadsOr500(deps, res);
+      if (!threads) return;
       const plan = classified.plan();
       const planSource = deps.readPlanSource?.();
       const evidence = classified.attentionEvidence;
@@ -2639,6 +2821,7 @@ export function buildInboxAttentionCensusRoute(deps: PanelGraphDeps, readPlanSna
         taskFacts: new Map(plan.tasks.map((task) => [task.id, { verify: task.verify, repo: task.repo, title: task.title, status: task.status, retirement: task.retirement, dispatchHold: task.dispatch_hold, risk: task.risk }])),
         releasedTaskIds, releaseReceipts, judgeByTask,
         mergedTaskIds: classified.mergedTaskIds,
+        dismissalAudit: classified.dismissalAudit,
         sources: {
           plan: planSource?.state === "stale" ? "partial" : "observed", registry: registryParse.kind === "fault" ? "partial" : sourceState(registryStamp), liveLedger: sourceState(liveStamp),
           // Reading every retained rotation proves positive receipts, never absence before the oldest
@@ -2673,7 +2856,7 @@ const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
 export interface ThreadListInbox {
   proposals: readonly Proposal[];
-  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state">>;
+  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state" | "retirement">>;
 }
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
@@ -2711,6 +2894,10 @@ function readSlowLaneClassification(stateDir: string, registryPath: string): Thr
 }
 
 interface InboxRead {
+  whyMeFeedback?: import("./inbox-why-me.js").WhyMeFeedback;
+  snapshotKey?: string;
+  attentionCensus?: import("./inbox-responder.js").AttentionCensus;
+  dismissalAudit?: import("./inbox-dismissal-audit.js").InboxDismissalAudit;
   proposals: Proposal[];
   classifications: InboxClassification[];
   ledgerLines: LedgerLines;
@@ -2750,7 +2937,9 @@ function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowL
   let lanes: { key: string; built: ReturnType<typeof inboxLanes> } | undefined;
   return {
     ...classified, classified, persisted, generatedAt: persisted.generatedAt, classifiedAt: persisted.generatedAt,
+    snapshotKey: persisted.snapshotKey, attentionCensus: persisted.attentionCensus, whyMeFeedback: persisted.whyMeFeedback,
     attentionEvidence: persisted.attentionEvidence,
+    dismissalAudit: persisted.dismissalAudit,
     mergedTaskIds: new Set(persisted.mergedTaskIds), projectionIndeterminate: persisted.projectionIndeterminate,
     plan: () => deps.readPlanSnapshot?.() ?? loadPlan(deps.planPath),
     lanes: () => {

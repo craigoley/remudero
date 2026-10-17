@@ -1,0 +1,91 @@
+- id: W1-T9489
+  title: "EVERY CLAUDE WORKER INHERITS THE FLEET ACCOUNT'S CLAUDE.AI CONNECTORS — fix, implement, review and recon spawns under bypassPermissions are offered all eight mcp__claude_ai_Claude_Docs__* tools (create, update, delete, export ...), a write and exfiltration path out of the sandbox, and a fix worker already called one on 2026-10-14; make every spawn strictMcpConfig with an explicit server map, deny mcp__claude_ai_* outright, and fail loudly on any init inventory that still lists one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto  # the reviewer and risk judge are strict on a high band; a bad option breaks spawns loudly, and a revert restores today's behaviour
+  principles: {tdd: strict}
+  budget_usd: 16.00
+  risk: high  # security hardening of EVERY Claude worker spawn: a wrong option drops the knowledge tool or refuses every spawn fleet-wide
+  origin: "operator session 2026-10-14: read-only sdk_init_summary investigation, 120 ledger rows (~/Remudero-notes/mcp-sdk-init-rows.ndjson), and the staged opt-in in PR #11666"
+  plan_refs: [W1-T505, W1-T981, W1-T2591, W1-T3668, W1-T4094]
+  files: [src/lib/worker.ts, src/lib/worker-mcp-isolation.ts, scripts/worker-mcp-exposure-census.mjs, test/every-claude-worker-spawn-refuses-the-account-connectors.test.ts, test/worker-mcp-isolation.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-13/14 over 120 worker ledger rows carrying `sdk_init_summary`
+    (schema sdk-init-summary-v1), grouped by step and provider:
+
+        fix.done claude ........ 33 rows list all 8 mcp__claude_ai_Claude_Docs__* tools
+        implement.done claude .. 30 rows list all 8
+        review.reviewer claude .  3 rows list all 8
+        recon.done claude ......  1 row lists all 8
+        codex / cash rows ......  0 (they never load the claude.ai account)
+
+    The eight are batch, create, delete, export, guide, query, read and update. They act on the
+    fleet account's claude.ai workspace: a worker can create, overwrite, delete or export documents
+    there, which is a write and exfiltration path that the worker sandbox and egress broker never
+    see. At 14:46:54Z on 2026-10-14 fix worker sweep-W1-T9077-1791989013901 called
+    mcp__claude_ai_Claude_Docs__guide, so the exposure is used, not theoretical.
+
+    WHY. `spawnWorker` (src/lib/worker.ts) builds its SDK `Options` with `settingSources:
+    WORKER_SETTING_SOURCES` ([]) and `permissionMode` (bypassPermissions for the worker lanes),
+    passes `mcpServers` only when `args.ruleLookup` is set, and passes `disallowedTools` only when
+    the caller supplies one. It never passes `strictMcpConfig`. The CLI runs with the shared
+    CLAUDE_CONFIG_DIR (/home/node/.claude/fleet-auth/claude, see `workerClaudeCredentialDir`), so it
+    attaches every connector the account has on claude.ai. Connecting Gmail, Drive, Calendar or
+    Vercel there would hand those tools to every worker with no code change.
+
+    THE INVENTORY HIDES THE SERVER. `safeNameAtom` (src/lib/worker-init-summary.ts) rejects the
+    server name "claude.ai Claude Docs" (it has spaces), so every exposed row reads
+    serverNames {names: ["knowledge"], rejectedEntries: 1}. Only `mcpToolNames` shows the leak, so
+    a check that reads server names alone sees a clean worker.
+
+    WHAT EXISTS. PR #11666 (src/lib/worker-mcp-isolation.ts) staged an opt-in
+    `mcpIsolation: "repo-knowledge-only"` that sets strictMcpConfig, but no caller opts in. It also
+    throws for any spawn without a repository-only tool bound, so it cannot simply be switched on
+    for the fix, review and recon lanes. test/worker-mcp-isolation.test.ts pins today's default
+    ("default workers are unchanged ...": `"strictMcpConfig" in baseline.options` is false).
+  design: |
+    (i) THE BOUNDARY, ON EVERY CLAUDE SPAWN. In `spawnWorker`'s options construction, always set
+    `options.strictMcpConfig = true` and an explicit `options.mcpServers`: exactly
+    `{ knowledge: ... }` when `args.ruleLookup` is set (today's in-process server, unchanged), and
+    `{}` otherwise. Nothing the account or any settings file declares can then attach a server.
+    Keep the logic and constants in src/lib/worker-mcp-isolation.ts so worker.ts grows by a few lines.
+    (ii) DEFENCE IN DEPTH. Always include `mcp__claude_ai_*` in `options.disallowedTools`,
+    merged with any caller-supplied list, never replacing it. Confirm against the pinned SDK/CLI
+    (0.3.293 today) that the pattern form is honoured. If it is not, deny with the form the CLI does
+    honour and say which in the PR. The W1-T2591 note that an unrestricted spawn's option object is
+    byte-identical is retired by this change; update that comment.
+    (iii) THE USAGE PROBE. `openUsageProbeSession` opens a session on the same config dir with
+    `{ settingSources: [] }`; give it the same strictMcpConfig and empty server map.
+    (iv) THE TRIPWIRE AT THE PRODUCER. After `collectWorkerResult`, for every Claude spawn (not only
+    the #11666 opt-in), read `result.initSummary`. If any `mcpToolNames` name starts with
+    `mcp__claude_ai_`, or any server name is outside the spawn's own `mcpServers` keys, or
+    `serverNames.rejectedEntries` > 0 (an unrenderable name is how today's leak looks), then record
+    `mcp_exposure` on the ledger row with the offending names and set `result.isError`, so the run
+    earns no success credit. An absent or partial inventory is reported as unknown, never as clean.
+    Also record `mcp_boundary: "strict"` on every row spawned under (i), so a census can tell
+    post-fix rows from pre-fix ones without a date cutoff.
+    (v) THE CENSUS. scripts/worker-mcp-exposure-census.mjs reads ledger rows (a file argument, or
+    the ledger union through `readLedgerUnionRawLinesSync` with a pattern; never a full-record union
+    read, which costs gigabytes in the core container). It exits non-zero, naming run_id, step and
+    tools, for any row with `mcp_boundary: "strict"` whose `sdk_init_summary` lists a
+    `mcp__claude_ai_*` tool or has rejected server entries. It reports pre-fix rows as a count and
+    does not fail on them.
+    (vi) NOT IN SCOPE: switching on #11666's tool-bound opt-in, Codex or cash spawns (they never
+    load the account), disconnecting anything on claude.ai, or reading old ledger archives.
+  acceptance:
+    - claim: "every Claude worker spawn passes strictMcpConfig with an explicit server map, knowledge-only when ruleLookup is set and empty otherwise"
+      proof: 'grep: test("every claude worker spawn passes strictMcpConfig with an explicit server map" in test/every-claude-worker-spawn-refuses-the-account-connectors.test.ts'
+    - claim: "every Claude worker spawn denies mcp__claude_ai_* in disallowedTools, merged with a caller-supplied list"
+      proof: 'grep: test("every claude worker spawn denies the account connector tools even beside its own disallowedTools" in test/every-claude-worker-spawn-refuses-the-account-connectors.test.ts'
+    - claim: "a worker whose init inventory lists an account connector tool or an unrenderable server name is ledgered as exposed and earns no success credit"
+      proof: 'grep: test("a worker whose init inventory lists an account connector is ledgered as exposed and earns no credit" in test/every-claude-worker-spawn-refuses-the-account-connectors.test.ts'
+    - claim: "the exposure census fails on a strict-boundary ledger row that lists a mcp__claude_ai_ tool and only counts pre-fix rows"
+      proof: 'grep: test("the exposure census fails on a strict-boundary row that lists an account connector" in test/every-claude-worker-spawn-refuses-the-account-connectors.test.ts'
+  falsifier: |
+    Delete the strictMcpConfig assignment, the disallowedTools merge, or the exposure check in turn:
+    the first, second and third tests must each fail. Feed the census one of the 2026-10-14 rows
+    re-tagged mcp_boundary "strict": it must exit non-zero.

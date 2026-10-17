@@ -1,0 +1,29 @@
+id: incident-5e98c35f558aad4f
+ts: 2026-10-15T05:17:16.964Z
+raw: >-
+  Incident 5e98c35f558a: intervention
+  automerge-hold:hold-pending-w-t-corrections
+
+  First seen: 2026-10-15T03:53:40.854Z
+
+  Last seen: 2026-10-15T03:53:40.854Z
+
+  Count: 1, burn: 1.00/hr
+
+  Deploy sha(s): unknown
+
+  Instance(s): core
+
+  Sample events:
+    - surface=control action=automerge.hold_engaged target=pr#10339 actor=operator_human cause=automerge-hold:hold-pending-w-t-corrections — a hand action answered a fleet state no lane resolved
+  Suspect commits (merged pull requests touching the incident's in-app frames):
+    (none found)
+attachments: []
+origin: incident#5e98c35f558aad4f2582888d4cd56cf3739ed845609851b451dbc250d22cb065
+status: new
+reply_to: null
+proposal_pr: null
+summary: null
+expansion: null
+submission_key: null
+thread_id: null

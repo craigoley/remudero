@@ -127,14 +127,24 @@ export function ciFrictionRemedyEffect(rounds: readonly RemedyRound[], causeKey:
     if (r.causeKey === causeKey) side.k += 1;
   }
   const windowDays = Math.round((span / 86_400_000) * 10) / 10;
+  return judgeShareWindows(before, after, windowDays, causeKey, { noun: "round", share: "share of fix rounds" });
+}
+
+/**
+ * The one judgement every remedy effect shares (W1-T9060): a cause's share in a before window against the same share
+ * after the merge. No cause in the before window is `unmeasurable`, never a verdict; a significant one-sided fall is a
+ * credit; as much evidence after as the before window needed to show the cause is a debit; anything between is pending.
+ */
+export function judgeShareWindows(before: ShareWindow, after: ShareWindow, windowDays: number, causeKey: string,
+  label: { noun: string; share: string }): RemedyEffect {
   if (before.k === 0 || before.n === 0) {
-    return { verdict: "unmeasurable", before, after, windowDays, z: 0, reason: `no ${causeKey} round in the ${windowDays}-day window before the merge, so no fall can be measured` };
+    return { verdict: "unmeasurable", before, after, windowDays, z: 0, reason: `no ${causeKey} ${label.noun} in the ${windowDays}-day window before the merge, so no fall can be measured` };
   }
   const pooled = (before.k + after.k) / (before.n + after.n);
   const se = after.n > 0 ? Math.sqrt(pooled * (1 - pooled) * (1 / before.n + 1 / after.n)) : 0;
   const z = se > 0 ? (share(after) - share(before)) / se : 0;
   const pct = (w: ShareWindow) => `${(share(w) * 100).toFixed(1)}% (${w.k}/${w.n})`;
-  const line = `share of fix rounds ${pct(before)} before, ${pct(after)} after, over ${windowDays} day(s) each side`;
+  const line = `${label.share} ${pct(before)} before, ${pct(after)} after, over ${windowDays} day(s) each side`;
   if (after.n > 0 && z <= ONE_SIDED_Z) return { verdict: "credit", before, after, windowDays, z, reason: `fell: ${line}` };
   // Equal evidence: the after window has seen as many rounds as the before window needed to show
   // the cause `before.k` times. A remedy is never debited on less evidence than it was filed on.
@@ -244,6 +254,17 @@ export interface CiFrictionOwner {
 
 const OWNER_LIMIT = 2;
 
+function ciLogSignatures(check: string, detail: string): string[] {
+  const own: string[] = [];
+  for (const part of detail.split(/ — |; /)) {
+    const signature = /^(.+?): (.+)$/.exec(part);
+    if (!signature) continue;
+    const namedFamily = signature[1]!.replace(/\s*\(\d+\/\d+\)$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    if (namedFamily === check) own.push(signature[2]!);
+  }
+  return own;
+}
+
 /** The search terms a cause's own rounds supply: the stable head of a refusal's reason, a check's name. */
 export function ownerSearchTerms(key: string, details: readonly string[]): string[] {
   const [kind, ...rest] = key.split(":");
@@ -257,16 +278,7 @@ export function ownerSearchTerms(key: string, details: readonly string[]): strin
   } else if (kind === "check") {
     const [first, family] = name.split(":");
     const check = first === "ci-log" && family ? family : first!;
-    if (first === "ci-log") {
-      for (const detail of details) {
-        for (const part of detail.split(/ — |; /)) {
-          const signature = /^(.+?): (.+)$/.exec(part);
-          if (!signature) continue;
-          const namedFamily = signature[1]!.replace(/\s*\(\d+\/\d+\)$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-          if (namedFamily === check) terms.push(signature[2]!);
-        }
-      }
-    }
+    if (first === "ci-log") for (const detail of details) terms.push(...ciLogSignatures(check, detail));
     terms.push(check);
   } else if (kind === "main_merge") {
     terms.push(name);
@@ -285,8 +297,9 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
       ? { files: [file], why: [`${file}: repaired by hand in multiple distinct merged PRs`] } : undefined;
   }
+  const logFamily = key.startsWith("check:ci-log:") ? key.split(":")[2] : undefined;
   const testPath = key.startsWith("check:")
-    ? [key, ...details].map((d) => /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(d)?.[1]).find((p): p is string => p !== undefined && !p.split("/").includes(".."))
+    ? [key, ...(logFamily ? details.flatMap((d) => ciLogSignatures(logFamily, d)) : details)].map((d) => /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(d)?.[1]).find((p): p is string => p !== undefined && !p.split("/").includes(".."))
     : undefined;
   if (key.startsWith("main_merge:")) {
     const file = key.slice("main_merge:".length);

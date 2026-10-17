@@ -5,13 +5,35 @@
  * A LEAF: it imports nothing from src, so the read-model worker, which answers for the threads IT
  * spawns ({@link answerThreadHeaps}), can import it without a cycle through serve's own modules.
  *
+ * W1-T9403: each part carries its USED heap (`used_bytes`) beside its committed heap (`bytes`), and a
+ * thread whose parent knows what it holds (a views lane's board projections) carries `holds`.
+ *
  * FALSIFIERS: test/serve-memory-names-where-rss-lives.test.ts,
- * test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts.
+ * test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts,
+ * test/serve-memory-names-what-the-heavy-view-lane-holds.test.ts; a bundle-started worker's threads (#11859):
+ * test/serve-starts-its-workers-from-current-worker-bundles.test.ts.
  */
 
 import diagnosticsChannel from "node:diagnostics_channel";
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
+
+/** What a thread's parent says the thread holds, by holder (`board:<instance>`): entries and bytes kept. */
+export type ThreadHolds = Record<string, { entries: number; bytes: number }>;
+
+/**
+ * One thread of a reading. `bytes` is its committed heap plus external memory; `used_bytes` its used heap
+ * plus external memory, absent (never zero) when the thread could not be read; `holds` what its parent
+ * says it holds, absent when nothing was reported.
+ */
+export interface WorkerHeapPart {
+  entries: number;
+  bytes: number;
+  used_bytes?: number;
+  holds?: ThreadHolds;
+}
 
 /** One `worker-heap:<kind>` line in the `serve.memory` row, with a part per thread; `error` names a thread left unsized. */
 export interface WorkerHeapReading {
@@ -19,7 +41,9 @@ export interface WorkerHeapReading {
   kind: "worker-heap";
   entries: number;
   bytes: number;
-  parts?: Record<string, { entries: number; bytes: number }>;
+  /** The parts' `used_bytes`, summed like `bytes`; absent when no part was read. */
+  used_bytes?: number;
+  parts?: Record<string, WorkerHeapPart>;
   error?: string;
 }
 
@@ -47,13 +71,48 @@ export interface TrackedWorker {
 }
 
 const SELF_MODULE = "worker-heaps";
-/** `<module>:<function>` of the first frame outside node and this module: the call that spawned the thread. */
+/** W1-T9370: startWorker constructs serve's workers, so a frame of its module is never the site that asked for one. */
+const SPAWN_HELPER_MODULE = "child-entry-argv";
+const moduleName = (path: string): string => basename(path).replace(/\.[cm]?[jt]s$/, "");
+/**
+ * The line esbuild heads each module's code with in a bundle (`// src/lib/read-model-worker.ts`). W1-T8777's worker
+ * bundles carry no source map, and every frame inside one names the bundle's file, so the header is what says whose
+ * code a bundle line is.
+ */
+const BUNDLE_MODULE_HEADER = /^\/\/ (\S+\.[cm]?[jt]sx?)$/;
+/** Each file's module headers as `[line, module]`, ascending, read once per file; `null` for a file that holds none. */
+const bundleHeaders = new Map<string, Array<[number, string]> | null>();
+/** The source module a JS file's 1-based `line` lies in when the file is a bundle; undefined when it is not one. */
+function bundledModule(file: string, line: number): string | undefined {
+  if (!/\.[cm]?js$/.test(file)) return undefined;
+  let headers = bundleHeaders.get(file);
+  if (headers === undefined) {
+    const found: Array<[number, string]> = [];
+    try {
+      readFileSync(file.startsWith("file:") ? fileURLToPath(file) : file, "utf8").split("\n").forEach((text, at) => {
+        const source = BUNDLE_MODULE_HEADER.exec(text)?.[1];
+        if (source) found.push([at + 1, moduleName(source)]);
+      });
+    } catch {
+      // A file that cannot be read is no bundle this thread can see into: its frame keeps the file's own name.
+    }
+    headers = found.length > 0 ? found : null;
+    bundleHeaders.set(file, headers);
+  }
+  return headers?.findLast(([start]) => start <= line)?.[1];
+}
+
+/**
+ * `<module>:<function>` of the first frame outside node, this module and the spawn helper: the call that spawned the
+ * thread. A frame inside a bundle names the SOURCE module its line came from, as a tsx-loaded frame does, so a
+ * bundle-started worker's threads keep the names they had before W1-T9370 started workers from bundles.
+ */
 export function spawnSite(stack: string | undefined): string {
   for (const line of (stack ?? "").split("\n").slice(1)) {
-    const frame = /^\s*at (?:(.+?) \()?(.+?):\d+:\d+\)?$/.exec(line);
-    const module = frame ? basename(frame[2]).replace(/\.[cm]?[jt]s$/, "") : "";
+    const frame = /^\s*at (?:(.+?) \()?(.+?):(\d+):\d+\)?$/.exec(line);
+    const module = frame ? bundledModule(frame[2], Number(frame[3])) ?? moduleName(frame[2]) : "";
     // A source-mapped frame and import.meta.url can disagree on path and extension; the module name cannot.
-    if (!frame || frame[2].startsWith("node:") || module === SELF_MODULE) continue;
+    if (!frame || frame[2].startsWith("node:") || module === SELF_MODULE || module === SPAWN_HELPER_MODULE) continue;
     return `${module}:${frame[1] ?? "<module>"}`;
   }
   return "unknown";
@@ -99,36 +158,64 @@ async function within<T>(read: () => Promise<T>, timeoutMs: number, late: T): Pr
   }
 }
 
-async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<{ bytes: number } | { error: string }> {
-  const unsized = (why: string): string => `thread ${thread.threadId} unsized: ${why}`;
+type ThreadHeap = { bytes: number; used_bytes?: number } | { error: string };
+
+/** A caller's deadline never cancels a native heap request. Keep one until it actually settles. */
+interface ThreadHeapRequest { exited: boolean; pending?: Promise<ThreadHeap> }
+const threadHeapRequests = new WeakMap<WorkerThread, ThreadHeapRequest>();
+
+async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<ThreadHeap> {
+  const id = thread.threadId;
+  const unsized = (why: string): string => `thread ${id} unsized: ${why}`;
   if (typeof thread.getHeapStatistics !== "function") return { error: unsized("this runtime has no worker.getHeapStatistics()") };
   try {
-    const read = async (): Promise<{ bytes: number } | { error: string }> => {
+    if (id < 0) return { error: unsized("worker exited") };
+    let request = threadHeapRequests.get(thread);
+    if (!request) {
+      const created: ThreadHeapRequest = { exited: false };
+      thread.once("exit", () => { created.exited = true; });
+      threadHeapRequests.set(thread, created);
+      request = created;
+    }
+    if (request.exited) return { error: unsized("worker exited") };
+    // Later samples report unknown at once: even attaching another timeout race would retain another waiter.
+    if (request.pending) return { error: unsized("heap statistics request still pending") };
+    const read = async (): Promise<ThreadHeap> => {
       const heap = await thread.getHeapStatistics();
-      return { bytes: heap.total_heap_size + heap.external_memory };
+      if (request.exited) return { error: unsized("worker exited") };
+      const bytes = heap.total_heap_size + heap.external_memory;
+      // A runtime that does not report the used heap leaves it unknown: absent, never NaN or zero.
+      return Number.isFinite(heap.used_heap_size) ? { bytes, used_bytes: heap.used_heap_size + heap.external_memory } : { bytes };
     };
-    return await within(read, timeoutMs, { error: unsized(`no heap statistics within ${timeoutMs}ms`) });
+    request.pending = read().finally(() => { request.pending = undefined; });
+    return await within(() => request.pending!, timeoutMs, { error: unsized(`no heap statistics within ${timeoutMs}ms`) });
   } catch (e) {
     return { error: unsized(String((e as Error)?.message ?? e)) };
   }
 }
 
 /** Each thread that answers for the threads it spawned, keyed by its Worker: dropped with it. */
-const nestedHeapReaders = new WeakMap<WorkerThread, (timeoutMs: number) => Promise<WorkerHeapReading[]>>();
+const nestedHeapReaders = new WeakMap<WorkerThread, (timeoutMs: number, unanswered: WorkerHeapReading[]) => Promise<WorkerHeapReading[]>>();
 
 /**
  * Serve's side of a thread that spawns threads of its own: {@link readWorkerHeaps} posts it a
  * {@link THREAD_HEAPS_REQUEST} beside its own heap read. Returns the thread's message filter: true
- * for an answer, which it settles. An unanswered request waits for its answer or the Worker's end.
+ * for an answer, which it settles. Every request releases its resolver on answer, timeout or post failure.
  */
 export function askNestedThreadHeaps(thread: WorkerThread & Pick<Worker, "postMessage">): (msg: unknown) => boolean {
   const waiting = new Map<number, (readings: WorkerHeapReading[]) => void>();
   let asked = 0;
-  nestedHeapReaders.set(thread, (timeoutMs) => new Promise((resolve) => {
-    asked += 1;
-    waiting.set(asked, resolve);
-    thread.postMessage({ type: THREAD_HEAPS_REQUEST, id: asked, timeoutMs });
-  }));
+  nestedHeapReaders.set(thread, async (timeoutMs, unanswered) => {
+    const id = ++asked;
+    try {
+      return await within(() => new Promise<WorkerHeapReading[]>((resolve) => {
+        waiting.set(id, resolve);
+        thread.postMessage({ type: THREAD_HEAPS_REQUEST, id, timeoutMs });
+      }), timeoutMs, unanswered);
+    } finally {
+      waiting.delete(id);
+    }
+  });
   return (msg) => {
     const answer = msg as Partial<ThreadHeapsAnswer> | undefined;
     if (answer?.type !== THREAD_HEAPS_ANSWER || answer.id === undefined) return false;
@@ -141,13 +228,18 @@ export function askNestedThreadHeaps(thread: WorkerThread & Pick<Worker, "postMe
 /**
  * The spawned side: answers a {@link THREAD_HEAPS_REQUEST} with `book`'s heaps, read in half the
  * asker's budget so a stuck grandchild is named by this answer, not lost to the asker's timeout.
- * True when `msg` was one.
+ * `holds` names what a thread it spawned holds (W1-T9403). True when `msg` was one.
  */
-export function answerThreadHeaps(port: { postMessage(value: unknown): void }, msg: unknown, book: Pick<ReturnType<typeof trackWorkerThreads>, "live"> = workerThreads()): boolean {
+export function answerThreadHeaps(
+  port: { postMessage(value: unknown): void },
+  msg: unknown,
+  book: Pick<ReturnType<typeof trackWorkerThreads>, "live"> = workerThreads(),
+  holds?: (threadId: number) => ThreadHolds | undefined,
+): boolean {
   const request = msg as { type?: unknown; id?: number; timeoutMs?: number } | undefined;
   if (request?.type !== THREAD_HEAPS_REQUEST) return false;
   const timeoutMs = Math.floor((request.timeoutMs ?? WORKER_HEAP_TIMEOUT_MS) / 2);
-  void readWorkerHeaps(book.live(), timeoutMs).then((readings) => port.postMessage({ type: THREAD_HEAPS_ANSWER, id: request.id, readings }));
+  void readWorkerHeaps(book.live(), timeoutMs, holds).then((readings) => port.postMessage({ type: THREAD_HEAPS_ANSWER, id: request.id, readings }));
   return true;
 }
 
@@ -159,32 +251,41 @@ async function nestedHeaps({ kind, thread }: TrackedWorker, timeoutMs: number): 
     name: `${WORKER_HEAP_PREFIX}inside:${kind}`, kind: "worker-heap", entries: 0, bytes: 0,
     error: `thread ${thread.threadId}'s own threads unsized: no answer within ${timeoutMs}ms`,
   };
-  return within(() => ask(timeoutMs), timeoutMs, [unanswered]);
+  return ask(timeoutMs, [unanswered]);
 }
 
 /**
- * Each live thread's committed heap plus its external memory, grouped as one `worker-heap:<kind>`
- * reading per spawn site with a part per thread. A thread that cannot be read is named in `error`
- * and counts 0 bytes, so its heap stays in `unattributed_bytes` rather than vanishing. The threads a
- * tracked thread spawned join under their own spawn site, as that thread answered for them.
+ * Each live thread's committed heap plus its external memory (`bytes`), and its used heap plus its
+ * external memory (`used_bytes`), grouped as one `worker-heap:<kind>` reading per spawn site with a
+ * part per thread. A thread that cannot be read is named in `error`, counts 0 bytes and has no
+ * `used_bytes`, so its heap stays in `unattributed_bytes` rather than vanishing. `holds` names what a
+ * thread holds, on its part. The threads a tracked thread spawned join under their own spawn site, as
+ * that thread answered for them.
  */
-export async function readWorkerHeaps(workers: readonly TrackedWorker[], timeoutMs = WORKER_HEAP_TIMEOUT_MS): Promise<WorkerHeapReading[]> {
+export async function readWorkerHeaps(
+  workers: readonly TrackedWorker[],
+  timeoutMs = WORKER_HEAP_TIMEOUT_MS,
+  holds?: (threadId: number) => ThreadHolds | undefined,
+): Promise<WorkerHeapReading[]> {
   const [heaps, nested] = await Promise.all([
     Promise.all(workers.map(async ({ kind, thread }) => ({ kind, threadId: thread.threadId, ...(await threadHeap(thread, timeoutMs)) }))),
     Promise.all(workers.map((worker) => nestedHeaps(worker, timeoutMs))),
   ]);
   const own = heaps.map((heap): WorkerHeapReading => {
     const bytes = "bytes" in heap ? heap.bytes : 0;
+    const used = "used_bytes" in heap && heap.used_bytes !== undefined ? { used_bytes: heap.used_bytes } : {};
+    const held = holds?.(heap.threadId);
     return {
-      name: `${WORKER_HEAP_PREFIX}${heap.kind}`, kind: "worker-heap", entries: 1, bytes,
-      parts: { [`thread-${heap.threadId}`]: { entries: 1, bytes } }, ...("error" in heap ? { error: heap.error } : {}),
+      name: `${WORKER_HEAP_PREFIX}${heap.kind}`, kind: "worker-heap", entries: 1, bytes, ...used,
+      parts: { [`thread-${heap.threadId}`]: { entries: 1, bytes, ...used, ...(held ? { holds: held } : {}) } }, ...("error" in heap ? { error: heap.error } : {}),
     };
   });
-  const readings = new Map<string, WorkerHeapReading & { parts: Record<string, { entries: number; bytes: number }> }>();
+  const readings = new Map<string, WorkerHeapReading & { parts: Record<string, WorkerHeapPart> }>();
   for (const part of [...own, ...nested.flat()]) {
     const reading = readings.get(part.name) ?? { name: part.name, kind: "worker-heap" as const, entries: 0, bytes: 0, parts: {} };
     reading.entries += part.entries;
     reading.bytes += part.bytes;
+    if (part.used_bytes !== undefined) reading.used_bytes = (reading.used_bytes ?? 0) + part.used_bytes;
     Object.assign(reading.parts, part.parts);
     if (part.error) reading.error = reading.error ? `${reading.error}; ${part.error}` : part.error;
     readings.set(part.name, reading);

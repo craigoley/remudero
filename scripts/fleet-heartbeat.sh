@@ -275,22 +275,106 @@ else
   # watch workflow escalated #4782 on that reading.
   #
   # So this reads all THREE forms, which is CLAUDE.md's standing rule for any ledger question:
-  # `state/ledger.ndjson`, the plain rotations, and the gzipped ones. `zgrep` reads plain input
-  # transparently, so the fix is the GLOB, never the tool. A form that matches nothing contributes
-  # nothing; the union is still whatever the other forms hold.
-  LEDGER_UNION_GLOB="${RMD_ROOT}/state/ledger.ndjson ${RMD_ROOT}/state/ledger.*.ndjson ${RMD_ROOT}/state/ledger.*.ndjson.gz"
-  ledger_union_grep() {
-    # shellcheck disable=SC2086 — the glob is intentional; unmatched patterns fall through and fail
-    # into /dev/null per form, which is exactly "this form contributes nothing".
-    zgrep -h "$1" $LEDGER_UNION_GLOB 2>/dev/null
+  # `state/ledger.ndjson`, the plain rotations, and the gzipped ones. A form that matches nothing
+  # contributes nothing; the union is still whatever the other forms hold.
+
+  # ── ONE NEWEST-FIRST PASS, STOPPED WHEN EVERY ANSWER IS FINAL ───────────────────────────────
+  # Three whole-union zgreps per beat read ~6 GB from a disk near its IOPS cap (#11937). This pass
+  # answers T (the max leading ts over `"step":"daemon\.` lines), S (the last daemon step token on
+  # a line carrying `"ts":"<T>"`) and B (the last daemon.boot line). S and B are LAST in union
+  # order (live, plain, gzipped; glob order within each), as `tail -n 1` had them, so an archived
+  # boot still outranks a newer live one: a separate defect, kept here byte-for-byte.
+  # THE STOP: a rotation's stamp bounds every row in it (rotateLedgerLocked; W1-T4100 heals a name
+  # only down to its mtime; compactedArchiveName; the rule rotationWindowMs relies on), so one
+  # stamped a whole second before T cannot change T or S. B is final once no unread file outranks
+  # its file. An unstamped name bounds nothing and is always read; an absent answer is searched
+  # for to the oldest rotation, so "none" means none. LC_ALL=C makes `>` the byte order of `sort`.
+  # Falsifier: test/the-beat-answers-its-ledger-questions-in-one-pass.test.ts.
+  ledger_union_answers() {
+    local _f
+    {
+      printf '%s\n' "$LEDGER"
+      for _f in "${RMD_ROOT}/state/"ledger.*.ndjson "${RMD_ROOT}/state/"ledger.*.ndjson.gz; do
+        [ -e "$_f" ] && printf '%s\n' "$_f"
+      done
+    } | LC_ALL=C awk '
+      # A single-quoted path for the one command this runs; the quote char is made, never written,
+      # so this program never closes the single quotes it is written inside.
+      function shq(s,   q) { q = sprintf("%c", 39); gsub(q, q "\"" q "\"" q, s); return q s q }
+      function stampof(p,   n) {
+        n = p; sub(/.*\//, "", n)
+        if (n ~ /^ledger\.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9]Z\.ndjson(\.gz)?$/)
+          return substr(n, 8, 10) "T" substr(n, 19, 2) ":" substr(n, 22, 2) ":" substr(n, 25, 2)
+        return "~"
+      }
+      function consider(line, r, ln,   rest, p, m, ts, v, tok, s) {
+        if (wantQ && index(line, "\"step\":\"daemon") && line ~ /"step":"daemon\./) {
+          if (substr(line, 1, 7) == "{\"ts\":\"") {
+            rest = substr(line, 8); p = index(rest, "\"")
+            if (p > 0) { ts = substr(rest, 1, p - 1); if (!haveMax || ts > max) { max = ts; haveMax = 1 } }
+          }
+          tok = ""; s = line
+          while (match(s, /"step":"daemon\.[^"]*"/)) { tok = substr(s, RSTART + 8, RLENGTH - 9); s = substr(s, RSTART + RLENGTH) }
+          if (tok != "") {
+            s = line
+            while ((p = index(s, "\"ts\":\"")) > 0) {
+              s = substr(s, p + 6); m = index(s, "\"")
+              if (m == 0) break
+              v = substr(s, 1, m - 1); s = substr(s, m + 1)
+              if (haveMax && v < max) continue
+              if (!(v in candTok) || r > candRank[v] || (r == candRank[v] && ln >= candLine[v])) {
+                candTok[v] = tok; candRank[v] = r; candLine[v] = ln
+              }
+            }
+          }
+        }
+        if (index(line, "daemon") && line ~ /"step":"daemon.boot"/ && r >= bootRank) { bootLine = line; bootRank = r }
+      }
+      function scanfile(i,   p, cmd, line, ln) {
+        p = path[i]; ln = 0
+        if (p ~ /\.gz$/) {
+          cmd = "gzip -dc -- " shq(p) " 2>/dev/null"
+          while ((cmd | getline line) > 0) consider(line, i, ++ln)
+          close(cmd)
+        } else {
+          while ((getline line < p) > 0) consider(line, i, ++ln)
+          close(p)
+        }
+      }
+      { path[NR - 1] = $0; n = NR - 1 }
+      END {
+        for (i = 1; i <= n; i++) { st[i] = stampof(path[i]); ord[i] = i }
+        for (i = 2; i <= n; i++) {
+          k = ord[i]; j = i - 1
+          while (j >= 1 && (st[ord[j]] < st[k] || (st[ord[j]] == st[k] && ord[j] < k))) { ord[j + 1] = ord[j]; j-- }
+          ord[j + 1] = k
+        }
+        suf[n + 1] = -1
+        for (k = n; k >= 1; k--) suf[k] = (ord[k] > suf[k + 1]) ? ord[k] : suf[k + 1]
+        haveMax = 0; max = ""; bootRank = -1; bootLine = ""; wantQ = 1
+        if (n >= 0) scanfile(0)
+        for (k = 1; k <= n; k++) {
+          i = ord[k]
+          if (wantQ && haveMax && st[i] != "~" && st[i] < substr(max, 1, 19)) wantQ = 0
+          if (!wantQ && suf[k] <= bootRank) break
+          if (!wantQ && i <= bootRank) continue
+          scanfile(i)
+        }
+        print "T=" max
+        print "S=" ((max != "" && (max in candTok)) ? candTok[max] : "")
+        print "B=" bootLine
+      }' 2>/dev/null
   }
-  DAEMON_LAST_TS="$(ledger_union_grep '"step":"daemon\.' \
-    | sed -n 's/^{"ts":"\([^"]*\)".*/\1/p' | sort | tail -n 1)"
-  if [ -n "$DAEMON_LAST_TS" ]; then
-    DAEMON_LAST_STEP="$(ledger_union_grep "\"ts\":\"${DAEMON_LAST_TS}\"" \
-      | grep -o '"step":"daemon\.[^"]*"' | tail -n 1 | cut -d'"' -f4)"
-  fi
-  BOOT_LINE="$(ledger_union_grep '"step":"daemon.boot"' | tail -n 1)"
+  BOOT_LINE=""
+  while IFS= read -r _answer; do
+    case "$_answer" in
+      T=*) DAEMON_LAST_TS="${_answer#T=}" ;;
+      S=*) DAEMON_LAST_STEP="${_answer#S=}" ;;
+      B=*) BOOT_LINE="${_answer#B=}" ;;
+    esac
+  done <<LEDGER_ANSWERS
+$(ledger_union_answers)
+LEDGER_ANSWERS
   if [ -n "$BOOT_LINE" ]; then
     DAEMON_BOOT_TS="$(printf '%s' "$BOOT_LINE" | grep -o '"ts":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
     DAEMON_BOOT_SHA="$(printf '%s' "$BOOT_LINE" | grep -o '"head_sha":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
@@ -1137,6 +1221,70 @@ else
   esac
 fi
 
+# ── probe: does the live container still carry its commissioned mounts? (W1-T2858) ───────────────
+# `rmd serve` has no Docker socket, so THIS host-side beat is the only place the mount verdict of
+# deploy/container-runtime-contract.sh (W1-T2857) can be measured. It is written as one sanitized
+# snapshot, `state/fleet-runtime-health.json`, that Serve reads (src/lib/fleet-runtime-health.ts).
+# Expectations mirror deploy/recycle-container.sh: state and Claude always, Codex and the container
+# provider config only when their host directory exists. Host source paths are used for comparison
+# and never written; a failed verifier is `unknown`, never `healthy`, and never stops the beat.
+RUNTIME_HEALTH_FILE="${RMD_ROOT}/state/fleet-runtime-health.json"
+RUNTIME_HEALTH_VERDICT="unknown"
+RUNTIME_HEALTH_REASON="inspect-unreadable"
+RUNTIME_HEALTH_TAIL=""
+RUNTIME_HEALTH_VERIFIER="${INSTALL_DIR}/deploy/container-runtime-contract.sh"
+if [ "$RESTART_CONTAINER" = "none" ]; then
+  RUNTIME_HEALTH_REASON="skipped"
+elif ! printf '%s' "$RESTART_CONTAINER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'; then
+  RUNTIME_HEALTH_REASON="bad-container-name"
+elif [ ! -x "$RUNTIME_HEALTH_VERIFIER" ]; then
+  RUNTIME_HEALTH_REASON="verifier-missing"
+else
+  RH_HOME="${HOME:-/root}"
+  RH_STATE_DIR="${RMD_STATE_DIR:-$RMD_ROOT}"
+  RH_ARGS=(--container "$RESTART_CONTAINER"
+    --expect "$RH_STATE_DIR" /home/node/Remudero rw
+    --expect "${RMD_CLAUDE_DIR:-${RH_HOME}/.claude}" /home/node/.claude rw)
+  RH_CODEX="${RMD_CODEX_DIR:-${RH_HOME}/.codex}"
+  RH_CONFIG="${RMD_CONTAINER_CONFIG_DIR:-${RH_HOME}/.config/remudero-container}"
+  [ ! -d "$RH_CODEX" ] || RH_ARGS+=(--expect "$RH_CODEX" /home/node/.codex rw)
+  [ ! -d "$RH_CONFIG" ] || RH_ARGS+=(--expect "$RH_CONFIG" /home/node/.config/remudero rw)
+  # A hung `docker inspect` must cost this beat seconds, not the beat.
+  RH_TIMEOUT=()
+  ! command -v timeout >/dev/null 2>&1 || RH_TIMEOUT=(timeout 20)
+  RH_OUT="$(${RH_TIMEOUT[@]+"${RH_TIMEOUT[@]}"} "$RUNTIME_HEALTH_VERIFIER" "${RH_ARGS[@]}" 2>/dev/null)"
+  RH_STATUS="$(printf '%s' "$RH_OUT" | sed -n 's/^{"status":"\([a-z]*\)".*/\1/p')"
+  RH_TAIL="${RH_OUT#*\"checked\":}"
+  case "$RH_STATUS" in healthy | drift) ;; *) RH_STATUS="" ;; esac
+  if [ -n "$RH_STATUS" ] && printf '%s' "$RH_TAIL" | grep -Eq '^[0-9]+,"drift":\[.*\]\}$'; then
+    RUNTIME_HEALTH_VERDICT="$RH_STATUS"
+    RUNTIME_HEALTH_REASON=""
+    RUNTIME_HEALTH_TAIL="$RH_TAIL"
+  fi
+fi
+if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != "1" ] || [ "${RMD_RUNTIME_HEALTH_WRITE:-}" = "1" ]; then
+  RH_HOST="$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-64)"
+  if [ "$RUNTIME_HEALTH_VERDICT" = "unknown" ]; then
+    RH_JSON="$(printf '{"version":1,"observed_at":"%s","host":"%s","container":"%s","status":"unknown","reason":"%s"}' \
+      "$NOW_ISO" "${RH_HOST:-unknown}" "$(printf '%s' "$RESTART_CONTAINER" | tr -cd 'A-Za-z0-9_.-' | cut -c1-128)" "$RUNTIME_HEALTH_REASON")"
+  else
+    RH_JSON="$(printf '{"version":1,"observed_at":"%s","host":"%s","container":"%s","status":"%s","checked":%s' \
+      "$NOW_ISO" "${RH_HOST:-unknown}" "$RESTART_CONTAINER" "$RUNTIME_HEALTH_VERDICT" "$RUNTIME_HEALTH_TAIL")"
+  fi
+  # Atomic: Serve must never read a half-written file. Same directory, so `mv` is a rename(2).
+  if mkdir -p "${RMD_ROOT}/state" 2>/dev/null \
+    && RH_TMP="$(mktemp "${RMD_ROOT}/state/.fleet-runtime-health.XXXXXX" 2>/dev/null)"; then
+    if printf '%s\n' "$RH_JSON" > "$RH_TMP" 2>/dev/null && chmod 0644 "$RH_TMP" 2>/dev/null && mv -f "$RH_TMP" "$RUNTIME_HEALTH_FILE" 2>/dev/null; then
+      :
+    else
+      rm -f "$RH_TMP" 2>/dev/null
+      printf 'fleet-heartbeat: runtime-health snapshot not written to %s\n' "$RUNTIME_HEALTH_FILE" >&2
+    fi
+  else
+    printf 'fleet-heartbeat: runtime-health snapshot not written to %s\n' "$RUNTIME_HEALTH_FILE" >&2
+  fi
+fi
+
 # ── probe: is automatic gc disabled by a stale .git/gc.log? (W1-T2529) ───────────────────────────
 # WHAT THIS CLOSES. git writes `.git/gc.log` when a background `gc --auto` fails, and REFUSES to
 # attempt another auto-gc for as long as that file exists — the condition is self-sustaining,
@@ -1320,6 +1468,7 @@ tsx_present=${TSX_PRESENT}
 node_modules_entries=${NODE_MODULES_ENTRIES}
 install_dir=${INSTALL_DIR}
 install_head_sha=${INSTALL_SHA}
+runtime_contract_verdict=${RUNTIME_HEALTH_VERDICT}
 gc_verdict=${GC_VERDICT}
 gc_disabled_reason=${GC_DISABLED_REASON}
 config_root=${RMD_ROOT}

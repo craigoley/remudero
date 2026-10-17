@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
@@ -18,6 +18,15 @@ export function age(path: string, hours = 13): void {
   if (!st) return;
   if (st.isDirectory()) for (const e of readdirSync(path)) age(join(path, e), hours);
   utimesSync(path, t, t);
+  // A linked worktree's HEAD lives outside its payload directory. Backdate
+  // that fixture metadata too, but never touch a path outside this fixture.
+  const marker = join(path, ".git");
+  const fixtureRoot = path.match(/^(.*\/rmd-janitor-[^/]+)(?:\/|$)/)?.[1];
+  if (st.isDirectory() && fixtureRoot && existsSync(marker) && statSync(marker).isFile()) {
+    const raw = readFileSync(marker, "utf8").trim();
+    const head = join(raw.slice("gitdir: ".length), "HEAD");
+    if (raw.startsWith("gitdir: /") && existsSync(head) && realpathSync(head).startsWith(realpathSync(fixtureRoot) + "/")) utimesSync(head, t, t);
+  }
 }
 
 export interface Fixture {
@@ -82,9 +91,13 @@ export function fixture(): Fixture {
   const lsof = join(bin, "lsof");
   writeFileSync(lsof, `#!/usr/bin/env bash\nif [ "\${FAKE_LSOF_FAIL:-0}" = 1 ]; then exit 1; fi\nwhile IFS= read -r p; do [ -n "$p" ] && printf 'p1\\nn%s\\n' "$p"; done < "${lsofList}"\n`);
   const fsid = join(bin, "fsid");
+  // Fixtures can backdate mtime but cannot backdate kernel ctime. Supply
+  // their aged ctime from mtime; the default real find is exercised separately.
+  const findAge = join(bin, "find-age");
+  writeFileSync(findAge, '#!/bin/bash\nargs=(); for arg; do if [ "$arg" = -cmin ]; then args+=(-mmin); else args+=("$arg"); fi; done\nexec find "${args[@]}"\n');
   writeFileSync(fsid, `#!/usr/bin/env bash\nif [ "$1" = "${rootfs}" ] || [[ "$1" = "${scratch}"* ]]; then echo 1; else echo "\${FAKE_ARCHIVE_FSID:-2}"; fi\n`);
   writeFileSync(join(bin, "docker"), "#!/usr/bin/env bash\nexit 0\n");
-  for (const f of [df, lsof, fsid, join(bin, "docker")]) chmodSync(f, 0o755);
+  for (const f of [df, lsof, fsid, findAge, join(bin, "docker")]) chmodSync(f, 0o755);
   const port = hostFlock(bin);
 
   return {
@@ -104,6 +117,7 @@ export function fixture(): Fixture {
       RMD_CLEANUP_ROOT_FS: rootfs,
       RMD_CLEANUP_DF: df,
       RMD_CLEANUP_LSOF: lsof,
+      RMD_CLEANUP_FIND: findAge,
       RMD_CLEANUP_FSID: fsid,
       RMD_CLEANUP_WATCH_ROOTS: "",
       // the clone roots and coverage caches default to the real home; a case that sweeps them

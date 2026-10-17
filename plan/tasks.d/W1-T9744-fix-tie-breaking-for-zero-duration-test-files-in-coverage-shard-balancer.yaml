@@ -1,0 +1,33 @@
+- id: W1-T9744
+  title: Fix tie-breaking for zero-duration test files in coverage shard balancer
+  repo: remudero
+  depends_on:
+    - W1-T220
+    - W1-T212
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=d7b074a5e11d4535
+  attempts: 0
+  files:
+    - scripts/test-tier-manifest.mjs
+  acceptance:
+    - claim: balanceFilesByDuration spreads zero-duration test files evenly across coverage shards
+      proof: "grep: balanceFilesByDuration tie-break logic in scripts/test-tier-manifest.mjs"
+  origin: architect
+  rationale: >-
+    From the 2026-09-16 follow-up on https://github.com/craigoley/remudero/pull/5792, ratified via
+    rmd approve:
+  
+    follow-up harvest [research]: `balanceFilesByDuration` in `scripts/test-tier-manifest.mjs`
+    piles **every** zero/tied-duration test file onto whichever shard happens to be the running
+    minimum at the moment ties start (since adding 0 never changes that shard's rank), rather than
+    spreading them round-robin. Locally this produced a 618-vs-~316-file split across the four
+    coverage shards despite near-perfectly balanced *measured* duration — plausibly why one shard
+    runs closest to the 39-minute ceiling under coverage instrumentation's higher per-file
+    overhead. Not touched here (out of scope for a ci-log-targeted fix and would affect every PR's
+    shard balance, not just this one), but worth a proper LPT tie-break fix (e.g., always
+    tie-break on file count first) before the next SHARD HANG. — from unfiled (run
+    DAEMON-1789582136457, https://github.com/craigoley/remudero/pull/5792)

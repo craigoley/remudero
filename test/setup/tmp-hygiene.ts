@@ -41,6 +41,11 @@ import { TEST_PROCESS_MARKER } from "../../src/lib/tmp.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 import { LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
 import { setTestFileSlotScope } from "../../src/lib/test-slot.js";
+import { fixtureRetentionReason } from "./retained-fixtures.js";
+
+// Fixtures must not populate the operator's durable dependency store because their HOME is real.
+// Explicit fixture roots remain supported; tests can set their own override after setup.
+process.env.RMD_DEPENDENCY_SEED_ROOT ??= "";
 
 if (isMainThread && runsTestFilesInThisProcess()) {
   const missing: string[] = [];
@@ -126,7 +131,7 @@ if (isMainThread) {
 
 // W1-T6084: record the non-code files this test file reads, when main's full run asks for it
 // (RMD_READ_MAP_DIR). Unset — every ordinary run — this is one property read and changes nothing.
-installReadMapFromEnv();
+await installReadMapFromEnv();
 
 // Coverage runs execute each test file in a separate instrumented process. Those fixture reads
 // never leave the test harness, so making every child wait on the production cross-process gap
@@ -135,6 +140,14 @@ installReadMapFromEnv();
 if (process.env.NODE_V8_COVERAGE !== undefined) {
   process.env.RMD_GH_SHARED_READ_GAP_MS ??= "0";
 }
+
+// The transport floor's mode is the OPERATOR's choice (src/lib/github-transport.ts
+// resolveGhTransportFloorMode), and an operator wrapper or developer shell may export
+// RMD_GH_TRANSPORT_FLOOR=enforce. Inherited, it refused a suite's second gh-shim read inside 180 s:
+// test/a-stale-dirty-fix-owner-is-preserved-and-reclaimed.test.ts went 5 of 11 red on host env alone.
+// A test of a mode sets it itself, after this runs. Main thread only: under SHARE_ENV a worker's
+// delete would clear the mode its parent test chose (#11882).
+if (isMainThread) delete process.env.RMD_GH_TRANSPORT_FLOOR;
 
 /**
  * DISABLE GIT'S AUTOMATIC BACKGROUND GC FOR EVERY GIT THIS SUITE SPAWNS (W1-T1217).
@@ -442,6 +455,11 @@ process.on("exit", () => {
   const refusals = ghRefusalCount();
 
   for (const dir of created) {
+    const retainedReason = fixtureRetentionReason(dir);
+    if (retainedReason !== undefined) {
+      console.error(`test fixture retained: ${String(dir)} (${retainedReason})`);
+      continue;
+    }
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

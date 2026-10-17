@@ -1,0 +1,91 @@
+- id: W1-T9792
+  title: "A FIX ROUND THAT FINDS ITS CRITERION UNMEETABLE ENDS IN AN OPERATOR QUESTION, NEVER A PLAN AMENDMENT. #12043 (W1-T9363) said so in NEEDS_DESIGN, and four escalations followed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # the fix rung's hand-off row and the sweep's refusal-amendment nomination; one new test file
+  band_meaning: span
+  origin: "operator session 2026-10-16 (Craig, 11:25Z): review #12043, get it merged, and fix the root cause that kept rmd from handling it"
+  plan_refs: [W1-T4838, W1-T5532, W1-T5531, W1-T5675, W1-T8868, W1-T3434, W1-T9363]
+  files:
+    - src/lib/refusal-amendment.ts
+    - src/lib/prompt-render.ts
+    - src/run-task.ts
+    - test/a-fix-rounds-refused-criterion-becomes-a-plan-amendment.test.ts
+  status: merged
+  priority: 2  # each case holds a PR for hours, spends fix rounds and judge calls at every refreshed head, and ends in a hand amendment
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core host ledger (read-only, niced; the live file plus every 2026-10-1* archive):
+      - #12043 (W1-T9363, run-W1-T9363-1792070864786). Its plan criterion 2 was `grep: serializeRetroDispatch( in
+        src/lib/drain.ts`, but drain.ts never runs a retro (the retro is retroCommand in src/run-task.ts). The review
+        failed that criterion. Fix round 1 (2026-10-15T22:46Z, mode reviewer-unmet) ended NEEDS_SCOPE src/run-task.ts,
+        and the scope amendment was refused as main-owned. Round 2 (10-16T01:42Z) ended
+        `fix.needs_design` "claim-mismatch: drain.ts never calls the serializer or runs retro synthesis; correct or
+        retire the acceptance claim before further implementation". Both rounds had diff_stat []. Then came 21
+        `fix.progress_judged` rows, three branch refreshes and four escalation issues (#12060, #12208, #12256, #12274).
+        The renderClarificationQuestion escalations recommended "re-dispatch-with-constraint", not "revise-spec".
+        The operator's plan amendment (#12297) fixed it.
+      - 27 `fix.needs_design` rows from 10-07 to 10-16, and at least 9 of them (7 tasks) name a plan-text defect:
+        - W1-T6087 x3: the task needs suites deleted, but credited-test-path needs them to exist;
+        - W1-T5736 and W1-T5689: a proof passes at the merge base;
+        - W1-T6106: already landed on main;
+        - main-repair-97e3f9136d82 x2: the base already satisfies the claims;
+        - W1-T8921: unit-test proofs that need a grep amendment;
+        - W1-T9363.
+        Control: the same query returns all 27 rows, including W1-T9363's.
+    WHY, READ on origin/main ec0eb2ce2 (symbols, not lines):
+      - `decideFixOutcomeAction` (src/lib/fix-outcome.ts) maps NEEDS_DESIGN to `hand-off`. runFixRung ledgers
+        `fix.needs_design` {reason, head_sha} and returns. That reason is free prose capped at 500 characters, and
+        nothing machine-readable says the criterion itself is the blocker.
+      - The route that turns a worker's account into a plan amendment exists. It is W1-T4838's
+        `noPrVerdictRowsFromLedger` → `extractRefusal` → `draftRefusalAmendments` in runSweep. But it nominates only
+        implement `verdict` rows with verdict no_pr. A fix round's hand-off is never a candidate.
+      - The fix footer in src/lib/prompt-render.ts offers NEEDS_DESIGN and does not invite the categorized `REFUSED:`
+        block, the review.ts `parseCriterionRefusals` grammar the implement contract already uses.
+      - W1-T8868's escalation triage has a `plan_amendment_pr` executor, but its only rule (`isStaleProofRefusal`)
+        matches pr-open's stale-proof refusal. The policy is `mode: shadow` in any case.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the new shards on all 506 fetched origin heads for
+    NEEDS_DESIGN|needs_design|draftRefusalAmendment|refusal-amendment. On main: W1-T5532 created NEEDS_DESIGN and
+    split off NEEDS_SCOPE's files: amendment, a different outcome. W1-T9306 covers the unstated outcome. W1-T4838,
+    W1-T5531 and W1-T5675 cover implement-verdict refusals only. On heads: only the W1-T9363 amendment branch, which
+    is the positive control.
+  design: |
+    1. PROMPT. In the fix footer's NEEDS_DESIGN line (src/lib/prompt-render.ts), say what to do when the unmet
+       criterion cannot be met as written: put the categorized `REFUSED:` block above the FIX_OUTCOME line, in the
+       implement contract's exact grammar (`N. [class] evidence`, classes from REFUSAL_REASON_CLASSES). Use one shared
+       literal so the two prompts cannot drift.
+    2. ROW. On the hand-off arm, runFixRung adds `report_excerpt` to `fix.needs_design`: the REFUSED block lines from
+       the worker transcript, bounded, and present only when `extractRefusal` finds one. Build it with a helper
+       exported from src/lib/refusal-amendment.ts (`refusalExcerptFromFixReport`) so the run-task change is one call.
+    3. NOMINATION. In src/lib/refusal-amendment.ts, a fix round's newest `fix.needs_design` row per task that carries
+       `report_excerpt` becomes a candidate beside the no_pr verdicts:
+       - its source_run_id is the round's run id;
+       - it gets the same REFUSAL_AMENDMENT_STEP dedupe, the same max-age backstop and the same `amendmentSettled`
+         main-moved retry (W1-T5531);
+       - runSweep's existing W1-T4838 block drafts it unchanged: ONE pointer PR per task, reviewed and judged like any
+         plan PR.
+       A row with no categorized block is never a candidate, so it keeps today's escalation.
+    4. NOTHING ELSE MOVES. The escalation path, the progress judge and the triage policy are untouched. This task
+       only gives the fleet's own amendment drafter the account the fix worker already wrote.
+    Tests go in test/a-fix-rounds-refused-criterion-becomes-a-plan-amendment.test.ts. They import
+    src/lib/refusal-amendment.ts and src/lib/prompt-render.ts, never src/run-task.ts (the affected-reach ratchet),
+    and drive the fold over a ledger shaped like #12043's round 2.
+  acceptance:
+    - claim: "a fix round's fix.needs_design row carrying a categorized refusal is nominated for a plan amendment"
+      proof: 'grep: test("W1-T9792: a fix round that refuses its criterion is nominated for a plan amendment" in test/a-fix-rounds-refused-criterion-becomes-a-plan-amendment.test.ts'
+    - claim: "a fix.needs_design row with no categorized refusal is not nominated"
+      proof: 'grep: test("W1-T9792: an uncategorized needs-design row keeps its escalation" in test/a-fix-rounds-refused-criterion-becomes-a-plan-amendment.test.ts'
+    - claim: "a fix-round refusal already drafted is not drafted twice"
+      proof: 'grep: test("W1-T9792: a drafted fix-round refusal is not drafted again" in test/a-fix-rounds-refused-criterion-becomes-a-plan-amendment.test.ts'
+    - claim: "the fix rung writes the refusal excerpt on its hand-off row"
+      proof: "grep: refusalExcerptFromFixReport( in src/run-task.ts"
+    - claim: "the fix footer tells a worker to state an unmeetable criterion as a categorized refusal"
+      proof: "grep: cannot be met as written in src/lib/prompt-render.ts"
+  falsifier: |
+    Leave noPrVerdictRowsFromLedger reading only verdict rows: the first test finds no candidate and fails. Nominate
+    every fix.needs_design row: the second test nominates prose and fails. Drop the REFUSAL_AMENDMENT_STEP dedupe for
+    the new source: the third test drafts twice and fails.

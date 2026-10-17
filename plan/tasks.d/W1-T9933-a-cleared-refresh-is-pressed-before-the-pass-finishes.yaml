@@ -1,0 +1,60 @@
+- id: W1-T9933
+  title: "A BASE-FIXED REFRESH THE FULL PASS CLEARED WAITS FOR THE WHOLE PASS — runSweep enters a cleared head into the W1-T9595 refresh admission mid-loop but runs refreshAdmission.run only after every PR's disposition, and the light pass reads the head as 'refresh unwired', so on 2026-10-16 #12394's refresh cleared at 19:07:35Z was pressed at 19:49:10Z, after its 45-minute stuck backstop had already escalated it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, WHEN a full pass presses an admitted refresh. Admission order, width, clearance and the light-pass surface are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 PR-queue drain (agent PRQ, 19:55Z): #12394 escalated stuck while its cleared refresh sat in a pass that had not finished"
+  plan_refs: [W1-T9595, W1-T9563, W1-T7735, W1-T6405]
+  files:
+    - src/lib/sweep.ts
+    - test/a-cleared-refresh-is-pressed-before-the-pass-finishes.test.ts
+  status: queued
+  priority: 1  # the base-fixed refresh is the remedy every PR that inherited a red main waits on; a long full pass delays all of them past the stuck backstop
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger (live ledger.ndjson, streamed read-only from the Azure host), daemon pid 586648:
+    - Full pass `sweep.pass` surface full at 19:03:11Z. The next full pass was skipped three times
+      (`daemon.sweep.skipped_concurrent` 19:36:23, 19:42:10, 19:47:57Z: "a full pass is already in flight").
+    - #12394 (head 0c535ce0): `refresh.clearance` arm base-fixed, refresh TRUE at 19:07:35Z, inside that pass. Its only
+      `sweep.base_fixed.refresh` (outcome updated, forced_by base-fixed-admission) and the pass's single
+      `sweep.base_red.refresh_admission` row (signal slow-start, width 1, admitted [#12394]) are both at 19:49:10Z, 41.6
+      minutes after clearance. Meanwhile 9 light-pass dispositions read "the branch refresh is unwired on this surface
+      (light pass)", `pr.stuck` fired at 19:31:22Z (own-red 47 min, BACKSTOP 45), and a question was logged at 19:35:37Z.
+    - WHY: in src/lib/sweep.ts, the base-fixed arm calls `refreshAdmission.enter(...)` during the per-PR loop, but
+      `await refreshAdmission.run(...)` sits after the loop (followed by `admissionFinalizations`). Every slower per-PR
+      action in the same pass (base reproductions, trial-merge probes, fix preparation) runs before any admitted
+      refresh. W1-T9595's light-pass wiring deliberately passes no updateBranch, so no other surface presses it.
+    - Settled full passes earlier the same day ran 6.2-31.0 min, and one 120.6 min (daemon.sweep.settled, archives
+      ledger.2026-10-16T15-37-45-989Z and T17-23-25-589Z). So the delay is routine, not a one-off.
+    - That pass was itself `daemon.sweep.abandoned` at 19:51:11Z (elapsed 3,696,432 ms against a learned bound of
+      3,690,294 ms) and settled at 19:52:22Z (3,767,264 ms). The next full pass started at 19:57:11Z with a learned bound of
+      5,523,822 ms (92 min). At 20:13:20Z a freshness restart latched mid-pass (`daemon.freshness_drain.started`, reason
+      upper_age, 11 detached sweep actions, 4 reviews in flight), while #12388 and #12391 read "main is green, but the
+      branch refresh is unwired on this surface (light pass)". A refresh that waits for the end of the loop is lost
+      whenever the pass is abandoned or the daemon restarts first.
+    NOT COVERED ELSEWHERE: W1-T9595 (merged) built the admission and its end-of-loop run. W1-T9563 (merged) learns the
+    pass bound. W1-T9918 (queued) is the light pass's own ready-refresh reads. None presses an admitted refresh before
+    the loop ends.
+  design: |
+    1. Decide the admission width at pass start, as now (refreshAdmissionReading over the open PRs and ledger). Then
+       press each candidate as it enters, while the pass's admitted count is below that width, in arrival order.
+       Oldest-held-first ordering is kept for the overflow: a candidate beyond the width is held as today, and the
+       end-of-loop `run` writes the one `sweep.base_red.refresh_admission` row covering both the early-pressed and
+       the held candidates.
+    2. A head pressed early settles its disposition at once, so its `sweep.disposed` reads "branch refresh requested".
+    3. Unchanged: the slow-start width of 1 with no uptake read, the 2x cohort width, `waiting` holding every candidate,
+       clearance, and the light pass's lack of updateBranch.
+    No new bound and no LLM.
+  acceptance:
+    - claim: "a cleared base-fixed refresh within the pass width is pressed when it enters, before a later PR's slow action in the same pass"
+      proof: 'grep: test("W1-T9933: a cleared refresh within the width is pressed before the pass finishes" in test/a-cleared-refresh-is-pressed-before-the-pass-finishes.test.ts'
+    - claim: "a candidate past the width is still held and the pass writes one admission row naming both"
+      proof: 'grep: test("W1-T9933: a candidate past the width is held and one admission row names both" in test/a-cleared-refresh-is-pressed-before-the-pass-finishes.test.ts'
+  falsifier: |
+    At origin/main, a runSweep fixture with a base-fixed-cleared PR first and a second PR whose action awaits a gate the
+    test controls records no updateBranch call until the gate opens, so the first test fails.

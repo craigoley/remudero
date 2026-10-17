@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { READ_MAP_FORMAT, readAffectedSuitesInput, selectAffectedSuites, type ReadMapInput } from "../src/lib/affected-suites.js";
+import { IMPACT_MAP_STALENESS_BOUND } from "../src/lib/test-impact-map.js";
 
 const contracts = ["openapi/daemon.yaml", "packages/api-client/src/schema.d.ts"];
 const proof = "test/an-openapi-change-selects-the-contract-suites-not-the-full-suite.test.ts";
@@ -40,12 +41,12 @@ test(proof, () => {
 });
 
 test(`${proof}: unusable read maps keep contract readers and report the map problem`, () => {
-  const map: NonNullable<ReadMapInput["map"]> = { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} };
+  const map: NonNullable<ReadMapInput["map"]> = { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] };
   const cases: Array<{ readMap?: ReadMapInput; problem?: string }> = [
     {},
     { readMap: { mapProblem: "file not found", drift: { changedSinceMap: [] } }, problem: "no read map (file not found)" },
     { readMap: { mapProblem: "malformed", drift: { changedSinceMap: [] } }, problem: "no read map (malformed)" },
-    { readMap: { map, drift: { distance: 900, changedSinceMap: [] } }, problem: "read map main is stale: 900 commits behind the base, past its bound of 150" },
+    { readMap: { map, drift: { distance: 900, changedSinceMap: [] } }, problem: `read map main is stale: 900 commits behind the base, past its bound of ${IMPACT_MAP_STALENESS_BOUND}` },
     { readMap: { map, drift: { problem: "no ancestry", changedSinceMap: [] } }, problem: "read map main is not an ancestor of the base (no ancestry)" },
   ];
   for (const path of contracts) {
@@ -63,7 +64,7 @@ test(`${proof}: unusable read maps keep contract readers and report the map prob
 
 test(`${proof}: other contract-tree paths still force a full run and name the path`, () => {
   const readMaps: Array<ReadMapInput | undefined> = [undefined, {
-    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {} },
+    map: { format: READ_MAP_FORMAT, sha: "main", suites: [], reads: {}, listed: {}, unknownDescriptorSuites: [] },
     drift: { distance: 0, changedSinceMap: [] },
   }];
   for (const path of ["openapi/other.yaml", "packages/api-client/src/client.ts"]) {

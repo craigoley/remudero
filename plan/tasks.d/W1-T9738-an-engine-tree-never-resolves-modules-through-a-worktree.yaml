@@ -1,0 +1,68 @@
+- id: W1-T9738
+  title: "AN ENGINE TREE NEVER RESOLVES ITS MODULES THROUGH A WORKER'S WORKTREE — buildEngineAfterStore cuts each engine tree with the run's own worktree as repoDir, so linkWorktreeNodeModules points engines/<hash>/node_modules at /home/node/Remudero/worktrees/run-W1-T*/node_modules, a path the worker can rewrite; on 2026-10-15 all 13 core engine trees linked into a run worktree and all 13 targets were gone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, where an engine tree's node_modules points; security: harness code must not resolve modules from a worker-writable path
+  band_meaning: blast-radius
+  origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9619/W1-T9602 builder report, item P (security)'
+  plan_refs: [W1-T9077, W1-T9374, W1-T8776, W1-T2777, W1-T9619]
+  files:
+    - src/lib/engine-tree.ts
+    - src/run-task.ts
+    - test/an-engine-tree-never-resolves-modules-through-a-worktree.test.ts
+  status: merged
+  priority: 1  # security: harness code resolving modules from a worker-writable path
+  attempts: 0
+  rationale: |
+    READ at origin/main 6bdb26420 (symbols, not lines):
+    - src/run-task.ts: after a run worktree is cut, the dispatch fills the store from it (W1-T9374) and then calls
+      buildEngineAfterStore(worktreePath, ...). That passes the RUN WORKTREE as repoDir to ensureEngineTree.
+    - src/lib/engine-tree.ts buildEngine links node_modules with linkWorktreeNodeModules(deps.repoDir, temp).
+      src/lib/worker.ts resolveNodeModulesSource(repoDir) prefers `<repoDir>/node_modules`, so the engine's link
+      targets the run worktree's own node_modules path, not the install it may itself point at.
+    - An engine tree is what a run child that outlives the daemon runs from (W1-T9077, ADR 0007). Its modules then
+      resolve through a directory inside a worker's worktree, which the worker can write: replacing that
+      worktree's node_modules (a symlink to the install today) with its own directory changes what harness code
+      loads. The engine record and its bundle are judged (materializeFromStore, childEntryIsCurrent); its
+      node_modules is not.
+    - When the run's worktree is reaped, the link dangles, so the engine cannot resolve any package.
+    OBSERVED 2026-10-15 ~22:20Z on the Azure host, readlink only (nothing inside the dirs was read):
+    /home/craigoleyagent/rmd-state2/state/engines/ holds 13 engine trees; each node_modules is a symlink to
+    /home/node/Remudero/worktrees/run-W1-T<id>-<epoch>/node_modules (W1-T5418, 7898, 9359, 9350, 8138, 9541, 9083,
+    9363, 9085, 9307, 7691, 9327, 9087). None of the 13 targets exists under the live scratch worktrees dir
+    (/mnt/scratch/rmd/rmd-state2/worktrees) or the state dir's. The W1-T9619 builder saw 8 such trees earlier, several
+    dangling.
+    INFERRED: a run child started from any of these engines today fails to resolve its packages, and while a
+    target worktree lives, its worker controls the engine's modules.
+  design: |
+    1. The engine's node_modules never points into a worktrees root. buildEngineAfterStore passes the managed
+       checkout (repos/<repo>) or the daemon's install root as the node_modules source, and buildEngine links to the
+       RESOLVED install directory (realpath of the source, so a symlinked worktree node_modules is followed to what it
+       names at build time), never to a path under the instance's worktrees root.
+    2. Refuse, never degrade: if the resolved source lies under a worktrees root (state or scratch bind) or does not
+       exist, the engine build fails with `node-modules-untrusted` or `node-modules-missing`, ledgered, and no engine
+       is published. The engine is cut from the worktree's sha as today; only the link source changes.
+    3. Existing engines: newestCurrentEngine (and the pruning pass) treat an engine whose node_modules link does not
+       resolve to the trusted install as not current, so it is rebuilt or pruned; no run child starts from it.
+    4. The engine build row names `node_modules_target` so the fleet can audit every engine from the ledger.
+    No new constant or switch.
+    Tests go in test/an-engine-tree-never-resolves-modules-through-a-worktree.test.ts, titled verbatim as in the
+    proofs, over a temp state root with a real git repo, a fake install dir and a worktree whose node_modules links
+    to it.
+  acceptance:
+    - claim: "an engine built after a run worktree's store fill links node_modules to the resolved install, never to a path under the worktrees root"
+      proof: 'grep: test("W1-T9738: an engine links node_modules to the install, never into a worktree" in test/an-engine-tree-never-resolves-modules-through-a-worktree.test.ts'
+    - claim: "a node_modules source under a worktrees root or missing fails the engine build with a named reason and publishes nothing"
+      proof: 'grep: test("W1-T9738: an untrusted or missing node_modules source publishes no engine" in test/an-engine-tree-never-resolves-modules-through-a-worktree.test.ts'
+    - claim: "an existing engine whose node_modules resolves into a worktree or dangles is not current"
+      proof: 'grep: test("W1-T9738: an engine linked into a worktree is not current" in test/an-engine-tree-never-resolves-modules-through-a-worktree.test.ts'
+  falsifier: |
+    On origin/main, call buildEngineAfterStore with a run worktree whose node_modules is a symlink to a fake install:
+    readlink of the engine's node_modules names the worktree's node_modules path, so the first test fails. Remove
+    the worktree: the engine's link dangles and it is still reported current, so the third test fails. Follow the
+    symlink with realpath but skip the worktrees-root check, and give the worktree a real node_modules DIRECTORY:
+    the engine links into the worktree and the second test fails.

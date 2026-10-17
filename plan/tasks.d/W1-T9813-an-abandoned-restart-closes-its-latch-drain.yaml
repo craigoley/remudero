@@ -1,0 +1,61 @@
+- id: W1-T9813
+  title: "A LATCH WHOSE RESTART IS ABANDONED NEVER CLOSES ITS DRAIN ROW — W1-T8172's beginLatchDrain writes daemon.freshness_drain.started at the latch, but the dispatch phase reaches stopForFreshness only when neither STOP nor PAUSE is set, so a stop, a pause, an error or blocked return, or a second latch leaves that .started with no .completed and no row saying the restart was dropped"
+  repo: remudero
+  depends_on: [W1-T9808]  # both edit the latch-drain state in runDaemon
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — every latch-drain start ends in exactly one closing row; what the drain waits on and when the restart fires are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 8 (B17): W1-T8172 (#12249) build lead (4), a latch whose restart is abandoned leaves .started with no .completed; ~/Remudero-notes/tracker-2026-10-15.md B17 lines"
+  plan_refs: [W1-T8172, W1-T8170, W1-T9069, W1-T5343, W1-T4429]
+  files:
+    - src/lib/daemon.ts
+    - test/an-abandoned-restart-closes-its-latch-drain.test.ts
+  status: queued
+  priority: 3  # observability: no reader pairs the rows today, but every drain-duration and abandoned-review measurement of a restart reads them
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16), src/lib/daemon.ts:
+      - `beginLatchDrain(latchAtMs)` runs from `latchRestart` and, when anything is in flight, logs
+        `daemon.freshness_drain.started` with `started_at: "latch"`. It stores `latchDrain`; only `drainBeforeRestart`
+        with the same `latchAtMs` marks it `done` and writes `.completed`.
+      - The dispatch phase calls that only through `if (inFlightFreshness && !deps.checkStop?.() &&
+        !deps.checkPause?.()) { ... return stopForFreshness(inFlightFreshness, restartWait.decidedAtMs); }`. With STOP
+        set the next tick returns `summary("stopped", stopped)`. With PAUSE set the phase falls through, and
+        `inFlightFreshness` is a per-phase `let`, so a later phase latches again with a new time and
+        `beginLatchDrain` replaces `latchDrain` (`if (latchDrain?.latchAtMs === latchAtMs) return;` is the only
+        guard). The `summary("error", ...)` and `summary("blocked", ...)` returns just above skip it too.
+      - So each such latch leaves one `.started` and no `.completed`, and nothing records that the restart was not
+        taken. `daemon.restart_latch_cost` is not written on those paths either.
+      - No source reader pairs the rows (`git grep freshness_drain` outside daemon.ts finds only the idle-lane cause
+        name in src/lib/idle-lane-accounting.ts). Operator and agent measurements of drain cost read them.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the open heads updated since 10-12 for latchDrain,
+    beginLatchDrain and freshness_drain; none closes an abandoned latch drain.
+  design: |
+    1. CLOSE IT WHERE THE RESTART IS DROPPED. When the dispatch phase returns, or falls through to the next tick, with
+       a latch drain that started and is not done, write `daemon.freshness_drain.abandoned` with `latched_at`,
+       `reason` ("stop", "pause", "error", "blocked" or "relatched"), `in_flight_reviews_left`,
+       `detached_sweep_actions_left` and `duration_ms` from the latch, then clear `latchDrain`. A new latch that
+       replaces an open one closes the old one with "relatched" first.
+    2. Nothing is cancelled: the reviews and actions the latch saw keep running, as today. A later restart's drain
+       starts its own row.
+    3. Every `.started` ends in exactly one `.completed` or `.abandoned`.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below; drive runDaemon with an injected runOne,
+       checkFreshness, checkStop, checkPause and fake clock, as test/the-restart-drain-starts-when-the-restart-latches.test.ts
+       does):
+       - a STOP after the latch writes one `.abandoned` row with reason "stop";
+       - a PAUSE after the latch writes one `.abandoned` row with reason "pause", and a later latch's row is its own;
+       - a restart that fires still writes one `.completed` and no `.abandoned` (positive control).
+  acceptance:
+    - claim: "a stop after the latch closes the latch drain with an abandoned row"
+      proof: 'grep: test("W1-T9813: a stop after the latch closes the latch drain" in test/an-abandoned-restart-closes-its-latch-drain.test.ts'
+    - claim: "a pause after the latch closes the latch drain, and a later latch starts its own"
+      proof: 'grep: test("W1-T9813: a pause after the latch closes the latch drain" in test/an-abandoned-restart-closes-its-latch-drain.test.ts'
+    - claim: "a restart that fires writes one completed row and no abandoned row"
+      proof: 'grep: test("W1-T9813: a restart that fires writes one completed row" in test/an-abandoned-restart-closes-its-latch-drain.test.ts'
+  falsifier: |
+    At origin/main, runDaemon with a review in flight at a latch and STOP set before the last lane settles writes
+    `daemon.freshness_drain.started` (started_at latch) and returns "stopped" with no closing row, so the first test
+    fails.

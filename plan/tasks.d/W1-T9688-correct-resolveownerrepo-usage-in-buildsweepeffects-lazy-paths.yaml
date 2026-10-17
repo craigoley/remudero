@@ -1,0 +1,29 @@
+- id: W1-T9688
+  title: Correct resolveOwnerRepo usage in buildSweepEffects lazy paths
+  repo: remudero
+  depends_on:
+    - W1-T254
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=9045f4bde51f317e
+  attempts: 0
+  files:
+    - src/run-task.ts
+    - src/lib/repo-location.ts
+  acceptance:
+    - claim: resolveOwnerRepo and resolveOwner no longer read origin in lazy paths of buildSweepEffects (one cross-file invariant, so the single test needs both files together and the task is raised to risk:high with band_meaning span)
+      proof: "unit test: buildSweepEffects lazy paths resolve owner without reading origin"
+  origin: architect
+  rationale: >-
+    From the 2026-10-10 follow-up on https://github.com/craigoley/remudero/pull/10607, ratified
+    via rmd approve:
+  
+    follow-up harvest [task]: other `resolveOwnerRepo()` calls inside `buildSweepEffects`' lazy
+    paths, such as `resolveOwner()` at about line 3966, still read origin. The test's `route` stub
+    never reaches them, but a future end-to-end `rmd fix` test that does would hit the same
+    sandbox failure. — from unfiled (run DAEMON-1791626152188,
+    https://github.com/craigoley/remudero/pull/10607)

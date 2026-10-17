@@ -1,0 +1,85 @@
+- id: W1-T9632
+  title: "THE FULL-SWEEP BOUND KEEPS LEARNING ACROSS RESTARTS — W1-T9563's learner needs 5 settled passes, but its boot seed reads only the live ledger, so each hourly restart resets it; real passes take 23-83 min, it never reaches 5, and on 2026-10-15 every full pass was still abandoned at 559 s"
+  repo: remudero
+  depends_on: [W1-T9563]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, what the full pass's bound is before the learner has 5 samples and what it is seeded from; high for blast radius: every full pass's wait
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: \"fix the root cause\" — PRs stuck behind full passes still abandoned at the 559 s cold-start bound after #11879 (W1-T9563) merged. Standing ruling: no hard thresholds, so the fix is a mechanism with no new fixed number"
+  plan_refs: [W1-T9563, W1-T9590, W1-T1044, W1-T8927, W1-T2582, W1-T147, W1-T9329]
+  files:
+    - src/lib/daemon.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - test/the-full-sweep-bound-is-learned-from-passes-that-completed.test.ts
+    - test/the-sweep-bound-keeps-learning-across-restarts.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-15, core ledger (read only, streamed to the Mac):
+      daemon.sweep.settled: 07:39Z elapsed 4,995 s (abandoned: true); 08:03Z 1,384 s (abandoned: true);
+        11:18Z 2,373 s (abandoned: true).
+      daemon.sweep.abandoned at 06:26Z (623 s), 07:49Z (579 s), 10:49Z (588 s) and 11:33Z (561 s), every one with
+        bound_basis no_history_fallback and samples 0-2. The 11:24Z daemon.sweep.started row reads bound_ms 559000,
+        samples 1.
+    WHY, read on origin/main 60af67fbf, src/lib/daemon.ts:
+      - `learnedSweepBound` returns the policy value (`sweepWallClockBoundMs`, 559 s) while fewer than
+        `SWEEP_BOUND_MIN_SAMPLES` (5) settled durations are held, however long the held ones are.
+      - `runDaemon` seeds the learner with `settledSweepDurations(bootLedgerLines)`, and `bootLedgerLines` is
+        `deps.readLedgerLines()`, the live ledger file only. `daemon.sweep.settled` is not a retained step, so a
+        rotation moves those rows to an archive. The core daemon restarts about hourly, and full passes take
+        23-83 min, so a boot finds 0-2 settled rows and the learner never reaches 5. Every full pass is abandoned at
+        559 s exactly as before W1-T9563, while the settled rows already show the pass needs far longer.
+    THE BOOT ALREADY READS THE UNION. `runDaemon` calls `deps.readRestartHistory()` at boot; the core daemon wires it
+    to `readRestartHistoryLines` (src/run-task.ts), one step-scoped `readLedgerUnionRecordsSync` read over
+    `RESTART_HISTORY_WINDOW_MS` (7 days) of rotations plus the live file. Adding the settled step to that read's step
+    list seeds the learner from the archives with no second scan of the corpus, and no new window.
+    RELATED, NOT OVERLAPPING: W1-T9590 (queued, P2) changes WHICH settled passes are sampled (only prs_walked > 0).
+    This task changes what the bound is before 5 samples and where the boot seed comes from. Both rules read the
+    learner's sample, so W1-T9590's filter applies to both, and the boot seed stays parsed by `settledSweepDurations`,
+    where W1-T9590 adds its prs_walked filter. W1-T9590's design step 4 says the policy value applies below 5 samples
+    "as today": once this task merges, "today" is the rule in design step 1 below, applied to SAMPLED passes, and its
+    second claim ("never learns a bound of seconds") still holds because this rule never goes under the policy value.
+    Its shard is not amended here: any edit re-lints its forward-referenced `unit test:` proofs.
+    Also sharing files: W1-T147 (the chaos drill) declares src/lib/daemon.ts and src/run-task.ts for its injected
+    outages, and W1-T9329 wires a status cadence from plan/policy.yaml into run-task.ts statusCommand. Neither touches
+    the sweep bound, its seed, or the restart-history read.
+  design: |
+    1. The cold-start bound never falls below the longest settled pass times the same headroom. In
+       `learnedSweepBound`, while fewer than `SWEEP_BOUND_MIN_SAMPLES` durations are held, the bound is
+       max(policy fallback, `SWEEP_BOUND_HEADROOM` x the longest held duration). When the longest-pass term is the
+       larger, `bound_basis` is `settled_max_fallback`; otherwise it stays `no_history_fallback`. With 5 or more
+       samples the nearest-rank p90 rule (`observed_passes`) is unchanged. No new constant: the headroom, window
+       and sample floor are W1-T9563's. Never clamp the result.
+    2. The boot seed reads the union. Export the step name as a constant from src/lib/daemon.ts and add it to
+       `readRestartHistoryLines`'s step list in src/run-task.ts. In `runDaemon`, seed the learner after the
+       restart-history read, from its lines when that read succeeded, and from the live ledger lines when it was
+       absent or threw (`daemon.restart_history_unreadable`, already logged). Never seed from both, so a live row is
+       not counted twice. `settledSweepDurations` keeps parsing the rows (W1-T9590 changes its filter there) and
+       returns them in `ts` order, so the window keeps the newest passes whatever order the union returns.
+       Log `daemon.sweep.seeded {samples, source: "ledger_union" | "live_ledger"}` once at boot.
+    3. plan/policy.yaml's `sweepWallClockBoundMs` comment says what the row now bounds: the cold start only when no
+       settled pass outlasts it, and the review drain.
+    4. Out of scope: the review-drain bound, the light pass, which passes are sampled (W1-T9590), and the quantile,
+       headroom and window values.
+  acceptance:
+    - claim: "three settled passes of 1,384, 2,373 and 4,995 s bound the next full pass at no less than 3 x 4,995 s with bound_basis settled_max_fallback, not the 559 s policy value"
+      proof: 'grep: test("W1-T9632: three settled passes of 1,384-4,995 s bound the next pass at 3x the longest, not the 559 s policy value" in test/the-sweep-bound-keeps-learning-across-restarts.test.ts'
+    - claim: "a boot whose long settled passes sit only in a rotated archive, with only short ones in the live ledger, seeds the learner from the union once per row and bounds its first pass by observed_passes"
+      proof: 'grep: test("W1-T9632: a boot whose settled passes were rotated into archives keeps its samples" in test/the-sweep-bound-keeps-learning-across-restarts.test.ts'
+    - claim: "an unreadable union seeds the learner from the live ledger"
+      proof: 'grep: test("W1-T9632: an unreadable archive union seeds the sweep bound from the live ledger" in test/the-sweep-bound-keeps-learning-across-restarts.test.ts'
+    - claim: "the cold-start rule names its basis"
+      proof: "grep: settled_max_fallback in src/lib/daemon.ts"
+  falsifier: |
+    Hold 3 settled durations of 1,384, 2,373 and 4,995 s with a 559 s policy value. On origin/main
+    `learnedSweepBound` returns 559 s with no_history_fallback, so the first test fails; with the change it returns
+    14,985 s with settled_max_fallback. Write 8 settled rows of the 11-35 min population into a gzipped rotation, 2 short ones into the live ledger,
+    and run `runDaemon` with `readRestartHistory` reading that state dir through `readRestartHistoryLines`: on
+    origin/main the step is not in the read and the seed ignores it, so the first pass starts on the policy value
+    and is abandoned, and the second test fails. Seed from the live lines only again, or drop the step from the
+    read, and the second test goes red.

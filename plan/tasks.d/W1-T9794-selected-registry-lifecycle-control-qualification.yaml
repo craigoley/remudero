@@ -1,0 +1,90 @@
+- id: W1-T9794
+  title: Selected registry lifecycle and pause observations retain exact owner-controlled targets
+  repo: remudero
+  depends_on: [W1-T9793, W1-T7727, W1-T9500]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator instruction 2026-10-16: qualify remaining trusted lifecycle consumers in opt-in shadow, never stop or retarget live workers"
+  plan_refs: [W1-T9435, W1-T9559, W1-T9572, W1-T9793, W1-T7755, W1-T7756]
+  files: [src/lib/selected-registry-consumers.ts, src/lib/deployer.ts, src/lib/pause-target.ts, src/lib/serve-policy-convergence.ts, src/lib/sre-lane.ts, src/run-task.ts, test/selected-registry-lifecycle-consumers.test.ts, test/deployer.test.ts, test/a-pause-holds-only-the-instance-it-targets.test.ts, test/a-changed-serve-policy-reaches-the-running-console.test.ts, test/the-sre-lane-finds-its-instance-from-inside-its-container.test.ts, test/the-sre-lane-runs-on-the-primary-instance.test.ts, test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts, docs/instance-registry-selection-contract.md, docs/docs-index.json, src/lib/instance-registry-selection.ts, test/one-registry-for-the-fleet.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    At actual main ec0eb2ce2, realDeployDeps captures registry text from
+    daemonInstanceRegistryPath, serve-policy-convergence independently reads that
+    default, pauseTargetOrRefuse trims/ORs the environment override, and
+    daemonSreLaneInput independently collapses selection. These control exact
+    instance/state/container targets and cannot borrow run/sweep mode receipts.
+    W9500's in-container SRE instance naming and W7727's instance-only pause are
+    existing behavior, not work to duplicate. Their normal source merges11780
+    and10769 were read independently; plan status alone is not credit. The
+    ALL-open subject audit found no selected lifecycle-control implementation;
+    freshness12294 and claim identity12289 remain with their owners.
+  design: |
+    1. Reuse W9793's observeSelectedRegistry adapter and bounded selected reader at actual
+       deploy/rollback/recycle, serve-policy convergence, pause/resume and SRE
+       target adoption seams. Forward the explicit SHADOW context from real CLI
+       and daemon composition, not fixture-only ports or stored trusted strings.
+       The maintained deployer must invoke this adapter at real target adoption,
+       not an import, fixture-only call or dummy production text. Retain the
+       existing independent legacy target and each actual outcome.
+       Do not turn on the SRE lane, invoke a real recycle or change its detectors.
+    2. Snapshot original code/registry digest, actual instance/repository, current
+       root and intended action before async work. Recheck after current admission
+       and immediately before the real attempted effect observation; stale roots,
+       missing/retired/ambiguous identities, unsupported capabilities and outages
+       remain unknown/would-refuse, never selected live or another instance.
+       Preserve host/container namespace distinctions; a matching name alone does
+       not prove a state-root/mount binding. Use current real evidence, not invented
+       PR heads or inferred host paths. No blocking daemon adapter/new scanner.
+    3. SHADOW must not stop/restart, write flags, change rollout/recycle targets,
+       consume pending effects, clear PAUSE/STOP/owner holds or alter any legacy
+       result. Missing configuration does no new reads/receipts. A sync-only
+       seam explicitly lacks fresh authority. Observation timeout, sink failure,
+       revision change and catch outcomes stay visible without becoming gates.
+       Unknown never ages into trusted/external. Publication remains not-granted.
+    4. Exercise actual production defaults/composition and every catch with real
+       disposable filesystem/child seams plus forbidden-effect recorders. Compare
+       owner/fleet/instance pause, configured-human/service, legacy no-config,
+       current and retired targets, in-flight mutation, admission waits, failed
+       deployment/recovery/rollback and unrelated trusted-instance controls.
+       Delete real forwarding/rechecks/snapshots to prove failures, restore exact
+       green. Do not run pause/resume/deploy/drain against a live state or ledger.
+    5. Refresh BOTH scope-time checks, all OPEN subjects and actual selector/owned
+       claim before build/publication; honor other lanes and normal fix rounds.
+       Amend scope normally before any out-of-scope repair. Commit before tests,
+       verified paths/tsx/tmp preload/shipped host slots and mapped coverage for
+       every changed source SF. Run one native per distinct committed repair;
+       compare EVERY failure on that native's actual unchanged pinned base with
+       complete TAP, keep unknown causes unknown and retain failed receipts.
+       Native/base/scoped/hosted/source merge/live are separate assurance layers.
+    6. WORKERS CONTINUE for this source step. No config/policy/settings/infra or
+       scheduler activation, real closure or schedule. Compatible live replacement
+       separately requires human-approved exact-instance drain and durable handoff;
+       incompatible shared state/claims/credentials/config/access requires FULL
+       AFFECTED WRITER STOP, ALL only when ALL affected. Admission pause is not
+       zero writers. Preserve full Apache public core and owner/admin override.
+  acceptance:
+    - claim: Maintained deployment composition invokes the shared bounded observation adapter
+      proof: 'grep: observeSelectedRegistry( in src/lib/deployer.ts'
+    - claim: Real CLI and daemon lifecycle target consumers receive opt-in selected observations
+      proof: 'unit test: selected lifecycle shadow reaches actual deploy pause and daemon consumers'
+    - claim: Revisions and identity changes invalidate observations at the actual attempted effect
+      proof: 'unit test: selected lifecycle effects observe current immutable instance targets'
+    - claim: Shadow unknown leaves owner holds and actual legacy effects unchanged
+      proof: 'unit test: selected lifecycle unknown preserves owner holds and legacy effects'
+    - claim: Recovery and rollback retain the original target without unknown-to-trusted promotion
+      proof: 'unit test: selected lifecycle recovery never retargets or promotes unknown evidence'
+    - claim: Defaults and catches remain bounded and do not execute live operations in qualification
+      proof: 'unit test: selected lifecycle defaults stay bounded with forbidden live effects'
+  falsifier: |
+    Existing independent legacy readers have no selected lifecycle observation at
+    the named real seams. Removing forwarding or final rechecks must fail targeted
+    effect-recorder cases while restored SHADOW keeps their actual legacy effects.
+    A pure target helper test, copied run/sweep receipt or base reproduction alone
+    is not fresh lifecycle permission or a hosted gate waiver.

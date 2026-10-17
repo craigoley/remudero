@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveFactSymbols } from "./knowledge-symbols.js";
 import { learningValue, sampleBeta, seededRandom, type LearningUsage } from "./knowledge-value.js";
@@ -576,24 +576,36 @@ export function loadLearnings(path: string): LocalLearningEntry[] {
   return parseLearningsDoc(raw, path, new Set());
 }
 
-/**
- * Parse every `*.yaml` shard in `dir`, sorted by filename for determinism, into one merged corpus
- * (W1-T33). A missing directory returns `[]`, the same convention as {@link loadLearnings}.
- * INVARIANT: ids are unique across every shard, not only within one. The result is the full
- * corpus; {@link selectLearnings} filters non-active entries out itself.
- */
-export function loadLearningsCorpus(dir: string): LocalLearningEntry[] {
-  let filenames: string[];
+/** TypeScript twin of scripts/lib/learnings-files.mjs; W1-T7954 pins their output together. */
+export function learningsSourceFiles(dir: string): Array<{ filename: string; shard: string }> {
+  let entries;
   try {
-    filenames = readdirSync(dir)
-      .filter((f) => f.endsWith(".yaml"))
-      .sort();
-  } catch {
-    return []; // no corpus directory yet
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
+  const files: Array<{ filename: string; shard: string }> = [];
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith(".yaml")) {
+      files.push({ filename: entry.name, shard: entry.name });
+    } else if (entry.isDirectory() && entry.name.endsWith(".d")) {
+      const shard = `${entry.name.slice(0, -2)}.yaml`;
+      for (const child of readdirSync(join(dir, entry.name), { withFileTypes: true })) {
+        if (child.isFile() && child.name.endsWith(".yaml")) {
+          files.push({ filename: `${entry.name}/${child.name}`, shard });
+        }
+      }
+    }
+  }
+  return files.sort((a, b) => a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0);
+}
+
+/** Load both storage forms; ids must be unique across the entire corpus. */
+export function loadLearningsCorpus(dir: string): LocalLearningEntry[] {
   const seen = new Set<string>();
   const entries: LocalLearningEntry[] = [];
-  for (const filename of filenames) {
+  for (const { filename } of learningsSourceFiles(dir)) {
     const path = join(dir, filename);
     const text = readFileSync(path, "utf8");
     let raw: unknown;
@@ -607,23 +619,21 @@ export function loadLearningsCorpus(dir: string): LocalLearningEntry[] {
   return entries;
 }
 
-/** One {@link StandingBrief} per shard in `dir` (W1-T4680); `previous` lets an untouched shard keep its prior brief object. */
+/** One brief per subsystem, including its per-entry files; unchanged briefs keep their identity. */
 export function buildShardStandingBriefs(
   dir: string,
   previous: Readonly<Record<string, StandingBrief>> = {},
 ): Record<string, StandingBrief> {
-  let filenames: string[];
-  try {
-    filenames = readdirSync(dir)
-      .filter((f) => f.endsWith(".yaml"))
-      .sort();
-  } catch {
-    return {}; // no corpus directory yet
+  const shards = new Map<string, LocalLearningEntry[]>();
+  const seen = new Set<string>();
+  for (const { filename, shard } of learningsSourceFiles(dir)) {
+    const path = join(dir, filename);
+    const entries = parseLearningsDoc(parseYaml(readFileSync(path, "utf8")), path, seen);
+    shards.set(shard, [...(shards.get(shard) ?? []), ...entries]);
   }
   const briefs: Record<string, StandingBrief> = {};
-  for (const filename of filenames) {
-    const entries = loadLearnings(join(dir, filename));
-    briefs[filename] = buildStandingBrief(entries, filename, previous[filename]);
+  for (const [shard, entries] of shards) {
+    briefs[shard] = buildStandingBrief(entries, shard, previous[shard]);
   }
   return briefs;
 }
@@ -1723,22 +1733,50 @@ export function propensitySeed(seed: number, k: number): number {
 
 /** A generated lookup index (W1-T33): per shard filename, the entry ids it carries and the union
  *  of `files:` globs, `symbols:` and `error_signatures:` those entries use, plus a
- *  `subsystem -> shard filename(s)` map. FALSIFIER: `npm run learnings-index:check` fails on an
- *  index that a fresh generate run would not produce. */
+ *  `subsystem -> shard filename(s)` map. The index is an optional local artifact (W1-T7954). */
 export interface LearningsIndex {
   files: Record<string, { entries: string[]; globs: string[]; symbols?: string[]; error_signatures?: string[] }>;
   bySubsystem: Record<string, string[]>;
 }
 
-/** Parse a `learnings/index.json`. Returns `null` on any missing/malformed index (non-fatal — callers fall back to a full corpus scan rather than fail closed on a lookup optimization). */
+/** W1-T7954: what `scripts/generate-learnings-index.mjs` would write for `dir`, built in memory from both storage
+ *  forms; `null` when `dir` holds no learnings source. THROWS on a corpus that does not parse, as the generator does. */
+export function buildLearningsIndex(dir: string): LearningsIndex | null {
+  const sources = learningsSourceFiles(dir);
+  if (sources.length === 0) return null;
+  const files: LearningsIndex["files"] = {};
+  const bySubsystem: Record<string, string[]> = {};
+  const seen = new Set<string>();
+  for (const { filename } of sources) {
+    const path = join(dir, filename);
+    const entries = parseLearningsDoc(parseYaml(readFileSync(path, "utf8")), path, seen);
+    for (const entry of entries) {
+      if (!entry.subsystem) continue;
+      const list = bySubsystem[entry.subsystem] ?? (bySubsystem[entry.subsystem] = []);
+      if (!list.includes(filename)) list.push(filename);
+    }
+    files[filename] = {
+      entries: entries.map((entry) => entry.id).sort(),
+      globs: [...new Set(entries.flatMap((entry) => entry.files))].sort(),
+      symbols: [...new Set(entries.flatMap((entry) => entry.symbols ?? []))].sort(),
+      error_signatures: [...new Set(entries.flatMap((entry) => entry.errorSignatures ?? []))].sort(),
+    };
+  }
+  for (const list of Object.values(bySubsystem)) list.sort();
+  return { files, bySubsystem };
+}
+
+/** Parse a `learnings/index.json`. Returns `null` on any missing/malformed index (non-fatal — callers fall back to a full corpus scan rather than fail closed on a lookup optimization).
+ *  W1-T7954: an ABSENT `<dir>/index.json` is built from `<dir>`'s corpus, so the wipe-test cadence still sees every shard. */
 export function loadLearningsIndex(path: string): LearningsIndex | null {
-  let text: string;
+  let text: string | undefined;
   try {
     text = readFileSync(path, "utf8");
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || basename(path) !== "index.json") return null;
   }
   try {
+    if (text === undefined) return buildLearningsIndex(dirname(path));
     const raw = JSON.parse(text) as unknown;
     const r = raw as { files?: unknown; bySubsystem?: unknown };
     if (typeof r !== "object" || r === null || typeof r.files !== "object" || r.files === null) return null;

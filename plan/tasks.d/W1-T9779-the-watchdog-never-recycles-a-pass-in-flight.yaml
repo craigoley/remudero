@@ -1,0 +1,88 @@
+- id: W1-T9779
+  title: "THE PROGRESS WATCHDOG NEVER RECYCLES A DAEMON WHOSE FULL PASS IS STILL IN FLIGHT INSIDE ITS OWN LEARNED BOUND — at 06:45:28Z on 2026-10-16 it read core STALLED action=recycle (newest progress row 30.3 min old) while the full pass that daemon.sweep.started at 06:10:59Z (bound_ms 8,706,363) was waiting on two reviews' memory admission; the reviews posted at 06:51Z and 06:54Z, the pass settled at 07:00:42Z, and the recycle replaced the container at 07:02:37Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the progress verdict reads the daemon's own in-flight pass marker before it asks for a recycle
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-16: agent F5, the 06:45:28Z progress-watchdog recycle of DAEMON-1792125203347 (pid 517647), read-only on the host"
+  plan_refs: [W1-T5687, W1-T5688, W1-T6598, W1-T6597, W1-T9563, W1-T9632, W1-T9702, W1-T9516, W1-T2379]
+  files: [src/lib/progress-watchdog.ts, src/run-task.ts, docs/cli-reference.md, test/the-watchdog-never-recycles-a-pass-in-flight.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger (live ledger.ndjson and the 05:06:25Z rotation, streamed read-only to the
+    Mac), the revival log and the rmd-fleet-watchdog journal:
+    - 06:10:59Z `daemon.sweep.started` {run_id DAEMON-1792125203347, bound_ms 8706363, bound_basis observed_passes,
+      samples 29}. 06:15:10Z `sweep.full_prelude` elapsed_ms 251189, then `sweep.pass` surface full enumerated 7.
+      06:15:12-13Z four `sweep.disposed` rows. The newest progress row is that 06:15:10Z `sweep.pass`.
+    - 06:12:57Z the light pass admitted reviews of #12270 and #12271 (`sweep.review_admitted`). Both waited in
+      memory admission: `memory_budget.enforce_admit` waited_ms 1,931,002 (#12271, admitted 06:46:11Z) and 2,182,763
+      (#12270, 06:50:24Z). The fix for #12267 waited 2,531,380 ms (admitted 06:54:08Z).
+    - From 06:15:13Z to 06:51:01Z the daemon wrote no sweep.* and no review.* row. It wrote daemon.pulse, the cadence
+      rows and main.health.observed every minute.
+    - The watchdog read STALLED capture-diagnostics at 06:30:28Z, 06:35:28Z and 06:40:28Z. At 06:45:28Z the journal
+      reads "progress-watchdog -- STALLED action=recycle" (progress age 30.3 min > STALL_RECYCLE_AFTER_MS).
+    - recycle-container.sh then drained for 16 min. Its PAUSE made W1-T8138, W1-T9124 and W1-T9541 yield at 06:46:08Z,
+      and that released the memory the reviews were waiting for. `review.posted` #12271 06:51:01Z, #12270 06:54:31Z;
+      light passes ran again from 06:57:38Z; `daemon.sweep.settled` 07:00:42Z {elapsed_ms 2982660, abandoned false}.
+      The revival log stamps "watchdog-recycle result=ok reason=replaced" at 07:02:37Z, when the drain ENDED. That is
+      why the recycle looks like it was decided at 07:02.
+    - The 05:32Z pass came close too: newest progress 05:42:13Z (`review.posted` #12269), next 06:12:54Z, 30.7 min.
+    WHY, READ at origin/main 4a64661fb, src/lib/progress-watchdog.ts: decideProgressWatchdog ages progress from the
+    newest sweep.pass / review.posted / verdict.merged row and nothing else (PROGRESS_STEPS). PROGRESS_WATCHDOG_READ_STEPS
+    adds only daemon.paths and daemon.boot. The daemon already writes its own in-flight marker: runGatedSweep
+    (src/lib/daemon.ts) logs `daemon.sweep.started` with the pass's learned bound_ms (W1-T9563, seeded across restarts
+    by W1-T9632), then exactly one of `daemon.sweep.settled` or `daemon.sweep.abandoned` when the pass ends or overruns
+    that bound. The watchdog reads none of the three, so it cannot tell a pass that is waiting from one that is wedged.
+    Counting sweep.disposed as progress would not have helped: none was written from 06:15:13Z to 06:57:11Z.
+    NUMBERS, 10-15T23Z to 10-16T07Z: 16 completed full passes, p50 18.7 min, p90 49.7 min, max 106.8 min. Every one
+    of them is inside its own bound_ms. The 30-min recycle bound sits below the p90.
+    OVERLAP CHECKED. W1-T9702 (merged) changed only the open-PR count. W1-T9704 (merged) ages a tick read. W1-T6598
+    (merged) ages a new generation from its boot. W1-T9516 (queued, not dispatched) ages a stall from a loop_lag
+    resume. It also edits progress-watchdog.ts, and it would not have caught this case: the newest loop_lag was at
+    06:10:28Z, before the newest progress row. W1-T9563/W1-T9632 (merged) learn the bound this task reads. W1-T2379
+    (queued) is why the light pass blocked; this task does not touch the sweep. Swept plan/ on origin/main and the 3
+    open run- PR heads (W1-T8879, W1-T9087, W1-T9363) for progress-watchdog, daemon.sweep.started and PROGRESS_STEPS;
+    positive control: each head lists 3903-3907 shards, and every count equals main's.
+  design: |
+    Operator rulings: no new fixed threshold, one concern, automated flow.
+    1. READ THE MARKER. PROGRESS_WATCHDOG_READ_STEPS adds `daemon.sweep.started`, `daemon.sweep.settled`,
+       `daemon.sweep.abandoned` and `daemon.pulse`. The verb is unchanged: it already reads whatever the list names.
+    2. A PASS IS IN FLIGHT when the newest `daemon.sweep.started` row S meets all four conditions:
+       - no `daemon.boot` or `daemon.paths` row is newer than S (S belongs to this generation);
+       - no `daemon.sweep.settled` or `daemon.sweep.abandoned` row with S's run_id is at or after S;
+       - S carries a finite positive bound_ms and now - S.ts <= bound_ms. The bound is the daemon's own, learned from
+         completed passes. A row with no bound_ms is never in flight;
+       - a `daemon.pulse` row with S's run_id is newer than both S and now - STALL_DIAGNOSE_AFTER_MS. That is an
+         existing calibrated bound, so a frozen loop is never read as a waiting pass.
+    3. ACT ON IT. Where the stale-progress branch would return `recycle` and a pass is in flight, the verdict is
+       state `IN_PASS` with action `capture-diagnostics`. The bundle keeps its at-most-one-per-15-min rule. The reason
+       names the pass's start, its age, its bound and the progress age. Below the recycle bound the verdict is
+       unchanged. CRASH_LOOP, the pre-node rule, UNKNOWN, IDLE and the generation-boot rule keep their order and win
+       first. The launcher acts only on action=recycle, so it needs no change.
+    4. STILL RECYCLES. A pass past its own bound_ms with no abandoned row has a wedged bound timer, so it is not in
+       flight, and the existing STALLED recycle applies. An abandoned pass is not in flight, so the existing age rule
+       applies from there.
+    The progress-watchdog COMMANDS detail in src/run-task.ts names IN_PASS, and docs/cli-reference.md is regenerated. Tests go in a new file, with `test(` titles
+    verbatim as in the proofs below. They replay the 10-16 rows (06:10:59 started, 06:15:10 sweep.pass full, a 06:45
+    pulse, now 06:45:28) and cover the pass past its bound, a settled pass, an abandoned pass, a pass from an earlier
+    generation and a pass whose daemon stopped pulsing.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-watchdog-never-recycles-a-pass-in-flight.test.ts"
+    - claim: "replaying 2026-10-16 06:45:28Z, a full pass in flight inside its own bound reads IN_PASS and is not recycled"
+      proof: "grep: W1-T9779: a full pass in flight inside its own learned bound is not recycled in test/the-watchdog-never-recycles-a-pass-in-flight.test.ts"
+    - claim: "a pass past its own learned bound is still recycled"
+      proof: "grep: W1-T9779: a pass past its own learned bound is still recycled in test/the-watchdog-never-recycles-a-pass-in-flight.test.ts"
+    - claim: "a pass whose daemon stopped pulsing is still recycled"
+      proof: "grep: W1-T9779: an in-flight pass whose daemon stopped pulsing is still recycled in test/the-watchdog-never-recycles-a-pass-in-flight.test.ts"
+    - claim: "the verdict reads the daemon's own pass marker"
+      proof: "grep: daemon\\.sweep\\.started in src/lib/progress-watchdog.ts"
+  falsifier: |
+    At origin/main, the 06:45:28Z replay reads STALLED action=recycle (progress 30.3 min old) and the second test fails.
+    Treat every started row as in flight with no bound: the pass-past-its-bound test sees IN_PASS and fails.

@@ -1,0 +1,61 @@
+- id: W1-T9482
+  title: "A STRIKE-LADDER REQUEUE IS HELD FOR A DAY BY ITS OWN TASK'S SPENT CHECKPOINT BRANCH — the sweep closed #11645 and requeued W1-T7898 at 13:04Z, then every dispatch pass refused it as run-branch-already-pushed, because a no-PR yield checkpoint pushed at 07:34Z is released only 24 h after its epoch"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a requeue the sweep ordered is dispatchable on the next pass (the run-branch release in drain.ts)
+  band_meaning: span
+  origin: "operator session 2026-10-14: #11645 (W1-T7898) sat closed with no further action"
+  plan_refs: [W1-T5536, W1-T1207, W1-T534, W1-T8676, W1-T7898]
+  files: [src/lib/drain.ts, src/lib/daemon.ts, test/a-requeued-task-is-not-held-by-its-own-spent-checkpoint-branch.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-14 on the core daemon's ledger (host remudero, ~/rmd-state2/state), read-only:
+      - W1-T7898 (a low-risk learnings/ci.yaml docs task) ran seven times from 10-11 to 10-14. Each run finished
+        implement.done in 5-8 turns for about $0.01, then yielded (freshness_yield, trigger recycle). Each yield
+        re-pushed the SAME checkpoint tip e54bc66f4, made on 10-11, under a new run-W1-T7898-<epoch> branch.
+      - 10:59Z run W1-T7898-1791975563702 resumed that checkpoint and opened #11645 at 11:17Z with head 443ebb288, still
+        on the 10-11 base 773ac6a31. The PR was dirty from birth: sweep.review_eligible came at 11:34Z, but the conflict
+        blocked review, and conflict-rebase refused with "no valid conflicting-file evidence was captured". At 12:43Z
+        came pr.stuck. At 13:04Z the progress judge returned change-approach (the learning admits the failure logs were
+        never read) and sweep.strike_ladder.requeued fired with rebuild 1. The sweep closed #11645 at 13:35Z with that
+        reason as a comment.
+      - From 14:29Z, every pass logged dispatch.lifetime_pressure followed by dispatch.skipped with reason
+        run-branch-already-pushed for W1-T7898. No run.start followed.
+    `git ls-remote` at 15:05Z showed five run-W1-T7898-* branches with no PR. Four were at e54bc66f4 and one at
+    43b5ef66e. state/branch-reap-state.remudero.json lists all five under noPrHeadShas at those shas.
+    orphanRunBranchReleased (src/lib/drain.ts) releases a no-PR run branch only when now minus the branch's epoch is at
+    least ORPHAN_RUN_BRANCH_GRACE_MS (24 h). run-W1-T7898-1791963253634 has epoch 2026-10-14T07:34:13Z, so the requeue
+    the sweep ordered at 13:04Z cannot dispatch before 2026-10-15T07:34Z. Its checkpoint was already consumed: the
+    10:59Z run built from it.
+    The daemon arm also still passes `undefined` for closedUnmergedRunBranches (runBranchDispatchOpts in daemon.ts).
+    W1-T1207 amendment (9) records this: its fix landed only on the drain.ts arms. Here the closed PR's own branch was
+    gone, so this gap was not what held W1-T7898, but it holds any requeue whose closed PR keeps its branch.
+  design: |
+    1. When the sweep requeues a task (sweep.strike_ladder.requeued, or any close-and-requeue the sweep orders), every
+       run-<id>-* ref of that task whose epoch is not after the requeue time, and that has no OPEN pull request, stops
+       blocking dispatch. Thread a requeue receipt (task id, requeue time) into the same OrphanRunBranchEvidence that
+       orphanRunBranchReleased reads, so one predicate decides it. The branches are never deleted.
+    2. Wire W1-T1207's closed-unmerged exclusion into the daemon arm: runBranchDispatchOpts passes the same
+       closedUnmergedRunBranches set that drain.ts's arms build, rather than `undefined`.
+    3. Log each release once per ref as dispatch.run_branch_exception with reason requeue-released, beside the
+       existing plan-filing exception, so an operator can see why a ref stopped blocking.
+    4. Keep the guard otherwise unchanged. A ref pushed AFTER the requeue, or one whose PR is open, still blocks: that
+       is the seconds-wide in-flight window W1-T534 closes.
+    Tests go in the new file, titled verbatim as in the proofs, and drive stillBlockedByPushedRunBranch and the daemon
+    dispatch-options builder directly.
+  acceptance:
+    - claim: "a task the sweep requeued is not held by a no-PR run branch pushed before the requeue"
+      proof: 'grep: test("W1-T9482: a requeued task is not held by its own spent checkpoint branch" in test/a-requeued-task-is-not-held-by-its-own-spent-checkpoint-branch.test.ts'
+    - claim: "a run branch pushed after the requeue still blocks a duplicate build"
+      proof: 'grep: test("W1-T9482: a run branch pushed after the requeue still blocks dispatch" in test/a-requeued-task-is-not-held-by-its-own-spent-checkpoint-branch.test.ts'
+    - claim: "the daemon arm excludes a closed-unmerged run branch the way the drain arms do"
+      proof: 'grep: test("W1-T9482: the daemon arm releases a closed-unmerged run branch" in test/a-requeued-task-is-not-held-by-its-own-spent-checkpoint-branch.test.ts'
+  falsifier: |
+    On main, give stillBlockedByPushedRunBranch a task with one no-PR ref whose epoch is 6 h old and a requeue 1 h ago:
+    it returns true, which is the run-branch-already-pushed refusal W1-T7898 received after 14:29Z.

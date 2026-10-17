@@ -1,0 +1,96 @@
+- id: W1-T9786
+  title: "A RESTORED CHECKPOINT OUTLIVES ITS RUN'S THROWN HARNESS ERROR — W1-T9047's run restored run-W1-T9047-1792027244995 at 03:48Z on 2026-10-15 and its push threw 'could not read Username' at 04:10Z; that thrown verdict consumed the receipt with no implement.checkpoint_kept row, so every pass refused the P1 as run-branch-already-pushed until the 24 h orphan grace, and the next build had no checkpoint left to restore"
+  repo: remudero
+  depends_on: []  # W1-T8676 (merged) added the kept row for a worker error; this adds it for a thrown run
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium  # Rule 19: one concern — the run.error exit of runTaskBody writes the kept row the worker-error exit already writes
+  band_meaning: span
+  origin: "fan-out 2026-10-15/16 investigator I3: why W1-T9047 (P1) was not dispatched for 12+ hours"
+  plan_refs: [W1-T9047, W1-T8676, W1-T7837, W1-T4655, W1-T9680, W1-T9482, W1-T534]
+  files: [src/run-task.ts, test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 on the core daemon's ledger (host remudero, ~/rmd-state2/state), read-only and niced, over
+    the live file and the 2026-10-13..16 rotations. Control: the same reads return W1-T9047's own run.start, verdict
+    and checkpoint rows for all six of its runs, and W1-T8707's resumed runs.
+      - 01:22Z run W1-T9047-1792027244995 restored run-W1-T9047-1792021879256. At 01:54:20Z it handed off
+        (run.freshness_handoff, then verdict handed_off reason freshness_yield) with branch
+        run-W1-T9047-1792027244995 at head a1251e869. That is the receipt.
+      - 03:46Z run W1-T9047-1792035987149 started. At 03:48:23Z implement.checkpoint_restored names source_branch
+        run-W1-T9047-1792027244995, source_head_sha a1251e869. implement.done came at 03:56Z.
+      - 04:10:39Z: verdict failed, stage run.error, cause git-push-failed, reason "Command failed: git -C
+        .../run-W1-T9047-1792035987149 push origin HEAD / fatal: could not read Username". No
+        implement.checkpoint_kept row follows. The run pushed no branch of its own.
+      - 2026-10-15T20:26Z to 2026-10-16T01:07Z: dispatch.skipped reason run-branch-already-pushed rows for W1-T9047.
+        From 02:22Z on 2026-10-16, each pass writes five dispatch.run_branch_exception reason orphan-run-branch-no-pr
+        rows, one per branch. The newest branch's epoch is 2026-10-15T01:20:44Z, and ORPHAN_RUN_BRANCH_GRACE_MS is 24 h.
+    WHAT HOLDS IT, read on origin/main 93530ba78 (symbols, not lines):
+      - `pendingWorkerBoundaryHandoffs` (src/lib/daemon.ts) lets any later verdict consume a receipt. The one
+        exception is an `implement.checkpoint_kept` row, which re-pends it.
+      - In `runTaskBody` (src/run-task.ts), only `failOnWorkerError` writes that row (W1-T8676), for a worker-error
+        `failed` verdict when the run's own branch is proven absent on origin. The generic `catch` arm writes its
+        verdict through `endThrownRun` (stage run.error, W1-T4655) and writes no kept row, though the same
+        `restoredCheckpoint` is in scope.
+      - So `runBranchStateFrom` has no receipt to excuse the five pushed branches. `stillBlockedByPushedRunBranch`
+        refuses the task until `orphanRunBranchReleased` frees every ref, 24 h after the newest branch's epoch.
+      - Once released, the next run's `pendingWorkerBoundaryHandoffs(...).get(taskId)` is empty. The build starts
+        from main, and the five checkpoints of paid work are not restored.
+    A thrown harness error (a refused push credential, a failed PR create, a failed GitHub read) is not the
+    checkpoint's fault any more than a worker error is. W1-T9680 (merged) parks the lane on a credential refusal and
+    keeps the daemon running. It does not keep the checkpoint.
+    CLASS, measured over every archive from 2026-09-28: 268 runs restored a checkpoint; 42 runs ended through the
+    run.error arm; 2 implement.checkpoint_kept rows exist. One run is in both groups with no kept row: W1-T9047's.
+    Today: 21 queued, unmerged tasks have run branches on origin, no open PR and no run.start in the last 6 h. Of
+    those, W1-T9047 is the only one whose last run restored a checkpoint and then had it consumed. Positive control:
+    W1-T9327, whose last verdict was a freshness_yield, still reads its receipt as pending. The recurrence is low.
+    Each hit stalls the task for up to a day and discards every checkpoint it had.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and the open PR heads (run-W1-T9087-1792105060412,
+    run-W1-T9363-1792070864786) for checkpoint_kept and git-push-failed. Control: main reads 3 files, and neither
+    head reads more. W1-T8676 covers a worker error. W1-T9482 (queued) covers a requeue held by a SPENT checkpoint
+    (drain.ts/daemon.ts). W1-T9618 and W1-T8833 cover fix-round pushes. None covers a thrown run consuming a
+    restored, still-unspent checkpoint.
+    NOT IN SCOPE, reported separately: the `WorkerAbandonedError` and Codex output-limit arms of the same `catch`
+    also end `failed` without a kept row (not measured here). ORPHAN_RUN_BRANCH_GRACE_MS is a fixed 24 h timer. A
+    thrown run that DID push its own branch leaves that branch with no receipt.
+  design: |
+    No new count, timer or bound. The row is the one W1-T8676 already reads.
+    1. In `runTaskBody`'s generic `catch` arm (the one that calls `endThrownRun(log, verdictWritten, "run.error", ...)`),
+       when this call is the one that writes the verdict (`verdictWritten` false before it), `restoredCheckpoint` is
+       set, and the run's own branch is proven absent on origin, write ONE `implement.checkpoint_kept` row right after
+       the verdict. Fields are {task_id, source_branch, head_sha, failed_stage: "run.error", failed_cause:
+       runErrorCause(err)}. "Proven absent" is the exact rule `failOnWorkerError` uses: `git rev-parse --verify --quiet
+       refs/remotes/origin/<branch>` in the worktree exits 1. Read it before the worktree is removed.
+    2. Share that predicate between `failOnWorkerError` and the new arm as one helper, so the two exits cannot drift.
+       `failOnWorkerError`'s behaviour is unchanged: it still keeps only a `failed`, non-budget worker-error verdict.
+    3. Change nothing else. `pendingWorkerBoundaryHandoffs`, `DECISION_RELEVANT_LEDGER_STEPS` (the kept row is
+       already retained) and the daemon's per-settle `refreshResumableHandoff` already turn the row into a receipt
+       that the next pass's `runBranchStateFrom` excuses and the next run restores. A checkpoint that keeps throwing
+       is bounded by the existing circuit breaker and lifetime judge, as W1-T8676 states.
+    Tests go in a new file, test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts, with `test(` titles
+    verbatim as in the proofs below. Drive a real runTask dispatch over a gitRepo() fixture: a bare origin holding
+    the checkpoint branch, a local git identity, and neutral helper names. The implement worker throws W1-T9047's
+    own push error ("Command failed: git -C ... push origin HEAD / fatal: could not read Username"), and the test
+    asserts the thrown verdict, the kept row right after it, and that the fold reads the receipt pending.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts"
+    - claim: "a restored checkpoint stays pending after its run throws a harness error"
+      proof: 'grep: test("W1-T9786: a restored checkpoint stays pending after its run throws a harness error" in test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts'
+    - claim: "a thrown run that pushed its own branch keeps nothing"
+      proof: 'grep: test("W1-T9786: a thrown run that pushed its own branch keeps nothing" in test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts'
+    - claim: "the thrown arm writes the kept row with its harness cause"
+      proof: 'grep: failed_cause: runErrorCause in src/run-task.ts'
+  falsifier: |
+    Leave the run.error arm as it is, and the first test reads no kept row after the git-push-failed verdict: the
+    receipt is consumed, as W1-T9047's was at 04:10:39Z. Keep the checkpoint without the own-branch check, and the
+    second test reads a kept row for a run whose own pushed branch is the newer checkpoint.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark. For each verdict with stage run.error
+    in a run that logged implement.checkpoint_restored, look for an implement.checkpoint_kept row from the same run,
+    and for the task's next implement.checkpoint_restored of that head. Healthy shape: no dispatch.skipped reason
+    run-branch-already-pushed for that task after its thrown verdict.

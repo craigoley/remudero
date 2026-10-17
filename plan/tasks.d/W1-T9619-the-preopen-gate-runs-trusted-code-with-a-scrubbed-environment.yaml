@@ -1,0 +1,91 @@
+- id: W1-T9619
+  title: "THE PRE-OPEN GATE RUNS TRUSTED CODE WITH A SCRUBBED ENVIRONMENT: for a core build, defaultRunGate starts the worktree's own bin/rmd or that worktree's run-task bundle, which is code the worker just wrote, before any review, in the daemon process's full environment and outside any sandbox; runPreopenGate then takes its verdict from coverage/preflight-summary.json inside that same worker-writable tree. Run the gate from trusted harness code with the worktree as data, give it an allowlisted environment with no credentials, contain it the way proof children are contained, and take the verdict only from what the harness itself observes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — what the pre-open gate's child may execute, see and report; high for blast radius: the gate runs before every build PR opens
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-15: security finding in src/lib/preopen-gate.ts, read at origin/main; operator approved filing on 2026-10-15"
+  plan_refs: [W1-T9556, W1-T9602, W1-T8920, W1-T8778, W1-T8945, W1-T6124, W1-T3280]
+  files: [src/lib/preopen-gate.ts, test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts, test/garden-and-preflight-children-run-the-precompiled-entry-when-current.test.ts, test/the-fast-gate-runs-only-the-steps-its-target-repo-holds.test.ts, test/the-fast-gate-backstop-holds-while-the-loop-is-frozen.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    CLASS: privileged execution of unreviewed, worker-authored code, plus trust of a result file the worker can
+    write. This record describes the class and the code paths at main only.
+    READ at origin/main 32cfb064f (after W1-T9556, PR 11921):
+    - preopenGateLaunch(cwd) checks existsSync(join(cwd, "bin", "rmd")). For a core build that is true, so root is
+      the worktree itself, and childEntryArgv(root, "run-task", ...) picks that worktree's precompiled run-task
+      bundle when current. Otherwise preopenGateCommand returns { file: <worktree>/bin/rmd }. Both are the branch's
+      own code. Only a consumer worktree, which has no bin/rmd, runs the harness's HARNESS_RMD with --repo-root.
+    - defaultRunGate runs execFile(process.execPath, deadlineRunnerArgs(file, args, ...), { cwd, timeout,
+      maxBuffer }), through scripts/run-with-deadline.mjs (W1-T9556). It passes no env option, so the child inherits
+      the daemon process's environment wholesale. The container environment that deploy/runtime-env-vars.sh
+      assembles names credential variables (GH_TOKEN, GH_APP_PRIVATE_KEY_PATH and model API keys among them). No
+      sandbox wraps the child.
+    - The gate runs in run-task.ts's implement path after the worker finishes and before the PR opens, so before
+      review and before CI.
+    - runPreopenGate then calls readGateSummary(worktreePath, ...), which reads preflightSummaryPath(worktreePath),
+      that is <worktree>/coverage/preflight-summary.json. Its only freshness check is finishedAt >= the run's start.
+      A pass there lets the build go on to open its PR. A fail hands the steps back to the worker.
+    - Even a trusted launcher would not contain worker code by itself: the fast gate's steps run scripts the target
+      tree holds (W1-T8920). So the environment and the sandbox are the boundary, not the launcher alone.
+    - The contained pattern already exists for proof children in src/lib/review.ts: buildProofEnv forwards only
+      PROOF_ENV_ALLOWLIST (PATH, HOME, the git config triple and PLAYWRIGHT_BROWSERS_PATH), proofChildEnv gives a
+      throwaway HOME, and proofSandboxArgv and proofSandboxStatus run the child under bwrap and name the reason when
+      it is unavailable (W1-T6124). Codex workers run under their provider's sandbox (worker-provider.ts passes
+      --sandbox workspace-write). The pre-open gate has neither.
+    IMPACT, INFERRED: a forged or skipped pre-open verdict alone does not merge anything, because CI and review still
+    gate the merge. The exposure is that unreviewed code runs with the daemon's credentials in reach.
+    RELATED:
+    - W1-T9602 (queued) states this same trust boundary and refuses to let the pre-open verdict stand in for the
+      push gate. It does not change how the pre-open gate itself runs. This task does. Both edit
+      src/lib/preopen-gate.ts, so whichever lands second rebases.
+    - W1-T9556 (merged) added the deadline runner and does not touch the environment or the launcher choice.
+    - W1-T8945 (queued) re-runs the gate after a repair, and W1-T3280 makes a summary name the tree it read. Neither
+      changes who writes the summary.
+    - No open PR head carries a shard on this subject (swept 2026-10-15 10:35Z over 404 heads against main's count).
+  design: |
+    The builder designs the mechanism. These are the requirements:
+    1. TRUSTED LAUNCHER. The gate's entry is the harness's own code, the daemon's checkout at its own sha
+       (HARNESS_RMD or the harness's bundle), always run with --repo-root <worktree>, the way a consumer worktree is
+       gated today. Nothing under the worktree is the executable the daemon starts. Update the W1-T8778 and W1-T8920
+       tests that pin "the worktree's own bin/rmd or bundle".
+    2. SCRUBBED ENVIRONMENT. The child gets an allowlisted environment built from an explicit list, never
+       process.env wholesale, and never any credential variable. Reuse review.ts's buildProofEnv, proofChildEnv or the
+       allowlist pattern where they fit. The allowlist is one exported constant, so a test can pin it.
+    3. CONTAINMENT. The child runs inside the same kind of sandbox the proof children use, with the worktree
+       writable and the harness's state, credentials and ledger out of reach. When the sandbox is unavailable the gate
+       is reported unmeasured with the reason, never a pass, and it never falls back to running with the full
+       environment.
+    4. A VERDICT THE HARNESS OBSERVES. runPreopenGate never reads its verdict from a path the sandboxed child can
+       write. Either the harness takes the result from what it observes itself (exit status, captured output), or the
+       child writes to a harness-owned location outside the worktree and outside the sandbox's writable set. A
+       preflight-summary.json present inside the worktree, valid or not, does not change the verdict.
+    5. LEDGER. implement.preopen_gate and child_entry.spawned record the launcher (harness or bundle), the sandbox
+       mode and the env allowlist's name. They never record the environment's values.
+    6. Unchanged: the backstop and deadline runner (W1-T9556), the fail-back prompt, and the steps the gate selects.
+  acceptance:
+    - claim: "a gate run's child sees no credential environment variable and gets only the declared allowlist"
+      proof: 'grep: test("W1-T9619: a gate run sees no credential environment variables" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+    - claim: "a gate run never executes bin/rmd or a run-task bundle from the worktree, and runs the harness code with --repo-root"
+      proof: 'grep: test("W1-T9619: a gate run never executes bin/rmd from the worktree" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+    - claim: "a preflight-summary.json written inside the worktree is not trusted: it cannot turn the gate's verdict into a pass"
+      proof: 'grep: test("W1-T9619: a worker-written preflight summary is not trusted" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+    - claim: "a gate that cannot be contained reports unmeasured with its reason and never a pass"
+      proof: 'grep: test("W1-T9619: a gate that cannot be contained is unmeasured, never a pass" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+    - claim: "a core worktree and a consumer worktree are both still measured, and a failing step is still handed back"
+      proof: 'grep: test("W1-T9619: core and consumer worktrees are both still measured" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+    - claim: "the new suite passes"
+      proof: 'unit test: test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+  falsifier: |
+    Restore execFile's inherited environment. A fixture parent environment holding a sentinel credential variable
+    then reaches the child, which records it, and the first test fails. Restore preopenGateLaunch's
+    existsSync(<worktree>/bin/rmd) branch, and a fixture worktree whose bin/rmd records that it ran is executed,
+    and the second test fails. Restore readGateSummary over preflightSummaryPath(worktreePath), and a fixture whose
+    harness-observed run fails but whose worktree holds a fresh passing summary reads as pass, and the third test
+    fails. Fall back to an uncontained run when the sandbox probe fails, and the fourth test reads pass and fails.

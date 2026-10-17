@@ -81,6 +81,7 @@ function draft(shape: DraftShape): string {
 
 /** The ledgerRowActor proposal's cached draft: a NEW module whose only call proof greps the new file itself. */
 const UNCALLED_MODULE = draft({
+  extra: ["  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
   files: ["src/lib/ledgerCaller.ts", "test/ledger.test.ts"],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
@@ -89,7 +90,7 @@ const UNCALLED_MODULE = draft({
 });
 const CALLED_MODULE = draft({
   risk: "high",
-  extra: ["  band_meaning: span"],
+  extra: ["  band_meaning: span", "  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
   files: ["src/lib/ledgerCaller.ts", "src/lib/panel.ts", "test/ledger.test.ts"],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
@@ -152,8 +153,9 @@ function stored(fragmentYaml: string): DraftedCandidate {
 
 test("W1-T9039: the draft lint blocks a new module with no call site", () => {
   const violations = lintDraftedFragment(UNCALLED_MODULE, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile);
-  assert.deepEqual(checks(violations), ["call-site"], JSON.stringify(violations));
+  assert.deepEqual(checks(violations), ["call-site", "draft-call-site-absent"], JSON.stringify(violations));
   assert.match(violations.find((v) => v.check === "call-site")!.message, /new module src\/lib\/ledgerCaller\.ts/);
+  assert.match(violations.find((v) => v.check === "draft-call-site-absent")!.message, /ledgerCaller\.ts.*CREATES/);
   assert.deepEqual(lintDraftedFragment(CALLED_MODULE, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile), [],
     "control: a call proof in a different src file clears it");
   // The production default resolves the same facts against the harness checkout, where ledgerCaller.ts is absent too.
@@ -186,6 +188,7 @@ test("W1-T9039: a drafted blocked task is cached queued", async () => {
       return worker(`=== FRAGMENT START ===\n${BLOCKED}=== FRAGMENT END ===\n${stamp}`);
     },
     log: (step, extra) => events.push({ step, extra }),
+    repoFacts: facts,
   }, "run-9039");
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   assert.equal(spawned.length, 1, "the harness owns the field, so no redraft is spent on it");
@@ -200,6 +203,7 @@ test("W1-T9039: a drafted blocked task is cached queued", async () => {
   const [kept] = await runDraftRung([proposal], "- id: W1-T1\n", {
     spawn: async () => worker(`=== FRAGMENT START ===\n${retired}=== FRAGMENT END ===\n${stamp}`),
     log: () => undefined,
+    repoFacts: facts,
   }, "run-9039b");
   assert.equal(kept.ok ? kept.candidate.fragmentYaml : "", retired.trimEnd());
 });
@@ -235,7 +239,8 @@ test("W1-T9039: the approve relint applies the draft floor repo facts", () => {
     const relinted = relintRatificationFragment(fragment, PROPOSAL_ID, facts);
     assert.equal(relinted.ok, false, `${check}: approve must refuse what the push floor refuses`);
     assert.match(relinted.ok ? "" : relinted.reason, new RegExp(`\\[${check}\\]`));
-    assert.deepEqual(checks(lintDraftedFragment(fragment, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile)), [check],
+    assert.deepEqual(checks(lintDraftedFragment(fragment, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile)),
+      check === "call-site" ? ["call-site", "draft-call-site-absent"] : [check],
       "the draft floor refuses the same thing");
   }
   const healed = relintRatificationFragment(BLOCKED, PROPOSAL_ID, facts);

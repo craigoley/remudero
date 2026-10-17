@@ -86,6 +86,8 @@ export interface SelfSyncDeps {
   reexec?: () => void;
   ignoreReentrancyGuard?: boolean;
   gitAsync?: AsyncGitRunner;
+  /** W1-T9687: explicit daemon boot identity; absent keeps checkout semantics, present-but-unavailable degrades. */
+  loadedCodeSha?: string;
   fetchTimeoutMs?: number; // W1-T5282: the awaited fetch's bound; defaults to `GATEWAY_FETCH_TIMEOUT_MS`
   recentFetchFallback?: boolean; // W1-T6033: the reviewer opts in; the daemon's per-tick read would only wait twice
   clock?: Clock; // W1-T6033: the clock a recent-fetch ref's age is read against; defaults to `systemClock`
@@ -447,8 +449,13 @@ export type ServiceFreshness =
         diffUnreadable?: string;
         changes?: AdvanceCommit[];
         logUnreadable?: string;
+        /** W1-T9092: the advance judged against the running process's own import closure (daemon-closure.ts). */
+        closure?: AdvanceClosure;
       } | null;
     } & RecentFetchMark;
+
+/** W1-T9092: whether an advance touched the closure of the process's entry. `unreadable` is material. */
+export type AdvanceClosure = { status: "read"; material: boolean; outside: number } | { status: "unreadable"; reason: string };
 
 export type RecentFetchMark = { source?: "recent-fetch"; refAgeMs?: number }; // W1-T6033: set only when a recent ref stood in
 
@@ -532,7 +539,7 @@ export async function checkServiceFreshnessAsync(
     if (!deps.recentFetchFallback || !isStalledHandshake(err)) return { status: "degraded", reason };
     return retryStalledHandshake(repoDir, deps, fetchMain, reason);
   }
-  return assessFetchedServiceAsync(repoDir, serviceGitAsync(repoDir, deps));
+  return assessFetchedServiceAsync(repoDir, serviceGitAsync(repoDir, deps), deps);
 }
 
 const DAEMON_POLL_INTERVAL_MS = 60_000;
@@ -550,7 +557,7 @@ async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchM
   const git = serviceGitAsync(repoDir, deps);
   try {
     await fetchMain();
-    return await assessFetchedServiceAsync(repoDir, git);
+    return await assessFetchedServiceAsync(repoDir, git, deps);
   } catch (retryErr) {
     const failed = `${reason}; retried once: ${String(retryErr)}`;
     let updated: RegExpExecArray | null;
@@ -564,7 +571,7 @@ async function retryStalledHandshake(repoDir: string, deps: SelfSyncDeps, fetchM
     if (refAgeMs < 0 || refAgeMs > RECENT_FETCH_MAX_AGE_MS) {
       return { status: "degraded", reason: `${failed}; origin/main was last updated ${refAgeMs} ms ago, outside ${RECENT_FETCH_MAX_AGE_MS} ms` };
     }
-    const assessed = await assessFetchedServiceAsync(repoDir, git);
+    const assessed = await assessFetchedServiceAsync(repoDir, git, deps);
     return assessed.status === "assessed" ? { ...assessed, source: "recent-fetch", refAgeMs } : assessed;
   }
 }
@@ -578,14 +585,18 @@ function serviceGitAsync(repoDir: string, deps: SelfSyncDeps): AsyncGitRunner {
   return localOverride ? async (args) => localOverride(args) : asyncGit(repoDir);
 }
 
-async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner): Promise<ServiceFreshness> {
+async function assessFetchedServiceAsync(repoDir: string, git: AsyncGitRunner, deps: Pick<SelfSyncDeps, "loadedCodeSha">): Promise<ServiceFreshness> {
+  const hasLoadedCodeSha = Object.hasOwn(deps, "loadedCodeSha");
+  if (hasLoadedCodeSha && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(deps.loadedCodeSha ?? "")) {
+    return { status: "degraded", reason: `daemon loaded-code SHA is missing or malformed in ${repoDir}` };
+  }
   let headSha: string;
   let originSha: string;
   try {
-    headSha = (await git(["rev-parse", "HEAD"])).trim();
+    headSha = (await git(hasLoadedCodeSha ? ["rev-parse", "--verify", `${deps.loadedCodeSha}^{commit}`] : ["rev-parse", "HEAD"])).trim();
     originSha = (await git(["rev-parse", "origin/main"])).trim();
   } catch (err) {
-    return { status: "degraded", reason: `could not resolve HEAD/origin/main in ${repoDir}: ${String(err)}` };
+    return { status: "degraded", reason: `could not resolve ${hasLoadedCodeSha ? "daemon loaded-code SHA" : "HEAD"}/origin/main in ${repoDir}: ${String(err)}` };
   }
   const dirty_paths = (await git(["status", "--porcelain", "-uno"])).split("\n").filter(Boolean).map((line) => line.slice(3));
   const dirty = dirty_paths.length > 0;
@@ -689,6 +700,13 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
  * `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
  * Why: docs/forensics/self-sync.md#daemonfreshnessfromservice.
  */
+/** W1-T9092: the closure's verdict when it was read. An UNREADABLE closure falls back to the prefix list, which calls
+ *  every src/ change material: it fails toward restarting without restarting for advances (docs, plan) today's daemon
+ *  already ignores, so a closure that stays unreadable (an entry outside the tree) can never add restarts. */
+function behindIsMaterial(behind: NonNullable<Extract<ServiceFreshness, { status: "assessed" }>["behind"]>): boolean {
+  return behind.closure?.status === "read" ? behind.closure.material : advanceIsMaterial(behind.changedPaths);
+}
+
 export function daemonFreshnessFromService(svc: ServiceFreshness) {
   if (svc.status === "guarded") return { stale: false, notStale: { arm: "unassessed", serviceStatus: "guarded" } } as const;
   if (svc.status === "degraded") {
@@ -699,7 +717,7 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
       stale: false,
       notStale: {
         arm: "dirty",
-        behind: svc.behind !== null && advanceIsMaterial(svc.behind.changedPaths),
+        behind: svc.behind !== null && behindIsMaterial(svc.behind),
         // PRIMARY CONTROL: match the live-edit ladder's 20-path ledger display bound.
         ...(svc.dirty_paths ? { dirty_paths: svc.dirty_paths.slice(0, 20) } : {}),
         ...(svc.behind ? { oldSha: svc.behind.oldSha, newSha: svc.behind.newSha } : {}),
@@ -709,10 +727,16 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
   }
   if (!svc.behind) return { stale: false, notStale: { arm: "up_to_date" } } as const;
   // An advance that cannot change this process's module graph is no reason to replace it (W1-T2964).
-  if (!advanceIsMaterial(svc.behind.changedPaths)) {
+  // W1-T9092: measured against the process's own closure when it was read, so a src/ module it never loads is no reason.
+  if (!behindIsMaterial(svc.behind)) {
+    const { closure } = svc.behind;
     return {
       stale: false,
-      notStale: { arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha },
+      notStale: {
+        arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha,
+        ...(closure?.status === "read" ? { basis: "closure" as const, outsideClosure: closure.outside } : {}),
+        ...(closure?.status === "unreadable" ? { basis: "prefix" as const, closureUnreadable: closure.reason } : {}),
+      },
     } as const;
   }
   const { oldSha, newSha, changes } = svc.behind;

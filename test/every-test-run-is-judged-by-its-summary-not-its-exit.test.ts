@@ -164,6 +164,7 @@ test("the author preflight's affected tests fail when a suite's process exits 0 
   writeFileSync(join(root, ".nvmrc"), process.versions.node + "\n");
   writeFileSync(join(root, ".gitignore"), "node_modules\ncoverage\n");
   symlinkSync(join(REPO_ROOT, "node_modules"), join(root, "node_modules"));
+  writeFileSync(join(root, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json")));
   writeFileSync(join(root, "scripts/diff-class.mjs"), "// This fixture has no census path readers.\n");
   writeFileSync(join(root, "scripts/census-precheck.mjs"), "console.log('fixture census precheck passed');\n");
   writeFileSync(join(root, "test/setup/tmp-hygiene.ts"), "export {};\n");
@@ -245,6 +246,24 @@ test("the judge's preload stays out of worker threads: a thread that throws stil
     });
     assert.equal(status, 0, log.join("\n"));
     assert.match(log.join("\n"), /run complete — 2\/2 file\(s\) reported, # tests 2, # fail 0/);
+  }
+});
+
+test("a run whose test timed out under --test-force-exit fails, pooled or isolated, though node exits 0 with # fail 0", () => {
+  const root = tierFixture();
+  // CI 38972373415: seven pooled tests hit their timeout; node counts that `cancelled`, not `fail`,
+  // and --test-force-exit exited 0, so the pool read green and its leak ladder never ran.
+  writeFileSync(join(root, "test/f-hangs.test.ts"), `import test from "node:test";\ntest("f never settles", () => new Promise(() => {}));\n`);
+  for (const pooled of [true, false]) {
+    const log: string[] = [];
+    const status = pool.spawnJudgedRun(["test/a-first.test.ts", "test/f-hangs.test.ts"], {
+      spawn: realSpawn as never, cwd: root,
+      args: ["--test", "--test-reporter=tap", "--test-reporter-destination=stdout", "--test-timeout=300", "--test-force-exit",
+        ...(pooled ? ["--experimental-test-isolation=none"] : [])],
+      pool: pooled, role: pooled ? "pool" : "rest", log: (l) => log.push(l), env: childEnv(),
+    });
+    assert.notEqual(status, 0, `pooled=${pooled}: ${log.join("\n")}`);
+    assert.match(log.join("\n"), /# cancelled 1: a test that timed out/, `pooled=${pooled}`);
   }
 });
 

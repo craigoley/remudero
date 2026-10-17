@@ -11,8 +11,8 @@
   origin: "operator session 2026-10-12: escalation triage of #9913 and #9894"
   plan_refs: [W1-T4471, W1-T4676, W1-T42]
   files: [src/lib/escalation-answers.ts, src/lib/panel-graph.ts, src/run-task.ts, test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts]
-  status: queued
-  priority: 1.5
+  status: merged
+  priority: 1  # operator-2026-10-14: 10 operator answers sit stranded in the host question store (plan/questions.ndjson) while their feedback records still read `status: grilling` — #8934, #9894, #9913, #10150, #10199, #10241, #10911, #10961, #11067, #11149; this task is the only path that applies them (was 1.5)
   attempts: 0
   rationale: |
     OBSERVED: escalations #9913 (TRIAGE-fb-1789382125003-abdb87) and #9894 (TRIAGE-fb-1789382055450-2b1a3c), both
@@ -42,6 +42,19 @@
        entry is still applied.
     5. Operator-only authority (G-6) is unchanged: a public commenter's text never reaches the feedback writer.
     Wire the landing deps the route uses into the daemon's call site in src/run-task.ts.
+    6. (operator 2026-10-14) Several stored answers on one issue: apply the one whose FIRST WORD is one of the
+       question's option labels (`parseOptionLabels` on the issue body, the same match `answerTextFor` makes), not the
+       earliest. Only when no stored answer names an option does the earliest accepted answer apply. On #8934, #10150
+       and #10199 a prose comment was stored BEFORE the option answer, and #8934's prose even says it is "not a
+       repository-owner-authored answer"; earliest-first would apply that prose.
+    7. (operator 2026-10-14) A stored answer reaches its record ONLY while the record still reads `grilling`, so it
+       never double-applies: a record already `answered`, `rejected`, `queued` or otherwise moved is left untouched and
+       the pass writes nothing for it. The route already returns 400 for a record that is not grilling; the
+       daemon-side apply checks the same status before it calls the factored function, rather than relying on the 400.
+    8. The 10 stranded answers include three records whose ids are not `fb-*` (evidence-coverage-containment-served-model,
+       evidence-coverage-feedback-summary-served-model, evidence-coverage-feedback-summary-cost: #10961, #11067,
+       #11149), so the `TRIAGE-<feedback id>` match must not require an `fb-` prefix.
+    Evidence: ~/Remudero-notes/grill-recommendations-2026-10-14.md (read-only pass, 2026-10-14 21:16Z).
   acceptance:
     - claim: "an operator reply on a TRIAGE-fb GRILL issue captures a reply entry for the grilled record and marks it answered"
       proof: 'grep: test("W1-T8511: an operator reply on a feedback grill issue answers its record" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
@@ -51,8 +64,15 @@
       proof: 'grep: test("W1-T8511: an answer already in the question store but not on its record is applied once" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
     - claim: "a non-operator comment on a feedback grill issue never reaches the feedback writer"
       proof: 'grep: test("W1-T8511: a non-operator comment never reaches the feedback record" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
+    - claim: "when an issue has several stored operator answers, the one whose first word is an option label is applied, not the earliest"
+      proof: 'grep: test("W1-T8511: the stored answer naming an option label wins over an earlier prose answer" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
+    - claim: "a stored answer reaches only a record still grilling, so it never double-applies"
+      proof: 'grep: test("W1-T8511: a stored answer never reaches a record that is no longer grilling" in test/a-reply-on-a-feedback-grill-issue-answers-the-feedback-record.test.ts'
   falsifier: |
     Seed a grilling feedback record and an open GRILL issue for `TRIAGE-<its id>` with one owner comment, then run
     `readEscalationAnswers`. At origin/main the record stays `grilling` with no reply entry; with the change a reply
     entry names it and the record reads `answered`. Pre-record the comment's origin in plan/questions.ndjson and the
     third test still sees the record answered; key the dedup on the question store and it reds.
+    Store a prose operator comment before an option-word comment and apply the earliest: the record's reply reads
+    the prose and the option-label test reds. Seed a record already `answered` and drop the grilling check: a second
+    reply entry is written and the no-double-apply test reds.

@@ -153,6 +153,8 @@ export interface components {
       workerStateSince?: string;
       /** Bounded worker observability. It names the active role/provider/model and the current or last tool, but never carries prompts, tool arguments, or tool output. */
       workerTelemetry?: {
+        /** Proven by this task's current run start, never inferred from task id or another event. */
+        runId?: string;
         role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
         provider?: string;
         requestedModel?: string;
@@ -197,9 +199,30 @@ export interface components {
       repairLadder?: {
         state: "running" | "stalled" | "unreadable";
       };
+      fleetRuntimeHealth?: FleetRuntimeHealth;
       /** W1-T5373: the needs-you composite's decision count, spliced by src/lib/serve.ts's `withStatusNeedsYou` through the shared `consumeHumanGateCounts`; the same number the nav badge's `inbox.decisions` and the composite's `needsYou` report. Never derived from `counts.blocked`. */
       needsYou?: HumanGateCountSummary;
       staleness?: ConsoleResponseStaleness;
+    };
+    /** W1-T2858: the host heartbeat's runtime-contract verdict (src/lib/fleet-runtime-health.ts), read from shared state and spliced by src/lib/serve.ts's `withFleetRuntimeHealth`. `unknown` (with `reason`) is a missing, malformed, future-version, stale or unmeasured snapshot -- never a healthy reading. Carries destinations and reason codes only: no host paths, credential or config contents. */
+    FleetRuntimeHealth: {
+      state: "healthy" | "drift" | "unknown";
+      reason?: string;
+      observedAt?: string;
+      ageMs?: number;
+      container?: string;
+      checked?: number;
+      drift?: ({
+        destination: string;
+        reason: "missing" | "wrong_source" | "read_only" | "read_write";
+      })[];
+      /** Present only on `drift`. `remedy` is a NAME for the operator; no action is attached. */
+      alert?: {
+        severity: "critical";
+        title: string;
+        detail: string;
+        remedy: string;
+      };
     };
     /** GET /v1/status's header counts (src/lib/board.ts's `CountSummary`), derived from the same `tasks`. */
     StatusCounts: {
@@ -676,6 +699,8 @@ export interface components {
     };
     /** GET /v1/inbox?section=<name>'s body: that one lane under its own key, exactly as the whole body carries it (`needsYou` an object of four lanes, every other section one page of an array), plus `counts` and, for a list section, `page`. */
     InboxSectionResult: {
+      /** Completed maintained classification shared by sections, pages and the attention census; absent from older unqualified bodies. */
+      snapshotKey?: string;
       planSource?: PlanSource;
       ready?: (InboxReadyItem)[];
       drafting?: (InboxDraftingItem)[];
@@ -1316,6 +1341,139 @@ export interface components {
       code?: string;
       reason: string;
       evidenceRef?: string;
+    };
+    /** An immutable automation-trigger-v1 definition (`validateAutomationTriggerDefinition`). Its activation mode never changes after registration; pause/resume is registry state. A definition, like every trigger request, is a closed whitelist: a command, credential, raw prompt or model instruction is refused by name, and any unnamed field is refused. */
+    AutomationTriggerDefinition: {
+      version: "automation-trigger-v1";
+      triggerId: string;
+      /** A registered flow whose automation-action-v1 contract and capability grant already exist. */
+      flowId: string;
+      activation: {
+        mode: "schedule" | "webhook" | "manual";
+        /** Schedule only -- the cadence entry (W1-T2923) this trigger runs on. */
+        scheduleId?: string;
+        /** Schedule only -- an IANA timezone. */
+        timezone?: string;
+        /** Schedule only. A non-existent (spring-forward) wall time is skipped or shifted; an ambiguous (fall-back) wall time fires once, at its first occurrence. */
+        dst?: "skip-gap" | "shift-gap";
+        /** Webhook only -- the authenticated event (W1-T2568) this trigger accepts. */
+        event?: string;
+      };
+      scope: {
+        repo?: string;
+        instance?: string;
+      };
+      /** The environment/policy profile, resolved at execution time, never at registration. */
+      profileId: string;
+      limits: {
+        maxQueued: number;
+        maxInFlight: number;
+      };
+      expirySeconds: number;
+      staleAfterSeconds: number;
+      /** Runs sharing this key share one in-flight bound; defaults to the triggerId. */
+      concurrencyKey: string;
+    };
+    /** One append-only history entry. Nothing ever rewrites an earlier event. */
+    AutomationTriggerRunEvent: {
+      kind: "queued" | "refused" | "start-refused" | "started" | "heartbeat" | "success" | "failed" | "expired" | "cancelled";
+      at: string;
+      code?: string;
+      reason: string;
+      /** The linked automation-action-v1 completion receipt. */
+      receiptId?: string;
+      profile?: {
+        profileId: string;
+        revision: string;
+      };
+    };
+    /** One bounded run as read now. `stale` (in progress with no observation inside the trigger's staleAfterSeconds) and `unknown` (the latest observation is dated after this read) are derived at read time; every other state is the run's latest stored event. A manual replay is a NEW run linked by `replayOf`; the original is never modified. */
+    AutomationTriggerRun: {
+      version: "automation-trigger-v1";
+      runId: string;
+      triggerId: string;
+      flowId: string;
+      /** The flow's automation-action-v1 contract; executing it still passes that contract's preflight and approval gate. */
+      actionId: string;
+      approvalPolicy: "none" | "human";
+      activationMode: "schedule" | "webhook" | "manual";
+      source: "schedule" | "webhook" | "manual";
+      scope: {
+        repo?: string;
+        instance?: string;
+      };
+      timezonePolicy?: {
+        timezone: string;
+        dst: "skip-gap" | "shift-gap";
+      };
+      profileId: string;
+      resolvedProfile?: {
+        profileId: string;
+        revision: string;
+      };
+      idempotencyKey: string;
+      deliveryId?: string;
+      scheduledFor?: string;
+      /** Manual only -- the verified request identity, never a body field. */
+      requestedBy?: string;
+      requestedAt: string;
+      expiresAt: string;
+      concurrencyKey: string;
+      replayOf?: string;
+      state: AutomationTriggerRunState;
+      code?: string;
+      reason: string;
+      observedAt: string;
+      freshness: {
+        ageSeconds: number;
+        status: "fresh" | "stale" | "unknown";
+      };
+      receiptId?: string;
+      events: (AutomationTriggerRunEvent)[];
+    };
+    /** The bounded run-history states of automation-trigger-v1. */
+    AutomationTriggerRunState: "refused" | "queued" | "in-progress" | "success" | "failed" | "expired" | "cancelled" | "stale" | "unknown";
+    AutomationTriggerHistory: {
+      version: "automation-trigger-v1";
+      generatedAt: string;
+      triggers: ({
+        trigger: AutomationTriggerDefinition;
+        state: "active" | "paused";
+        reason: string;
+        changedAt: string;
+        /** The trigger's external source as last observed; `unknown` when never observed, never a quiet success. */
+        source: {
+          status: "available" | "unavailable" | "unknown";
+          observedAt?: string;
+          reason: string;
+        };
+        queued: number;
+        /** In-progress and stale runs -- running work stays visible on a paused trigger. */
+        inFlight: number;
+      })[];
+      /** Newest first. */
+      runs: (AutomationTriggerRun)[];
+    };
+    /** `submitAutomationTrigger`'s answer. `queued` admitted a new run; `duplicate` returns the run a repeated idempotency key or delivery id already started; `refused` names its code (e.g. unregistered-trigger, source-not-permitted, trigger-paused, request-expired, queue-full, history-full, journal-unavailable) and, against a known trigger, the refused run recorded in history. */
+    AutomationTriggerSubmission: {
+      outcome: "queued" | "duplicate" | "refused";
+      run?: AutomationTriggerRun;
+      code?: string;
+      reason?: string;
+      field?: string;
+    };
+    AutomationTriggerRunRequest: {
+      triggerId: string;
+      idempotencyKey: string;
+    };
+    AutomationTriggerActivationRequest: {
+      triggerId: string;
+      state: "active" | "paused";
+      reason?: string;
+    };
+    AutomationTriggerReplayRequest: {
+      runId: string;
+      idempotencyKey: string;
     };
     OperatorAgentActionHistory: {
       action: AutomationAction;
@@ -2510,7 +2668,7 @@ export interface components {
       queueMs: number | null;
       executionMs: number | null;
       exit: number | null;
-      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | null | null;
+      reason: "inputs-unchanged" | "process-completed" | "process-failed" | "signal-or-cancelled" | "spawn-failed" | "memory-budget-shortfall" | null | null;
       attempts: number;
       completions: number;
       failures: number;
@@ -2916,6 +3074,47 @@ export interface components {
       value: number | null;
       notCollectedReason?: string;
     };
+    GardenerWorkerCallCounts: {
+      assignments: number | null;
+      matched: number | null;
+      missing: number | null;
+      orphan: number | null;
+      conflicting: number | null;
+      invalid: number | null;
+    };
+    GardenerWorkerBillingModes: {
+      api: number | null;
+      subscription: number | null;
+      unknown: number | null;
+    };
+    GardenerWorkerPriceCoverage: {
+      reported: number | null;
+      unreported: number | null;
+    };
+    /** Optional gardener-worker-calls-v1 evidence from the existing off-loop ledger union capture, served from cached Analytics without a GET-time ledger scan. Global counters aggregate only repository-scoped gardens; host and fleet gardens are excluded. A match requires the exact validated origin, gardener name and parent pass in the same repository and daemon generation, the same immutable assignment ID, and the same nonempty run and task. Optional raw repository/generation fields must agree. Identical semantic assignment/attempt replays count once even when timestamps differ; conflicting restatements quarantine the identity and cannot create a matched call. Missing parents, assignments or terminal attempts, unobserved assignments, malformed attributed rows and incomplete retained evidence remain gaps. Call observation is neither task success nor proof that a running or interrupted parent completed. These counters never sum dollars or make worker.attempt a canonical monetary producer. Null means unknown. A complete newly captured empty corpus can observe zero; an old source without worker-call capture reports not_collected/missing_capture with null counters and clocks. Optional evidence failure or overflow preserves independent monetary subtotals and ordinary Analytics while refusing complete usage coverage. No raw identities, prompts, tokens, worker envelopes or credentials are public. */
+    GardenerWorkerCalls: {
+      version: "gardener-worker-calls-v1";
+      state: "not_collected" | "partial" | "complete";
+      reason: "missing_capture" | "invalid_capture" | "scope_mismatch" | "over_budget" | "incomplete_evidence" | "observed";
+      /** Source capture clock, independent of the evidence window and GardenerSpend.materializedAt. */
+      observedAt: string | null;
+      window: {
+        from: string;
+        through: string;
+      } | null;
+      counts: GardenerWorkerCallCounts;
+      /** Matched calls with exactly api or subscription billing_mode; every other value is unknown. These are not billed amounts. */
+      billingModes: GardenerWorkerBillingModes;
+      /** Matched attempts with their own explicit finite nonnegative numeric total_cost_usd are reported, including an explicit zero. Absent, invalid, inherited or differently named prices are unreported. Field presence is neither billed spend nor an invoice; API reported estimates and subscription notional prices remain distinct concepts. */
+      priceCoverage: GardenerWorkerPriceCoverage;
+      /** Only repository-scoped registered gardens, with bounded public names and no raw join identities. */
+      gardens: ({
+        name: string;
+        counts: GardenerWorkerCallCounts;
+        billingModes: GardenerWorkerBillingModes;
+        priceCoverage: GardenerWorkerPriceCoverage;
+      })[];
+    };
     /** Optional cached gardener cost evidence (W1-T8484), scoped to the current daemon generation. Only exact parent passes admit canonical producer receipts. A priced subtotal is distinct from a complete total; absent correlation, prices or retained-corpus coverage stay unknown. Host and fleet gardeners contribute no repository cost. */
     GardenerSpend: {
       version: "gardener-spend-v1";
@@ -2945,6 +3144,7 @@ export interface components {
         totalUsd: number | null;
         pricedSubtotalUsd: number | null;
       })[];
+      workerCalls?: GardenerWorkerCalls;
     };
     RepositoryFlowBucket: {
       date: string;
@@ -3389,6 +3589,12 @@ export interface components {
     /** One view's shadow comparator counters. `ready` needs zero `real` diffs sustained for a day and a day of continuous sampling since the last one: at least one sample per minute for every key the streak sampled (the shadow driver's cadence), raised to 3 x requests-per-day samples when measured traffic is higher (the rule of three). */
     ViewShadowReadiness: {
       view: string;
+      /** The current producer contract these counters qualify; older generations remain archived, not counted. */
+      qualificationGeneration?: string;
+      /** Samples refused because either matched producer or source was not ready. */
+      skipped?: number;
+      lastSkippedMs?: number;
+      lastSkipReason?: string;
       requests: number;
       firstRequestMs: number | null;
       samples: number;
@@ -3534,6 +3740,7 @@ export interface components {
       proposalId: string;
       summary?: string;
       plain?: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       stampLine?: string;
       draftedTasks?: (InboxDraftedTask)[];
       spawnedAt?: string;
@@ -3571,7 +3778,7 @@ export interface components {
       total: number;
       next?: string;
     };
-    /** GET /v1/views/inbox?section=<s>[&cursor=<n>] (docs/views.md, src/lib/inbox-view.ts): one page of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a read answers from memory. Every page carries every lane's counts. Dark until state/read-model/switches.json sets `inbox` to `serve`. */
+    /** GET /v1/views/inbox?section=<s>[&cursor=<opaque>] (docs/views.md, src/lib/inbox-view.ts): one page of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a read answers from memory. Every page carries every lane's counts. Dark until state/read-model/switches.json sets `inbox` to `serve`. */
     InboxView: {
       view: "inbox";
       version: 1;
@@ -3581,6 +3788,8 @@ export interface components {
       /** `inbox-store:core`: when the slow lane last classified. */
       sources: (ViewSource)[];
       data: {
+        /** One completed classification, reused by every section, continuation and attention census. */
+        snapshotKey?: string;
         section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet" | "archived" | "snoozed";
         items: (InboxViewItem)[];
         counts: InboxCounts;
@@ -3717,8 +3926,59 @@ export interface components {
         signal: string;
         confidence: number;
       })[];
-      /** Why no proposal is generated (no repository, or no committed analytics snapshot yet). */
+      recordVersion?: "operator-agent-records-v1";
+      /** W1-T9244 additive detail coverage in the same order as proposals. Generated recommendations are observations from the sole native ranking evaluation, never registered ledger history. Interpret detail freshness together with the envelope sources and stale flag. Unknown details stay explicit. */
+      records?: ({
+        proposalId: string;
+        detail: (AgentGeneratedRecommendation) | ({
+          state: "unavailable";
+          reason: string;
+        });
+        durable: ({
+          state: "unregistered";
+        }) | ({
+          state: "registered";
+          source: "ledger";
+          createdAt: string;
+          status: "pending" | "accepted" | "rejected" | "expired";
+        });
+      })[];
+      /** Bounds apply before publication (100 ranks, 64 KiB including identity reserve). A capped detail remains unavailable beside its rank; an over-budget rank set is refused with reason and published=0. Counts describe detail coverage, not healthy outcomes, probability or proof of an empty engine. */
+      coverage?: {
+        ranked: number;
+        published: number;
+        complete: number;
+        unavailable: number;
+        capped: number;
+      };
+      /** Why generation or publication was refused, including missing, malformed or over-budget sources. */
       reason?: string;
+    };
+    AgentGeneratedRecommendation: {
+      state: "reported";
+      kind: "generated-recommendation";
+      observationId: string;
+      repository: string;
+      instanceId: string;
+      proposalText: string;
+      reasoning: string;
+      observedAt: string;
+      /** The rank confidence is the existing heuristic, not a calibrated probability or an approval grant. */
+      scoreKind: "native-heuristic";
+      evidence: ({
+        key: string;
+        value: number;
+        unit: "count" | "tokens" | "tokens/run" | "ms" | "ratio";
+        source: string;
+        observedAt: string;
+        freshness: "fresh";
+        window: {
+          start: string;
+          end: string;
+        } | null;
+      })[];
+      /** Named unknowns, including source window, independent samples, causation, cost, savings and consent. */
+      unavailable: (string)[];
     };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
@@ -3816,16 +4076,7 @@ export interface components {
         /** Blocked PRs and merge holds, most urgent tone first. */
         actions: (NowAction)[];
         recent: {
-          entries: ({
-            ts: string;
-            /** A RecentActivityEntry verb; a consumer renders an unknown one. */
-            verb: string;
-            taskId: string;
-            title: string;
-            detail?: string;
-            costUsd?: number;
-            prUrl?: string;
-          })[];
+          entries: (RecentActivityEntry)[];
           /** Exact merges today (UTC), one per task and pull request, over full history. */
           mergedToday: {
             count: number;
@@ -3996,7 +4247,13 @@ export interface components {
         unverified?: true;
         openedAt?: string;
       };
+      /** Stable current-dispatch identity; event timing and tool activity stay on recent entries. */
       worker?: {
+        /** Proven by this instance task's current run start; absent when no dispatch identity is evidenced. */
+        runId?: string;
+        role?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
+        provider?: string;
+        /** Only an explicit receipt from this run, never an assignment or requested model. */
         servedModel?: string;
         requestedModel?: string;
       };
@@ -4317,6 +4574,24 @@ export interface components {
       predicate: "drafted" | "deps_merged" | "deps_observable" | "evidence_anchors" | "lint_clean" | "no_conflict";
       detail: string;
     };
+    /** W1-T8950: the decision the fleet recommends on an operator inbox item (src/lib/inbox-recommendation.ts's `ServedRecommendation`). Served only while current for the item's summary, lane and task record; fleet items never carry it. `route` is attached at serve time with the option mapping (approve only on a ready item; keep carries none). */
+    InboxRecommendation: {
+      action: "approve" | "decline" | "reframe" | "reply" | "keep";
+      /** The exact reason, feedback or reply text the action posts as its input. */
+      text?: string;
+      /** One plain sentence. */
+      why: string;
+      /** Merged PR numbers ("#11199"), shas on main, task ids, or file paths. */
+      evidence: (string)[];
+      /** True only with evidence of a merged change on main that resolves the subject. */
+      obsolete: boolean;
+      /** The shared root cause, when several items are one cause. */
+      group?: string;
+      /** When the recommendation was written (ISO 8601). */
+      generatedAt: string;
+      source: "writer" | "operator-session-seed";
+      route?: PlainOptionAction;
+    };
     /** One READY-to-ratify proposal (src/lib/panel-graph.ts's `InboxReadyItem`); the drafted tasks ride along so the operator sees exactly what APPROVE would file. */
     InboxReadyItem: {
       from?: InboxSender;
@@ -4332,6 +4607,7 @@ export interface components {
       /** The raw proposal summary (the console's Details). */
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       /** The drafted fragment's stamp line, when the draft carries one. */
       stampLine?: string;
       draftedTasks: (InboxDraftedTask)[];
@@ -4350,11 +4626,14 @@ export interface components {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       /** When the drafting worker was spawned; an empty string when unrecorded. */
       spawnedAt: string;
     };
     /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
+      retirement?: InboxRetirement;
+      needsTriageReason?: string;
       from?: InboxSender;
       /** When the item arrived (RFC 3339 UTC), from a recorded instant (a ruling's judged_at, else the first time the inbox classified it); null only when neither exists. */
       receivedAt?: string | null;
@@ -4367,6 +4646,7 @@ export interface components {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       reasons: (InboxPredicateFailure)[];
       state?: "not_ready" | "deferred_with_trigger";
       /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
@@ -4397,6 +4677,7 @@ export interface components {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
+      recommendation?: InboxRecommendation;
       /** The latest `panel.proposal_declined` row's reason, verbatim. */
       reason: string;
     };
@@ -4427,6 +4708,8 @@ export interface components {
     };
     /** GET /v1/inbox's body (src/lib/panel-graph.ts's `buildInboxRoute`). Deferred, ratified and retired proposals are never returned. The four top-level lanes hold every owner's items; `needsYou` and `fleet` split them by who must act. `declined`, `needsYou` and `fleet` are optional ONLY because the console cache's cold fallback body (serve.ts's `fallbackBodyForCachedRead`) carries just `ready`, `drafting` and `notReady`; every handler-computed body carries all six. */
     InboxResult: {
+      /** Completed maintained classification shared by sections, pages and the attention census; absent from older unqualified bodies. */
+      snapshotKey?: string;
       planSource?: PlanSource;
       ready: (InboxReadyItem)[];
       drafting: (InboxDraftingItem)[];
@@ -4465,6 +4748,10 @@ export interface components {
     };
     /** A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`). */
     InboxThreadMessageExtra: {
+      event?: {
+        key: string;
+        kind: "reframed" | "declined" | "restored" | "approved" | "released" | "redrafted" | "task_filed" | "released_to_fleet" | "refused" | "retired" | "retirement_outcome";
+      };
       did?: InboxThreadActionTaken;
       suggestedAction?: InboxThreadAction;
       /** The message is one of the responder's bounded clarifying questions. */
@@ -4517,6 +4804,8 @@ export interface components {
       detail: string;
     };
     InboxAttentionCensusItem: {
+      retirement?: InboxRetirement;
+      needsTriageReason?: string;
       threadId: string;
       proposalId: string;
       taskId?: string;
@@ -4537,9 +4826,78 @@ export interface components {
       reason: string;
       decision?: "needs_operator" | "automate" | "backlog";
       at?: string | null;
+      /** Exact advisory correction receipts supplied to this judgment; no execution authority. */
+      whyMeReceiptIds?: (string)[];
+    };
+    /** Read-only retirement outcome audit. Missing scope, continuity, controls or outcomes remains unmeasurable; no proposal is changed. */
+    InboxDismissalAudit: {
+      contract: "inbox-dismissal-audit-v1";
+      state: "measured" | "unmeasurable";
+      scope: {
+        instance: string | null;
+        repository: string | null;
+      };
+      window: {
+        from: string;
+        to: string;
+      };
+      coverage: {
+        receipts: "observed" | "partial" | "unavailable";
+        outcomes: "observed" | "partial" | "unavailable";
+        plan: "observed" | "partial" | "unavailable";
+        registry: "observed" | "partial" | "unavailable";
+      };
+      controls: {
+        heldSecurity: {
+          observed: boolean;
+          passed: boolean;
+          taskId: "W1-T216";
+        };
+        terminalMechanical: {
+          observed: boolean;
+          passed: boolean;
+        };
+      };
+      /** Eligible receipts and audited receipts use the same units. Only returned evidence rows are capped. */
+      denominator: {
+        eligible: number;
+        sampled: number;
+        returned: number;
+        unqualified: number;
+        foreign: number;
+        duplicates: number;
+        conflicting: number;
+      };
+      /** Observed lower bounds, never a certified zero without coverage. */
+      observed: {
+        falseDismissals: number;
+        terminalConfirmed: number;
+        restored: number;
+        unresolved: number;
+      };
+      measurement: {
+        falseDismissals: number | null;
+        falseDismissalRate: number | null;
+      };
+      items: ({
+        receiptId: string;
+        proposalId: string;
+        taskId: string | null;
+        snapshotKey: string;
+        retiredAt: string;
+        outcome: "false_dismissal" | "terminal_confirmed" | "unresolved";
+        restored: boolean;
+        evidence: (string)[];
+      })[];
+      truncated: boolean;
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      /** At most 16 KiB of serialized retirement views; completeness is retirementHistory. */
+      retirements?: (InboxRetirement)[];
+      retirementHistory?: InboxRetirementHistory;
+      whyMeFeedback?: InboxWhyMeFeedback;
+      dismissalAudit?: InboxDismissalAudit;
       planSource?: PlanSource;
       scope: "core";
       state: "complete" | "partial";
@@ -4655,7 +5013,160 @@ export interface components {
         path: string;
       })[];
     };
-    InstanceInboxReframeRequest: unknown;
+    InboxRetirementScope: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      taskId: string | null;
+    };
+    InboxRetirement: {
+      retirementId: string;
+      /** Immutable original retirement snapshot anchor. */
+      snapshotKey: string;
+      scope: InboxRetirementScope;
+      proofId: string;
+      proofKind: "merged-task" | "plan-retirement" | "handoff" | "successor";
+      reason: string;
+      state: "retired" | "restored_for_review";
+    };
+    /** Byte-bounded maintained classification projection, separate from the full audit denominator. */
+    InboxRetirementHistory: {
+      state: "observed" | "absent" | "unavailable";
+      /** Null when absent or unavailable; observed empty is zero. */
+      total: number | null;
+      returned: number;
+      truncated: boolean;
+      countSemantics: "maintained_classification_retirements";
+    };
+    InboxRetirementRestoreRequest: {
+      repository: string;
+      instance: string;
+      proposalId: string;
+      /** Exactly thread:<proposalId>::inbox::-::-. */
+      threadId: string;
+      intentId: string;
+      retirementId: string;
+      snapshotKey: string;
+      taskId: string | null;
+      /** Nonblank */
+      reason: string;
+    };
+    InboxRetirementRestoreReceipt: {
+      id: string;
+      kind: "restore";
+      scope: InboxRetirementScope;
+      snapshotKey: string;
+      retirementId: string;
+      at: string;
+      authority: "operator";
+      operator: string;
+      intentId: string;
+    };
+    InboxRetirementRestoreResult: {
+      repository: string;
+      instance: string;
+      ok: true;
+      accepted: true;
+      delivery: "delivered";
+      audit: "journal_recorded";
+      materialization: "pending_refresh";
+      replayed?: true;
+      receipt: InboxRetirementRestoreReceipt;
+    };
+    InboxWhyMeCorrectionRequest: {
+      repository: string;
+      instance: string;
+      threadId: string;
+      proposalId: string;
+      snapshotKey: string;
+      intentId: string;
+      correction: "fleet_can_handle" | "still_need_me";
+      note?: string;
+      supersedes?: string;
+    };
+    InboxWhyMeCorrection: {
+      repository: string;
+      instance: string;
+      threadId: string;
+      proposalId: string;
+      snapshotKey: string;
+      intentId: string;
+      correction: "fleet_can_handle" | "still_need_me";
+      note: string;
+      supersedes?: string;
+      receiptId: string;
+      /** Service-verified actor; never a client-supplied identity. */
+      operator: string;
+      recordedAt: string;
+      original: {
+        whyMe: string;
+        sourceFacts: (InboxAttentionCensusFact)[];
+        judgment?: InboxAttentionJudgment;
+      };
+    };
+    /** Fleet observation of advisory feedback against its maintained assessment; never execution or release authority. */
+    InboxWhyMeOutcome: {
+      observedAt: string;
+      /** As-of time of the maintained assessment */
+      assessmentAt: string;
+      snapshotKey: string;
+      state: "held" | "awaiting_assessment" | "assessment_observed" | "item_absent" | "superseded" | "snapshot_changed";
+      authority: "unchanged";
+      classification?: string;
+      /** Receipt-joined means the existing judge received this advisory input; it does not claim a causal benefit. */
+      assessmentRelation: "receipt_joined" | "unjoined";
+      judgment?: InboxAttentionJudgment;
+    };
+    /** Separate maintained advisory receipt projection. Its identity/generatedAt qualify its own history; classificationSnapshotKey names the unchanged frozen census. It never changes census items, authority or page keys. Missing outcomes are pending; partial history is not verified absence. Public items are bounded to 16KiB; every original settled receipt remains durable. */
+    InboxWhyMeFeedback: {
+      contract: "inbox-why-me-v1";
+      identity: string;
+      generatedAt: string;
+      scope: {
+        repository: string;
+        instance: string;
+      };
+      classificationSnapshotKey: string;
+      state: "observed" | "partial" | "unavailable";
+      reason?: string;
+      total: number;
+      truncated: boolean;
+      items: ((InboxWhyMeCorrection) & ({
+        mismatch: boolean;
+        active: boolean;
+        /** Latest non-superseded correction for this operator/ask; historical snapshot context remains explicit. */
+        latest: boolean;
+        /** Current non-judge source facts still match the original ask. */
+        sameAskFacts: boolean;
+        currentSnapshot: boolean;
+        outcome?: InboxWhyMeOutcome;
+      }))[];
+    };
+    InboxWhyMeCorrectionResult: {
+      repository: string;
+      instance: string;
+      ok: true;
+      delivery: "delivered";
+      authority: "feedback_only";
+      audit: "receipt_recorded";
+      correction: InboxWhyMeCorrection;
+      replayed?: boolean;
+      receipt: {
+        intentId: string;
+        key: string;
+        status: "settled";
+        action: "why-me-correction";
+        threadId: string;
+      };
+    };
+    InstanceInboxReframeRequest: (InboxReframeRequest) & ({
+      repository: string;
+      instance: string;
+      /** Must identify the same proposal as proposalId. */
+      threadId: string;
+      intentId: string;
+      snapshotKey: string;
+    });
     InstanceInboxReframeResult: {
       repository: string;
       instance: string;
@@ -4727,6 +5238,12 @@ export interface components {
       ok: boolean;
       proposalId: string;
       restored: boolean;
+    };
+    InboxSnapshotRefusal: {
+      error: "invalid_cursor" | "inbox_snapshot_changed" | "inbox_snapshot_pending" | "inbox_snapshot_stale" | "plan_source_unavailable";
+      detail: string;
+      restartRequired?: true;
+      snapshotKey?: string;
     };
     /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`, `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet), `plan_source_unavailable` (W1-T5639: serve has not read the plan, so nothing is derived from a placeholder). */
     InboxRefusal: {
@@ -5877,6 +6394,55 @@ export interface paths {
         };
     };
   };
+  "/v1/automation/triggers": {
+    get: {
+      responses: {
+          "200": AutomationTriggerHistory;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/automation/triggers/run": {
+    post: {
+      responses: {
+          "200": AutomationTriggerSubmission;
+          "202": AutomationTriggerSubmission;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AutomationTriggerSubmission;
+          "409": AutomationTriggerSubmission;
+          "503": AutomationTriggerSubmission;
+        };
+    };
+  };
+  "/v1/automation/triggers/activation": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/automation/triggers/replay": {
+    post: {
+      responses: {
+          "200": AutomationTriggerSubmission;
+          "202": AutomationTriggerSubmission;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": AutomationTriggerSubmission;
+          "409": AutomationTriggerSubmission;
+          "503": AutomationTriggerSubmission;
+        };
+    };
+  };
   "/v1/operator-agent/actions": {
     get: {
       responses: {
@@ -6221,6 +6787,8 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": undefined;
+          "409": InboxSnapshotRefusal;
+          "503": InboxSnapshotRefusal;
         };
     };
   };
@@ -6527,6 +7095,7 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "409": InboxSnapshotRefusal;
           "503": InboxRefusal;
         };
     };
@@ -6615,7 +7184,10 @@ export interface paths {
   "/v1/i/{instance}/inbox": {
     get: {
       responses: {
-          "200": unknown;
+          "200": (InboxResult) & ({
+            repository: string;
+            instance: string;
+          });
           "503": undefined;
         };
     };
@@ -6623,7 +7195,11 @@ export interface paths {
   "/v1/i/{instance}/inbox/attention-census": {
     get: {
       responses: {
-          "200": unknown;
+          "200": (InboxAttentionCensusResult) & ({
+            repository: string;
+            instance: string;
+            contract: "read-write" | "read-only";
+          });
           "503": undefined;
         };
     };
@@ -6632,6 +7208,29 @@ export interface paths {
     get: {
       responses: {
           "200": InstanceInboxProposal;
+          "404": undefined;
+          "409": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/retirement-restore": {
+    post: {
+      responses: {
+          "200": InboxRetirementRestoreResult;
+          "400": undefined;
+          "403": undefined;
+          "409": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/why-me-correction": {
+    post: {
+      responses: {
+          "200": InboxWhyMeCorrectionResult;
+          "400": undefined;
+          "403": undefined;
           "404": undefined;
           "409": undefined;
           "503": undefined;

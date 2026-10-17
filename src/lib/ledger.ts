@@ -26,6 +26,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
+import { sameHost } from "./host-identity.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
@@ -138,9 +139,9 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
 
 /** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
 export type LedgerActor = "daemon" | "worker" | "service" | "host_automation" | "test" |
-  "operator_human" | "operator_ai" | "unknown" | "operator";
+  "operator_human" | "operator_ai" | "unknown" | "operator" | "run_child";
 
-export function markLedgerProcessActor(actor: "daemon" | "service" | "host_automation"): void {
+export function markLedgerProcessActor(actor: "daemon" | "service" | "host_automation" | "run_child"): void {
   process.env.REMUDERO_PROCESS_ACTOR = actor;
 }
 
@@ -149,6 +150,21 @@ export function markLedgerProcessActor(actor: "daemon" | "service" | "host_autom
 const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
 
 export const DAEMON_PID_ENV = "REMUDERO_DAEMON_PID";
+
+/** W1-T9085: mark THIS process as a run child (src/run-child-main.ts): every ledger row it writes from here on reports
+ *  `actor: "run_child"` (ADR 0007 A.3). The daemon spawned it, so it inherited the daemon's own marker; that one is dropped.
+ *  Returns the call that puts both back. */
+export function markRunChildProcessActor(env: NodeJS.ProcessEnv = process.env): () => void {
+  const kind = env.REMUDERO_PROCESS_ACTOR;
+  const daemon = env[DAEMON_PROCESS_ACTOR_ENV];
+  env.REMUDERO_PROCESS_ACTOR = "run_child";
+  delete env[DAEMON_PROCESS_ACTOR_ENV];
+  return () => {
+    if (kind === undefined) delete env.REMUDERO_PROCESS_ACTOR;
+    else env.REMUDERO_PROCESS_ACTOR = kind;
+    if (daemon !== undefined) env[DAEMON_PROCESS_ACTOR_ENV] = daemon;
+  };
+}
 
 /** Mark THIS process as the daemon. Call once, at the top of `daemonCommand` (run-task.ts),
  *  before its first `appendLedger` call. Every ledger row this process (or anything it calls
@@ -172,7 +188,7 @@ export function deriveLedgerActor(
   if (env.NODE_TEST_CONTEXT) return "test";
   if (env[WORKER_SCOPE_ENV]) return "worker";
   const kind = env.REMUDERO_PROCESS_ACTOR;
-  if (kind === "service" || kind === "host_automation" || kind === "daemon") return kind;
+  if (kind === "service" || kind === "host_automation" || kind === "daemon" || kind === "run_child") return kind;
   if (env[DAEMON_PROCESS_ACTOR_ENV]) return "daemon";
   if (env.CLAUDECODE === "1" || env.CLAUDE_CODE_SESSION_ID) return "operator_ai";
   return isTTY ? "operator_human" : "unknown";
@@ -187,7 +203,7 @@ export type LedgerRowActor = LedgerActor;
 export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
   switch (line.actor) {
     case "daemon": case "worker": case "service": case "host_automation": case "test":
-    case "operator_human": case "operator_ai": case "operator": return line.actor;
+    case "operator_human": case "operator_ai": case "operator": case "run_child": return line.actor;
     default: return "unknown";
   }
 }
@@ -582,8 +598,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "repair.lease_posted",
   "pr.opened",
   "pr.open_satisfied_by_main", // the backlog gardener retires the task from it; rotated away, a satisfied task is rebuilt.
-  "pr.rehome.started", // W1-T7448: a resumed re-home reuses its started branch name; rotated away, it opens a second.
-  "pr.rehomed", // W1-T7448: a completed re-home is never repeated for the same head.
+  "pr.identity_trailer.started", // W1-T9055: a retried trailer commit on the same head reuses its started row; rotated away, it writes a second.
+  "pr.identity_trailered", // W1-T9055: a completed trailer commit is never repeated for the same head.
   "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
   "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
   "selector-shadow.observation", // W1-T5925: the shadow verdict folds every row; rotated away, it forgets.
@@ -673,6 +689,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.base_red.refresh",
   "sweep.base_fixed.refresh", // baseRedHistoryFromLedger and refreshRecordsFromLedger read prior refreshes.
   "refresh.clearance", // refusedRefreshClearancesFromLedger memoizes refusal evidence across passes.
+  "sweep.base_red.refresh_admission", // W1-T9595: the light pass replays its held heads; pacing reads its cohort.
   "sweep.ci_timeout_refresh.attempted",
   "sweep.ci_timeout_refresh.outcome",
   "sweep.ci_timeout_refresh.escalated",
@@ -756,6 +773,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.repair.bisecting", // W1-T7760 mainBisectionFromLedger: lost, a probe in flight is dispatched a second time.
   "main.repair.probe_concluded", // W1-T7760 mainBisectionFromLedger: lost, a concluded probe is re-run and the bisection restarts.
   "main.repair.fix_opened", // W1-T8575 mainRepairPrUrlsFromLedger (sweep.ts): lost, a red-main repair PR is held for the red it repairs.
+  "main.repair.located", // W1-T8042 mainRepairRedsFromLedger (sweep.ts): lost, a red shared across PRs opens a second record.
+  "main.repair.resolved", // W1-T8042 same fold: lost, a repaired red's record reads open and absorbs a new red.
+  "main.repair.inherited", // W1-T8042 same fold and mainRepairRecordsFromLedger: lost, the shared red is handed over again.
   "refusal_amendment.drafted", // noPrVerdictRowsFromLedger: lost, a settled no_pr refusal is re-drafted.
   "sre.governor", // governorTiersFromLedger: lost, a stopped runbook re-pauses and re-pages; on change only.
   "sweep.plan_repair", // planRepairHistoryFromLedger: the per-head repair and once-per-PR stale-base key.
@@ -882,6 +902,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
   // it on rotation would re-log the same stand-down every pass.
   "sweep.update_branch.skipped_queue",
+  // W1-T7735: the refresh value test reads its own decision rows back. Judge rulings are spent once
+  // per head, a repeated skip writes no second row, and a request is consumed once. Outcomes join
+  // decisions to derive the benefit weight. Each row dropped on rotation would re-spend a judge call
+  // or re-consume a request.
+  "sweep.refresh.decided",
+  "sweep.refresh.outcome",
+  "sweep.refresh.requested",
   // W1-T1235: `latestGhRateLimitRefusalsFromLedger` (run-task.ts) reads the newest row per bucket
   // for `rmd status`'s GITHUB BUCKETS section. Kept here, not in the render set, because GitHub's
   // resets outlast RENDER_STEP_RETENTION_WINDOW_MS and an operator needs the LAST refusal however
@@ -1401,7 +1428,7 @@ export function isRotationLockHolderStale(
   opts: { hostname?: () => string; inContainer?: () => boolean; nowMs?: number; isPidAlive?: (pid: number) => boolean } = {},
 ): boolean {
   const myHost = (opts.hostname ?? hostname)();
-  if (held.host !== myHost) {
+  if (!sameHost(held.host, myHost)) {
     const startedMs = Date.parse(held.startedAt);
     return !Number.isFinite(startedMs) || (opts.nowMs ?? systemClock.now()) - startedMs > LEDGER_ROTATION_SMOOTHING_WINDOW_MS;
   }

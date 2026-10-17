@@ -1,0 +1,61 @@
+- id: W1-T9558
+  title: "THE LIGHT PASS ADMITS A DISCRIMINATE-ONLY OR REVIEW-REUSED HEAD — `runSweep` queues all three review dispositions in one pool (W1-T3798), but the light pass selects and acts on `post-review` only, so a cheap-mode head waits for the full pass. Since 2026-10-11 that pass closes review admissions on its wall-clock bound before it reaches its review pool, so 6 of 7 such heads on 2026-10-13/14 were never reviewed (#11710, #11783)"
+  repo: remudero
+  depends_on: [W1-T3798, W1-T5931]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — which review dispositions the light pass may admit; it spends review lanes unattended
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-14: \"figure out why reviews aren't posting efficiently\"; root-caused from the core ledger 2026-10-12..14 (read only)"
+  plan_refs: [W1-T100, W1-T3704, W1-T3798, W1-T5713, W1-T9047, W1-T2584, W1-T5931, W1-T1044, W1-T526]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/the-light-pass-admits-the-cheap-review-modes.test.ts]
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-14 from the core ledger union (2026-10-12 through 21:51Z on 2026-10-14, read only, streamed to the Mac).
+    - Admissions by surface (`sweep.review_admitted`): 99.6% are `surface: light`. Full-surface admissions per day:
+      42 on 10-05, 17, 7, 7, 26 on 10-09, 15 on 10-10, then 3, 1, 3, 1 on 10-11..10-14.
+    - Admissions with `review_mode` discriminate-only or reuse: 3 on 10-09, 4 on 10-10, all full-surface. None since.
+    - The light pass serves `post-review` well. Eligible-to-posted p50 1.9-3.6 min and p90 6.5-22 min in every 12 h window.
+      Review child p50 2.0-2.9 min. Average concurrent reviews 0.1-2.8 against an adaptive width of 4-5.
+    - Cheap-mode heads on 10-13/14: 7. Six were never reviewed: #11402 (66 min), #11629 (113 min), #11710 three heads
+      (63, 109 and 25+ min), and #11783 (50+ min). One (#11596) posted after 41 min. Each one's light-pass rows read
+      "deferred to full sweep (light pass)", then a full-pass row read "review admission continuation gate closed".
+      Each wait ended only when a push replaced the head. A refreshed head can be discriminate-only again, so #11710 looped.
+    WHY:
+    - `selectReviewAdmissions`, `reviewAdmissionQueueDepth`, the outcome-dedup set, `observeReviewEligibility` and
+      `publishLightPassReviewDemand` (src/lib/sweep.ts) all filter on `disposition === "post-review"`.
+      `lightPassActionable` (src/run-task.ts) returns true only for `post-review` among the review dispositions.
+    - The full pass runs its review pool after the per-PR walk. `runGatedSweep` (src/lib/daemon.ts) sets
+      `reviewAdmissionsOpen = false` when `sweepWallClockBoundMs` (559 s) expires. Full passes now take 11-44 min
+      (p50 16.6 min, mostly building the open-PR snapshot before `runSweep` starts). On 10-14 12-24Z, 20 passes were
+      abandoned against 19 completed `sweep.summary` rows. The pool is reached after the gate has closed.
+    - W1-T100 also declares src/lib/sweep.ts and src/run-task.ts as the sweep's home. This task changes only which
+      review dispositions the light pass admits.
+    - W1-T9047 (queued, P1) routes MORE refreshed heads into reuse and discriminate-only. Without this task, each head it
+      routes would wait for a full pass that cannot admit it.
+  design: |
+    1. Add `isReviewLaneDisposition(d)` to src/lib/sweep.ts: post-review, review-reused or discriminate-only. Use it at
+       every light-pass site that filters on post-review: selection, queue depth, the outcome-dedup set, eligibility
+       observation, demand publication, the non-admitted wrapper's actionable and stand-down reason, and the refill deps.
+    2. `lightPassActionable` returns true for all three, on the ordinary pass and the review-only pass, as it does for
+       post-review today.
+    3. The three share one lane: the same adaptive width (`effectiveReviewWidth`), the same process-wide
+       `reviewAdmissionBound`, the same oldest-first order and the same exact-input outcome keys. `runSweep` already
+       derives each head's mode and passes it to `postReview`. No new bound or count is introduced.
+    4. Out of scope, reported separately: the full pass's 559 s bound fires on every healthy pass today, and review
+       reservations reduce fix admissions.
+  acceptance:
+    - claim: "a discriminate-only head and a review-reused head are each admitted by the light pass in their own mode, a cheap head shares the one review width with a full review, and lightPassActionable admits all three review dispositions"
+      proof: "unit test: test/the-light-pass-admits-the-cheap-review-modes.test.ts"
+    - claim: "the suite names the discriminate-only light-pass admission in a test title"
+      proof: "grep: W1-T9558: a discriminate-only head is admitted by the light pass and reviewed in its cheap mode in test/the-light-pass-admits-the-cheap-review-modes.test.ts"
+    - claim: "the light pass selects review admissions through the shared review-lane predicate"
+      proof: "grep: isReviewLaneDisposition(deriveDisposition(pr, policy, now)\\.disposition) in src/lib/sweep.ts"
+  falsifier: |
+    Give the light pass one green, push-orphaned head whose own diff is unchanged and whose merge base moved. At origin/main
+    its row reads "deferred to full sweep (light pass)" and `postReview` is never called. With the change it writes
+    `sweep.review_admitted` with `review_mode: discriminate-only` and `surface: light`, and `postReview` receives that mode.

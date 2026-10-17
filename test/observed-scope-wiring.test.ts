@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 import { runDrain, runnableCandidates, type DrainDeps } from "../src/lib/drain.js";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import {
@@ -248,8 +248,8 @@ test("SOURCE: all three call sites pass observedByTask EXPLICITLY rather than om
   // daemon.ts's one call site: runDaemon's own direct partitionByFileOverlap call.
   assert.match(
     daemonSrc,
-    /partitionByFileOverlap\(candidates, deps\.observedByTask \?\? NO_OBSERVED_SCOPE\)/,
-    "runDaemon's own partitionByFileOverlap call passes an explicit second argument",
+    /partitionByFileOverlap\(\[\.\.\.occupiedTasks, \.\.\.candidates\], deps\.observedByTask \?\? NO_OBSERVED_SCOPE\)/,
+    "runDaemon checks occupied children and candidates with an explicit observed scope argument",
   );
 
   // Neither call-site file passes a bare `partitionByFileOverlap(candidates)` anymore.

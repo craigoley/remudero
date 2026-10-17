@@ -141,12 +141,30 @@ workerAbandon:
   min: 1200000
   max: 7200000
 # W1-T1044 (A SWEEP TICK HAS NO WALL-CLOCK BOUND). The bound on `await deps.sweep()`
-# (src/lib/daemon.ts's poll loop). MEASURED, not a round figure: this task's own rationale
-# re-derived healthy sweep ticks at 61.8s median / 111.8s p90, against 21 confirmed hangs
-# longer than 20 minutes (1200000ms), the shortest one 165.5 minutes. value: 559000 is 5x
-# the measured p90 (111800ms) — comfortably past the whole healthy population's own tail,
-# and still 2.15x BELOW the shortest confirmed hang, so the bound cannot fire on a
-# merely-slow-but-healthy tick and cannot wait as long as even the shortest observed one.
+# (src/lib/daemon.ts's poll loop). W1-T1044 derived 559000 as 5x a 111.8s p90 of healthy
+# ticks, against 21 confirmed hangs, the shortest one 165.5 minutes.
+#
+# W1-T9563 (THAT POPULATION IS GONE, AND THIS ROW IS NO LONGER THE FULL PASS'S BOUND). On
+# 2026-10-14 12-24Z completed full passes measured 6.6 / 16.6 / 33.7 / 35.3 min (min / p50 /
+# p90 / max, n=20), and 21 healthy passes were abandoned at 559s; no hang was observed. This
+# value now FIRES ON HEALTHY PASSES and is not claimed otherwise. The full pass's bound is
+# LEARNED instead: `learnedSweepBound` (src/lib/daemon.ts) takes nearest-rank p90 x 3 of the
+# last 40 `daemon.sweep.settled` durations, seeded at boot from the ledger union (W1-T9632:
+# the boot's restart-history read carries the step, so an hourly restart no longer resets the
+# sample), and writes `bound_basis` on every `daemon.sweep.started`/`.abandoned` row. At 10-14 12-24Z's
+# sample that is 101.1 min, under the 165.5 min hang. The learned value is never clamped to
+# this row's max.
+#
+# WHAT THIS ROW STILL BOUNDS: (1) the COLD START, only while fewer than 5 passes have settled
+# AND none of them x3 outlasts this value (`bound_basis: no_history_fallback`); otherwise the
+# cold start is 3x the longest settled pass (`settled_max_fallback`, W1-T9632: on 2026-10-15
+# passes of 1,384-4,995 s were each abandoned at 559 s). After the abandon stopped closing the review pool, a
+# cold-start abandon costs only that pass's attributed outcome, and the pass still settles and
+# seeds the learner. (2) `drainInFlightReviews` in the stop and restart paths (W1-T8172), a
+# review drain, not a pass. The value is deliberately NOT raised to the measured population:
+# that would lengthen every restart's review drain, which W1-T9563 leaves out of scope. Re-
+# derive it, and the drain bound with it, only as its own task. min/max below now bound only an
+# operator retune of these two uses.
 #
 # W1-T1219 (ONE POLICY ROW BOUNDS TWO UNRELATED POPULATIONS): until this task, this SAME
 # field also bounded ONE fix-rung worker spawn inside `runFixRung` (src/run-task.ts) — a
@@ -163,11 +181,8 @@ workerAbandon:
 # `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`), never a load failure, so an existing `policy.yaml`
 # fixture that predates this task keeps loading clean.
 #
-# min: 180000 (3 minutes) sits comfortably above the measured p90 (111.8s) with its own
-# margin — a tighter operator retune still cannot abandon a healthy-but-slow tick. max:
-# 900000 (15 minutes) stays safely under the shortest confirmed hang (20 minutes) even at
-# the loosest retune, so the bound cannot be widened past the point where it stops firing on
-# the class of hang it was measured against.
+# min: 180000 (3 minutes) and max: 900000 (15 minutes) are W1-T1044's retune range, kept for
+# the cold start and the review drain above; neither bounds the learned full-pass value.
 sweepWallClockBoundMs:
   value: 559000
   origin: "net-new"
@@ -877,11 +892,33 @@ sweep:
   # re-read when only uncertainty tipped it; back-off while reserved work that can free memory still
   # runs; admitted and named when nothing is left to wait for. Switching to enforce is an operator ruling made by editing this row;
   # nothing switches it on a timer. Read by host-memory-shadow.ts
-  # itself, never by validatePolicy.
+  # itself, never by validatePolicy. `classModes` overrides mode for named worker classes: garden
+  # (gardener/cleanup-bot children) enforces on operator 2026-10-14, after the 10-14 loop stalls in which
+  # the shadow verdict would have refused the 3 running garden children. A garden child that would not
+  # fit is deferred to its next pass (memory_budget.enforce_defer), never dropped. Operator 2026-10-15
+  # approved guarded enforcement for implement (build), fix, review and advisory after W1-T8472 merged
+  # in #11725. Existing workers are not stopped; test/proof and unnamed classes stay shadow. No numeric
+  # threshold, resource limit, provider, credential or spending setting changes with this ruling.
   hostMemoryBudget:
     mode:
       value: "shadow"
       origin: "proposal"
+    classModes:
+      implement:
+        value: "enforce"
+        origin: "proposal"
+      fix:
+        value: "enforce"
+        origin: "proposal"
+      review:
+        value: "enforce"
+        origin: "proposal"
+      advisory:
+        value: "enforce"
+        origin: "proposal"
+      garden:
+        value: "enforce"
+        origin: "proposal"
     # The 1.5 GiB dispatch reserve (memoryFloorMib above) rounded up: MemAvailable kept after every claim.
     hostReserveMib:
       value: 2048
@@ -935,6 +972,19 @@ sweep:
       origin: "proposal"
       min: 1000
       max: 86400000
+  # W1-T9082 — ADR 0007 decision A.9: whether a build run also starts a child process. mode accepts off, shadow,
+  # on or auto, and an absent block reads as off. "shadow" starts one PROBE child per dispatched run beside the
+  # in-process run: it loads what a run child would load, round-trips the run-child contract and records
+  # `run_child.shadow` (load time, tree peak, admitted class estimate). "on" (W1-T9085) runs the build in a detached
+  # child. "auto" (W1-T9087, shipped) decides between them on its own ledger evidence since the previous daemon boot
+  # (src/lib/run-child-mode.ts): it promotes to on only after a clean whole boot cycle with an adoption pass and every
+  # probe peak within its class estimate, and demotes to shadow on a contract mismatch, a misidentified child or a lost
+  # one. Every change, and one decision per boot, is ledgered as `run_child.mode_decision`. Read by
+  # src/lib/policy.ts (loadRunChildMode), never by validatePolicy.
+  runChild:
+    mode:
+      value: "auto"
+      origin: "proposal"
 
 drain:
   max:
@@ -1719,12 +1769,26 @@ escalationTriage:
 # "act" closes only positively-evidenced issues that are not MANUAL or GRILL and whose newest comment is
 # not the operator's, at most `maxClosesPerPass` a pass; "off" stops the garden. The operator flips it
 # once the shadow verdict table over the open backlog is right (operator ruling 2026-10-13).
+# Flipped to "act" on operator 2026-10-14 ("go with your recommendations"): on 10-14 the shadow pass
+# judged #11639 resolved, and the escalation reconciler closed it about 40 min after its PR merged.
 issueRevalidation:
   mode:
-    value: "shadow"
+    value: "act"
     origin: "net-new"
   maxClosesPerPass:
     value: 5
     origin: "net-new"
     min: 1
     max: 20
+
+# W1-T8245: who may hold which instance. `automationSetters` lists the setter classes that count as the fleet's
+# OWN automation on that instance (src/lib/foreign-pause-detector.ts); every other class from W1-T7839's actor
+# evidence is foreign, and a hold with no actor evidence is `unverified`, which no policy can list. This names
+# a hold, it never refuses one: the foreign-pause detector judges a foreign hold by the idle lane-slot minutes
+# it caused against what the instance's own automation holds normally cost (ownHistoryBound), not by its clock.
+# Classes: daemon, host-recycle, human-at-a-terminal, agent-session, remote-non-interactive, host-automation.
+# For core: the daemon's freshness/restart drain and the host recycle (deploy/recycle-container.sh).
+pausePolicy:
+  core:
+    automationSetters: [daemon, host-recycle]
+    origin: "operator ruling 2026-10-11: serve work never pauses core; only the daemon's drain and the host recycle do"

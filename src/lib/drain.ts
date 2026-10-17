@@ -157,6 +157,10 @@ export interface OrphanRunBranchEvidence {
   nowMs: number;
   liveTaskIds: ReadonlySet<string>;
   graceMs?: number;
+  /** W1-T9482: when the sweep last requeued a task (`sweep.strike_ladder.requeued`), epoch ms; absent when
+   *  it never did. A requeue is the sweep's order to rebuild, so a ref pushed before it is spent. Lazy so a
+   *  caller reads its ledger only for a task that actually has a proven no-PR ref. */
+  requeuedAtMs?: (taskId: string) => number | undefined;
 }
 
 /** True when one pushed run ref is an ORPHAN that must stop blocking dispatch: its exact tip sha is
@@ -170,7 +174,18 @@ export function orphanRunBranchReleased(ref: PushedRunRef, orphan: OrphanRunBran
   if (orphan.liveTaskIds.has(ref.taskId)) return false;
   const epoch = /-(\d{13})$/.exec(ref.ref);
   if (!epoch) return false;
-  return orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS);
+  return (
+    orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS) ||
+    requeueReleasesRef(ref, Number(epoch[1]), orphan)
+  );
+}
+
+/** W1-T9482: true when the sweep requeued `ref`'s task at or after the instant the ref was pushed. Only
+ *  reached past the sha proof, so the ref has no pull request; a ref pushed AFTER the requeue (epoch later)
+ *  is a build in flight and keeps blocking. */
+function requeueReleasesRef(ref: PushedRunRef, epochMs: number, orphan: OrphanRunBranchEvidence): boolean {
+  const requeuedAt = orphan.requeuedAtMs?.(ref.taskId);
+  return requeuedAt !== undefined && Number.isFinite(requeuedAt) && epochMs <= requeuedAt;
 }
 
 /** W1-T4002 — the ONE decision {@link runDrain}, {@link runDrainLanes} AND daemon.ts's own
@@ -217,7 +232,12 @@ export function logPlanOnlyRunBranchException(
         pr_number: match.prNumber,
       });
     } else if (orphanRunBranchReleased(ref, orphan)) {
-      log("dispatch.run_branch_exception", { task: taskId, reason: "orphan-run-branch-no-pr", ref: ref.ref, sha: ref.sha });
+      const epoch = /-(\d{13})$/.exec(ref.ref);
+      const graceElapsed = epoch !== null && orphan !== undefined &&
+        orphan.nowMs - Number(epoch[1]) >= (orphan.graceMs ?? ORPHAN_RUN_BRANCH_GRACE_MS);
+      // W1-T9482: name the requeue when it, and not the 24 h grace, is what released the ref.
+      const reason = graceElapsed ? "orphan-run-branch-no-pr" : "requeue-released";
+      log("dispatch.run_branch_exception", { task: taskId, reason, ref: ref.ref, sha: ref.sha });
     }
   }
 }
@@ -278,6 +298,10 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   dispatchValueContext?: DispatchValueContext;
   /** Returns the open PR number for a task whose latest PR is currently OPEN. */
   isOpenPr?: OpenPrCheck;
+  /** Tasks holding a pending pre-PR handoff receipt (daemon.ts `pendingWorkerBoundaryHandoffs`): a run of each
+   *  was yielded by the harness before its pull request opened. They are walked ahead of every fresh start, in
+   *  their own dispatch order. Ordering only: each still passes the whole eligibility chain. */
+  resumableTaskIds?: ReadonlySet<string>;
 
   /** W1-T2675 — a FAILED credit read, which is not the same as "not merged". `deriveStatus`
    *  (status.ts) returns `indeterminate: true` when the GitHub read genuinely failed, and a caller
@@ -427,8 +451,13 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
 /** Measured stride passes first when a ready cost-of-delay context exists, else priority first (W1-T4064, W1-T9323). Without readable evidence,
  * the historic scope/id order remains deterministic; the comparator performs no reads. */
 // Why: the shard-starvation defect this replaces and what sorting by id costs — docs/forensics/drain.md.
-export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext): Task[] {
-  return [...tasks].sort((a, b) => compareDispatch(a, b, context));
+export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext, resumable?: ReadonlySet<string>): Task[] {
+  const ordered = [...tasks].sort((a, b) => compareDispatch(a, b, context));
+  if (resumable === undefined || resumable.size === 0) return ordered;
+  // A task the harness yielded before its pull request already won a lane; the yield took it, not the queue.
+  // MEASURED 2026-10-17: W1-T9089 and W1-T9757 yielded at 22:07Z to a restart and re-entered at stride ranks 28
+  // and 31, behind a high-fanout family filed four hours earlier, and had no run.start for 6.8 h.
+  return [...ordered.filter((t) => resumable.has(t.id)), ...ordered.filter((t) => !resumable.has(t.id))];
 }
 
 /** Total order. With a ready cost-of-delay context (W1-T9323): stride pass, priority as the first tiebreak,
@@ -512,7 +541,7 @@ function observeOpenSibling(t: Task, opts: NextRunnableOpts): void {
 
 export function nextRunnable(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): Task | undefined {
   opts.beginSelectionPass?.();
-  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
+  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
     if (!isDispatchEligible(plan, t, isMerged, opts)) continue;
     // W1-T2397: observe, then dispatch anyway. Placed AFTER eligibility said yes and BEFORE the task
     // is returned unchanged, so it is structurally incapable of changing the answer.
@@ -792,7 +821,7 @@ export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: numbe
 function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts): Task[] {
   opts.beginSelectionPass?.();
   const eligible: Task[] = [];
-  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
+  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext, opts.resumableTaskIds)) {
     if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
   }
   return eligible;
@@ -1035,7 +1064,7 @@ export function isWorktreeNodeModulesRefusal(err: unknown): err is { reasonClass
 }
 
 /** W1-T5344 — which kind of per-task DELIVERY failure ended a lane. */
-export type LaneDeliveryFailureClass = "command_failed" | "pr_open_refused";
+export type LaneDeliveryFailureClass = "command_failed" | "pr_open_refused" | "push_credential_missing";
 
 /** W1-T5344 — a lane's rejection recognised as ONE TASK's delivery failure: its class and the
  *  first line of its message (the ledger carries no multi-line stderr). */
@@ -1075,6 +1104,16 @@ export function laneDeliveryFailure(err: unknown): LaneDeliveryFailure | undefin
   const stderr = (err as { stderr?: unknown }).stderr;
   if (CREDENTIAL_REFUSAL_RE.test(`${err.message}\n${stderr == null ? "" : String(stderr)}`)) return undefined;
   return { failureClass: "command_failed", firstLine: firstLineOf(err.message) };
+}
+
+/** W1-T9680 — a spawned command's failure whose text is a credential refusal ({@link CREDENTIAL_REFUSAL_RE}): its
+ *  first line and its stderr, bounded. One lane's refusal is not yet the fleet's — the daemon probes before it stops. */
+export function laneCredentialRefusal(err: unknown): { firstLine: string; stderr: string } | undefined {
+  if (!(err instanceof Error) || !SPAWNED_COMMAND_FAILED_RE.test(err.message)) return undefined;
+  const raw = (err as { stderr?: unknown; stderrText?: unknown }).stderr ?? (err as { stderrText?: unknown }).stderrText;
+  const stderr = raw == null || String(raw) === "" ? err.message.split("\n").slice(1).join("\n") : String(raw);
+  if (!CREDENTIAL_REFUSAL_RE.test(`${err.message}\n${stderr}`)) return undefined;
+  return { firstLine: firstLineOf(err.message), stderr: stderr.trim().slice(0, 500) };
 }
 
 function isPrOpenRefusal(err: unknown): err is Error {

@@ -1,0 +1,30 @@
+- id: W1-T9940
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — wipetest.cadence.refused landed 15 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.9
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:wipetest.cadence.refused"
+  files:
+    - test/scout-wipetest-cadence-refused.test.ts
+  acceptance:
+    - claim: "wipetest.cadence.refused stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9940: wipetest.cadence.refused no longer recurs\" in test/scout-wipetest-cadence-refused.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step wipetest.cadence.refused carries a failure shape and landed rows in both halves of the trailing 7 days: 6 in the older half, 9 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The record supplies recurrence counts but no row contents or diagnosed cause; it explicitly leaves locating the emitter to the builder. The finding that these refusals require repair cannot be verified from what is shown.; on the change's description/files alone, no diff was read — Acceptance checks only for a test declaration via grep; that cannot establish that the cause is fixed or recurrence stops. The sole declared file is a new test, leaving the proposed remedy’s implementation scope unspecified."
+    judged_at: "2026-10-16T23:10:32.976Z"
+    pin: "bf88093cbd821617f9263ebce75b99369f5b9829233d0a6a7034a2e197c31728"
