@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { runDaemon, type DaemonDeps } from "../src/lib/daemon.js";
 import { dispatchOrder, nextRunnable } from "../src/lib/drain.js";
 import { loadPlan, loadPlanFromYaml, type Task } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 
 const head = "a".repeat(40);
 
