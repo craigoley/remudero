@@ -12346,7 +12346,7 @@ export function readRuntimeImageSha(path: string = IMAGE_BUILD_SHA_PATH): string
   try {
     return readFileSync(path, "utf8").trim() || undefined;
   } catch {
-    return undefined;
+    return undefined; // deliberate: absent and unreadable are both "image unknown", never "unchanged"
   }
 }
 

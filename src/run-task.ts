@@ -8794,7 +8794,7 @@ async function runReview(args: {
   const runtimeImageSha = args.runtimeImageSha === undefined ? readRuntimeImageSha() : args.runtimeImageSha ?? undefined;
   const requeues = runtimeImageSha === undefined ? [] : (await readLedgerUnionRawLinesAsync(dirname(args.ledgerPath),
     { maxRotations: 0, step: REVIEW_REQUEUED_STEP, keep: (line) => line.includes(headSha) })).rawLines.flatMap((line) => {
-    try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; /* deliberate: a torn line requests nothing */ }
   });
   const decisionDigest = reviewerImageDecisionDigest(preparedDecision.decisionDigest, { headSha, runtimeImageSha, requeues });
   const decisionClaim = await claimReviewDecision({
