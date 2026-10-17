@@ -1,26 +1,16 @@
-"""Repo-owned 99 migrated audit controls plus eight loader/marker regressions.
+"""Literal-inventory source-module controls, NOT runtime qualification.
 
-PREPARED ONLY. Main must review/stage committed test, fixture and auditor bytes.
-Future admitted CLI:
+Admitted CLI, bound to committed test/fixture/auditor bytes:
   python -I -S test_runtime_compatibility_audit.py --pip-wheel ABSOLUTE_WHEEL \
     --auditor-sha256 REVIEWED_SHA256 --receipt PRIVATE_ABSOLUTE_JSON
 
-Linux Python 3.12 only; the real patch is reported. No download/install/build,
+Linux Python 3.12 only; the real patch is reported. No package download/install/build,
 candidate import, production target-loader call or observed-host fallback.
 The reviewed auditor digest is mandatory and has no environment/default value.
 
-Migration: 44 original core cases and 55 policy cases retained. Only old private
-loader/setup and fixed-3.12.3 provenance assertions become portable repo-bound
-Linux-3.12 provenance assertions; the policy identity test is renamed accordingly.
-Main reported the predecessor 99-case run as 95 pass / 4 fail / 0 error / 0 skip:
-requested/nested/cyclic/second-requester missing-extra cases, NOT flaky. Preserve
-that evidence; this source file neither reruns nor rewrites its receipts.
-
-TAP wrapper PLAN, not an implemented or executed Node test: invoke this CLI with
-no selection/filter, require exit 0 and its exclusive JSON receipt, then verify
-literal IDs, selected/executed/pass=107, unrun/fail/error/skip/xfail/xpass=0,
-source/tool hashes and invariantErrors=[]. Keep Node's wrapper count distinct
-from the 107 native Python cases. No green result from stdout text alone.
+No selection/filter: require exclusive JSON, exit 0, literal inventory=168,
+zero other outcomes, source/tool hashes and invariantErrors=[]. Node wrappers
+are separate cases. Historical failed receipts remain immutable.
 """
 from __future__ import annotations
 
@@ -42,6 +32,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 
+METADATA_TESTS_SHA256 = "9eb898e30ab9fd3fc0a96eebe626cdba96bcca2512ff27e5b88880da0f3b4737"
 FIXTURES_SHA256 = "66d2d91312ab5006bef72ef6ab2daa2ea8816870e7c6f740ca296d428d58190d"
 APPROVED_PIP_SHA = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
 RAW_CONFIGURATION_NAMES = (
@@ -96,38 +87,6 @@ class AuditSyntheticModuleTests(unittest.TestCase):
             H.audit(self.c, *wheels)
         self.assertEqual(raised.exception.code, code)
         return raised.exception
-
-    def test_real_pip_2621_api_and_raw_metadata_adapter_have_zip_origin(self):
-        row = H.scan(self.c, H.wheel("semgrep", "1.180.0", ["mcp==1.29.0"]))
-        self.assertIsInstance(row["dist"], self.api.Distribution)
-        self.assertEqual(str(row["dist"].version), "1.180.0")
-        self.assertEqual([str(r) for r in row["dependencies"]], ["mcp==1.29.0"])
-        details = self.api.PackageDetails(row["dist"].version, row["dependencies"])
-        missing, conflicting = self.api.check_package_set({"semgrep": details})
-        self.assertIn("semgrep", missing)
-        self.assertEqual(conflicting, {})
-        self.assertEqual(self.api.pip.__version__, "26.2.1")
-        self.assertEqual(self.c.provenance["platform"], sys.platform)
-        self.assertEqual(self.c.provenance["pythonVersion"], platform.python_version())
-        self.assertEqual(sys.platform, "linux")
-        self.assertEqual(sys.version_info[:2], (3, 12))
-        self.assertIs(self.c.provenance["linuxQualification"], False)
-
-    def test_synthetic_wheel_has_actual_crc_and_byte_correct_record(self):
-        fixture = H.wheel("attack", files={"attack/data.txt": b"positive bytes\n"})
-        with zipfile.ZipFile(io.BytesIO(fixture.raw)) as archive:
-            self.assertIsNone(archive.testzip())
-            rows = list(csv.reader(io.StringIO(archive.read(fixture.record_path).decode())))
-            self.assertEqual({r[0] for r in rows}, set(archive.namelist()))
-            for path, encoded, size in rows:
-                if path == fixture.record_path:
-                    self.assertEqual((encoded, size), ("", ""))
-                else:
-                    raw = archive.read(path)
-                    expected = base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b"=").decode()
-                    self.assertEqual(encoded, "sha256=" + expected)
-                    self.assertEqual(size, str(len(raw)))
-        self.positive(fixture)
 
     def test_original_mcp_129_dependency_accepts_129_positive(self):
         self.positive(H.wheel("semgrep", "1.180.0", ["mcp==1.29.0"]), H.wheel("mcp", "1.29.0"))
@@ -220,7 +179,80 @@ class AuditSyntheticModuleTests(unittest.TestCase):
 
     def test_unreviewed_shared_namespace_remains_blocked_not_waived(self):
         self.blocked("NAMESPACE_OWNERSHIP", H.wheel("one", files={"namespace/one.py": b"# one\n"}), H.wheel("two", files={"namespace/two.py": b"# two\n"}))
-        self.assertEqual(self.p.APPROVED_SHARED_NAMESPACES, {})
+        self.assertEqual(set(self.p.APPROVED_SHARED_NAMESPACES), {"google", "opentelemetry"})
+        self.assertNotIn("namespace", self.p.APPROVED_SHARED_NAMESPACES)
+
+    def test_reviewed_namespace_tuples_are_exact_lower_seam_not_artifact_evidence(self):
+        for root, identities in self.p.APPROVED_SHARED_NAMESPACES.items():
+            for name, version, artifact_sha in identities:
+                row = {"name": name, "version": version, "sha256": artifact_sha}
+                self.assertTrue(self.p.approved_namespace_contributor(row, root, ("site", root, "child", "__init__.py")))
+
+    def test_reviewed_namespace_rejects_wrong_owner_version_or_whole_artifact_hash(self):
+        root = "google"
+        name, version, artifact_sha = next(iter(self.p.APPROVED_SHARED_NAMESPACES[root]))
+        original = {"name": name, "version": version, "sha256": artifact_sha}
+        for field, value in [("name", "attack"), ("version", version + ".1"), ("sha256", "0" * 64)]:
+            changed = dict(original, **{field: value})
+            self.assertFalse(self.p.approved_namespace_contributor(changed, root, ("site", root, "child.py")))
+
+    def test_reviewed_namespace_rejects_root_module_init_and_case_aliases(self):
+        name, version, artifact_sha = next(iter(self.p.APPROVED_SHARED_NAMESPACES["google"]))
+        row = {"name": name, "version": version, "sha256": artifact_sha}
+        for destination in [("site", "google.py"), ("site", "google", "__init__.py"),
+                            ("site", "google", "__INIT__.py"), ("site", "Google", "child.py"),
+                            ("bin", "google", "child.py")]:
+            self.assertFalse(self.p.approved_namespace_contributor(row, "google", destination))
+
+    def test_unapproved_single_contributor_cannot_claim_a_reviewed_namespace(self):
+        self.blocked("UNAPPROVED_NAMESPACE_CONTRIBUTOR", H.wheel("attack", files={"google/child.py": H.payload(self.c)}))
+
+    def test_special_member_exact_tuple_fixture_is_not_original_artifact_proof(self):
+        data = H.payload(self.c)
+        path = "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py"
+        identity = ("fixture", "1.0", "a" * 64)
+        original = self.p.APPROVED_SPECIAL_MEMBERS
+        try:
+            self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
+            self.assertTrue(self.p.approved_special_member(*identity, path, data, ("site", *path.split("/"))))
+        finally:
+            self.p.APPROVED_SPECIAL_MEMBERS = original
+
+    def test_special_member_rejects_install_scheme_and_case_destination_aliases(self):
+        data = b"inert alias control\n"
+        path, identity = "setuptools/_vendor/fixture.dist-info/METADATA", ("fixture", "1.0", "a" * 64)
+        original = self.p.APPROVED_SPECIAL_MEMBERS
+        try:
+            self.p.APPROVED_SPECIAL_MEMBERS = {identity: {path: (len(data), self.p.digest(data))}}
+            for destination in [("bin", *path.split("/")), ("site", *path.upper().split("/")),
+                                ("site", "fixture.data", "purelib", *path.split("/"))]:
+                self.assertFalse(self.p.approved_special_member(*identity, path, data, destination))
+        finally:
+            self.p.APPROVED_SPECIAL_MEMBERS = original
+
+    def test_special_member_default_policy_never_accepts_an_unreviewed_body(self):
+        identity, paths = next(iter(self.p.APPROVED_SPECIAL_MEMBERS.items()))
+        path = next(iter(paths))
+        self.assertFalse(self.p.approved_special_member(*identity, path, b"unreviewed", ("site", *path.split("/"))))
+        self.assertFalse(self.p.approved_special_member(*identity, "sitecustomize.py", b"unreviewed", ("site", "sitecustomize.py")))
+
+    def test_default_special_inventory_is_bounded_nested_and_digest_bound(self):
+        self.assertEqual(sum(map(len, self.p.APPROVED_SPECIAL_MEMBERS.values())), 83)
+        self.assertEqual({identity[0] for identity in self.p.APPROVED_SPECIAL_MEMBERS}, {"setuptools", "opentelemetry-instrumentation"})
+        for identity, paths in self.p.APPROVED_SPECIAL_MEMBERS.items():
+            self.assertRegex(identity[2], r"^[a-f0-9]{64}$")
+            for path, (size, member_sha) in paths.items():
+                self.assertGreaterEqual(size, 0)
+                self.assertRegex(member_sha, r"^[a-f0-9]{64}$")
+                self.assertTrue(path.startswith("setuptools/_vendor/") or path == "opentelemetry/instrumentation/auto_instrumentation/sitecustomize.py")
+
+    def test_default_namespace_inventory_is_two_roots_and_twelve_versioned_artifacts(self):
+        self.assertEqual(set(self.p.APPROVED_SHARED_NAMESPACES), {"google", "opentelemetry"})
+        self.assertEqual(sum(map(len, self.p.APPROVED_SHARED_NAMESPACES.values())), 12)
+        for identities in self.p.APPROVED_SHARED_NAMESPACES.values():
+            for name, version, artifact_sha in identities:
+                self.assertTrue(name and version)
+                self.assertRegex(artifact_sha, r"^[a-f0-9]{64}$")
 
     def test_archive_parent_traversal_blocks(self):
         self.blocked("ARCHIVE_TRAVERSAL", H.wheel("attack", files={"../pip/__main__.py": H.payload(self.c)}))
@@ -734,25 +766,44 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_archive_parent_traversal_blocks",
     "AuditSyntheticModuleTests.test_archive_symbolic_link_is_not_an_installable_regular_file",
     "AuditSyntheticModuleTests.test_case_alias_destination_collision_blocks",
+    "AuditSyntheticModuleTests.test_cross_project_exclusive_import_cannot_shadow_namespace",
+    "AuditSyntheticModuleTests.test_cross_project_exclusive_import_claims_cannot_collide",
+    "AuditSyntheticModuleTests.test_cross_project_exclusive_import_prefixes_cannot_shadow",
+    "AuditSyntheticModuleTests.test_default_namespace_inventory_is_two_roots_and_twelve_versioned_artifacts",
+    "AuditSyntheticModuleTests.test_default_special_inventory_is_bounded_nested_and_digest_bound",
     "AuditSyntheticModuleTests.test_direct_url_dependency_is_rejected_without_fetch",
     "AuditSyntheticModuleTests.test_duplicate_distribution_identity_is_not_a_complete_set",
+    "AuditSyntheticModuleTests.test_dynamic_identity_fields_and_unknown_origin_remain_blocked",
     "AuditSyntheticModuleTests.test_empty_population_is_not_positive_evidence",
     "AuditSyntheticModuleTests.test_exact_setuptools_pth_policy_tuple_positive_is_not_artifact_proof",
+    "AuditSyntheticModuleTests.test_exclusive_namespace_child_can_coexist_with_shared_parent_metadata",
     "AuditSyntheticModuleTests.test_foreign_generated_semgrep_entrypoint_blocks",
     "AuditSyntheticModuleTests.test_foreign_package_cannot_add_file_to_semgrep_owned_root",
     "AuditSyntheticModuleTests.test_foreign_package_cannot_overwrite_pip_check_module",
     "AuditSyntheticModuleTests.test_foreign_package_cannot_shadow_stdlib_email",
     "AuditSyntheticModuleTests.test_generated_entrypoint_collision_between_packages_blocks",
+    "AuditSyntheticModuleTests.test_import_declaration_work_is_bounded_per_project_and_whole_set",
+    "AuditSyntheticModuleTests.test_import_declarations_require_the_reviewed_metadata_version",
+    "AuditSyntheticModuleTests.test_import_metadata_does_not_waive_tool_namespace_protection",
+    "AuditSyntheticModuleTests.test_import_parser_accepts_private_unicode_and_dotted_names_as_data",
+    "AuditSyntheticModuleTests.test_import_parser_distinguishes_empty_exclusive_and_namespace_fields",
+    "AuditSyntheticModuleTests.test_import_parser_refuses_invalid_names_and_private_markers",
     "AuditSyntheticModuleTests.test_inactive_extra_uses_actual_pip_marker_filter",
     "AuditSyntheticModuleTests.test_malformed_requires_dist_raises_real_pip_invalid_requirement",
     "AuditSyntheticModuleTests.test_mcp_mutant_preserves_exact_original_semgrep_metadata_bytes",
+    "AuditSyntheticModuleTests.test_metadata25_final_dependency_closure_still_blocks",
+    "AuditSyntheticModuleTests.test_metadata25_final_requires_python_still_blocks",
+    "AuditSyntheticModuleTests.test_metadata25_preserves_raw_bytes_and_final_import_declarations",
     "AuditSyntheticModuleTests.test_metadata_name_cannot_disagree_with_filename",
+    "AuditSyntheticModuleTests.test_metadata_unsupported_versions_remain_explicit_refusals",
     "AuditSyntheticModuleTests.test_metadata_version_cannot_disagree_with_filename",
     "AuditSyntheticModuleTests.test_missing_default_dependency_blocks",
+    "AuditSyntheticModuleTests.test_namespace_metadata_does_not_waive_actual_archive_ownership",
     "AuditSyntheticModuleTests.test_ordinary_candidate_module_payload_is_never_imported",
     "AuditSyntheticModuleTests.test_original_mcp_129_dependency_accepts_129_positive",
     "AuditSyntheticModuleTests.test_original_mcp_129_dependency_rejects_130_negative",
     "AuditSyntheticModuleTests.test_other_platform_marker_is_inactive_on_actual_linux",
+    "AuditSyntheticModuleTests.test_printable_space_paths_keep_safety_guards",
     "AuditSyntheticModuleTests.test_purelib_pth_alias_is_rejected_without_execution",
     "AuditSyntheticModuleTests.test_raw_current_pip_entrypoint_overwrite_blocks",
     "AuditSyntheticModuleTests.test_raw_current_python_entrypoint_overwrite_blocks",
@@ -760,20 +811,62 @@ EXPECTED_TEST_IDS = (
     "AuditSyntheticModuleTests.test_record_foreign_destination_blocks",
     "AuditSyntheticModuleTests.test_record_wrong_hash_is_not_a_byte_correct_wheel",
     "AuditSyntheticModuleTests.test_record_wrong_size_is_not_a_byte_correct_wheel",
+    "AuditSyntheticModuleTests.test_reviewed_namespace_rejects_root_module_init_and_case_aliases",
+    "AuditSyntheticModuleTests.test_reviewed_namespace_rejects_wrong_owner_version_or_whole_artifact_hash",
+    "AuditSyntheticModuleTests.test_reviewed_namespace_tuples_are_exact_lower_seam_not_artifact_evidence",
     "AuditSyntheticModuleTests.test_root_pth_marker_is_rejected_without_execution",
     "AuditSyntheticModuleTests.test_same_package_root_and_data_alias_destination_collides",
+    "AuditSyntheticModuleTests.test_same_project_exclusive_parent_and_namespace_child_are_not_ambiguous",
+    "AuditSyntheticModuleTests.test_same_project_import_name_namespace_ambiguity_blocks",
+    "AuditSyntheticModuleTests.test_sdist_dynamic_dependencies_remain_blocked_before_build",
+    "AuditSyntheticModuleTests.test_sdist_dynamic_import_fields_remain_blocked_before_build",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_data_path_alias",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_actual_digest",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_owner",
     "AuditSyntheticModuleTests.test_setuptools_pth_policy_rejects_wrong_version",
     "AuditSyntheticModuleTests.test_sitecustomize_marker_is_rejected_without_execution",
+    "AuditSyntheticModuleTests.test_source_recipe_01_exact_pins",
+    "AuditSyntheticModuleTests.test_source_recipe_02_legacy_closure",
+    "AuditSyntheticModuleTests.test_source_recipe_03_wrong_wheel_hash",
+    "AuditSyntheticModuleTests.test_source_recipe_04_wrong_mcp_pin",
+    "AuditSyntheticModuleTests.test_source_recipe_05_unknown_version",
+    "AuditSyntheticModuleTests.test_source_recipe_06_exclude_derived",
+    "AuditSyntheticModuleTests.test_source_recipe_07_legacy_download",
+    "AuditSyntheticModuleTests.test_source_recipe_08_bound_code",
+    "AuditSyntheticModuleTests.test_source_recipe_09_changed_assembler",
+    "AuditSyntheticModuleTests.test_source_recipe_10_changed_policy",
+    "AuditSyntheticModuleTests.test_source_recipe_11_real_loader",
+    "AuditSyntheticModuleTests.test_source_recipe_12_exact_profile",
+    "AuditSyntheticModuleTests.test_source_recipe_13_profile_drift",
+    "AuditSyntheticModuleTests.test_source_recipe_14_profile_shape",
+    "AuditSyntheticModuleTests.test_source_recipe_15_bound_receipt",
+    "AuditSyntheticModuleTests.test_source_recipe_16_receipt_profile",
+    "AuditSyntheticModuleTests.test_source_recipe_17_receipt_identity",
+    "AuditSyntheticModuleTests.test_source_recipe_18_no_assurance_transfer",
+    "AuditSyntheticModuleTests.test_source_recipe_19_bad_wheel_inert",
+    "AuditSyntheticModuleTests.test_source_recipe_20_fixed_raw_inputs",
+    "AuditSyntheticModuleTests.test_source_recipe_21_version_layers",
+    "AuditSyntheticModuleTests.test_source_recipe_22_new_metadata_graph",
+    "AuditSyntheticModuleTests.test_source_recipe_23_original_donor_graph",
+    "AuditSyntheticModuleTests.test_source_recipe_24_missing_receipt_fields",
+    "AuditSyntheticModuleTests.test_source_recipe_25_private_creation",
+    "AuditSyntheticModuleTests.test_source_recipe_26_existing_entry_refused",
+    "AuditSyntheticModuleTests.test_source_recipe_27_real_stdlib_creation",
+    "AuditSyntheticModuleTests.test_special_member_default_policy_never_accepts_an_unreviewed_body",
+    "AuditSyntheticModuleTests.test_special_member_exact_tuple_fixture_is_not_original_artifact_proof",
+    "AuditSyntheticModuleTests.test_special_member_rejects_install_scheme_and_case_destination_aliases",
+    "AuditSyntheticModuleTests.test_special_member_rejects_wrong_identity_path_and_body",
     "AuditSyntheticModuleTests.test_synthetic_setuptools_archive_cannot_fake_approved_artifact_digest",
     "AuditSyntheticModuleTests.test_synthetic_wheel_has_actual_crc_and_byte_correct_record",
     "AuditSyntheticModuleTests.test_two_packages_cannot_own_same_destination_file",
+    "AuditSyntheticModuleTests.test_unapproved_single_contributor_cannot_claim_a_reviewed_namespace",
     "AuditSyntheticModuleTests.test_unreviewed_shared_namespace_remains_blocked_not_waived",
     "AuditSyntheticModuleTests.test_usercustomize_marker_is_rejected_without_execution",
+    "AuditSyntheticModuleTests.test_wheel_dynamic_dependency_is_final_and_original_bytes_are_preserved",
+    "AuditSyntheticModuleTests.test_wheel_dynamic_import_field_still_enforces_final_syntax",
+    "AuditSyntheticModuleTests.test_wheel_dynamic_python_still_enforces_final_requires_python",
 )
-EXPECTED_TEST_COUNT = 107
+EXPECTED_TEST_COUNT = 168
 
 
 def canonical_id(test):
@@ -792,8 +885,8 @@ def build_suite():
     first = unittest.defaultTestLoader.loadTestsFromTestCase(AuditSyntheticModuleTests)
     second = additionalCases(H, CONTEXT)
     third = unittest.defaultTestLoader.loadTestsFromTestCase(AuditLoaderMarkerRegressions)
-    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (44, 55, 8):
-        raise AssertionError("44+55+8 migration inventory changed")
+    if (first.countTestCases(), second.countTestCases(), third.countTestCases()) != (105, 55, 8):
+        raise AssertionError("105+55+8 exact-layout/metadata/recipe inventory changed")
     suite = unittest.TestSuite([first, second, third])
     actual = tuple(sorted(canonical_id(test) for test in flatten_suite(suite)))
     if len(EXPECTED_TEST_IDS) != EXPECTED_TEST_COUNT or len(set(EXPECTED_TEST_IDS)) != EXPECTED_TEST_COUNT:
@@ -842,7 +935,7 @@ def json_once(path, value):
 
 def main():
     global H, CONTEXT
-    parser = argparse.ArgumentParser(description="107 literal-inventory source-module controls; no runtime qualification")
+    parser = argparse.ArgumentParser(description="168 literal-inventory source-module controls; no runtime qualification")
     parser.add_argument("--pip-wheel", required=True, type=pathlib.Path)
     parser.add_argument("--auditor-sha256", required=True, help="reviewed workflow/controller literal, never computed as an approval")
     parser.add_argument("--receipt", required=True, type=pathlib.Path, help="new JSON in an existing private neutral directory")
@@ -861,12 +954,15 @@ def main():
     path = pathlib.Path(__file__).absolute()
     fixture_path = path.with_name("runtime_audit_test_fixtures.py")
     auditor_path = path.with_name("runtime-compatibility-audit.py")
+    metadata_tests_path = path.with_name("runtime_audit_metadata_tests.py")
     try:
         if not (sys.flags.isolated and sys.flags.no_site and sys.platform == "linux" and sys.version_info[:2] == (3, 12)):
             raise AssertionError("actual Linux Python 3.12 -I -S required; no substituted runtime")
         if re.fullmatch(r"[a-f0-9]{64}", args.auditor_sha256) is None:
             raise AssertionError("explicit reviewed auditor SHA-256 required")
-        for source, limit in ((path, 262144), (fixture_path, 65536), (auditor_path, 65536)):
+        for source, limit in ((path, 262144), (fixture_path, 65536), (auditor_path, 65536), (metadata_tests_path, 65536),
+                              *((path.with_name(n), 65536) for n in
+                                ("runtime_source_recipe.py", "prepare-source-build.py", "source-build-policy.json"))):
             snapshots[source] = read_regular(source, limit)
         raw = snapshots[fixture_path]
         if digest(raw) != FIXTURES_SHA256:
@@ -875,6 +971,13 @@ def main():
         H.__file__ = str(fixture_path)
         exec(compile(raw, str(fixture_path), "exec", dont_inherit=True), H.__dict__)
         CONTEXT = H.load_context(args.pip_wheel, args.auditor_sha256, parent, receipt.name + ".candidate-must-not-execute")
+        raw_cases = snapshots[metadata_tests_path]
+        if digest(raw_cases) != METADATA_TESTS_SHA256:
+            raise AssertionError("repo metadata test source SHA-256 mismatch")
+        metadata_cases = types.ModuleType("_repo_semgrep_metadata_controls")
+        metadata_cases.__file__ = str(metadata_tests_path)
+        exec(compile(raw_cases, str(metadata_tests_path), "exec", dont_inherit=True), metadata_cases.__dict__)
+        metadata_cases.attach_metadata_cases(AuditSyntheticModuleTests, H)
         suite = build_suite()
         result = unittest.TextTestRunner(verbosity=2, resultclass=InventoryResult).run(suite)
     except Exception as error:
@@ -931,7 +1034,8 @@ def main():
         "predecessor99MainReport": PREDECESSOR_99_MAIN_REPORT,
         "failures": [{"test": test.id(), "traceback": trace[:12000]} for test, trace in result.failures] if result is not None else [],
         "errors": [{"test": test.id(), "traceback": trace[:12000]} for test, trace in result.errors] if result is not None else [],
-        "limits": ["synthetic source-module controls only", "no production target loader", "no build/install/network",
+        "limits": ["source-module controls; one real stdlib venv-creation child", "no production target loader", "no package build/install/network",
+                   "no child exact-runtime parity claim",
                    "no scanner or real-artifact positive", "no constrained runner/workflow/full-author/pilot qualification"],
     }
     json_once(receipt, report)
