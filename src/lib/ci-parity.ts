@@ -2779,6 +2779,15 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   // be projected (CENSUS_ADMITTED_MEMBERS narrows on `script`).
   // The nested-preflight census (#9724). Its one real `git ls-files` is scoped to `test/*.ts`, the
   // TEST corpus; the `src/` text the recognizer sees is its fixture import line. Same route as above.
+  // W1-T9860's basename-uniqueness check. SCOPE NOTE: the task's `files:` does not name this file;
+  // the row is here because `censusPopulationDrift` refuses an undisclosed census-shaped file, and
+  // that gate cannot be satisfied from inside the declared paths. One refusal row, no behaviour.
+  refusedForPredicate(
+    "test/every-test-basename-is-unique.test.ts",
+    "a",
+    "W1-T9860's basename-uniqueness check. Its `git ls-files -- test/` and its directory walk both read the TEST " +
+      "corpus, never src/; its `src/` text is the import of src/lib/test-path-resolver.js, the rule it applies",
+  ),
   refusedForPredicate(
     "test/no-test-drives-a-real-preflight-against-the-repository-root.test.ts",
     "a",
