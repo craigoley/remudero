@@ -1030,11 +1030,14 @@ export function main(argv, { spawn = spawnSync, env = process.env } = {}) {
           "to the fast tier), so a stale row is the one thing left this gate refuses:",
       );
       const current = { files: Object.fromEntries(testFiles.map(file => [file, file])) };
+      let anyMoved = false;
       for (const f of ghosts) {
         const moved = manifestEntryFor(current, f);
+        if (moved !== undefined) anyMoved = true;
         console.error(moved === undefined ? `  ${f}` : `  re-key: ${f} -> ${moved}`);
       }
-      console.error("Re-key moved row(s); remove deleted row(s), or restore the file they name.");
+      if (anyMoved) console.error("A `re-key:` row names a moved file — re-key it to the path shown.");
+      console.error("Remove the row(s) above, or restore the file they name.");
       return 1;
     }
     console.log(
