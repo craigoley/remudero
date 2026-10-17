@@ -4323,7 +4323,6 @@ export async function runDaemon(
   // surface that admits a review or a fix asks this, per admission: does the kind's measured length fit the time left?
   type RestartWindow = { deadlineMs: number; lengths: { review?: number; "fix-dispatch"?: number }; held: number };
   let restartWindow: RestartWindow | undefined;
-  // W1-T9924: a dispatch refill passes its own candidate's class median as the length.
   const restartAdmission: RestartAdmission = (kind, surface, candidateMs) => {
     const lengthMs = kind === "dispatch-refill" ? candidateMs : restartWindow?.lengths[kind];
     if (restartWindow === undefined || lengthMs === undefined) return true;
@@ -6740,7 +6739,6 @@ export async function runDaemon(
     let idleLaneMs = 0;
     let firstRestartAtMs: number | undefined;
     let classSpans: Map<string, { ms: number; samples: number }> | undefined;
-    // W1-T9924: how each refill under the latch was admitted, and one hold row per lane and state.
     const latchAdmissions = new Map<string, Record<string, unknown>>();
     const drainHeldRows = new Map<number, string>();
     const refillDrainDeadlines = new Map<string, number>();
@@ -6880,7 +6878,6 @@ export async function runDaemon(
         let next: Task | undefined;
         // W1-T9069: set when a latched restart leaves candidates but none ends before it; the lane then parks.
         let latchPark: { reason: string; restartAtMs?: number; budgetMs?: number; nearest?: { task: string; spanMs: number } } | undefined;
-        // W1-T9924: the shortest in-process candidate the drain's time left refused.
         let drainHeld: { task: string; taskClass: string; measuredMs: number; samples: number } | undefined;
         const refillDeferrals: PriorityDeferral[] = [];
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
