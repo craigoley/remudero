@@ -54,7 +54,7 @@ async function phase(t: TestContext, mode: PassMode = "completed", sweepWallCloc
       rows.push({ step, extra });
       if (step === "daemon.sweep.abandoned") abandoned.resolve();
     },
-  }, { laneCount: 1, max: 1, sweepRetriggerIntervalMs: 2 * windowMs, sweepWallClockBoundMs });
+  }, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1, sweepRetriggerIntervalMs: 2 * windowMs, sweepWallClockBoundMs });
   void run.then(() => { finished = true; });
   t.after(async () => {
     cleaning = true;
@@ -209,7 +209,7 @@ async function idleExit(t: TestContext, reviewerCodeStale = false) {
       rows.push({ step, extra });
       if (step === "review.stale_reviewer_restart_requested") callsAtRestartRequest = calls;
     },
-  });
+  }, { freshnessMinLifetimeMs: 0 });
   assert.equal(summary.stopReason, "stale");
   assert.equal(rows.find(({ step }) => step === "daemon_selfrestart_for_freshness")?.extra?.pre_exit_pass, "ran");
   return { calls, callsAtRestartRequest };

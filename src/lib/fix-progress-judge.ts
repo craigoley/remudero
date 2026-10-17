@@ -27,6 +27,9 @@ export interface FixProgressRound {
   /** The class of {@link redBefore} ({@link fixRedClass}): which red this round was dispatched against. */
   redClass?: string;
   redAfter?: string[];
+  /** W1-T10067: {@link redAfter} was read off a head whose checks have not all reported, so a red absent
+   *  from it may still be running. Present only when true. */
+  redAfterPartial?: true;
   diffStat?: unknown;
   diffDigest?: string;
   completed: boolean;
@@ -50,6 +53,8 @@ export interface FixProgressInput {
   headSha: string;
   strikesSpent: number;
   currentRed: string[];
+  /** W1-T10067: the head's required checks that have not concluded. Present only when non-empty. */
+  pendingChecks?: string[];
   /** W1-T7762: the class of the red now judged ({@link fixRedClass}); a verdict is ruled on exactly one class. */
   redClass?: string;
   rounds: FixProgressRound[];
@@ -71,7 +76,9 @@ export interface FixProgressInput {
     scopeAmendmentsPending?: number;
     /** W1-T9618: rounds whose commit never reached the remote (`fix.done` subtype push_failed). Each is also a
      *  no-op round; a count that keeps growing is a push path that is broken, not a worker that needs another try. */
-    pushFailedRounds?: number };
+    pushFailedRounds?: number;
+    /** W1-T10067: how many required checks on the head have not reported. Present only when non-zero. */
+    pendingChecks?: number };
   /** The excerpts behind {@link signals.reviewerOnlyFailurePersists}, for the escalation to carry. */
   persistentReviewerFailures?: ReviewerProofFailure[];
 }
@@ -158,6 +165,8 @@ export function buildFixProgressInput(facts: {
   ledger: readonly Record<string, unknown>[]; operatorAnswer?: string; formerCeiling?: number; parkedReason?: string;
   /** W1-T7762: the red's names at gate granularity, when the caller can name the failing sub-gate. */
   redClassNames?: readonly string[];
+  /** W1-T10067: the head's required checks that have not concluded, at gate granularity. */
+  pendingChecks?: readonly string[];
 }): FixProgressInput {
   const rounds: FixProgressRound[] = [];
   const byId = new Map<string, FixProgressRound>();
@@ -217,8 +226,12 @@ export function buildFixProgressInput(facts: {
   const notLanded = (r: FixProgressRound) => r.subtype === "push_failed";
   const awaitedOrLanded = (r: FixProgressRound) => r.scopeAmendment?.state === "pending" || r.scopeAmendment?.state === "merged";
   const currentRed = sorted(facts.currentRed);
+  const pendingChecks = sorted([...facts.pendingChecks ?? []]);
   for (const [index, round] of rounds.entries()) {
-    if (round.completed && round.redAfter === undefined) round.redAfter = rounds[index + 1]?.redBefore ?? currentRed;
+    if (!round.completed || round.redAfter !== undefined) continue;
+    const next = rounds[index + 1];
+    round.redAfter = next?.redBefore ?? currentRed;
+    if (!next && pendingChecks.length > 0) round.redAfterPartial = true;
   }
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
   const signals: FixProgressInput["signals"] = {
@@ -238,6 +251,7 @@ export function buildFixProgressInput(facts: {
   if (pending > 0) signals.scopeAmendmentsPending = pending;
   const pushFailed = rounds.filter(r => r.completed && notLanded(r)).length;
   if (pushFailed > 0) signals.pushFailedRounds = pushFailed;
+  if (pendingChecks.length > 0) signals.pendingChecks = pendingChecks.length;
   const persistentReviewerFailures: ReviewerProofFailure[] = [];
   for (const round of rounds) {
     if (round.fixOutcome !== "FIXED" || notLanded(round) || !round.reviewerFailures || !round.reviewAfter) continue;
@@ -252,7 +266,7 @@ export function buildFixProgressInput(facts: {
   const otherClassRounds = rounds.filter(r => r.redClass !== undefined && r.redClass !== checkClass).length;
   if (otherClassRounds > 0) signals.otherClassRounds = otherClassRounds;
   return { taskId: facts.taskId, prNumber: facts.prNumber, headSha: facts.headSha,
-    strikesSpent: facts.strikesSpent ?? 0, currentRed, redClass: fixRedClass(facts.redClassNames ?? currentRed), rounds,
+    strikesSpent: facts.strikesSpent ?? 0, currentRed, ...(pendingChecks.length > 0 ? { pendingChecks } : {}), redClass: fixRedClass(facts.redClassNames ?? currentRed), rounds,
     operatorAnswer: facts.operatorAnswer, formerCeiling: facts.formerCeiling, parkedReason: facts.parkedReason, signals,
     ...(persistentReviewerFailures.length > 0 ? { persistentReviewerFailures } : {}) };
 }
@@ -271,6 +285,21 @@ export function parseFixProgressVerdict(text: string): FixProgressVerdict | unde
   if (v.verdict === "escalate" && typeof v.loop === "string" && v.loop.trim())
     return { verdict: "escalate", loop: v.loop, reason: v.reason };
   return undefined;
+}
+
+/** W1-T10039: why a PR's first fix round was dispatched without the progress judge. */
+export const FIRST_FIX_ROUND_UNJUDGED_REASON =
+  "first fix round: no round, strike or parked wait yet, so there is no progress to judge";
+
+/**
+ * W1-T10039: an empty history carries no evidence about progress, so a verdict on it is noise. `continue` with
+ * {@link FIRST_FIX_ROUND_UNJUDGED_REASON} when the input has no round, no spent strike and no parked reason;
+ * otherwise undefined, and the caller asks the judge. PURE.
+ */
+export function firstFixRoundVerdict(input: FixProgressInput):
+  { verdict: "continue"; reason: string; judge_skipped: "first-round" } | undefined {
+  if (input.rounds.length > 0 || input.strikesSpent > 0 || input.parkedReason) return undefined;
+  return { verdict: "continue", reason: FIRST_FIX_ROUND_UNJUDGED_REASON, judge_skipped: "first-round" };
 }
 
 export async function judgeFixProgress(input: FixProgressInput, judge?: FixProgressJudge): Promise<FixProgressResult> {

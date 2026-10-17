@@ -70,7 +70,7 @@ function harness() {
       },
       checkFreshness: () => (stale ? staleOwnCode : { stale: false }),
     } as unknown as DaemonDeps,
-    { max: 2, laneCount: 2, pollIntervalMs: POLL_MS },
+    { freshnessMinLifetimeMs: 0, max: 2, laneCount: 2, pollIntervalMs: POLL_MS },
   );
   const tick = async () => {
     await drainMicrotasks();

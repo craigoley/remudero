@@ -52,7 +52,7 @@ function waitingOnDeadReviewer(): OpenPrView {
 function ownRed(): OpenPrView {
   return {
     prNumber: OWN_RED, prUrl: `https://github.com/o/r/pull/${OWN_RED}`, taskId: "W1-T8879",
-    headSha: "own-red-head", checksState: "red", reviewState: "pending", unmetCriteria: [], priorStrikes: 0,
+    headSha: "own-red-head", checksState: "red", reviewState: "pending", unmetCriteria: [], priorStrikes: 1,
     autoMergeArmed: false, lastActivityAt: new Date(T0).toISOString(),
     redRequiredChecks: ["ci"], ciFailures: [{ name: "ci", logTail: "assertion failed in this diff" }],
   };

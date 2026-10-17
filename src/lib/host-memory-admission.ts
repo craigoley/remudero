@@ -31,6 +31,8 @@
  * no earlier own-tail start still inside its time-to-peak, is admitted on "own-tail" when its typical peak clears the
  * reserve. psi, swap-in, memory-available and a sighted container ceiling still refuse. A wait is ledgered at its first
  * attempt and whenever its reasons change, and the admit row splits the waiting time by reason.
+ * W1-T10085: "psi" is named past the LEARNED full avg10 bound, and every admitted start, on any tier, is marked admitted
+ * in the PSI record under the admission lock, so the bound learns from the starts it let through.
  */
 
 import { join } from "node:path";
@@ -46,6 +48,7 @@ import {
   evaluateShadowMemory,
   gatherShadowInputs,
   hostMemoryBudgetModeFor,
+  markPsiStartAdmitted,
   type ShadowInputs,
   type ShadowMemoryPorts,
   type ShadowReason,
@@ -330,6 +333,7 @@ export async function awaitMemoryAdmission(
               const visible = ports.readLedger(root);
               if (visible?.state !== "present") throw new Error(`admission-ledger-${visible?.state ?? "unreadable"}`);
               if (!visible.entries.some(entry => entry.id === reservation!.id)) throw new Error("admission-reservation-not-visible");
+              if (inputs.psiRecordAt !== undefined) markPsiStartAdmitted(ports, root, inputs.psiRecordAt);
             }
             return { inputs, verdict, tier, admitAs, agedBlock, ownTail };
           });

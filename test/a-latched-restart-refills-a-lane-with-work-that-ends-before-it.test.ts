@@ -75,7 +75,7 @@ async function rig(options: { spanMin?: number; yieldMin?: number; freshness?: t
     },
     log: (step: string, fields?: Record<string, unknown>) => rows.push({ step, fields: fields ?? {} }),
     sleep: () => new Promise<void>((resolve) => sleeps.push(resolve)),
-  } as unknown as DaemonDeps, { laneCount: 3, max: 12 });
+  } as unknown as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 3, max: 12 });
   await flush();
   const settleTick = async () => { sleeps.shift()?.(); await flush(); await flush(); };
   const h = {

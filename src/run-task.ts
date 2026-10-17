@@ -28,7 +28,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { judgeFixProgress,
+import { firstFixRoundVerdict, judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -76,8 +76,6 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
-// @ts-expect-error W1-T10064: the daemon's own copy of the W1-T9864 codemod, which has no declaration file.
-import { rewriteSource as codemodRewriteSource } from "../scripts/test-location-codemod.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -423,6 +421,7 @@ import {
 } from "./lib/relint.js";
 import type { RunResult } from "./lib/run-result.js";
 import { censusRunDirs } from "./lib/run-child-contract.js";
+import { dropTierRowsBeforePush, prePushGateRefusal } from "./lib/pre-push-refusal.js";
 export type { RunResult };
 import { InitError, readClaudeJsonKeys, runInit } from "./lib/init.js";
 import type { Tier, TierDetection } from "./lib/tier.js";
@@ -1205,7 +1204,7 @@ import { captureSelectedRegistryIntent, selectedRegistryObserverFromIntent, with
   type SelectedRegistryObserver } from "./lib/selected-registry-consumers.js";
 
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerMemoHolders, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -1894,7 +1893,8 @@ import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-tele
 import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
-import { createFullPreludeTimer, isReviewLaneDisposition, terminalUnionScans } from "./lib/sweep.js";
+import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
+  terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
 import { createDaemonFootprint, daemonFootprintPath, installDaemonFootprint, type DaemonFootprint } from "./lib/daemon-footprint.js";
 import {
@@ -3162,6 +3162,7 @@ import {
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
 import { codexHarnessCommits, isCodexWorkerOutputLimitError, type CodexHarnessCommit } from "./lib/worker-provider.js";
+import { aliasRewriteFields, mergeHeadPresent, rewriteAddedTestImports, type AddedTestAliasRewrite, type TestAliasRewriter } from "./lib/added-test-alias-rewrite.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 import { toolStepSignature } from "./lib/tool-step-signature.js";
 
@@ -8575,6 +8576,8 @@ async function runReview(args: {
   owner: string;
   repo: string;
   prUrl: string;
+  /** W1-T9970 test seam: the reviewer's image; `null` is off-container. Default {@link readRuntimeImageSha}. */
+  runtimeImageSha?: string | null;
   /** `files` (W1-T322): the task's declared scope — see {@link "./lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { id: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string };
@@ -8794,7 +8797,13 @@ async function runReview(args: {
     input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership },
     headCheckoutDir: args.headCheckoutDir, task, ledgerPath: args.ledgerPath, prUrl,
   });
-  const decisionDigest = preparedDecision.decisionDigest;
+  // W1-T9970: read once per review; a reviewer-image re-review of this head is its own decision.
+  const runtimeImageSha = args.runtimeImageSha === undefined ? readRuntimeImageSha() : args.runtimeImageSha ?? undefined;
+  const requeues = runtimeImageSha === undefined ? [] : (await readLedgerUnionRawLinesAsync(dirname(args.ledgerPath),
+    { maxRotations: 0, step: REVIEW_REQUEUED_STEP, keep: (line) => line.includes(headSha) })).rawLines.flatMap((line) => {
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; /* deliberate: a torn line requests nothing */ }
+  });
+  const decisionDigest = reviewerImageDecisionDigest(preparedDecision.decisionDigest, { headSha, runtimeImageSha, requeues });
   const decisionClaim = await claimReviewDecision({
     ledgerPath: args.ledgerPath, taskId: task.id, prUrl, digest: decisionDigest, headCheckoutDir: args.headCheckoutDir,
   });
@@ -9290,6 +9299,7 @@ async function runReview(args: {
     pr_url: prUrl,
     ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
     review_engine_revision: REVIEW_ENGINE_REVISION,
+    ...(runtimeImageSha !== undefined ? { runtime_image_sha: runtimeImageSha } : {}),
     review_decision_digest: decisionDigest,
     decision_verdict: verdict,
     evaluator_provenance: evaluatorProvenance,
@@ -12722,10 +12732,10 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = await judgeFixProgress(input, progressJudge);
+      const decision = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
@@ -19122,7 +19132,7 @@ export async function pushFixRound(
     const remote = await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])
       .then((stdout) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return { fixRoundPushedHead: expectedHeadSha };
-    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
+    throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err) ?? prePushGateRefusal(err), String((err as Error)?.message ?? err));
   }
 }
 
@@ -19424,7 +19434,9 @@ export async function repairCensusRefusedPush(input: {
       "",
       input.recheck
         ? "PRE-PUSH DIFF-COVERAGE (W1-T4797): no PR exists yet — CI's coverage-ratchet would refuse this head; add the tests that cover each line named above."
-        : "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
+        : censusPushRefusal(refusal.text)
+          ? "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above."
+          : "PRE-PUSH GATE: no PR exists yet — hooks/pre-push refused this branch with the gate output above; apply the remedy it names.",
       CENSUS_PUSH_NEVER_BYPASS,
     ].join("\n");
     const roundStart = head();
@@ -19482,10 +19494,11 @@ export async function repairCensusRefusedPush(input: {
       refusal = stillRefused;
       continue;
     }
+    dropTierRowsBeforePush(cwd, log);
     try {
       await gitPushRunBranchAsync(cwd);
     } catch (err) {
-      const next = censusPushRefusal(err);
+      const next = censusPushRefusal(err) ?? prePushGateRefusal(err);
       if (!next) throw err;
       refusal = next;
       for (const f of next.offeredBaselines) offered.add(f);
@@ -21475,6 +21488,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
       }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
+      dropTierRowsBeforePush(worktreePath, log);
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
       const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, { ...opts.coveragePrecheckPorts, repo: task.repo }), log, "fallback_push");
@@ -21482,9 +21496,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         await gitPushRunBranchAsync(worktreePath);
       } catch (err) {
-        const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err);
+        const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err) ?? prePushGateRefusal(err);
         if (!refusal) throw err;
-        const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : "census-refused";
+        const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : censusPushRefusal(err) ? "census-refused" : "pre-push-refused";
         const rung = await repairCensusRefusedPush({
           refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
           ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
@@ -43252,60 +43266,7 @@ export interface WorkerEditCommit {
   readonly aliasRewrite?: AddedTestAliasRewrite;
 }
 
-/** W1-T10064: the W1-T9864 codemod's `rewriteSource` contract. */
-export type TestAliasRewriter = (text: string, file: string) => { text: string; rewritten: number; unresolved: string[] };
-
-/** W1-T10064: what the alias rewrite did to the new tests a harness commit stages. */
-export interface AddedTestAliasRewrite {
-  readonly rewritten: string[];
-  readonly unresolved: { path: string; specifier: string }[];
-  readonly failed: { path: string; error: string }[];
-}
-
-/**
- * W1-T10064: REWRITE THE RELATIVE IMPORTS OF THE TESTS THE WORKER ADDED to `#src/`/`#scripts/`/`#test/`, the
- * mechanical edit the W1-T9864 census asks of every new test. Only `??`/`A` test files absent from a merge's
- * MERGE_HEAD are touched; an existing file is never rewritten. A throw leaves the file as written and is named.
- */
-export function rewriteAddedTestImports(
-  repoDir: string,
-  status: string,
-  staged: readonly string[],
-  runGit: GitRunner,
-  rewrite: TestAliasRewriter = codemodRewriteSource,
-): AddedTestAliasRewrite {
-  const result: AddedTestAliasRewrite = { rewritten: [], unresolved: [], failed: [] };
-  let candidates = status.split("\0").filter((entry) => ["?? ", "A  ", "AM "].includes(entry.slice(0, 3)))
-    .map((entry) => entry.slice(3)).filter((path) => staged.includes(path) && /^test\/.+\.test\.m?ts$/.test(path) &&
-      !path.split("/").includes("..") && existsSync(join(repoDir, path)) && lstatSync(join(repoDir, path)).isFile());
-  if (candidates.length > 0 && mergeHeadPresent(runGit)) {
-    const fromMain = new Set(runGit(["ls-tree", "-r", "--name-only", "MERGE_HEAD", "--", ...candidates]).split("\n"));
-    candidates = candidates.filter((path) => !fromMain.has(path));
-  }
-  for (const path of candidates) {
-    try {
-      const out = rewrite(readFileSync(join(repoDir, path), "utf8"), path);
-      result.unresolved.push(...out.unresolved.map((specifier) => ({ path, specifier })));
-      if (out.rewritten > 0) {
-        writeFileSync(join(repoDir, path), out.text);
-        result.rewritten.push(path);
-      }
-    } catch (error) {
-      result.failed.push({ path, error: String((error as Error)?.message ?? error) });
-    }
-  }
-  return result;
-}
-
-/** W1-T10064: the `implement.harness_commit` fields of an alias rewrite, each present only when non-empty. */
-export function aliasRewriteFields(rewrite: AddedTestAliasRewrite | undefined): Record<string, unknown> {
-  if (rewrite === undefined) return {};
-  return {
-    ...(rewrite.rewritten.length > 0 ? { alias_rewritten: rewrite.rewritten } : {}),
-    ...(rewrite.unresolved.length > 0 ? { alias_unresolved: rewrite.unresolved } : {}),
-    ...(rewrite.failed.length > 0 ? { alias_rewrite_failed: rewrite.failed } : {}),
-  };
-}
+export { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite, type TestAliasRewriter };
 
 /** Read worker edits against HEAD, or committed registrations against their merge base. */
 export function readRegistrationChanges(
@@ -43655,17 +43616,6 @@ export function commitWorkerEditsWithCensusFix(
   const censusFix = deps.censusFix ? deps.censusFix(repoDir) : runCensusFix(repoDir);
   const { censusFix: _injectedCensusFix, ...gitDeps } = deps;
   return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps, acceptance), censusFix };
-}
-
-/** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
-function mergeHeadPresent(runGit: GitRunner): boolean {
-  try {
-    runGit(["rev-parse", "--verify", "-q", "MERGE_HEAD"]);
-    return true;
-  } catch {
-    // No MERGE_HEAD: nothing is mid-merge.
-    return false;
-  }
 }
 
 /**

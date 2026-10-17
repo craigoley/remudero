@@ -145,7 +145,7 @@ test("W1-T5282: the daemon freshness read lets a timer fire while git fetch is i
       log: (step: string, extra?: Record<string, unknown>) => {
         if (step === "daemon.freshness_not_stale") events.push(`${step}:${String(extra?.arm)}@${counter.turn() - fetchTurns[0]!}`);
       },
-    } as unknown as DaemonDeps);
+    } as unknown as DaemonDeps, { freshnessMinLifetimeMs: 0 });
     assert.equal(summary.stopReason, "stopped");
   } finally {
     counter.stop();
@@ -275,7 +275,7 @@ async function staleFixtureRun(awaited: boolean) {
       const reading: DaemonFreshness = reads <= 2 ? { stale: false } : { stale: true, oldSha: HEAD, newSha: MAIN };
       return awaited ? afterTurns(2, reading) : reading;
     },
-  } as unknown as DaemonDeps);
+  } as unknown as DaemonDeps, { freshnessMinLifetimeMs: 0 });
   return { summary, steps };
 }
 
@@ -324,7 +324,7 @@ function lanePool(awaited: boolean, readTurns = 1, max = 3) {
       await gates.get(id)?.promise;
       return okResult(id);
     },
-  } as unknown as DaemonDeps, { laneCount: 2, pollIntervalMs: 10, max });
+  } as unknown as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 2, pollIntervalMs: 10, max });
   return {
     steps,
     started,
