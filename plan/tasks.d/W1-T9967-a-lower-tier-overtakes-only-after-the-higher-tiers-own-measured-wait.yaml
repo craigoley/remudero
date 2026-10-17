@@ -14,7 +14,7 @@
     - src/lib/dispatch-value.ts
     - test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts
     - test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: chose both dispatch-order options; P1 queue fixes ranked 125-277 of 769
   attempts: 0
   rationale: |

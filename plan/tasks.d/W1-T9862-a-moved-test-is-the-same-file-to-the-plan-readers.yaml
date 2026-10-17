@@ -19,7 +19,7 @@
     - src/lib/gate-gardener.ts
     - src/lib/dispatch-overlap.ts
     - test/a-moved-test-is-the-same-file-to-the-plan-readers.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
