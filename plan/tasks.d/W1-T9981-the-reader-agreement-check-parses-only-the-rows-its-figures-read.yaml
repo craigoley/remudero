@@ -1,0 +1,115 @@
+- id: W1-T9981
+  title: "THE READER-AGREEMENT CHECK PARSES ONLY THE ROWS ITS FIGURES READ — the sweep prelude's 15-minute cross-check parses the whole 7-day ledger window twice (132 archives, ~740 MB of raw lines), and the first one after every boot is the daemon's post-boot spike: heap 625 MiB at 02:35:36Z, 2,417 MiB at 02:36:17Z, then 553 MiB after the reclaimer's collection; the figures need a few step kinds and the halted tasks' rows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which ledger rows the reader-agreement check parses; the figures it compares, its cadence and its disagreement rows are unchanged
+  band_meaning: span
+  origin: "operator brief 2026-10-17 ~02:55Z (agent F13): host MemAvailable 6.5 GB to ~1.0 GB within 9 minutes of the 02:33Z core boot, load 77, ssh dead 02:40-02:54Z; file the post-boot spike at priority 1; standing rulings: never raise core memory.max, reduce usage; no hard fixed thresholds"
+  plan_refs: [W1-T4841, W1-T6246, W1-T4820, W1-T9647, W1-T9106, W1-T9972, W1-T9816, W1-T9781]
+  files:
+    - src/lib/reader-agreement.ts
+    - src/lib/status.ts
+    - test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-17: the post-boot spike behind the 02:33Z host collapse
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 on the core ledger (state2), read-only: the live ledger and the 19-27, 21-23, 23-33 and 01-34
+    archives. Rows: daemon.memory (W1-T9647), daemon.slack_reclaim, daemon.alive, sweep.full_prelude, reader.disagreement.
+    - THE SPIKE IS THE FIRST FULL PASS'S reader_agreement STAGE. Boot 02:33:15Z (head 999d96d9a). The first full pass
+      started 02:34:33Z. Its sweep.full_prelude row (02:57:17Z) times reader_agreement at 27.8 s, and that stage's
+      reader.disagreement row (dispatch_streak W1-T5902, board 2 vs independent 5) is at 02:36:04Z, so it ran about
+      02:35:36-02:36:04Z.
+        - daemon.alive 02:35:36Z: heap used 625 MiB, rss 1,774 MiB.
+        - daemon.memory 02:36:17Z (uptime 232 s): heap used 2,417 MiB, old space 2,223 MiB, VmRSS 3,102 MiB,
+          VmHWM 3,107 MiB. Its holders name 267 MiB.
+        - daemon.slack_reclaim 02:36:22Z: heap 2,505 to 527 MiB, 2,068 MiB freed, rss 3,171 to 1,103 MiB. The
+          ~2 GB was garbage made inside one stage.
+    - EVERY BOOT SHOWS IT, at the first reader.disagreement:
+        - boot 22:27:09Z: reader.disagreement 22:31:54Z; heap 335 MiB (uptime 230 s), 992 (421 s), 1,779 (605 s);
+          VmHWM 1,515 to 3,679 MiB.
+        - boot 00:25:18Z: reader.disagreement 00:29:33Z; VmHWM 1,785 MiB at 00:28:27Z, 4,058 MiB at 00:31:28Z;
+          reclaim 00:32:27Z heap 1,351 to 722 MiB.
+    - IT RECURS, it is not boot-only: reader.disagreement 23:23:52Z, then reclaim 23:23:53Z heap 3,132 to 1,304 MiB, and
+      VmHWM 3,679 to 4,022 MiB. A pass whose figures agree writes no row, so the passes that agree are not visible.
+      INFERRED: each check (one per non-light pass, at most every READER_AGREEMENT_INTERVAL_MS) allocates the same.
+      At boot it lands on a small heap with the admission gate blind to it (see the sibling admission task).
+    - THE OTHER CANDIDATES ARE NOT IN THE WINDOW:
+        - the board snapshot load (board_snapshot.loaded 02:32:37Z, 38 MB) and the run-child boot census and mode
+          decision (02:33:10-14Z) both ran before the 625 MiB sample;
+        - triage_evidence (21.6 s) and escalation_answers (50.2 s) run in the prelude's first group, also before it;
+        - the benchmark cohort (38 MB checkpoint) runs detached, at 02:54:40-02:55:36Z, 22:38Z and 00:36Z;
+        - ledger_fold, the next stage (89.7 s, 02:36:04-02:37:34Z), holds live data (reclaim 02:37:01Z heap 1,665 to
+          1,263 MiB). It is a separate, smaller item, not this task.
+    - THE CORPUS: STATUS_BOARD_WINDOW_MS (7 days) covers 132 core archives, 111 MB gzip. One archive (1.29 MB gzip) is
+      8.64 MB and 12,360 rows raw. INFERRED: ~740 MB of raw lines and ~1.6 M rows per read.
+    READ at origin/main 35839d2ca (symbols):
+    - runSweep's prelude (src/lib/sweep.ts, lastReaderAgreementAt, READER_AGREEMENT_INTERVAL_MS) calls
+      checkReaderAgreement on every non-light, non-dry pass at most once per interval. The first full pass after a boot
+      always runs it.
+    - boardFigures (src/lib/reader-agreement.ts) reads readLedgerUnionBounded (src/lib/status.ts), which parses every
+      row of the window (readLedgerUnionRecordsSync, no rotation memo, no filter), then builds buildLedgerIndex over
+      all of them.
+    - independentFigures then reads readLedgerUnionRawLinesSync over the same window, keeps union.rawLines, and
+      JSON.parses every line into a second `rows` array while the raw strings are still held. When the off-loop queue
+      gateway's facts are fresh, it also runs projectPlan(plan, { readLedger: () => rows }).
+    - What the figures read:
+        - dispatch.circuit_broken rows (the halted set);
+        - the halted tasks' own rows: run.start, pr.opened, dispatch.breaker_released, verdict and verdict.merged, plus
+          orphanedRunIds' per-run counts and the newest ts;
+        - deploy.ok rows;
+        - the queued-task count, which reads what projectPlan's reducers read.
+      LedgerUnionRecordReadOptions extends LedgerUnionRawReadOptions, so the record reader already takes the raw
+      `pattern`/`keep` pre-parse filter. W1-T9816 used it for bootRunChildMode's settled-row read.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and 49 shards on open heads for reader-agreement,
+    checkReaderAgreement, boardFigures, independentFigures and reader_agreement. The hits are W1-T4841 (built the
+    check), W1-T6246 (moved the queue projection's GitHub walk off the loop), W1-T9781 (names fleet_state's time) and
+    W1-T9121 (names closed-PR walks). None bounds what the check parses. W1-T9647 names held heap, not transient
+    garbage. W1-T9106 caps the heap ceiling; a lower ceiling collects this garbage sooner but still makes it.
+  design: |
+    No new constant, interval or byte bound. The window, minRotations, refuseIncomplete and the cadence are unchanged.
+    1. EACH READER PARSES ONLY WHAT ITS FIGURES READ. The board side and the independent side each keep their own
+       corpus reader and their own reducers, as W1-T4841 and W1-T4820 require. The board side keeps the board's
+       dedupe through readLedgerUnionBounded. Each passes a pre-parse `keep` (or `pattern`) that retains a line only
+       when it names one of the steps a figure reads, or the task id of a halted task.
+       - readLedgerUnionBounded gains a pass-through of that filter, and it also applies to its live-file read. A
+         caller that passes no filter reads exactly as today.
+       - The halted set comes from the corpus itself. Either one raw pass keeps the step lines and a later pass keeps
+         the halted tasks' lines, or one pass keeps both when the order allows it. The builder picks one and says
+         which. A parsed copy of the whole window is never held.
+    2. THE QUEUED-TASK FIGURE. projectPlan reads broadly. Its independent figure is computed from rows filtered to
+       the steps projectPlan's reducers read. The builder derives that list from the reducers, and a census test fails
+       when a fixture row of an unlisted step changes projectPlan's queued count. Or it runs in a short-lived worker
+       that returns only the count. Either way, the main isolate never holds the whole window.
+    3. THE SAVING IS READ LIVE. Each check writes one reader.agreement row, even when the figures agree. It carries
+       lines_scanned, rows_kept per reader, heap_used_before_bytes and heap_used_after_bytes (process.memoryUsage, no
+       collection), and duration_ms. The before/after pair over daemon.memory and daemon.slack_reclaim rows, one
+       generation either side, is the check.
+    4. The figures, the reader.disagreement rows and checkReaderAgreement's signature are unchanged. A fixture corpus
+       gives the same findings before and after.
+    Tests go in the new file, with titles verbatim as in the proofs. Inject the raw readers and count the lines each
+    side parses. One test reads a real temporary state dir through the default readers, so the default seams are
+    covered.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts"
+    - claim: "neither reader parses a line whose step no figure reads and whose task is not halted"
+      proof: 'grep: test("W1-T9981: neither reader parses a row no figure reads" in test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts'
+    - claim: "the findings on a mixed fixture corpus equal the unfiltered readers' findings"
+      proof: 'grep: test("W1-T9981: the filtered readers return the same findings as the unfiltered ones" in test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts'
+    - claim: "the queued-task figure never holds the whole window on the main isolate"
+      proof: 'grep: test("W1-T9981: the queued-task figure never parses the whole window" in test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts'
+    - claim: "every check writes reader.agreement with its scanned and kept counts and its heap before and after"
+      proof: 'grep: test("W1-T9981: every check writes its scanned and kept counts and its heap use" in test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts'
+    - claim: "the default readers read a real state dir"
+      proof: 'grep: test("W1-T9981: the default readers read a real state dir" in test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts'
+  falsifier: |
+    On origin/main boardFigures parses every row of the window. A fixture of 1,000 rows of an unhalted task, plus one
+    halted task, makes each reader parse 1,000+ lines, and the "parses a row no figure reads" test goes red. Drop the
+    filter from readLedgerUnionBounded's live-file read only: the live fixture's unrelated rows are parsed and the same
+    test goes red. Filter out a step dispatchesWithoutNewOwnedPr reads, such as pr.opened: the board streak changes and
+    the "same findings" test goes red.
