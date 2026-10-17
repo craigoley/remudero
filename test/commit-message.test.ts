@@ -34,7 +34,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const CONFIG = join(REPO_ROOT, "commitlint.config.mjs");
 
-function rangeFixture(t: TestContext, message = "fix(fixture): valid range message") {
+function rangeFixture(t: TestContext) {
   const previous = [process.env.GIT_CONFIG_GLOBAL, process.env.GIT_CONFIG_SYSTEM];
   process.env.GIT_CONFIG_GLOBAL = "/dev/null";
   process.env.GIT_CONFIG_SYSTEM = "/dev/null";
@@ -49,7 +49,7 @@ function rangeFixture(t: TestContext, message = "fix(fixture): valid range messa
     "commit", "--quiet", "--allow-empty", "-m", text);
   commit("chore(fixture): seed a real range");
   const from = repo.git("rev-parse", "HEAD");
-  commit(message);
+  commit("fix(fixture): valid range message");
   return { repo, from, to: repo.git("rev-parse", "HEAD") };
 }
 
@@ -69,10 +69,13 @@ test("emitter range status checks preserve healthy and invalid message controls"
   const valid = rangeFixture(t), good = emitterChecksStep(valid.repo.dir, { from: valid.from, to: valid.to });
   assert.equal(good.ok, true, good.detail);
   assert.match(good.detail, /1 commit message/);
-  const invalid = rangeFixture(t, "wip: invalid conventional type"), bad = emitterChecksStep(invalid.repo.dir,
-    { from: invalid.from, to: invalid.to });
+  valid.repo.git("-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "commit", "--quiet",
+    "--allow-empty", "-m", "wip: invalid conventional type");
+  const bad = emitterChecksStep(valid.repo.dir, { from: valid.to, to: "HEAD" });
   assert.equal(bad.ok, false);
   assert.match(bad.detail, /type-enum/);
+  assert.equal(emitterChecksStep(valid.repo.dir, { from: "missing-fixture-origin", to: "HEAD" }).ok, false,
+    "healthy controls travel beside the repaired status boundary, not a proof that passes on the old false-zero reader");
 });
 
 test("emitter range failures name Git status signal and errno without certifying zero", () => {

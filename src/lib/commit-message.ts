@@ -594,6 +594,10 @@ export function readRangeCommitMessages(
   // skipping it would let a never-run spawn read as zero messages, a vacuous pass.
   const spawnFailed = spawnFailureDetail("emitter-checks", res);
   if (spawnFailed) throw new Error(spawnFailed);
+  if (res.status !== 0) {
+    const diagnostic = res.stderr.trim().slice(0, 512) || "no Git stderr captured";
+    throw new Error(`emitter-checks: Git range read FAILED (exit ${res.status}); ${diagnostic}`);
+  }
   return splitRangeCommitMessages(res.stdout);
 }
 
