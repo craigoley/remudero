@@ -251,6 +251,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  notStarted?: "admission-abandoned";
+  admissionSinceMs?: number;
   /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
   mcpIsolation?: WorkerMcpIsolationEvidence;
   /** W1-T9489: set on every Claude spawn made under the strict MCP boundary, so a census tells post-fix rows from pre-fix
@@ -1291,6 +1293,8 @@ export interface SpawnWorkerArgs {
   /** W1-T5659 — a caller's cancel. Aborting it aborts THIS call's query (chained into the same `options.abortController` the
    * clock bound uses; one is constructed when only this is set). Omitted leaves behaviour byte-identical. */
   signal?: AbortSignal;
+  memoryAdmissionSinceMs?: number;
+  onMemoryAdmissionEnd?: () => void;
   /** Observe the per-spawn worker-home reap this teardown already runs. `reapWorkerHome` ALREADY COMPUTES a {@link
    * WorkerHomeReapResult} naming what it removed and why, and that value was discarded in statement position until this.
    * Called on EVERY exit path including a thrown error, never allowed to throw. INSTRUMENTATION ONLY: it observes, it never
@@ -2356,12 +2360,26 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
   const childReservationId = currentRunChildReservationId();
+  const admissionStartedAtMs = systemClock.now();
   const admission = childReservationId ? undefined : await awaitMemoryAdmission({
     workerClass: workerClassOf(args),
+    signal: args.signal,
+    sinceMs: args.memoryAdmissionSinceMs,
     root: () => (args.config ?? loadConfig()).root,
     ...(args.runId ? { runId: args.runId } : {}),
     ...(args.taskId ? { taskId: args.taskId } : {}),
   }, args.memoryShadow);
+  args.onMemoryAdmissionEnd?.();
+  if (admission?.kind === "abandoned" || args.signal?.aborted) {
+    if (admission && "reservation" in admission) admission.reservation?.releaseOccupancy();
+    if (admission?.kind === "admitted") admission.endAged?.();
+    return { notStarted: "admission-abandoned", subtype: "admission_abandoned",
+      admissionSinceMs: Math.min(admissionStartedAtMs, args.memoryAdmissionSinceMs ?? admissionStartedAtMs),
+      sessionId: "", costUsd: 0, numTurns: 0,
+      text: "", blocks: [], stderr: "", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+      model: args.model ?? "", effort: args.effort ?? "", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+      modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+  }
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   const memoryReservation = childReservationId ? undefined :
     (admission && "reservation" in admission ? admission.reservation : undefined) ??

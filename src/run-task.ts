@@ -13802,6 +13802,15 @@ export async function runFixRung(opts: {
       }
       spawnElapsedMs = spawnOutcome.elapsedMs;
       fixResult = deps.account(spawnOutcome.result);
+      if (fixResult.notStarted === "admission-abandoned") {
+        deps.log("fix.done", { ...fixReceipt.joinFields(), round_id: roundId, head_sha: priorHeadSha,
+          ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
+          strike: attempt, round, subtype: "admission_abandoned", worker_exit: "not_spawned",
+          admission_since_ms: fixResult.admissionSinceMs, cost_usd: 0, num_turns: 0 });
+        deps.branchClaim?.release();
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
+          standDownReason: "fix admission abandoned before a worker started" };
+      }
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
