@@ -5,7 +5,7 @@
 // The first test really shells out: it cuts an engine tree, builds the `run-child` bundle into it, and runs the probe from there.
 import assert from "node:assert/strict";
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -63,7 +63,8 @@ function fixture(label: string, real: boolean): Fixture {
     cpSync(join(REPO_ROOT, "src"), join(engine, "src"), { recursive: true });
     for (const name of readdirSync(REPO_ROOT)) {
       if ([".git", "src", "dist", "state", "test"].includes(name) || existsSync(join(engine, name))) continue;
-      symlinkSync(join(REPO_ROOT, name), join(engine, name));
+      // An engine must link directly to its real dependency donor, including in a linked operator checkout.
+      symlinkSync(name === "node_modules" ? realpathSync(join(REPO_ROOT, name)) : join(REPO_ROOT, name), join(engine, name));
     }
   }
   return {
@@ -118,7 +119,7 @@ test("W1-T9082: a shadow probe writes its status and its shadow row", { timeout:
   const fx = await bundledFixture();
   const rows: Row[] = [];
   const outcome = await startRunChildProbe(inputFor(fx, rows), seamsFor(fx));
-  assert.ok(outcome.started, "a probe started");
+  assert.ok(outcome.started, JSON.stringify({ outcome, rows }));
   const row = only(rows, "run_child.shadow");
   assert.equal(row.contract, "ok", JSON.stringify(row));
   assert.equal(row.entry_kind, "bundle", "the engine tree holds a current bundle, so the probe ran it under plain node");

@@ -61,10 +61,12 @@
       while that repair waits. The two gates also use different arithmetic: the repair gate charges memoryFloorMib
       plus every planned review's p90 plus the fix rungs (W1-T9679); the budget charges hostReserveMib plus typical
       growth and one tail. So the budget can admit a build in a state where the repair gate refuses a fix.
-    - NOT RE-MEASURED: whether a build has been admitted while a repair was refused for memory since 19:47Z 10-15.
-      Measure that with `rmd ledger-grep` (sweep.disposed "live host capacity exhausted" beside run.start and
-      memory_budget.enforce_admit for implement) before this is built. If no window shows both, the operator may
-      retire this task as superseded by #12106 and W1-T9762. A filing PR does not retire it.
+    - MEASURED 2026-10-16 (core ledger, archive union, core booted on W1-T9762 at 14:18Z): sweep.fix_capacity
+      refused a fix 8 times between 16:16 and 17:10Z, every one with pressure_tier fits and 2-4 implement
+      memory_budget.enforce_admit within 10 min. At 16:45:51Z: headroom_mib 1,617, review_charge_mib 2,324 (2 planned
+      reviews at review_estimate_mib 1,162 each), fix_estimate_mib 859 against fix_typical_mib 279,
+      fix_admissions_available 0, admission_rung none. So the yield is still needed, and the repair gate's review charge
+      is the same p90-for-unseen over-charge that W1-T9762 removed from the budget. Do not retire this task.
   design: |
     One priority rule, adaptive, with no new fixed number (operator ruling: no hard thresholds):
     1. DEMAND. When createSweepFixAdmissionController refuses a claim on a readable pressure reading (the MiB arithmetic,

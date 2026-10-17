@@ -1,0 +1,149 @@
+- id: W1-T9928
+  title: "A SILENT TEST-SLOT HOLDER KEEPS LIVE WORK RESERVED — keep beating through long steps, reclaim holder capacity only after verified process-tree quiescence or an identity-checked owner-assisted release, recover proven orphaned mutation guards, and re-derive transient contention each poll"
+  repo: remudero
+  depends_on: []  # W1-T8047 and W1-T9541 also edited src/lib/test-slot.ts; both are merged. run-unfiled-1792161817235 (open, operator) adds a maxConcurrency option there, a different hunk
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high  # Rule 19: one concern — when a host-wide test-slot reservation is judged abandoned; a too-eager judgment double-books a live run
+  band_meaning: blast-radius
+  origin: "operator approval 2026-10-16 (Craig, P1); live-work safety amendment explicitly approved by Craig: File the live-work safety amendment. Waiting runs reached native bounds; the original active full validation completed naturally, not by an agent killing it."
+  plan_refs: [W1-T396, W1-T6090, W1-T7392, W1-T7809, W1-T8047, W1-T9541]
+  files:
+    - src/lib/test-slot.ts
+    - src/lib/test-slot-mutation.ts
+    - scripts/preflight-author.mjs
+    - scripts/lib/author-step-capture.mjs
+    - test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts
+  status: queued
+  priority: 1  # restore safe admission behind proven orphaned guards without double-booking a working holder
+  attempts: 0
+  rationale: |
+    READ 2026-10-16 19:33Z on the operator Mac (read-only; nothing was signalled, edited or deleted):
+    - /tmp/rmd-test-slots/slot-1.json (0644, owner craigoley, legacy writer): pid 70214, host Craigs-Mac-mini,
+      startedAt 17:28:50.350Z, heartbeatAt 17:33:16.319Z, label preflight-author:static-and-affected, concurrency 2,
+      memoryBytes 1073741824, and no recorded heartbeat cadence. slot-2.json held native-author-runtime:sample.
+    - pid 70214 (ps STAT Ss, 0% CPU, up 2 h 04 m) is `node --import tsx scripts/preflight-author.mjs` in a Codex
+      checkout under OS user craigoley. Its child 52484 (scripts/lib/author-step-capture.mjs) STARTED AT 17:33:16Z, the
+      same second as the last heartbeat. Grandchild 52489 is `node --test --test-concurrency=1` over 3645 test files
+      (a full-fallback selection), and its current suite child was at 108% CPU. So the holder was WORKING. It was
+      not hung. Its record had stopped beating.
+    - Waiters' first `test_slot.waiting` row named "slot 1: mutation pending; coordination UNKNOWN" and "private
+      coordination encountered; private writer remains gated". F7 saw an orphaned /tmp/rmd-test-slots/.slot-1.json.mutation
+      (uid craigoleyagent, mtime 18:42:53Z, no process holding it open). It was gone by 19:34Z.
+    WHY THE HEARTBEAT STOPPED. It was not an unref'd timer, and it was not a stuck await. preflight-author has no
+    heartbeat timer at all. `main` calls `slot.refresh()` once, just before the affected-tests step. `runStep` then
+    calls `captureStepSync`, which runs the step through `spawnSync`, and that blocks the event loop for the whole
+    child run, hours for a full fallback. A timer added beside that call would be starved the same way.
+    src/lib/test-run.ts `runBoundedTest` is the only caller with a timer: `setInterval(slot.refresh,
+    TEST_SLOT_LEASE_MS / 3)`, unref'd, beside an async spawn. That is correct there.
+    WHY A LIVE PID KEEPS ITS SLOT. In src/lib/test-slot.ts, `testSlotHolderStale` sends a same-host holder in the same
+    pid namespace to `isHolderStale` (src/lib/fs-race-safe.ts), which reads only host, boot, pid liveness and start
+    time. heartbeatAt is read only for a foreign host/namespace, against the fixed 90-minute TEST_SLOT_LEASE_MS backstop.
+    WHY AN ORPHANED GUARD BLOCKS FOREVER. src/lib/test-slot-mutation.ts `acquireSlotMutation` creates the guard with
+    `wx` and says "An abandoned or unreadable guard is never aged, retried or stolen". The guard is empty, so it names
+    no writer. A writer killed between open and release, such as an agent killing its own waiting preflight, leaves it
+    behind for good.
+    WHY THE WAITER STAYS GATED. In `testSlotAcquisition`, a busy guard sets `privateRequired = true`, and nothing
+    clears it. From then on, `memoryShort` returns "private coordination encountered; private writer remains gated"
+    for EVERY slot on EVERY later poll. A legacy (non-private) waiter therefore cannot reach the reclaim branch, even
+    after the guard is gone. It ends at TEST_SLOT_WAIT_BOUND_MS as NOT_RUN. So reclaiming the guard alone would not
+    unblock the waiter that saw it.
+    SWEEP 19:35Z: plan/tasks.d on origin/main for test-slot, heartbeat, mutation guard, privateRequired and slot reclaim
+    (W1-T6090, W1-T6111, W1-T7093, W1-T7392, W1-T7809, W1-T8047, W1-T8230, W1-T9102, W1-T9541). None judges a live
+    pid by its heartbeat, ages a mutation guard, or clears the sticky gate. 443 origin heads were diffed against main
+    for these files. The only open edit is run-unfiled-1792161817235 (a worker ceiling, a different hunk). The
+    run-W1-T8047-* and run-W1-T9541-* heads are leftovers of merged tasks.
+    LIVE-WORK SAFETY AMENDMENT 2026-10-16, directly approved by Craig:
+    A missed heartbeat measures missing progress reporting, not process-tree quiescence. The original parent
+    blocked in synchronous capture while its test grandchild was working, then completed naturally at 19:35:55Z
+    (32774 tests, 9 failures); other bounded waits ended NOT_RUN. The prior origin's claim that each agent killed
+    its own run is not supported. Recovering the exact orphaned mutation guard was a separate, one-shot,
+    owner-assisted action and did not release the live slot or authorize further recovery.
+    PR #12422 filed this queued design; it did not implement it. The safety finding is recorded at
+    https://github.com/craigoley/remudero/pull/12422#issuecomment-6223684599.
+    Node child-process documentation distinguishes parent exit from descendant exit; Linux cgroup-v2's
+    populated notification covers live processes throughout a known sub-hierarchy. Neither a parent's dead pid
+    nor an empty current PPID walk proves an untracked or reparented descendant ended. These are design
+    constraints, not permission to create cgroups, move processes, signal workers or change live guards.
+    References: https://nodejs.org/api/child_process.html#subprocesskillsignal and
+    https://docs.kernel.org/admin-guide/cgroup-v2.html#un-populated-notification.
+  design: |
+    Bounds come from the holder's own record or from what the waiter measured. There is no new wall-clock age, no
+    LLM, and no change to private-capacity-v1's cross-account rule.
+    1. A RECORD STATES ITS CADENCE. `TestSlotHolder` gains an optional `heartbeatIntervalMs`. A lease writes it ONLY
+       while it really beats on a live event loop. A record without it keeps today's pid judgment. That covers every
+       pre-fix checkout and every sync caller that blocks its loop (sweep the `acquireTestSlot(` callers:
+       typecheck-run, commit-message, ci-parity, calibrate-author-runtime). Adding the field never makes a working
+       but blocked holder look stale.
+    2. PREFLIGHT-AUTHOR BEATS WHILE A STEP RUNS. The lease beats on an unref'd interval and records that interval.
+       The step must not block that loop. Either move the step to an async spawn that `main` awaits, or have the
+       capture subprocess, which already spools asynchronously, beat through a lease-provided handle that writes
+       under the mutation guard with the owner's nonce. Pick one and name it. A stopped beat, including one
+       caused by delayed scheduling, parent failure or a blocked event loop, is never proof that its work ended.
+    3. SILENCE IS NOT QUIESCENCE. Three missed recorded intervals may trigger a bounded observation and a
+       diagnostic, never reclaim, expiry or free capacity. Retain the reservation while any covered child or
+       descendant remains live, even if the parent died or its PID was reused. For new reclaim behavior require
+       positive, complete evidence that the exact reserved process tree ended or an identity-checked owner-assisted
+       release. Bind evidence to host/boot/namespace, owner, process start and reservation nonce/generation; check
+       the same reservation again under its mutation guard before release. A current PPID-only walk after parent
+       death is insufficient: reparented or detached descendants must be covered by the recorded run identity.
+       Unknown, incomplete, failed, unsupported or foreign-namespace probes keep capacity reserved and expose the
+       reason. Missing legacy identity requires owner assistance, not an invented lease expiry. Do not introduce
+       a shorter foreign-host/namespace lease or change cadence-less compatibility behavior in this task.
+    4. RELEASE PROVEN CAPACITY, NEVER SIGNAL. Before unlinking a holder record, the reclaim path verifies the
+       evidence from (3) for that exact record. Owner assistance is an identity-checked release after covered work
+       has safely ended, not authority to free a live child's capacity. Log the decision's actual reason,
+       reservation identity, probe coverage and terminal or owner-release evidence; heartbeat silence remains
+       diagnostic context, not a `stale_heartbeat_reclaimed` justification. Identity drift or a late refresh holds
+       the record for re-observation. Preserve today's lost-refresh fencing. No waiter kills or signals any
+       process, of any user. A private-capacity-v1 record of another uid stays "owner-lane release required".
+       This plan amendment changes no live claims, reservation limits, safety settings or protocol activation.
+    5. AN ORPHANED GUARD IS RECLAIMED. `.slot-N.json.mutation` is orphaned when BOTH hold:
+       (a) its age is past a bound derived from the guard holds this waiter has itself measured (its own acquire to
+           release durations, kept per acquisition; with none measured yet, it judges no guard);
+       (b) a bounded liveness probe positively shows that no process holds it open. The writer keeps its descriptor
+           until release, so this is an open-file check: lsof on darwin, a /proc/<pid>/fd scan on linux, run as the
+           guard's own uid.
+       An unknown, failed or foreign-uid probe keeps the guard and logs `test_slot.mutation_guard_unproven`. A
+       reclaim logs `test_slot.mutation_guard_reclaimed` with path, uid, mtime, age, boundMs and probe. Optionally,
+       new guards may carry the writer's pid/processStart, so a pid probe can stand in for (b). An empty guard from
+       an older writer must still be judged by (b).
+    6. THE GATE IS RE-DERIVED EACH POLL. Guard contention seen on an earlier poll is that poll's evidence only.
+       Each poll recomputes whether private coordination is present from what it observes then: a 0600 record, or
+       a guard that is still busy. A waiter therefore acquires on the first poll after the guard is gone or
+       reclaimed. A 0600 private record still gates a legacy waiter, exactly as today.
+    7. Tests go in the new file, with injected clock, isPidAlive and probe seams, plus one test that runs the real
+       default open-file probe (doctrine coverage-traps/cover-the-real-default). Add a real child-process control:
+       delay or stop the fixture parent's beats while its test child remains active; a second waiter must not
+       acquire the same capacity, and the child must finish normally. Cover parent exit with a surviving child,
+       PID/start or nonce mismatch, partial/failed probes, and unknown owner identity as non-release controls.
+       Positive controls prove exact-tree terminal evidence and identity-checked owner release admit a waiter
+       only after covered work ends, with no signal sent by reclaim. Test both Linux and Darwin default evidence
+       paths where supported; unsupported or insufficient evidence stays reserved, never silently skips safety.
+       The proofs below name the `test(` titles verbatim.
+  acceptance:
+    - claim: "a real active validation child retains its reservation after missed parent heartbeats, including a parent exit; a second waiter cannot acquire that capacity and no reclaim sends a signal"
+      proof: 'grep: test("W1-T9928: a silent holder with a live validation child cannot be double admitted" in test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts'
+    - claim: "reclaim admits a waiter only after exact process-tree terminal evidence or identity-checked owner-assisted release after work ends; PID reuse, reservation replacement, incomplete probes and unknown ownership retain capacity"
+      proof: 'grep: test("W1-T9928: only proven quiescence or an identity-checked owner release frees capacity" in test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts'
+    - claim: "a record with no recorded cadence, or one beating inside its bound, is never reclaimed while its pid is live"
+      proof: 'grep: test("W1-T9928: a beating or cadence-less live holder keeps its slot" in test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts'
+    - claim: "preflight-author's lease keeps beating while a long step runs; a delayed beat is diagnostic only, never permission to reclaim live work"
+      proof: 'grep: test("W1-T9928: preflight-author keeps beating its slot while a step runs" in test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts'
+    - claim: "an empty mutation guard that no process holds open, past the waiter's measured hold bound, is reclaimed and logged; an open or unprovable guard is kept"
+      proof: 'grep: test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept" in test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts'
+    - claim: "a legacy waiter whose first poll met a busy guard acquires on a later poll once the guard is gone"
+      proof: 'grep: test("W1-T9928: a waiter that met a busy guard acquires once it is gone" in test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts'
+  falsifier: |
+    SAFETY COUNTEREXAMPLE: applying the original design's three-missed-beats reclaim to a fixture with a delayed
+    or exited parent and a still-running validation child admits a second waiter into the same capacity. That
+    result must fail the amended safety test. The fixed design keeps the slot through silence, surviving or
+    reparented descendants and unprovable identity; the real child completes normally. Positive controls then
+    admit one waiter only after verified exact-tree quiescence or identity-checked owner-assisted release after
+    work ends. Deleting that safety condition must reproduce forbidden double admission, not merely change prose.
+    RETAINED LIVENESS COUNTEREXAMPLES: an empty proven-orphan `.slot-1.json.mutation` stays "mutation pending;
+    coordination UNKNOWN" on current main. Removing it after the first poll still leaves "private coordination
+    encountered; private writer remains gated" until TEST_SLOT_WAIT_BOUND_MS, which returns NOT_RUN. Fix those
+    paths without treating heartbeat age, parent death or missing evidence as proof that capacity is free.
