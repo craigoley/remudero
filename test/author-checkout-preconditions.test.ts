@@ -108,6 +108,19 @@ test('checkout diagnostics refuse malformed or changed bundle and environment ev
   assert.equal(f.check({bundles: [{path, head: 'b'.repeat(40)}]}).state, 'blocked');
   const old = process.env.GIT_INDEX_FILE; process.env.GIT_INDEX_FILE = '/not-our-index';
   try { assert.equal(f.check().state, 'blocked'); } finally { if (old === undefined) delete process.env.GIT_INDEX_FILE; else process.env.GIT_INDEX_FILE = old; }
+  // Default positive controls retain tmp-hygiene's dead-push and no-background-GC entries.
+  // Appending any other entry must still refuse before the subprocess seam is reached.
+  const count = process.env.GIT_CONFIG_COUNT, at = Number(count ?? '0');
+  const key = 'GIT_CONFIG_KEY_' + at, value = 'GIT_CONFIG_VALUE_' + at;
+  process.env.GIT_CONFIG_COUNT = String(at + 1); process.env[key] = 'core.sshCommand'; process.env[value] = 'untrusted';
+  let calls = 0;
+  try {
+    const refused = f.check({}, {spawn: () => { calls++; throw Error('must not execute'); }});
+    assert.equal(refused.state, 'blocked'); assert.equal(refused.failures[0].code, 'git-environment-override'); assert.equal(calls, 0);
+  } finally {
+    delete process.env[key]; delete process.env[value];
+    if (count === undefined) delete process.env.GIT_CONFIG_COUNT; else process.env.GIT_CONFIG_COUNT = count;
+  }
   let changed = false;
   const r = f.check({bundles: [{path, head: f.head}]}, {spawn: (file: string, args: string[], options: object) => {
     const out = spawnWithinBudget(file, args, options);

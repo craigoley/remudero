@@ -4,6 +4,23 @@ import {performance} from 'node:perf_hooks';
 import {authorDependencyProvenance} from './author-dependency-provenance.mjs';
 import {spawnWithinBudget} from './bounded-subprocess.mjs';
 
+// Preserve the maintained test containment, not arbitrary environment Git configuration.
+// Each allowed value only disables background work or rewrites pushes to a dead local path.
+function containmentConfigOnly(env) {
+  const keys = Object.keys(env).filter(key => key === 'GIT_CONFIG_COUNT' || /^GIT_CONFIG_(KEY|VALUE)_[0-9]+$/.test(key));
+  if (!keys.length) return true;
+  if (!/^(0|[1-9][0-9]?)$/.test(env.GIT_CONFIG_COUNT ?? '')) return false;
+  const count = Number(env.GIT_CONFIG_COUNT);
+  if (count > 64 || keys.length !== 1 + count * 2) return false;
+  const pushKey = 'url.file:///nonexistent/W1-T4805-live-github-push-blocked-by-the-test-suite/.pushInsteadOf';
+  for (let i = 0; i < count; i++) {
+    const key = env['GIT_CONFIG_KEY_' + i], value = env['GIT_CONFIG_VALUE_' + i];
+    if (!((key === 'gc.auto' && value === '0') || (key === 'receive.autogc' && value === 'false') ||
+        (key === pushKey && ['https://github.com/', 'git@github.com:', 'ssh://git@github.com/'].includes(value)))) return false;
+  }
+  return true;
+}
+
 /** Opt-in, read-only setup diagnostic. No fetch/import, ref/config write, install, lease or test. */
 export function checkAuthorCheckout(root, {head, upstream, bundles = [], budgetMs = 10000} = {}, deps = {}) {
   const startedMono = performance.now(), failures = [], observations = [], run = deps.spawn ?? spawnWithinBudget;
@@ -21,9 +38,10 @@ export function checkAuthorCheckout(root, {head, upstream, bundles = [], budgetM
     GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null'};
   for (const key of Object.keys(env)) if (['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_CONFIG',
-    'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'].includes(key) || /^GIT_CONFIG_(KEY|VALUE)_[0-9]+$/.test(key)) {
+    'GIT_CONFIG_PARAMETERS'].includes(key)) {
     refuse('git-environment-override'); return result();
   }
+  if (!containmentConfigOnly(env)) { refuse('git-environment-override'); return result(); }
   const git = (args, allow = [0]) => {
     const r = run('git', ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', ...args],
       {cwd: root, env, startedMono, budgetMs, encoding: 'utf8', maxBuffer: 1024 * 1024});
