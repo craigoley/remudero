@@ -7,7 +7,7 @@
 // below is a tmp path this suite creates. Nothing reads a real key or a real ~/.gitconfig.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { afterEach, test } from "node:test";
 
@@ -180,6 +180,16 @@ test("proofCheckoutGitDirs and proofLinkedModuleRoots read each checkout shape",
   assert.deepEqual(proofLinkedModuleRoots(clone), [], "no node_modules");
   mkdirSync(join(clone, "node_modules"));
   assert.deepEqual(proofLinkedModuleRoots(clone), [], "an in-checkout install needs no extra mount");
+  // A worker worktree links to an engine tree's node_modules, itself a link to the install: both hops are mounted.
+  const real = realpathSync(root);
+  mkdirSync(join(real, "install"));
+  mkdirSync(join(real, "engine"));
+  symlinkSync(join(real, "install"), join(real, "engine", "node_modules"), "dir");
+  const linked = join(real, "linked");
+  mkdirSync(linked);
+  symlinkSync(join(real, "engine", "node_modules"), join(linked, "node_modules"), "dir");
+  assert.deepEqual(proofLinkedModuleRoots(linked), [join(real, "install"), join(real, "engine", "node_modules")],
+    "a link to a link mounts the middle hop, or the checkout's own link dangles in the sandbox");
 });
 
 test("a sandbox that cannot start reads as not_executable, never a pass or a failure", async () => {
