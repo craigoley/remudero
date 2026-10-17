@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -60,6 +60,33 @@ function writeOversizedLedger(ledgerPath: string, ceiling: number): void {
 }
 
 const CEILING = 4096;
+
+function rotateWithArchiveAge(offsetMs: number, smoothingWindowMs: number): ReturnType<typeof rotateLedger> {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    writeOversizedLedger(ledgerPath, CEILING);
+    const archive = join(dir, "ledger.2026-10-01T00-00-00-000Z.ndjson");
+    writeFileSync(archive, noiseLine(-1) + "\n");
+    const mtime = new Date(Date.now() + offsetMs);
+    utimesSync(archive, mtime, mtime);
+    return rotateLedger(ledgerPath, { ceilingBytes: CEILING, smoothingWindowMs });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("zero-window ledger rotation does not wait for a future archive mtime", () => {
+  assert.equal(rotateWithArchiveAge(60_000, 0).rotated, true);
+});
+
+test("nonzero-window ledger rotation still waits for a future archive mtime", () => {
+  assert.equal(rotateWithArchiveAge(60_000, 60_000).rotated, false);
+});
+
+test("nonzero-window ledger rotation proceeds after the archive pacing window", () => {
+  assert.equal(rotateWithArchiveAge(-120_000, 60_000).rotated, true);
+});
 
 test("a concurrent rotator cannot drop a row appended between two renames — the lock makes the second rotation skip, and the appended line survives", () => {
   const dir = tmpDir();
