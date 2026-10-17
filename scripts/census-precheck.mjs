@@ -31,7 +31,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -491,6 +491,7 @@ function childOptions(root, timeoutMs = CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
 function assertChildFinished(res, what) {
   if (res.error) throw new Error(`the ${what} child could not run to completion: ${res.error.message}`);
   if (res.signal) throw new Error(`the ${what} child was ended by ${res.signal}`);
+  if (res.outputComplete === false) throw new Error(`the ${what} child has incomplete captured output`);
 }
 
 function isMember(m) {
@@ -619,9 +620,15 @@ function censusReaderContext(root, child, options) {
   const env = { ...Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])), ...options.env };
   const readGit = (args) => gitOut(root, args, { env, timeout: CENSUS_SUITE_CHILD_TIME_BOUND_MS });
   const untracked = readGit(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
+  const dependencies = join(root, "node_modules");
+  const dependency = existsSync(dependencies) ? statSync(dependencies) : null;
   const input = { root: resolve(root), head: readGit(["rev-parse", "HEAD"]).trim(),
     tracked: readGit(["ls-files", "--stage", "-z"]), diff: readGit(["diff", "--binary", "HEAD"]),
-    untracked: untracked.map((p) => [p, readFileSync(join(root, p)).toString("base64")]),
+    untracked: untracked.filter((p) => p !== "node_modules" && p !== "node_modules/")
+      .map((p) => [p, readFileSync(join(root, p)).toString("base64")]),
+    dependency: dependency ? [realpathSync(dependencies), dependency.dev, dependency.ino,
+      ...["package-lock.json", "node_modules/tsx/package.json"].map((p) => existsSync(join(root, p)) ? readFileSync(join(root, p)).toString("base64") : null)] : null,
+    loader: readFileSync(fileURLToPath(import.meta.resolve("tsx"))).toString("base64"),
     runtime: [process.execPath, process.version, process.versions.v8, process.platform, process.arch],
     command: child, environment: Object.entries(options.env).sort(([a], [b]) => a.localeCompare(b)),
     snapshot: options.env[CENSUS_SNAPSHOT_ENV] ? readFileSync(options.env[CENSUS_SNAPSHOT_ENV]).toString("base64") : null };
@@ -642,7 +649,8 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   const finishedMs = now();
   assertChildFinished(res, "census suite");
   const stdout = String(res.stdout ?? "");
-  const total = stdout.match(/^# tests (\d+)$/m);
+  const totals = [...stdout.matchAll(/^# tests (\d+)$/gm)];
+  const total = totals.length === 1 ? totals[0] : null;
   if (total === null) {
     throw new Error(
       `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,

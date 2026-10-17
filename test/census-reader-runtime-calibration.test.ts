@@ -56,8 +56,9 @@ test("source-reader calibration never retries a failed assertion or learns incom
     { status: 0, stdout: PASS.replace("# tests 1", "# tests 0") },
     { status: 0, stdout: "no summary" }, { status: 2, stdout: PASS },
     { status: null, signal: "SIGTERM", stdout: PASS }, { status: null, error: new Error("ETIMEDOUT") },
+    { status: 0, stdout: PASS, outputComplete: false }, { status: 0, stdout: PASS + "# tests 1\n" },
   ]) assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY,
-    priority, readContext: () => "same", run: () => result }), /UNKNOWN|0 tests|summary|exited 2|SIGTERM|ETIMEDOUT/);
+    priority, readContext: () => "same", run: () => result }), /UNKNOWN|0 tests|summary|exited 2|SIGTERM|ETIMEDOUT|incomplete/);
 });
 
 test("source-reader qualification rejects source drift and a new runtime overrun without another try", (t) => {
@@ -81,7 +82,7 @@ test("source-reader calibration exercises real native context and children witho
 
 test("source-reader native timeout preserves its started runaway and closed capture rather than reporting a pass", (t) => {
   const marker = "OWN_READER_RUNAWAY_STARTED";
-  const repo = fixture(t, `process.on("SIGTERM", () => {}); console.error(${JSON.stringify(marker)}); test("owned runaway", async () => new Promise(() => { setInterval(() => {}, 100); }));`);
+  const repo = fixture(t, `import { writeFileSync } from "node:fs"; process.on("SIGTERM", () => {}); writeFileSync("started-control", ${JSON.stringify(marker)}); test("owned runaway", async () => new Promise(() => { setInterval(() => {}, 100); }));`);
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], timeoutMs: 2000 }), (error: Error) => {
     assert.match(error.message, /exceeded 2000 ms.*capture retained at/);
     const dir = error.message.match(/capture retained at (.+)$/)![1];
@@ -89,7 +90,7 @@ test("source-reader native timeout preserves its started runaway and closed capt
     assert.equal(native.error.code, "ERR_AUTHOR_STEP_TIMEOUT");
     assert.equal(native.outputComplete, false);
     assert.ok(native.finishedAt);
-    assert.match(readFileSync(join(dir, "stderr"), "utf8"), new RegExp(marker));
+    assert.equal(readFileSync(join(repo.dir, "started-control"), "utf8"), marker);
     return true;
   });
 });
