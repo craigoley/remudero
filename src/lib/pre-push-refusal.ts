@@ -4,8 +4,9 @@
 // own push was rethrown, ended `failed` at run.error, and threw the finished build away. On 2026-10-17 W1-T9089's
 // second census strike cleared the census and was then refused by test-tier-manifest — a gate that names its own
 // remedy — and the P1 run ended `failed` at 11:27Z.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 
 /** The shape run-task.ts's census refusal has, so either feeds the same repair rung. */
@@ -49,15 +50,16 @@ export const TEST_TIER_MANIFEST = "scripts/test-tier-manifest.json";
  */
 export function dropDeletedTestTierRows(cwd: string, log: (step: string, extra?: Record<string, unknown>) => void): string[] {
   const path = join(cwd, TEST_TIER_MANIFEST);
-  if (!existsSync(path)) return [];
+  const text = readFileIfExists(path);
+  if (text === undefined) return [];
   const deleted = hostWorktreeGit(cwd, ["diff", "--name-only", "--diff-filter=D", "origin/main...HEAD", "--", "test/"])
     .split("\n").map((f) => f.trim()).filter(Boolean);
   if (deleted.length === 0) return [];
-  const manifest = JSON.parse(readFileSync(path, "utf8")) as { files?: Record<string, unknown> };
+  const manifest = JSON.parse(text) as { files?: Record<string, unknown> };
   const rows = deleted.filter((file) => manifest.files !== undefined && Object.hasOwn(manifest.files, file) && !existsSync(join(cwd, file)));
   if (rows.length === 0) return [];
   for (const file of rows) delete manifest.files![file];
-  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeAtomic(path, `${JSON.stringify(manifest, null, 2)}\n`);
   hostWorktreeGit(cwd, ["add", "--", TEST_TIER_MANIFEST]);
   hostWorktreeGit(cwd, ["commit", "-q", "-m", "chore(test): drop the tier-manifest rows of test files this branch deletes"]);
   log("push.tier_rows_dropped", { rows, manifest: TEST_TIER_MANIFEST });
