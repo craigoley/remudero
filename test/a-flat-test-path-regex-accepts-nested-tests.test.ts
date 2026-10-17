@@ -52,11 +52,12 @@ test("W1-T9871: the fixture-copy census reads a nested test file", () => {
     "test/top.test.ts": INIT_SITE,
     "test/x/y.test.ts": INIT_SITE,
     "test/x/deeper/z.test.ts": INIT_SITE,
+    "test/x/fixtures/regular.test.ts": INIT_SITE,
     "test/x/helper.ts": INIT_SITE,
   });
   try {
-    assert.deepEqual(listFixtureCopyFiles(root), ["top.test.ts", "x/deeper/z.test.ts", "x/y.test.ts"]);
-    assert.equal(countFixtureCopies(root).gitInitSites, 3, "the two nested suites count; a non-suite helper does not");
+    assert.deepEqual(listFixtureCopyFiles(root), ["top.test.ts", "x/deeper/z.test.ts", "x/fixtures/regular.test.ts", "x/y.test.ts"]);
+    assert.equal(countFixtureCopies(root).gitInitSites, 4, "nested suites count, including a nested fixtures directory; a helper does not");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -79,16 +80,20 @@ test("W1-T9871: the census precheck takes a nested test into scope", () => {
   );
 });
 
-test("W1-T9871: a nested new test counts as an added test file at head", () => {
+test("W1-T9871: a nested new test counts as an added test file", () => {
   const repo = gitRepo({ kind: "nested-added-tests" });
   try {
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
-    mkdirSync(join(repo.dir, "test", "x"), { recursive: true });
-    writeFileSync(join(repo.dir, "test", "x", "y.test.ts"), "");
-    writeFileSync(join(repo.dir, "test", "x", "helper.ts"), "");
+    for (const path of ["test/top.test.ts", "test/x/y.test.ts", "test/x/deeper/z.test.ts", "test/x/helper.ts", "test/fixtures/a/data.test.ts", "test/fixtures-extra/regular.test.ts"]) {
+      mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+      writeFileSync(join(repo.dir, path), "");
+    }
     repo.git("add", ".");
     repo.git("commit", "--quiet", "-m", "add a nested suite");
-    assert.deepEqual(addedTestFilesAtHead(repo.git("rev-parse", "HEAD"), repo.dir), { kind: "read", files: ["test/x/y.test.ts"] });
+    assert.deepEqual(addedTestFilesAtHead(repo.git("rev-parse", "HEAD"), repo.dir), {
+      kind: "read",
+      files: ["test/fixtures-extra/regular.test.ts", "test/top.test.ts", "test/x/deeper/z.test.ts", "test/x/y.test.ts"],
+    });
   } finally {
     repo.cleanup();
   }
@@ -109,6 +114,17 @@ test("W1-T9871: a test under test/fixtures is still excluded", () => {
       testFiles: ["fixtures/a/test/existing.test.ts"],
     });
     assert.deepEqual(found, [], "a fixtures path is not in the precheck's scope");
+    const mixed: string[] = evaluateCensusPrecheck({
+      changed: [fixturePath, "test/x/y.test.ts"],
+      readHead: (p: string) => (p === FIXTURES ? zero : p === "test/x/y.test.ts" ? INIT_SITE : null),
+      readBase: (p: string) => {
+        assert.notEqual(p, fixturePath, "fixture changes stay out of scope even when a real nested suite triggers the census");
+        return p === FIXTURES ? zero : null;
+      },
+      measuredFiles: [],
+      testFiles: ["x/y.test.ts"],
+    });
+    assert.deepEqual(mixed.map((f) => f.split(" — ")[0]), ["fixture-copy: gitInitSites 1 > baseline 0", "fixture-copy: gitInitFiles 1 > baseline 0"]);
 
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
     mkdirSync(join(repo.dir, "test", "fixtures", "a"), { recursive: true });
@@ -123,13 +139,20 @@ test("W1-T9871: a test under test/fixtures is still excluded", () => {
 });
 
 test("W1-T9871: the census inspects exactly the tracked test suites outside test/fixtures", () => {
-  const tracked = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "test/"], { cwd: REPO_ROOT, encoding: "utf8" })
-    .split("\0")
-    .filter((p) => p.endsWith(".test.ts") && !p.startsWith("test/fixtures/") && p !== "test/fixture-copy-census.test.ts")
-    .map((p) => p.slice("test/".length))
-    .sort();
-  const inspected: string[] = listFixtureCopyFiles(REPO_ROOT);
-  assert.ok(inspected.length > 0, "the census must inspect something");
-  assert.ok(inspected.some((p) => p.includes("/")), "the live tree has nested suites (test/helpers/*.test.ts) the walk must reach");
-  assert.deepEqual(inspected, tracked);
+  assert.ok(countFixtureCopies(REPO_ROOT).gitInitSites > 0, "the real checkout passes the census's completeness guard");
+  const repo = gitRepo({ kind: "census-completeness" });
+  try {
+    for (const path of ["test/top.test.ts", "test/x/y.test.ts", "test/fixtures/a/data.test.ts", "test/fixture-copy-census.test.ts"]) {
+      mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
+      writeFileSync(join(repo.dir, path), INIT_SITE);
+    }
+    repo.git("add", ".");
+    assert.equal(countFixtureCopies(repo.dir).gitInitSites, 2, "all tracked suites, excluding fixtures and the census itself");
+    rmSync(join(repo.dir, "test", "x", "y.test.ts"));
+    assert.throws(() => countFixtureCopies(repo.dir), /complete tracked test suite population/);
+    rmSync(join(repo.dir, "test", "top.test.ts"));
+    assert.throws(() => countFixtureCopies(repo.dir), /must inspect at least one test suite/);
+  } finally {
+    repo.cleanup();
+  }
 });

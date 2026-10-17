@@ -6821,7 +6821,6 @@ export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd(
     const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
       .split("\n")
       .map((p) => p.trim())
-      // Any depth, never test/fixtures/** (data, not a suite).
       .filter((p) => /^test\/(?!fixtures\/)(?:[^/]+\/)*[^/]+\.test\.ts$/.test(p));
     return { kind: "read", files };
   } catch (err) {

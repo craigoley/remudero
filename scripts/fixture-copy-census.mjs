@@ -7,7 +7,9 @@
  * The definitions are unchanged, byte for byte in behaviour; the census suite imports them from
  * here and keeps every falsifier that pins what each signature does and does not count.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 /** Every signature this census tracks, in the fixed order the baseline JSON's keys must match
@@ -145,11 +147,21 @@ export function countFixtureCopiesInTexts(texts) {
   };
 }
 
-/** Scan `<root>/test` (see {@link listFixtureCopyFiles}) and return the seven signature counts.
- *  Reads files, computes, returns — no writes, no baseline comparison. */
+/** Scan `<root>/test` and return the seven signature counts. In a git checkout, require the
+ *  complete tracked suite population; synthetic directory-only fixtures need no git index. */
 export function countFixtureCopies(root) {
   const testDir = join(root, "test");
-  return countFixtureCopiesInTexts(listFixtureCopyFiles(root).map((name) => [name, readFileSync(join(testDir, name), "utf8")]));
+  const inspected = listFixtureCopyFiles(root);
+  if (existsSync(join(root, ".git"))) {
+    const tracked = execFileSync("git", ["ls-files", "-z", "--", ":(glob)test/**/*.test.ts"], { cwd: root, encoding: "utf8" })
+      .split("\0")
+      .filter((p) => p && !p.startsWith("test/fixtures/") && !p.endsWith(`/${FIXTURE_COPY_CENSUS_FILENAME}`))
+      .map((p) => p.slice("test/".length))
+      .sort();
+    assert.ok(inspected.length > 0, "the fixture-copy census must inspect at least one test suite");
+    assert.deepEqual(inspected, tracked, "the fixture-copy census must inspect the complete tracked test suite population");
+  }
+  return countFixtureCopiesInTexts(inspected.map((name) => [name, readFileSync(join(testDir, name), "utf8")]));
 }
 
 /** Every signature whose live count exceeds its baseline, rendered `"<signature>: N > baseline
