@@ -42,7 +42,21 @@ test("source-reader runtime refuses absent stale malformed and other-context cal
   for (const policy of [null, {}, { floorMs: 0, multiple: 4 }, { floorMs: 1000, multiple: NaN }]) {
     assert.throws(() => censusReaderBudget(good, "head-A", policy, 10001), /UNKNOWN/);
   }
-  assert.throws(() => censusReaderBudget({ ...good, elapsedMs: 16000 }, "head-A", POLICY, 10001), /cannot fit/);
+  assert.equal(censusReaderBudget({ ...good, elapsedMs: 16000 }, "head-A", POLICY, 10001), 60000);
+  assert.throws(() => censusReaderBudget({ ...good, elapsedMs: 60001 }, "head-A", POLICY, 10001), /exceeded.*backstop/);
+  assert.throws(() => censusReaderBudget(good, "head-A", { floorMs: Number.MAX_VALUE, multiple: 4 }, 10001), /UNKNOWN/);
+});
+
+test("source-reader calibration caps its budget rather than rejecting a healthy reader", (t) => {
+  const repo = fixture(t), time = [0, 18000, 18001, 18002, 36002], bounds: number[] = [];
+  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+    now: () => time.shift()!, readContext: () => "same-runtime-input", run: (_f: string, _a: string[], options: { timeout: number }) => {
+      bounds.push(options.timeout); return { status: 0, stdout: PASS };
+    } }), []);
+  assert.deepEqual(bounds, [60000, 60000]);
+  const overrun = [0, 18000, 18001, 18002, 79003];
+  assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY, priority,
+    now: () => overrun.shift()!, readContext: () => "same-runtime-input", run: () => ({ status: 0, stdout: PASS }) }), /exceeded.*60000ms/);
 });
 
 test("source-reader calibration never retries a failed assertion or learns incomplete output", (t) => {

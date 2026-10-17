@@ -600,11 +600,10 @@ export function censusReaderBudget(measurement, context, policy, nowMs) {
       nowMs - measurement.finishedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
     throw new Error("source-reader runtime is UNKNOWN: missing, stale, mismatched or incomplete calibration");
   }
+  if (measurement.elapsedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) throw new Error("source-reader calibration exceeded the existing backstop");
   const budgetMs = Math.ceil(Math.max(policy.floorMs, measurement.elapsedMs) * policy.multiple);
-  if (budgetMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
-    throw new Error(`source-reader calibration cannot fit its ${budgetMs}ms measured budget inside the existing ${CENSUS_SUITE_CHILD_TIME_BOUND_MS}ms backstop`);
-  }
-  return budgetMs;
+  if (!Number.isSafeInteger(budgetMs)) throw new Error("source-reader runtime is UNKNOWN: invalid derived budget");
+  return Math.min(budgetMs, CENSUS_SUITE_CHILD_TIME_BOUND_MS);
 }
 
 function runCensusChild(file, args, options) {
@@ -683,6 +682,8 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during calibration");
   if (calibration.failing.length > 0) return calibration.failing;
   if (!calibration.passed) throw new Error("source-reader runtime is UNKNOWN: calibration has no complete unskipped pass");
+  console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.tests,
+    cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), assurance: "observation-not-qualification" })}`);
   const measurement = { ...calibration, context, complete: true, passed: true };
   options.timeout = censusReaderBudget(measurement, context, readerRuntimePolicy, now());
   const measured = once();
