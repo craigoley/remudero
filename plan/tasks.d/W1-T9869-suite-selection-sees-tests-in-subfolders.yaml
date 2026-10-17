@@ -14,7 +14,7 @@
     - scripts/diff-class.mjs
     - src/lib/affected-suites.ts
     - test/suite-selection-sees-tests-in-subfolders.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
