@@ -1,7 +1,7 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
+import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -16100,7 +16100,7 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
-      const result = await judgeFixProgress(input, progressJudge);
+      const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
         step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
         site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
@@ -18640,7 +18640,7 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const result = await judgeFixProgress(input, progressJudge);
+                const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
                   step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
                   site: progressParkedReason?.split(":")[0] ?? "fix-strike",
@@ -19411,7 +19411,7 @@ export async function runSweep(
                 break;
               }
               // The plan-shard correction is not another code-fix round. Every ordinary body-fix
-              // dispatch, including one beyond its former strike ceiling, remains judge-gated.
+              // dispatch after the first (W1-T10039), including one past its former ceiling, is judge-gated.
               const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
               if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;
