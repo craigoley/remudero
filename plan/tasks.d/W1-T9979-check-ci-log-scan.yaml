@@ -3,21 +3,104 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: high
   band_meaning: blast-radius
   priority: 1.2
   status: queued
   attempts: 0
-  author_class: machine
+  author_class: operator
   origin: "ci-friction:check:ci-log:scan"
   files:
     - .github/workflows/semgrep.yml
     - test/check-ci-log-scan.test.ts
+    - .github/semgrep/requirements.txt
+    - .github/semgrep/source-runtime-qualification.py
+    - .github/semgrep/test_source_runtime_qualification.py
+    - scripts/semgrep-native-contract-ratchet.mjs
+    - test/semgrep-native-install.test.ts
+    - test/semgrep-native-qualification.test.ts
+    - docs/semgrep-native-ce.md
+    - docs/docs-index.json
+  design: |
+    Operator-approved W1-T9979 runtime qualification, 2026-10-17, same operator thread.
+    The operator explicitly approved the governed scope/qualification/CI lock-Scan
+    adoption recommendation. This is an operator decision, not an automated low-risk
+    judgement, permission to waive a security gate, or fleet/runtime activation.
+    Preserve the original task identity, measured cause, high blast-radius risk,
+    priority and machine origin. The operator now commissions this explicit scope
+    and evidence contract; original machine authorship and escalation remain in Git
+    history. Workflow edits stay on the existing operator-build route, not fleet dispatch.
+
+    1. Reproduce the real failure with a nonempty control: the committed Scan installs
+       Semgrep 1.180.0 with MCP 1.30.0, then pip check rejects Semgrep's exact 1.29.0
+       requirement before any scan. Missing SARIF after that is a consequence, not a
+       finding or a second install success. Retain exact-head/base receipts and unknowns.
+       Do not downgrade MCP, ignore an advisory, suppress pip check, patch an upstream
+       wheel's METADATA, weaken hash/layout/closure guards or widen a baseline.
+    2. Reuse the separately merged, audited source recipe and its independently bound
+       assembler/policy. Qualify only the distinctly versioned 1.181.0+remudero.1
+       distribution with its exact approved source/donor bytes, deterministic whole-wheel
+       hash and unchanged CE engine/library inventory. Acquire inert bytes before import,
+       audit original and built metadata/layout, hash-install the complete closure offline,
+       then require ordinary pip check and installed distribution/CLI/engine identities.
+       CPython 3.12.15/Linux x86_64 and the recorded build profile are separate evidence
+       requirements; a synthetic fixture or assembled wheel is not runtime qualification.
+    3. Exercise real installed MCP imports, API/startup/shutdown and bounded localhost
+       request/authentication controls in a disposable private environment. Include
+       incompatible, missing, revised and partial inputs and no-listener/timeout failures.
+       No model call, live credential, external service write, account login, package
+       publication or private source disclosure. Never mark an incomplete probe healthy.
+    4. Drive the actual maintained Scan install/qualification composition, not only a
+       helper or copied command. Qualify baseline discrimination, invalid-rule refusal,
+       original parser sentinels and JSON/SARIF target/error inventories with healthy
+       controls. A bounded original-rule fixture scan and a whole-repository registry-rule
+       scan are distinct; retain both receipts and explicit omitted/failed/unknown counts.
+       Do not certify parser omissions, a missing report, findings or a skipped job as PASS.
+    5. Adopt the qualified closure through one normal source PR only after the actual
+       artifact/runtime controls pass. Keep the existing Scan identity, supported events,
+       permissions, deadline, four registry packs, PR-base semantics, advisory findings
+       treatment and security merge policy. Add no schedules and do not change their
+       cadence. The exact-head compatibility workflow and its trusted auditor/recipe
+       remain unchanged; any demonstrated need to change them requires a separately
+       governed staging amendment/normal merge BEFORE lock adoption, never self-trusted
+       workflow replacement in the same adoption PR.
+    6. Cover every real default and catch with deterministic negative/healthy controls,
+       retain the original W1-T9979 regression title, delete the actual install/probe
+       forwarding to observe failure and restore the exact committed tree. Keep literal
+       canonical proofs executable; no replacement PR-local Acceptance or fake call text.
+       Commit before verified-path/explicit-loader/shipped-slot tests and supported
+       source-mapped coverage. One native author run per distinct committed tree; compare
+       every failed title on THAT actual unchanged pinned base before attribution/repair.
+       Unknown causes remain unknown; no retries of unchanged failures into unexplained green.
+    7. Before build/publication refresh exact merged-trailer OR run-branch credit, active
+       branches, ALL open-head subject blobs with controls, actual selector/overlaps and
+       ordinary task ownership. Confirm this contract amendment actually merges before
+       implementation. Preserve other owners, including W9928/#12570 and W9919; no
+       competing repair pushes, automatic mass branch refresh or new SHA for stale gates.
+       Validate GitHub's stored canonical body/proofs and follow required current-head
+       hosted checks, normal review and merge. Reuse the existing off-loop gardener to
+       measure this cause's before/after repair-round share; recurrence is not root cause.
+    8. WORKERS CONTINUE for isolated source/tests. Registry/admission behavior remains
+       opt-in SHADOW ONLY, independent human owner/admin override, scoped services,
+       trusted PR flow and complete public Apache core. No production worker stop/restart,
+       live policy/config/settings/credentials/infra/scheduler activation or actual external
+       closure. Any future live replacement or incompatible shared-writer cutover needs
+       separate explicit affected-instance/writer approval. No schedules are recreated.
   acceptance:
     - claim: "the harness no longer spends a fix round on check:ci-log:scan"
-      proof: "grep: test(\"W1-T9979: check:ci-log:scan is prevented, not retried\" in test/check-ci-log-scan.test.ts"
-  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:scan's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+      proof: 'unit test: W1-T9979: check:ci-log:scan is prevented, not retried'
+    - claim: The actual maintained Scan composition invokes the bounded source-runtime qualifier
+      proof: 'grep: source-runtime-qualification\.py in .github/workflows/semgrep.yml'
+    - claim: Hash-bound source assembly and installed dependency closure refuse incompatible or incomplete evidence
+      proof: 'unit test: W1-T9979: source runtime closure never bypasses provenance hashes or pip check'
+    - claim: Real MCP API and disposable authentication probes cannot turn incomplete startup into compatibility
+      proof: 'unit test: W1-T9979: real MCP compatibility and authentication probes fail closed'
+    - claim: Original engine controls and actual JSON/SARIF inventories preserve baseline and invalid-rule semantics
+      proof: 'unit test: W1-T9979: actual scanner controls and inventories distinguish complete from unknown'
+    - claim: Healthy legacy policy and actual install/probe forwarding remain load-bearing without live effects
+      proof: 'unit test: W1-T9979: Scan adoption preserves policy owner override and forbidden effects'
+  note: "Originally machine-filed by the ci-friction gardener (W1-T4435) at rung 1 and escalated. The operator explicitly commissioned the clarified qualification/adoption contract on 2026-10-17; the pinned operator ruling is not a gate waiver, machine low-risk judgement or fleet activation. Workflow work remains operator-build. After its implementation merges, the existing gardener measures check:ci-log:scan's share of fix rounds in equal windows; recurrence reopens the cause at rung 2."
   rationale: |
     MEASURED by the ci-friction gardener: check:ci-log:scan cost 27.7 PR minute(s) (seven-day half-life) across 9 fix round(s) on 8 pull request(s).
 
@@ -71,10 +154,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
+    verdict: "operator"
+    action: proceed
     confidence: 1
     reasons:
-      - "deterministic backstop: it declares .github/workflows/semgrep.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
-    judged_at: "2026-10-17T09:09:06.773Z"
-    pin: "b061fa99eb56715c48f9b6693bf82ef70c386804cc528418427bd4863e995430"
+      - "Operator explicitly approved the governed W9979 scope, compatibility qualification and CI lock-Scan adoption in this thread on 2026-10-17; not a security waiver or fleet activation. All original guard, owner override and shadow-only boundaries remain."
+    judged_at: "2026-10-17T13:36:53.659Z"
+    pin: "1225dcc6dc82c71f8014925b483352c4826edffed781a02a18b50d69b49a597c"
