@@ -1,17 +1,21 @@
+/**
+ * W1-T9913 found the stale-event block: an armed Dependabot head GitHub still BLOCKS on a red an older event's run
+ * left behind. W1-T9995 replaces its remedy. Dependabot refuses `@dependabot recreate` from rmd (W1-T9994), so the
+ * block is cleared by re-running that old run of a live-reading check, and escalated once when the re-run is red,
+ * cannot clear it, or the check reads the frozen event payload.
+ */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 
 import {
   DEPENDABOT_RECREATE_COMMAND,
-  DEPENDABOT_STALE_EVENT_CAUSE,
   buildDepReviewStaleEventEscalation,
   dependabotStaleEventVerdict,
-  reconcileDependabotOwnRed,
   reconcileDependabotStaleEvent,
-  type DepReviewResult,
+  type SupersededRerunOutcome,
 } from "../src/lib/dep-review.js";
 import {
   DEFAULT_SWEEP_POLICY,
@@ -48,62 +52,46 @@ test("W1-T9913: a superseded red under an armed, blocked head is a stale-event b
   assert.deepEqual(dependabotStaleEventVerdict({ ...blocked, supersededReds: [] }), { kind: "none" });
 });
 
-test("W1-T9913: a stale-event block asks Dependabot to recreate once per head, on its second sighting", (t) => {
+test("W1-T9995: a stale-event block re-runs the superseded run instead of commenting recreate", (t) => {
+  // The second sighting rides the re-run lane's outcome; the reconciler has no comment port at all. The command-level
+  // half (#11968's armed BLOCKED head re-runs both old runs) is in test/a-held-dependabot-pr-is-refreshed-by-dependabot.test.ts.
   const f = fixture(t);
-  assert.equal(f.run(HEAD), "observed", "the first sighting only records the head");
-  assert.deepEqual(f.comments, []);
-  assert.equal(f.run(HEAD), "requested");
-  assert.deepEqual(f.comments, [DEPENDABOT_RECREATE_COMMAND]);
-  const state = f.state() as { refreshes: Array<Record<string, unknown>> };
-  assert.deepEqual(state.refreshes.map((r) => [r.headSha, r.command, r.cause, r.delivered]),
-    [[HEAD, DEPENDABOT_RECREATE_COMMAND, DEPENDABOT_STALE_EVENT_CAUSE, true]]);
-  assert.equal(f.run(HEAD), "awaiting-dependabot", "the same head is never asked twice");
-  assert.equal(f.comments.length, 1);
-  const rows = f.rows.filter((r) => r.step === "dep-review.stale_event.recreate_requested");
-  assert.deepEqual(rows, [{ step: "dep-review.stale_event.recreate_requested", pr_number: 11968, head_sha: HEAD,
-    stale_checks: ["ci-gate", "commitlint"], command: DEPENDABOT_RECREATE_COMMAND }]);
-
-  const failing = fixture(t, { failComment: true });
-  failing.run(HEAD);
-  assert.equal(failing.run(HEAD), "failed");
-  assert.deepEqual((failing.state() as { refreshes: unknown[] }).refreshes, [], "a failed ask records nothing, so the next pass asks again");
-  assert.equal(failing.rows.filter((r) => r.step === "dep-review.stale_event.failed").length, 1);
-});
-
-test("W1-T9913: a stale-event block after a delivered recreate escalates instead of recreating again", (t) => {
-  const f = fixture(t);
-  f.run(HEAD);
-  f.run(HEAD);
-  assert.equal(f.run(NEW_HEAD), "observed");
-  assert.equal(f.run(NEW_HEAD), "escalated");
-  assert.equal(f.run(NEW_HEAD), "escalated");
-  assert.equal(f.comments.length, 1, "the recreated head is not recreated again");
-  assert.equal(f.escalations, 1, "one ask per head");
-  assert.equal(f.rows.filter((r) => r.step === "dep-review.stale_event.escalated").length, 1);
+  const rerun = (kind: SupersededRerunOutcome["kind"]): SupersededRerunOutcome => ({ kind, checks: ["ci-gate", "commitlint"] });
+  assert.equal(f.run(HEAD, rerun("requested")), "observed", "the first sighting only records the head");
+  assert.equal(f.run(HEAD, rerun("requested")), "rerun");
+  assert.deepEqual(f.rows.filter((r) => r.step === "dep-review.stale_event.rerun_requested").map((r) => r.rerun_checks), [["ci-gate", "commitlint"]]);
+  assert.equal(f.run(HEAD, rerun("pending")), "awaiting-rerun");
+  assert.equal(f.run(HEAD, rerun("failed")), "failed", "an unrecorded re-run is retried, never escalated");
+  assert.equal(f.run(HEAD, rerun("unavailable")), "failed");
+  assert.equal(f.escalations, 0);
+  assert.equal(f.run(HEAD, rerun("red")), "escalated", "a red re-run escalates");
+  assert.equal(f.run(HEAD, rerun("red")), "escalated");
+  assert.equal(f.escalations, 1, "once per head");
+  for (const kind of ["verified", "unselected"] as const) {
+    const g = fixture(t);
+    g.run(HEAD, rerun(kind));
+    assert.equal(g.run(HEAD, rerun(kind)), "escalated", `${kind}: the re-run cannot clear a block GitHub still holds`);
+  }
+  // A check that reads the frozen event payload is never re-run, so its block escalates on the second sighting.
+  const payload = fixture(t);
+  payload.run(HEAD, rerun("none"), ["acceptance-author-gate"]);
+  assert.equal(payload.run(HEAD, rerun("requested"), ["acceptance-author-gate", "commitlint"]), "escalated");
+  assert.deepEqual(payload.rows.find((r) => r.step === "dep-review.stale_event.escalated")?.payload_checks, ["acceptance-author-gate"]);
+  const unsent = fixture(t, { escalation: undefined });
+  unsent.run(HEAD, rerun("red"));
+  assert.equal(unsent.run(HEAD, rerun("red")), "failed", "an undelivered ask is retried");
+  const thrown = fixture(t, { escalationThrows: true });
+  thrown.run(HEAD, rerun("red"));
+  assert.equal(thrown.run(HEAD, rerun("red")), "failed");
+  assert.equal(thrown.rows.filter((r) => r.step === "dep-review.stale_event.failed").length, 1);
   const e = buildDepReviewStaleEventEscalation({ prUrl: "https://github.com/craigoley/remudero/pull/11968", prNumber: 11968,
-    title: "chore(deps): bump x", headSha: NEW_HEAD, checks: ["ci-gate"] });
+    title: "chore(deps): bump x", headSha: NEW_HEAD, checks: ["ci-gate"], rerun: "red" });
   assert.equal(e.taskId, "dep-review-stale-event-PR11968");
   assert.equal(e.headSha, NEW_HEAD);
+  assert.match(e.detail, /re-run: red/);
+  assert.ok(e.options.some((o) => o.label === e.recommendation));
 
-  const unsent = fixture(t, { escalation: undefined });
-  unsent.run(HEAD);
-  unsent.run(HEAD);
-  unsent.run(NEW_HEAD);
-  assert.equal(unsent.run(NEW_HEAD), "failed", "an undelivered ask is retried");
-  const thrown = fixture(t, { escalationThrows: true });
-  thrown.run(HEAD);
-  thrown.run(HEAD);
-  thrown.run(NEW_HEAD);
-  assert.equal(thrown.run(NEW_HEAD), "failed");
-  assert.equal(thrown.rows.filter((r) => r.step === "dep-review.stale_event.failed").length, 1);
-
-  // A stale-event recreate is not a base-red refresh: own-red never reads it as a refresh that survived.
-  const hold: DepReviewResult = { decision: "hold", semverLevel: "patch", pinOnly: false, offendingFiles: [], redChecks: ["ci"],
-    migrationBumps: [], reason: "required check(s) not green: ci" };
-  const ownRed = reconcileDependabotOwnRed({ statePath: f.statePath, owner: "craigoley", repo: "remudero",
-    prUrl: "https://github.com/craigoley/remudero/pull/11968", prNumber: 11968, title: "chore(deps): bump x from 1.0.0 to 1.0.1",
-    body: "", headSha: NEW_HEAD, result: hold, signal: "unclassified", nowMs: 5, capture: () => ({ id: "fb" }), log: () => {} });
-  assert.equal(ownRed, "none");
+  assert.ok(!JSON.stringify(f.rows).includes(DEPENDABOT_RECREATE_COMMAND), "no outcome is a recreate comment");
 });
 
 test("W1-T9913: the terminal dep-review dedup stands aside for an armed blocked head and a new head re-earns it", async () => {
@@ -135,22 +123,19 @@ test("W1-T9913: the terminal dep-review dedup stands aside for an armed blocked 
   assert.deepEqual(reviewed, [HEAD, HEAD, NEW_HEAD], "a recreated head re-earns its review");
 });
 
-function fixture(t: { after(fn: () => void): void },
-  opts: { failComment?: boolean; escalation?: string | undefined; escalationThrows?: boolean } = { escalation: "https://github.com/craigoley/remudero/issues/1" }) {
+function fixture(t: TestContext,
+  opts: { escalation?: string | undefined; escalationThrows?: boolean } = { escalation: "https://github.com/craigoley/remudero/issues/1" }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9913-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const statePath = join(root, "dep-review-holds", "craigoley", "remudero", "PR11968.json");
-  const comments: string[] = [];
   const rows: Array<Record<string, unknown>> = [];
   let escalations = 0;
   let now = 1_000;
   return {
-    statePath, comments, rows,
+    statePath, rows,
     get escalations() { return escalations; },
-    state: () => JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>,
-    run: (headSha: string) => reconcileDependabotStaleEvent({
-      statePath, prNumber: 11968, headSha, checks: ["ci-gate", "commitlint"], nowMs: (now += 1_000),
-      comment: (body) => { if (opts.failComment) throw new Error("comment unavailable"); comments.push(body); },
+    run: (headSha: string, rerun: SupersededRerunOutcome, checks: string[] = ["ci-gate", "commitlint"]) => reconcileDependabotStaleEvent({
+      statePath, prNumber: 11968, headSha, checks, rerun, nowMs: (now += 1_000),
       escalate: () => { if (opts.escalationThrows) throw new Error("issues unavailable"); escalations += 1; return opts.escalation; },
       log: (step, extra) => { rows.push({ step, ...extra }); },
     }),

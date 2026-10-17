@@ -26,7 +26,10 @@ def retire(home, apply=False):
         doc = plistlib.loads(raw)
     except (ValueError, plistlib.InvalidFileException):
         return {"state": "held-invalid-plist", "changed": False}
-    if doc.get("Label") != LABEL or doc.get("ProgramArguments") != LEGACY_ARGS:
+    # launchd executes Program, when present, rather than ProgramArguments[0].
+    # Matching arguments alone cannot identify the executable being retired.
+    if (doc.get("Label") != LABEL or doc.get("ProgramArguments") != LEGACY_ARGS
+            or ("Program" in doc and doc["Program"] != LEGACY_ARGS[0])):
         return {"state": "held-different-job", "changed": False}
     script = home / "bin/covtmp-sweep.zsh"
     if (not script.is_file() or script.is_symlink() or script.resolve() != script

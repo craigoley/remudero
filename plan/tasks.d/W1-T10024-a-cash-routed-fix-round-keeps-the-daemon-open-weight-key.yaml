@@ -1,0 +1,75 @@
+- id: W1-T10024
+  title: "A CASH-ROUTED FIX OR CENSUS STRIKE KEEPS THE DAEMON'S OPEN-WEIGHT KEY — spawnWorker's cash branch spreads the caller's `env` extras (`{ RMD_CENSUS_SNAPSHOT: <path> }`) into spawnOpenWeightWorker, whose `args.env ?? process.env` then reads RMD_OPENWEIGHT_API_KEY from that one-key object, so on 2026-10-17 cash fix rounds and census-push strikes that carried a census snapshot ended in 0 ms with 'openweight provider requires RMD_OPENWEIGHT_API_KEY in the daemon environment' (7 rounds, #12570 and #12575 among them) while the daemon's own cash calls in the same process reached Azure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which environment the open-weight adapter reads its credential from when a caller passes worker env extras. Routing, the cash allowance, the key's custody and the check child's allowlist are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 PR-queue triage, agent D40's core-ledger read of #12570 (W1-T9928) and #12575 (W1-T9877)"
+  plan_refs: [W1-T3603, W1-T3728, W1-T3692, W1-T4785, W1-T9619]
+  files:
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - test/a-cash-routed-fix-round-keeps-the-daemon-open-weight-key.test.ts
+  status: queued
+  priority: 1  # while claude is below reserve and codex reads unreadable, the router's cash-fallback is the ONLY arm, so every fix round that carries a census snapshot dies before its worker runs and is counted as a refusal at its head
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 ~13:40Z on the core ledger (the 09:45Z, 11:00Z and 12:49Z archives plus the live file on the
+    Azure host, read-only, niced, streamed to the Mac; every form opened).
+    - 7 distinct rows (deduplicated across archive and live forms) carry stderr "openweight provider requires
+      RMD_OPENWEIGHT_API_KEY in the daemon environment": 5 `fix.done` (lane daemon: W1-T9425 at 09:16, 09:27 and 09:35Z;
+      W1-T9877/#12575 at 12:10:41Z; W1-T9928/#12570 at 13:26:31Z) and 2 `census_push.strike` (run_child: W1-T9427
+      08:39Z, W1-T9863 09:55Z). Each is provider cash, model
+      gpt-6-luna, worker_duration_ms 0, worker_exit unobserved.
+    - Each round was then recorded as `fix.commit_refused` "no anchored COMMIT_MESSAGE line in the report" with
+      fix_outcome unstated, and the next pass read "refused (1 at this head) — retrying the fix round". A credential
+      failure is booked as the worker's refusal.
+    - The SAME daemon process (pid 1024151) reached Azure on its own cash calls: `inbox.draft_synthesized` rows end in
+      HTTP 429 or "openweight daily allowance exhausted", and run-task `implement.done` rows on cash succeed. The
+      remudero-daemon container's Config.Env holds a non-empty RMD_OPENWEIGHT_API_KEY (count-only check, value not read).
+    - Every one of these rounds was routed `rule: cash-fallback` with claude "below-reserve" and codex "unreadable"
+      (77 cash-fallback assignment rows since 08:31Z across fix, review, ci-judge, risk-judge, run-task and others).
+    READ at origin/main d83fece77 (symbols, not lines):
+    - src/run-task.ts: the fix strike's `fixArgs` and the census-push strike both pass
+      `...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {})`.
+    - src/lib/worker.ts `SpawnWorkerArgs.env` is documented "Extra env vars merged into the allowlisted child env";
+      the claude path honours that through `buildWorkerEnv(args.env ?? {}, process.env, …)`.
+    - The cash branch of `spawnWorker` calls `runOpenWeight({ ...args, prompt: executionPrompt, … }, config, selection)`,
+      so the extras object arrives as the adapter's `env`.
+    - src/lib/worker-provider.ts `spawnOpenWeightWorker` documents `env` as "Test-only override; production reads the
+      daemon process environment" and reads `const env = args.env ?? process.env; const key = env[OPENWEIGHT_API_KEY_ENV]`.
+      One field name means two different things across the call.
+    WHY THIS IS NOT ANOTHER TASK: W1-T3603 and W1-T3728 are the key's declaration and durable home (the key IS
+    present). W1-T3692 and W1-T4785 decide WHEN cash is chosen, not what it reads. W1-T9619 scrubs the pre-open gate's
+    child environment, not the adapter's. Swept plan/tasks.d on origin/main for RMD_OPENWEIGHT_API_KEY, "in the daemon
+    environment", CENSUS_SNAPSHOT and cash-fallback (positive control: the sweep finds W1-T3603's own mention of the
+    key), and the plan diffs of the 7 open PR heads at 13:44Z: none names this.
+  design: |
+    1. The cash branch of `spawnWorker` never hands the caller's worker-env extras to the adapter as its `env`. The
+       adapter keeps reading its credential from the daemon process environment (or the test-only override, which no
+       production caller sets).
+    2. The extras still reach where a worker env reaches on this provider: the fixed-check child environment
+       (`openWeightCheckEnv`) gains them, under the same rule as the claude path (never ANTHROPIC_*, never the open-weight
+       key). A census snapshot path a fix round passes is therefore visible to its run_check.
+    3. A missing key stays a refusal before transport, and its fix.done keeps the stderr; nothing else about the
+       refusal changes here.
+    4. TESTS in test/a-cash-routed-fix-round-keeps-the-daemon-open-weight-key.test.ts, `test(` titles verbatim as in the
+       proofs: drive `spawnWorker` with mountProvider cash, a fake fetch, a temp config root, the key set in the
+       process environment and `env: { RMD_CENSUS_SNAPSHOT: <tmp path> }`; no network.
+  acceptance:
+    - claim: "a cash-routed spawn given worker env extras still authenticates with the daemon's open-weight key"
+      proof: 'grep: test("W1-T10024: a cash spawn with env extras still sends the daemon open-weight key" in test/a-cash-routed-fix-round-keeps-the-daemon-open-weight-key.test.ts'
+    - claim: "the extras reach the fixed-check child environment and the key does not"
+      proof: 'grep: test("W1-T10024: env extras reach the check child and the open-weight key does not" in test/a-cash-routed-fix-round-keeps-the-daemon-open-weight-key.test.ts'
+  falsifier: |
+    At origin/main the first test's fake fetch is never called: the spawn returns openweight_error "requires
+    RMD_OPENWEIGHT_API_KEY in the daemon environment" although the key is set in process.env. With the fix the fetch
+    receives the key. Merging the extras by copying process.env into the check child fails the second test (the key
+    appears there).
+  note: |
+    EFFECT, measured after merge from the core ledger: `fix.done` and `census_push.strike` rows whose stderr is "requires
+    RMD_OPENWEIGHT_API_KEY in the daemon environment" while the daemon's own cash rows reach Azure. Healthy shape: none.

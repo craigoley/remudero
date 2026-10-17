@@ -5,7 +5,7 @@ import { checkCommitMessage, CONVENTIONAL_LIMITS } from "./commit-message.js";
 import { escalate, type Escalation, type EscalateDeps } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { REVIEW_CONTEXT } from "./review.js";
-import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
+import { checkRunsRestArgs, combinedStatusRestArgs, jobsForRunRestArgs, rollupFromRest, runsForHeadRestArgs, singlePrRestArgs, type GhApiFetcher } from "./open-prs-rest.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { planNodePin } from "../../scripts/node-pin-follows-the-image.mjs";
 
@@ -1042,6 +1042,7 @@ interface DepReviewHoldState {
   /** W1-T9584 — every head a Dependabot refresh was asked for. Never pruned, so neither a restart
    *  nor a ledger rotation can ask twice for one head. */
   refreshes?: DependabotRefreshRecord[];
+  supersededReruns?: SupersededRerunRecord[];
 }
 
 /** Durable per-PR state survives ledger rotation; delivered heads stay recorded after retirement. */
@@ -1178,6 +1179,11 @@ function readRefreshState(statePath: string, headSha: string): DepReviewHoldStat
     !r || typeof r.headSha !== "string" || typeof r.command !== "string" || typeof r.requestedAtMs !== "number"))) {
     throw new Error("invalid dependency refresh state; refusing to forget requested heads");
   }
+  const reruns = state?.supersededReruns;
+  if (reruns !== undefined && (!Array.isArray(reruns) || reruns.some((r) =>
+    !r || typeof r.headSha !== "string" || typeof r.runId !== "number" || typeof r.attempt !== "number"))) {
+    throw new Error("invalid superseded re-run state; refusing to re-run a run twice");
+  }
   return state;
 }
 
@@ -1251,42 +1257,208 @@ export function dependabotStaleEventVerdict(input: {
   return { kind: "stale-event", checks: [...new Set(input.supersededReds)].sort() };
 }
 
+
+export const LIVE_READING_RERUN_CHECKS: ReadonlyArray<{ check: string; workflow: string }> = [
+  { check: "commitlint", workflow: ".github/workflows/pr-title-lint.yml" },
+  { check: "ci-gate", workflow: ".github/workflows/ci.yml" },
+];
+
+export function isLiveReadingCheck(check: string): boolean {
+  return LIVE_READING_RERUN_CHECKS.some((c) => c.check === check);
+}
+
+export interface DependabotHeadRunJob {
+  id: number;
+  name: string;
+  status?: string;
+  conclusion?: string | null;
+}
+
+export interface DependabotHeadRun {
+  id: number;
+  path?: string;
+  status?: string;
+  conclusion?: string | null;
+  run_attempt?: number;
+  jobs?: DependabotHeadRunJob[];
+}
+
+export interface SupersededRedRerun {
+  runId: number;
+  attempt: number;
+  checks: string[];
+  jobIds: number[];
+  kind: "rerun-failed-jobs" | "job";
+  endpoint: string;
+}
+
+const isRed = (conclusion: string | null | undefined): boolean => RED_CONCLUSIONS.has(String(conclusion ?? "").toUpperCase());
+
+export function supersededRedReruns(runs: readonly DependabotHeadRun[], superseded: readonly string[]): SupersededRedRerun[] {
+  const order = (s: SupersededRedRerun) => LIVE_READING_RERUN_CHECKS.findIndex((c) => c.check === s.checks[0]);
+  return runs.flatMap((run): SupersededRedRerun[] => {
+    const live = LIVE_READING_RERUN_CHECKS.filter((c) => c.workflow === run.path && superseded.includes(c.check)).map((c) => c.check);
+    if (run.status !== "completed" || !isRed(run.conclusion)) return [];
+    const failed = (run.jobs ?? []).filter((j) => isRed(j.conclusion));
+    const rerun = failed.filter((j) => live.includes(j.name));
+    const at = { runId: run.id, attempt: run.run_attempt ?? 1 };
+    if (rerun.length === 0) return [];
+    if (rerun.length === failed.length) {
+      return [{ ...at, checks: rerun.map((j) => j.name), jobIds: rerun.map((j) => j.id), kind: "rerun-failed-jobs",
+        endpoint: `actions/runs/${run.id}/rerun-failed-jobs` }];
+    }
+    return rerun.map((j) => ({ ...at, checks: [j.name], jobIds: [j.id], kind: "job" as const, endpoint: `actions/jobs/${j.id}/rerun` }));
+  }).sort((a, b) => order(a) - order(b));
+}
+
+export interface SupersededRerunRecord {
+  headSha: string;
+  runId: number;
+  attempt: number;
+  checks: string[];
+  endpoint: string;
+  requestedAtMs: number;
+  result?: "success" | "red";
+}
+
+export interface DependabotActionsPort {
+  runs(headSha: string): Promise<DependabotHeadRun[]>;
+  jobs(runId: number): Promise<DependabotHeadRunJob[]>;
+  rerun(endpoint: string): Promise<void>;
+}
+
+export function dependabotActionsPort(owner: string, repo: string, read: (args: string[]) => Promise<unknown>,
+  post: (path: string) => Promise<unknown>): DependabotActionsPort {
+  const list = async <T>(args: string[], key: string): Promise<T[]> => {
+    const rows = ((await read(args)) as Record<string, unknown> | null | undefined)?.[key];
+    if (!Array.isArray(rows)) throw new Error(`${args[1]}: no ${key} array in the response`);
+    return rows as T[];
+  };
+  return {
+    runs: (headSha) => list(runsForHeadRestArgs(owner, repo, headSha), "workflow_runs"),
+    jobs: (runId) => list(jobsForRunRestArgs(owner, repo, runId), "jobs"),
+    rerun: async (endpoint) => { await post(`repos/${owner}/${repo}/${endpoint}`); },
+  };
+}
+
+export type SupersededRerunOutcome = {
+  kind: "none" | "unavailable" | "requested" | "pending" | "verified" | "red" | "failed" | "unselected";
+  checks: string[];
+  redNow?: true;
+};
+
+function rerunOutcome(records: readonly SupersededRerunRecord[], live: readonly string[], pass: { failed?: boolean; requested?: boolean; redNow?: boolean }): SupersededRerunOutcome {
+  const checks = [...new Set([...live, ...records.flatMap((r) => r.checks)])].sort();
+  const kind = records.some((r) => r.result === "red") ? "red" : pass.failed ? "failed" : pass.requested ? "requested"
+    : records.some((r) => r.result === undefined) ? "pending" : records.length > 0 ? "verified" : live.length > 0 ? "unselected" : "none";
+  return { kind, checks, ...(pass.redNow ? { redNow: true as const } : {}) };
+}
+
+export async function reconcileSupersededRedReruns(args: {
+  statePath: string;
+  prNumber: number;
+  headSha: string;
+  superseded: readonly string[];
+  actions: DependabotActionsPort | undefined;
+  nowMs: number;
+  log: (step: string, extra: Record<string, unknown>) => void;
+}): Promise<SupersededRerunOutcome> {
+  const live = args.superseded.filter(isLiveReadingCheck).sort();
+  const state = readRefreshState(args.statePath, args.headSha);
+  const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
+  const mine = () => (state.supersededReruns ?? []).filter((r) => r.headSha === args.headSha);
+  const at = { pr_number: args.prNumber, head_sha: args.headSha };
+  const open = mine().filter((r) => r.result === undefined);
+  if (live.length === 0 && open.length === 0) return rerunOutcome(mine(), live, {});
+  if (args.actions === undefined) return { kind: "unavailable", checks: live };
+  let failed = false, redNow = false;
+  const failRow = (action: string, extra: Record<string, unknown>, error: unknown) =>
+    ({ ...at, action, ...extra, error: String((error as Error)?.message ?? error) });
+  const FAILED = "dep-review.superseded_red.rerun_failed";
+  let runs: DependabotHeadRun[];
+  try {
+    runs = await args.actions.runs(args.headSha);
+  } catch (error) {
+    args.log(FAILED, failRow("read-runs", {}, error));
+    return { kind: "failed", checks: live };
+  }
+  for (const record of open) {
+    const run = runs.find((r) => r.id === record.runId);
+    if (run?.status !== "completed" || (run.run_attempt ?? 0) <= record.attempt) continue;
+    record.result = String(run.conclusion ?? "").toUpperCase() === "SUCCESS" ? "success" : "red";
+    redNow ||= record.result === "red";
+    save();
+    args.log(record.result === "success" ? "dep-review.superseded_red.rerun_verified" : "dep-review.superseded_red.rerun_red",
+      { ...at, checks: record.checks, run_id: record.runId, attempt: run.run_attempt, conclusion: run.conclusion ?? null });
+  }
+  const done = new Set(mine().map((r) => r.runId));
+  const workflows = new Set(LIVE_READING_RERUN_CHECKS.filter((c) => live.includes(c.check)).map((c) => c.workflow));
+  const read: DependabotHeadRun[] = [];
+  for (const run of runs.filter((r) => !done.has(r.id) && r.status === "completed" && isRed(r.conclusion) && workflows.has(r.path ?? ""))) {
+    try {
+      read.push({ ...run, jobs: await args.actions.jobs(run.id) });
+    } catch (error) {
+      failed = true;
+      args.log(FAILED, failRow("read-jobs", { run_id: run.id }, error));
+    }
+  }
+  let requested = false;
+  for (const selected of supersededRedReruns(read, live)) {
+    const extra = { checks: selected.checks, run_id: selected.runId, job_ids: selected.jobIds, endpoint: selected.endpoint, attempt: selected.attempt };
+    try {
+      await args.actions.rerun(selected.endpoint);
+    } catch (error) {
+      failed = true;
+      args.log(FAILED, failRow("rerun", extra, error));
+      continue;
+    }
+    state.supersededReruns = [...(state.supersededReruns ?? []), { headSha: args.headSha, runId: selected.runId,
+      attempt: selected.attempt, checks: selected.checks, endpoint: selected.endpoint, requestedAtMs: args.nowMs }];
+    save();
+    requested = true;
+    args.log("dep-review.superseded_red.rerun_requested", { ...at, ...extra });
+  }
+  return rerunOutcome(mine(), live, { failed, requested, redNow });
+}
+
 export function buildDepReviewStaleEventEscalation(args: {
   prUrl: string;
   prNumber: number;
   title: string;
   headSha: string;
   checks: readonly string[];
+  rerun?: SupersededRerunOutcome["kind"];
 }): Escalation {
   return {
     class: "MANUAL",
     taskId: `dep-review-stale-event-PR${args.prNumber}`,
     headSha: args.headSha,
-    summary: `Dependabot PR is armed but GitHub still blocks it on a superseded red, after a recreate: ${args.title}`,
+    summary: `Dependabot PR is armed but GitHub still blocks it on a superseded red a re-run did not clear: ${args.title}`,
     detail: [
       `${args.prUrl} passed dependency review and auto-merge is armed, but GitHub reports it BLOCKED while`,
       `${args.checks.join(", ")} failed only in a run an older event started; the newest run of each passed.`,
-      `rmd already asked Dependabot to recreate an earlier head of this PR for the same block, so it will not ask again.`,
+      `rmd re-runs the old run of a check that reads live state (re-run: ${args.rerun ?? "none"}); a check that reads`,
+      `the frozen event payload is never re-run, and Dependabot refuses \`@dependabot recreate\` from rmd.`,
       ``,
       `Head: ${args.headSha}`,
     ].join("\n"),
     options: [
-      { label: "rerun", detail: `re-run the failed job of ${args.checks.join(", ")} at ${args.headSha.slice(0, 7)}, so its own check suite turns green` },
-      { label: "investigate", detail: "read why the recreated head inherited the block (a title or body edit after its CI started)" },
+      { label: "investigate", detail: `read the old run of ${args.checks.join(", ")} at ${args.headSha.slice(0, 7)} and why its re-run did not clear the block` },
+      { label: "recreate", detail: "comment `@dependabot recreate` as a maintainer, so the head's checks start from a fresh event" },
     ],
-    recommendation: "rerun",
+    recommendation: "investigate",
   };
 }
 
-export type DependabotStaleEventOutcome = "observed" | "requested" | "awaiting-dependabot" | "escalated" | "failed";
+export type DependabotStaleEventOutcome = "observed" | "rerun" | "awaiting-rerun" | "escalated" | "failed";
 
 export function reconcileDependabotStaleEvent(args: {
   statePath: string;
   prNumber: number;
   headSha: string;
   checks: readonly string[];
+  rerun: SupersededRerunOutcome;
   nowMs: number;
-  comment: (body: string) => void;
   escalate: () => string | null | undefined;
   log: (step: string, extra: Record<string, unknown>) => void;
 }): DependabotStaleEventOutcome {
@@ -1294,47 +1466,35 @@ export function reconcileDependabotStaleEvent(args: {
     staleEvent?: { headSha?: unknown; firstSeenMs?: unknown; issueUrl?: unknown };
   };
   const save = () => writeAtomic(args.statePath, `${JSON.stringify(state)}\n`);
-  const at = { pr_number: args.prNumber, head_sha: args.headSha, stale_checks: args.checks };
-  const ours = (state.refreshes ?? []).filter((r) => r.cause === DEPENDABOT_STALE_EVENT_CAUSE && r.delivered);
-  if (ours.some((r) => r.headSha === args.headSha)) return "awaiting-dependabot";
+  const at = { pr_number: args.prNumber, head_sha: args.headSha, stale_checks: args.checks, rerun: args.rerun.kind };
   if (state.staleEvent?.headSha !== args.headSha) {
     state.staleEvent = { headSha: args.headSha, firstSeenMs: args.nowMs };
     save();
     args.log("dep-review.stale_event.observed", at);
     return "observed";
   }
-  if (ours.length > 0) {
-    if (typeof state.staleEvent.issueUrl === "string") return "escalated";
-    let issueUrl: string | null | undefined;
-    try {
-      issueUrl = args.escalate();
-    } catch (error) {
-      issueUrl = undefined;
-      args.log("dep-review.stale_event.failed", { ...at, action: "escalate", error: String((error as Error)?.message ?? error) });
+  const payload = args.checks.filter((c) => !isLiveReadingCheck(c));
+  if (payload.length === 0) {
+    if (args.rerun.kind === "requested") {
+      args.log("dep-review.stale_event.rerun_requested", { ...at, rerun_checks: args.rerun.checks });
+      return "rerun";
     }
-    if (!issueUrl) return "failed";
-    state.staleEvent.issueUrl = issueUrl;
-    save();
-    args.log("dep-review.stale_event.escalated", { ...at, issue_url: issueUrl });
-    return "escalated";
+    if (args.rerun.kind === "pending") return "awaiting-rerun";
+    if (args.rerun.kind === "failed" || args.rerun.kind === "unavailable") return "failed";
   }
-  const record: DependabotRefreshRecord = {
-    headSha: args.headSha, command: DEPENDABOT_RECREATE_COMMAND, cause: DEPENDABOT_STALE_EVENT_CAUSE, requestedAtMs: args.nowMs, delivered: false,
-  };
-  state.refreshes = [...(state.refreshes ?? []), record];
-  save();
+  if (typeof state.staleEvent.issueUrl === "string") return "escalated";
+  let issueUrl: string | null | undefined;
   try {
-    args.comment(record.command);
+    issueUrl = args.escalate();
   } catch (error) {
-    state.refreshes = state.refreshes.filter((r) => r !== record);
-    save();
-    args.log("dep-review.stale_event.failed", { ...at, command: record.command, error: String((error as Error)?.message ?? error) });
-    return "failed";
+    issueUrl = undefined;
+    args.log("dep-review.stale_event.failed", { ...at, action: "escalate", error: String((error as Error)?.message ?? error) });
   }
-  record.delivered = true;
+  if (!issueUrl) return "failed";
+  state.staleEvent.issueUrl = issueUrl;
   save();
-  args.log("dep-review.stale_event.recreate_requested", { ...at, command: record.command });
-  return "requested";
+  args.log("dep-review.stale_event.escalated", { ...at, payload_checks: payload, issue_url: issueUrl });
+  return "escalated";
 }
 
 // ── W1-T9586 — an own red on a minor/patch Dependabot head becomes a migration proposal (W1-T2705's capture path).
