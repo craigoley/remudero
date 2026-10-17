@@ -9,6 +9,7 @@
   that undid it. A `run-unfiled-*` hand PR carries no trailer, so the API is its only record.
   *(Added 2026-10-17, with the `status:` rule below folded into this headline.)*
   *(Index lines retired 2026-10-11: the W1-T3323 bullets below split this instruction across two headlines, the second opening on "AND" as a continuation of the first. They are kept verbatim; their ids resolve here through `doctrine/merged-rules.json`.)*
+  *(Index line merged 2026-10-17: the LAST W1-T3323 bullet below is carried by this headline's "a shard's `status:`" clause. It is kept verbatim; its id resolves here through `doctrine/merged-rules.json`.)*
 
 - **Derive "which tasks are merged" from the `Remudero-Task:` trailer on merged PRs — never from
   ledger verdict lines.** The dominant merge path here is GATE-SIDE: the PR merges after the run
@@ -22,8 +23,6 @@
   `Remudero-Task:` lines** (`grep -acE '^Remudero-Task:'` on its body = 0) and W1-T444 is credited
   anyway, purely by its `run-W1-T444-1786560477` head. So union the two, or you will re-dispatch a
   task that shipped.
-
-*(Index line merged 2026-10-17: the W1-T3323 bullet below is carried by this headline's "a shard's `status:`" clause. It is kept verbatim; its id resolves here through `doctrine/merged-rules.json`.)*
 
 - **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
   shipped.** THREE THIS SESSION: W1-T1127 read `queued` on main while its build had merged as

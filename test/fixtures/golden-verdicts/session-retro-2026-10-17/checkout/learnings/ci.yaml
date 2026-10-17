@@ -3,9 +3,9 @@
   lifecycle: active
   files: [osv-scanner.toml, ".github/semgrep/**", ".github/workflows/osv-scanner*.yml", commitlint.config.mjs, .github/workflows/pr-title-lint.yml, src/lib/code-scanning-merge-policy.mjs]
   fact: >-
-    Never add a security-advisory ignore, a scanner exclusion or any gate loosening without the
-    operator's explicit yes. A reachability argument is not a waiver: leave the gate red and escalate.
-    Before pushing to another session's PR, read ALL its comments.
+    Never add a security-advisory ignore, scanner exclusion or gate loosening without the operator's
+    explicit yes; a reachability argument is not a waiver. Read ALL comments on another session's PR
+    before pushing to it.
   src: "PRs #12305/#12342, #12322/#12343"
   cited: "2026-10-16"
 
@@ -14,8 +14,7 @@
   lifecycle: active
   files: ["scripts/*-baseline.json"]
   fact: >-
-    A shared count ceiling is judged on each PR's own base, so a PR that LOWERS a baseline row on a
-    stale base reds main once siblings adding lines merge. Right before merge, re-derive a lowered
-    row against current origin/main, until W1-T9962 automates that.
+    Ceiling ratchets judge each PR on its own base: re-derive a LOWERED baseline row against current
+    origin/main right before merge, or siblings that add lines red main (until W1-T9962).
   src: "PRs #12428, #12388, #12437, #12454; W1-T9962"
   cited: "2026-10-16"

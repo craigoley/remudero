@@ -138,9 +138,8 @@
   lifecycle: active
   files: [scripts/pure-test-pool.mjs, scripts/test-run.mjs, scripts/test-with-retry.mjs, scripts/pool-run-tally.mjs, scripts/preflight-author.mjs, scripts/lib/native-author-runtime.mjs, src/lib/retro-preflight.ts, src/lib/ci-friction-gardener.ts, src/lib/plan-pr-emitter.ts]
   fact: >-
-    node:test prints a timed-out test as `not ok` but counts it under `# cancelled`, not `# fail`, so
-    `# fail 0` can sit over tests that never finished. Any judge of node test output must treat
-    `# cancelled` > 0 as a failure.
+    node:test counts a timed-out test under `# cancelled`, not `# fail`, so `# fail 0` can hide
+    tests that never finished: treat `# cancelled` > 0 as a failure.
   evidence: >-
     #12472: CI 38972373415's pool read `# fail 0` over seven tests that timed out behind a ticker
     leaked by test/gated-cadences-run-once-the-boot-gate-opens.test.ts; `judgeRun` in

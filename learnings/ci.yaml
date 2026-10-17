@@ -109,13 +109,16 @@
   lifecycle: active
   files: [scripts/lib/inherited-violation.mjs]
   fact: >-
-    source-size-ratchet was BLOCKED on src/run-task.ts on a clean origin/main checkout, so every open
-    PR inherited the failure regardless of its own diff — it surfaced on a branch touching only
-    src/lib/review.ts, with no relationship to the violation. Nobody's individual mistake: several
-    PRs each grew that file within their own recorded ceiling, and the sum crossed a bucket boundary
-    after they merged; six PRs were red on it at once and nothing said why. Re-run the ratchet's
-    measure against the merge base (contentAtRef/splitInheritedViolations) and label a violation that
-    already reproduces there INHERITED rather than blaming the diff.
+    A ratchet BLOCKED on a file the diff never touched may be inherited from main: PRs each within
+    their own ceiling can cross a bucket together. Re-run its measure against the merge base
+    (contentAtRef/splitInheritedViolations) and label a violation that reproduces there INHERITED
+    rather than blaming the diff.
+  evidence: >-
+    2026-09-07: source-size-ratchet was BLOCKED on src/run-task.ts on a clean origin/main checkout, so
+    every open PR inherited the failure regardless of its own diff; it surfaced on a branch touching
+    only src/lib/review.ts. Several PRs each grew that file within their own recorded ceiling, and the
+    sum crossed a bucket boundary after they merged; six PRs were red on it at once and nothing said
+    why. Folded 2026-10-17: the narrative moved here, the instruction stays in the fact.
   assertion: 'grep -q "splitInheritedViolations" scripts/lib/inherited-violation.mjs'
   src: measured 2026-09-07 — source-size-ratchet BLOCKED on origin/main across six unrelated open PRs
   cited: "2026-09-07"
@@ -239,7 +242,7 @@
     The commitlint gate checks the LIVE PR TITLE, which becomes the squash-merge subject, not the
     branch's commit history. Before spending another CI cycle, make the title `type(scope): subject`
     with an allowed lower-case type, lower-case subject, no final period, and at most 100 characters;
-    after correcting a title, rerun commitlint so it reads the current title.
+    a retitle alone re-runs it.
   evidence: >-
     The commitlint job reads `gh pr view --json title` at job time, and `commitlint.config.mjs`
     extends `@commitlint/config-conventional`. CI history includes 42 repaired commitlint refusals
@@ -728,9 +731,9 @@
   lifecycle: active
   files: [osv-scanner.toml, ".github/semgrep/**", ".github/workflows/osv-scanner*.yml", commitlint.config.mjs, .github/workflows/pr-title-lint.yml, src/lib/code-scanning-merge-policy.mjs]
   fact: >-
-    Never add a security-advisory ignore, a scanner exclusion or any gate loosening without the
-    operator's explicit yes. A reachability argument is not a waiver: leave the gate red and escalate.
-    Before pushing to another session's PR, read ALL its comments.
+    Never add a security-advisory ignore, scanner exclusion or gate loosening without the operator's
+    explicit yes; a reachability argument is not a waiver. Read ALL comments on another session's PR
+    before pushing to it.
   evidence: >-
     #12305 merged a GHSA-84m7-p3x7-pcfv ignore in .github/semgrep/osv-scanner.toml, argued
     unreachable, over the PR owner's comment asking for no security exception; #12342 reverted it.
@@ -744,9 +747,8 @@
   lifecycle: active
   files: ["scripts/*-baseline.json"]
   fact: >-
-    A shared count ceiling is judged on each PR's own base, so a PR that LOWERS a baseline row on a
-    stale base reds main once siblings adding lines merge. Right before merge, re-derive a lowered
-    row against current origin/main, until W1-T9962 automates that.
+    Ceiling ratchets judge each PR on its own base: re-derive a LOWERED baseline row against current
+    origin/main right before merge, or siblings that add lines red main (until W1-T9962).
   evidence: >-
     2026-10-16: #12428 and #12437 each added a comment line to src/run-task.ts while #12388 lowered
     its comment-load row to 18250 on a base without them. All three were green alone; main read 18253

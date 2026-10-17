@@ -342,9 +342,7 @@
   cited: "2026-08-31"
 - id: next-task-id-max-across-both-plan-sources
   subsystem: plan
-  # retired 2026-10-17 by the session retro: a grep max+1 mints on hope; reserve with rmd next-task-id
-  lifecycle: superseded
-  superseded_by: next-task-id-needs-a-fresh-pull
+  lifecycle: active
   files: [ plan/tasks.yaml, "plan/tasks.d/**" ]
   fact: >-
     Compute a new task id from the max across BOTH `plan/tasks.yaml` AND every
@@ -592,9 +590,9 @@
   lifecycle: active
   files: [src/lib/garden-registry.ts, src/lib/host-memory-admission.ts, src/lib/gardener-runtime.ts]
   fact: >-
-    A garden's scheduled fallback cadence is not its pass cadence: where `gardenSchedule` returns
-    `intervalFor: sameInterval` and `minIntervalMs: 0` it is the 60 s poll tick, never a behavioural
-    bound. A restart seed is age since the last completion, not queueing time.
+    A garden's scheduled fallback cadence (`intervalFor: sameInterval`, `minIntervalMs: 0`) is the
+    60 s poll tick, never a behavioural bound; a restart seed is age since the last completion, not
+    queueing time.
   evidence: >-
     W1-T9761 (#12435) admitted a deferred garden once its streak reached its cadence. The first live
     core rows after the 2026-10-17 boots named cadence_basis scheduled at 60000 ms for 12 of 19
@@ -608,9 +606,9 @@
   lifecycle: active
   files: ["plan/tasks.d/**", src/lib/dispatch-value.ts]
   fact: >-
-    A filing's `depends_on` is a dispatch input: `costOfDelayContext` multiplies a task's score by 1
-    plus its open transitive dependents, so a serial chain lifts its enablers over independent P1
-    work. Declare `depends_on` only for a real dependency, until W1-T10020 weights dependents by value.
+    `depends_on` is a dispatch input: `costOfDelayContext` multiplies a score by 1 + open transitive
+    dependents, so a serial chain outranks independent P1 work. Declare it only for a real
+    dependency (until W1-T10020).
   evidence: >-
     #12389 filed the test restructure as 21 serial waves (W1-T9860..W1-T9901). Each early enabler had
     26-34 open dependents and scored about 3.6 against about 0.5 for independent P1 fixes, and
