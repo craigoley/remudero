@@ -10,7 +10,7 @@ import { basenameResolutionNote, resolveTestPath, type TestPathResolution } from
 // Re-exported so a script already importing the proof dialect from here reaches the resolver through one import.
 export { resolveTestPath };
 import { createRequire } from "node:module";
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
@@ -1863,6 +1863,7 @@ export function proofLinkedModuleRoots(cwd: string): string[] {
   }
   const checkout = realpathSync(cwd);
   const roots = isWithin(target, checkout) ? [] : [target];
+  roots.push(...intermediateModuleLinks(join(cwd, "node_modules"), target, checkout));
   const scan = (dir: string, depth: number): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
@@ -1879,6 +1880,29 @@ export function proofLinkedModuleRoots(cwd: string): string[] {
   };
   scan(target, 0);
   return roots;
+}
+
+/** Each link BETWEEN a checkout's `node_modules` and the install it finally resolves to. A worker worktree links to an
+ *  engine tree's `node_modules`, itself a link to the canonical install: with only the final target mounted, the
+ *  middle hop is absent inside the sandbox and the checkout's own link dangles there. Each hop is bound read-only and
+ *  resolves to that same install, so no new content is exposed. */
+function intermediateModuleLinks(start: string, target: string, checkout: string): string[] {
+  const hops: string[] = [];
+  const seen = new Set<string>([start]);
+  for (let link = start; ; ) {
+    let next: string;
+    try {
+      if (!lstatSync(link).isSymbolicLink()) break;
+      next = resolve(dirname(link), readlinkSync(link));
+    } catch (error) {
+      break; // an unreadable hop: the chain realpathSync resolved stops here, and the final target is mounted anyway
+    }
+    if (seen.has(next) || isWithin(next, target)) break;
+    seen.add(next);
+    if (!isWithin(next, checkout)) hops.push(next);
+    link = next;
+  }
+  return hops;
 }
 
 export interface ProofSandboxArgvInput {
