@@ -13,7 +13,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-cleared-refresh-is-pressed-before-the-pass-finishes.test.ts
-  status: queued
+  status: merged
   priority: 1  # the base-fixed refresh is the remedy every PR that inherited a red main waits on; a long full pass delays all of them past the stuck backstop
   attempts: 0
   rationale: |
