@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-13: gardener loop audit; operator ruling the same day (silence: re-judge, then retire; silence never approves)"
   plan_refs: [W1-T8830, W1-T8829, W1-T8868]
   files: [src/lib/machine-filing-judge.ts, src/lib/status-board.ts, src/run-task.ts, test/an-unanswered-machine-filing-is-resurfaced-then-retired.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

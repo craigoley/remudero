@@ -13,7 +13,7 @@
   files:
     - src/lib/dispatch-value.ts
     - test/downstream-fan-out-reorders-within-a-tier-never-across-one.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: chose both dispatch-order options; a 29-dependent P2 scored 17x a P1 fix
   attempts: 0
   rationale: |
