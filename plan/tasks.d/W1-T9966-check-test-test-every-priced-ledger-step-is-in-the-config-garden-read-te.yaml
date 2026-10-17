@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.22
   status: queued
@@ -46,3 +46,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The plan record describes a flaky-test fix touching src/lib/config-gardener.ts and a new test file. Neither involves secrets, auth, permissions, data deletion, merge/deploy/review policy, or irreversible actions."
+      - "The failing test checks that ledger steps are listed in CONFIG_GARDEN_LEDGER_STEPS, which is a repo-internal consistency check. The filing's verification is a grep for a named test in the new test file, so the outcome can be verified."
+      - "The gates state shows a machine-authored task from the ci-friction family (28 merged, 40 declined). That track record warrants some caution, but the change still goes through CI and review. No operator-only decision is requested."
+    judged_at: "2026-10-17T03:13:51.505Z"
+    pin: "a778020172261a0c055f6131b4e3b940c3d5f82f43c5e8550ac595179145466a"
