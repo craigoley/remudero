@@ -1,0 +1,98 @@
+- id: W1-T9816
+  title: "RUN-CHILD MODE AUTO DECIDES FROM A LIVE LEDGER THAT ROTATION HAS ALREADY PRUNED — W1-T9087 seeds its evidence tracker from readLedgerLines(ledgerPath), the live file only, but no run_child.* step and no run_child.mode_decision is retained by rotateLedger, and daemon.start outlives a rotation only by the 30-min render window. So a boot can promote shadow -> on over a window whose lost child was rotated away, and a daemon up longer than 30 min forgets the previous boot and holds forever with 'no whole boot cycle'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — auto's evidence window is read from the ledger union since the previous boot, and an unreadable union holds; the promotion and demotion rules are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 12 (D3 concern 2): #12219 W1-T9087 review, 'run_child evidence seeded from the live ledger only; rotation prunes run_child.* rows'"
+  plan_refs: [W1-T9087, W1-T9086, W1-T9082, W1-T3755, W1-T244]
+  files:
+    - src/lib/run-child-mode.ts
+    - src/run-task.ts
+    - test/run-child-auto-reads-its-whole-window-past-rotation.test.ts
+  status: merged
+  priority: 1  # raised 2026-10-16 (R1 freshness-yield investigation): run children are the fix for 279 freshness yields in 6 days, and this read decides whether they ever stay on; was 2 (operator-2026-10-16: auto is live on core; a forgotten loss re-promotes the detached-child contract it was demoted for, and the 30-min boot window keeps promotion from ever happening on a daemon that lives longer)
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16):
+    - src/run-task.ts `daemonCommand`: `const bootLedgerLines = readLedgerLines(ledgerPath);` then
+      `const childModeTracker = createRunChildModeTracker(bootLedgerLines);`. `readLedgerLines`
+      (src/lib/status.ts) reads only the live file. #12304 (c77fd4477) added a pattern prefilter to the boot's
+      `readLedgerUnionRecordsSync(... step: ["run_child.settled"] ...)`, but that read feeds `adoptRunChildren`'s
+      settled ids only, never the tracker.
+    - src/lib/run-child-mode.ts `RUN_CHILD_MODE_EVIDENCE_STEPS` is `daemon.start`, `run_child.shadow`,
+      `run_child.lost`, `run_child.settled`, `run_child.adoption_pass` and `run_child.mode_decision`.
+      `foldRunChildModeEvidence` sets `windowStart` from the previous `daemon.start`, and `mode` from the last
+      `run_child.mode_decision` (default `shadow`).
+    - src/lib/ledger.ts `rotateLedger` keeps a row live only for `DECISION_RELEVANT_LEDGER_STEPS`, model-attribution
+      steps, or the health/render windows. No `run_child.*` step appears in ledger.ts's retention sets, so every
+      run_child row leaves the live file at the next rotation. `daemon.start` is in `RENDER_RELEVANT_LEDGER_STEPS`, so
+      it survives only within `RENDER_STEP_RETENTION_WINDOW_MS` (30 min). The newest-boot exemption (W1-T3755) is for
+      `daemon.boot`, not `daemon.start`.
+    - Two consequences:
+      (a) RE-PROMOTION WITHOUT A CLEAN CYCLE. Boot B, then a lost child L (demoted to shadow), then a rotation within
+          30 min of B (drops L and the demotion row, keeps B's daemon.start), then clean probes, then boot C.
+          C's seed holds B's daemon.start and the clean probes but not L, so `decideRunChildMode` reaches
+          "promoted: ... across a whole boot cycle".
+      (b) PROMOTION STARVES. A daemon that lives more than 30 min across a rotation loses the previous
+          `daemon.start`, so the next boot reads `held: no whole boot cycle in the evidence yet (no previous boot)`.
+          Core restarts run about 40 min apart (memory: restarts-cost-a-quarter-of-capacity).
+      (c) ON IS FORGOTTEN. `mode` is the last `run_child.mode_decision` row, and that row rotates out too. A daemon
+          that is `on` and boots after a rotation reads `from: shadow`. It must then pass a whole new promotion, and by
+          (b) that read usually holds. So the fleet falls back to in-process runs with no loss to explain it.
+    - Core ledger (read 2026-10-16, archives 10-15..16 plus live): the only `run_child.mode_decision` row is
+      2026-10-16T14:18:00.567Z, run DAEMON-1792160213250, shadow to shadow, reason "held: no whole boot cycle in the
+      evidence yet (no previous boot)", although core booted earlier that day. Consequence (b) is live.
+    - WHY P1 (R1 investigation 2026-10-16, core ledger union 10-10..10-16; scripts and rows in
+      ~/Remudero-notes/r1-freshness-2026-10-16/ on the operator Mac):
+      - From 10-11 to 10-16, 311 build runs ended `handed_off/freshness_yield`: 279 for a daemon restart and 32 for a
+        recycle. By day: 74, 88, 61, 37, 26, 25. They were 311 of the 521 verdicts (60%).
+      - Each freshness restart yields every in-process run, because the run lives in the daemon's process (ADR 0007
+        cause 2). A yield gives a running build no fresh code; it only lets the daemon exit.
+      - The latch holdout rarely saves a run. Of 72 runs held in `implementing`, 63 still yielded, most of them on
+        `estimate_elapsed`, and 9 finished. 69 of 103 `daemon.restart_yield_asked` rows give `estimate_elapsed`.
+      - A yield seldom loses the work itself: 254 of the 311 next runs restored the pushed checkpoint. It costs time.
+        The task waits a median 32 minutes (p90 621) before it starts again. And 170 of the 265 next runs yielded
+        again: 42 tasks yielded 3 or more times, 192 yields between them.
+      - On 10-16 to 16:03Z, 29.3 of 35.8 run lane-hours ended in freshness_yield, and 9 PRs opened.
+      - Under `on`, a restart does not touch a child (`restartAtWorkerBoundary` returns nothing when
+        `hasChildTask`), and W1-T9086 lets the next boot adopt it. So `on` removes all 279 restart-triggered yields.
+        It was live for 25 minutes, 15:06-15:31Z on 10-16. All 3 children were lost ("Cannot find module 'tsx'" and
+        "Cannot find package 'yaml'" from engines/6a34d2fd.../), and auto demoted.
+      - W1-T9738 (#12345, merged 16:00Z) fixes that engine link. Re-promotion then needs this window read.
+        Only 3 `run_child.mode_decision` rows exist in 7 days, and the first was starved by (b).
+      - The live file read at 16:03Z holds one `run_child.*` row and one `daemon.start`. The 15:06Z promotion and
+        the 15:31Z demotion rows are already only in archives.
+    - OVERLAP CHECKED: W1-T9087's shard says nothing of rotation. W1-T9086, W1-T9089 and W1-T9114 do not touch the
+      tracker's seed. The recent open heads naming createRunChildModeTracker are W1-T9087's own merged run branches.
+  design: |
+    1. THE WINDOW FROM THE UNION. At boot, under `auto` only, the tracker's seed is read with
+       `readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [...RUN_CHILD_MODE_EVIDENCE_STEPS], pattern: <the same
+       steps>, refuseIncomplete: true, since: <the boot before the previous one> })`. The `since` comes from the
+       union's own `daemon.start` rows, so the read is bounded by two boot cycles, not by a constant.
+    2. AN UNREADABLE WINDOW HOLDS. When the union read is not ok, auto ledgers `run_child.mode_decision`
+       `to: shadow` with a reason naming the unread files. A partial window never promotes.
+    3. The decision rules in `decideRunChildMode` are unchanged. `on` and `off` policies read nothing new.
+    4. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - a lost child in the window that only an archive holds still holds promotion at the next boot;
+       - a previous `daemon.start` that only an archive holds still opens a whole boot cycle;
+       - an unreadable union holds shadow and names the unread file;
+       - a daemon that is `on` and boots after a rotation stays `on`, because its last decision is read from the archive.
+  acceptance:
+    - claim: "a lost child that rotation moved to an archive still holds promotion at the next boot"
+      proof: 'grep: test("W1-T9816: a rotated-away lost child still holds run-child promotion" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
+    - claim: "the previous boot's daemon.start is found in an archive, so a whole cycle can be judged"
+      proof: 'grep: test("W1-T9816: an archived previous boot still opens the run-child window" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
+    - claim: "an unreadable evidence window holds shadow and names what was unread"
+      proof: 'grep: test("W1-T9816: an unreadable run-child window holds shadow" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
+    - claim: "a daemon that was on and boots after a rotation stays on, because its last decision is read from the archive"
+      proof: 'grep: test("W1-T9816: an archived on decision keeps run-child mode on across a rotation" in test/run-child-auto-reads-its-whole-window-past-rotation.test.ts'
+  falsifier: |
+    At origin/main, a state dir is built whose archive holds daemon.start B and run_child.lost L, and whose live
+    file holds daemon.start B, two `run_child.shadow` contract-ok rows with peaks within estimate, daemon.start C and
+    an adoption pass adopting every live child. createRunChildModeTracker(readLedgerLines(live)) then decides `on`
+    ("promoted"), so the first test fails.

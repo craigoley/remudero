@@ -6,7 +6,11 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { buildRegisteredGarden, type GardenBuildContext } from "../src/run-task.js";
+import { world } from "./helpers/why-me-world.js";
+import { mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
+import { receiptIdentity } from "../src/lib/benchmark-run.js";
+import { runInboxGardener } from "../src/lib/inbox-gardener.js";
+import { buildRegisteredGarden, defaultProofDebtCadenceInput, inboxGardenerRunTaskPorts, type GardenBuildContext } from "../src/run-task.js";
 
 function fixture(t: { after(fn: () => void): void }, fail: boolean | "heap") {
   const root = mkdtempSync(join(tmpdir(), "rmd-config-mount-boundary-"));
@@ -82,4 +86,41 @@ test("a registered config mount-worker heap exhaustion leaves the garden process
     "the real worker heap refusal is reported, not manufactured by a fake");
   assert.ok(events.some((e) => e.step === "config.scorecard"), "the process completes its other classes after worker termination");
   assert.equal(events.some((e) => e.step === "config.gardener_failed"), false);
+});
+
+
+test("the actual registered Inbox garden defaults off and supplies a governed bounded residual judge", async t => {
+  const f = fixture(t, false), old = process.env.RMD_INBOX_GARDENER_MODE;
+  delete process.env.RMD_INBOX_GARDENER_MODE;
+  t.after(() => { if (old === undefined) delete process.env.RMD_INBOX_GARDENER_MODE; else process.env.RMD_INBOX_GARDENER_MODE = old; });
+  const pass = await buildRegisteredGarden("inbox", f.ctx);
+  assert.equal(await pass.due?.(), false);
+  await pass();
+  assert.equal(f.events.some(e => e.step === "inbox.gardener_pass" && e.extra?.state === "disabled"), true);
+  const w = await world(t);
+  writeFileSync(w.planPath, readFileSync(w.planPath, "utf8") + "- id: W1-T1200\n  title: Mechanical repair\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  acceptance:\n    - claim: missing proof\n      proof: 'grep: missing in src/missing.ts'\n");
+  const input = defaultProofDebtCadenceInput(w.root, { readMergeEvidenceLog: () => ({ dump: "", ref: "fixture" }) })!;
+  mintProofDebtProposals([{ taskId: "W1-T1200", criterionIndex: 0, cause: "grep-path-absent", claim: "missing", proof: "grep: missing in src/missing.ts" }], () => "plan/tasks.yaml", w.registry, { sourcePermit: input.sourcePermit });
+  await w.refresh();
+  const instanceBefore = process.env.RMD_INSTANCE_NAME; process.env.RMD_INSTANCE_NAME = "core";
+  t.after(() => { if (instanceBefore === undefined) delete process.env.RMD_INSTANCE_NAME; else process.env.RMD_INSTANCE_NAME = instanceBefore; });
+  const calls: any[] = [];
+  const wired = await inboxGardenerRunTaskPorts({ ...f.ctx, config: { ...f.ctx.config, root: w.root }, repoRoot: w.root, owner: "owner", repo: "core" }, { mount: () => ({ model: "fixture-model", effort: "low", provider: "fixture-provider" } as any),
+    githubJson: async () => [], spawn: async options => { calls.push(options); return { text: JSON.stringify({ decision: "mechanical_followup", reason: "normal fleet repair" }) } as any; } });
+  await runInboxGardener({ stateDir: join(f.root, "state"), scope: wired.scope, ports: wired.ports, mode: "off" });
+  assert.equal(calls.length, 0, "the actual production provider wrapper is never invoked while off");
+  const result = await runInboxGardener({ stateDir: w.state, scope: wired.scope, ports: wired.ports, mode: "shadow" });
+  assert.equal(result.state, "complete"); assert.equal("judged" in result && result.judged, 1); assert.equal(calls.length, 1);
+  await runInboxGardener({ stateDir: w.state, scope: wired.scope, ports: wired.ports, mode: "shadow" });
+  assert.equal(calls.length, 1, "unchanged production input cannot spend again");
+  assert.equal(calls[0].maxTurns, 1); assert.deepEqual(calls[0].tools, []);
+  assert.equal(calls[0].model, "fixture-model"); assert.equal(calls[0].effort, "low"); assert.equal(calls[0].mountProvider, "fixture-provider");
+  assert.equal(receiptIdentity(calls[0]).taskId, "INBOX-GARDENER");
+  assert.match(calls[0].prompt, /no approval|untrusted/i);
+  const missingPin = await inboxGardenerRunTaskPorts({ ...f.ctx, config: { ...f.ctx.config, root: w.root }, repoRoot: w.root, owner: "owner", repo: "core" },
+    { readCodeSha: async () => { throw new Error("loaded source unavailable"); }, githubJson: async () => [], spawn: async () => assert.fail("unqualified code cannot spend") });
+  const unknown = await runInboxGardener({ stateDir: w.state, scope: missingPin.scope, ports: missingPin.ports, mode: "shadow" });
+  assert.equal(unknown.state, "source_partial");
+  assert.equal(f.events.some(e => e.step === "inbox.gardener_source_unavailable"), true);
+
 });

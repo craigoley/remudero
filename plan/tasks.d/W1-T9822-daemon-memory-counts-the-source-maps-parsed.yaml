@@ -1,0 +1,66 @@
+- id: W1-T9822
+  title: "DAEMON.MEMORY COUNTS THE SOURCE MAPS ACTUALLY PARSED, NOT ONLY AN UPPER BOUND — whenever maps are on, the source-map-cache holder reports the census ceiling (587 maps x 240,549 B = 141.2 MB, parts.upper_bound) on every row, so the saving of W1-T9720 and its worker-spawn follow-up can never show per daemon generation; the row gains source_maps {enabled, parsed} (W1-T9720 design item 3, not built because its file was outside that task's files)"
+  repo: remudero
+  depends_on: [W1-T9720]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what the source-map-cache holder and the daemon.memory row report; no source map is turned on or off
+  band_meaning: blast-radius
+  origin: 'W1-T9720 builder report (PR 12326), follow-up 2, and W1-T9720 design item 3; coordinator brief batch1016 item 6'
+  plan_refs: [W1-T9720, W1-T9647, W1-T9091, W1-T9767]
+  files:
+    - src/lib/daemon-memory-census.ts
+    - src/lib/source-map-count.ts
+    - test/daemon-memory-counts-the-source-maps-parsed.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, core ledger /home/craigoleyagent/rmd-state2/state/ledger.ndjson, newest daemon.memory row
+    (2026-10-16T14:34:33Z, boot_head_sha 65f87ae063ae; 30 daemon.memory rows in the live file):
+    `{"name":"source-map-cache","kind":"source-maps","entries":587,"bytes":141202263,"basis":"census",
+    "calibration":"source-maps.module@27d1f36d8d59/2026-10-15","parts":{"upper_bound":1}}`, with
+    `source_maps_enabled: true`.
+    READ at origin/main (src/lib/daemon-memory-census.ts; symbols, not lines):
+    - sourceMapCacheHolder returns the calibrated census estimate (DAEMON_MEMORY_CALIBRATION["source-maps.module"]:
+      587 entries x 240,549 B) whenever process.sourceMapsEnabled, and 0 when maps are off. Its comment: "No
+      public API sizes Node's cache, and asking it (module.findSourceMap) would parse the very maps being counted
+      ... Which modules' maps are really parsed would need the stack formatters to count them (a follow-up)."
+    - The row writes `source_maps_enabled` and no parsed count.
+    - W1-T9720's design item 3 asked for `source_maps: {enabled, parsed}`. Its builder (PR 12326) left it out
+      because only read-plane.ts and its test were in that task's files.
+    OBSERVED offline by the W1-T9720 builder (logs-8864/9720-bench.log): the sync-spawn meter alone parsed 5 maps,
+    +17.0 MiB, on 90 spawns; the fix parsed 0 and added 0.2 MiB. That count needed --expose-internals (wrapping
+    Node's internal SourceMap class), which production cannot use.
+    INFERRED: with the bound reported unchanged on every row, no generation-over-generation reading can show what
+    W1-T9720 or the worker-spawn follow-up saved. W1-T9767's proposal path would also keep seeing a 141 MB holder.
+  design: |
+    1. Count the distinct maps the daemon's isolate has had parsed, without --expose-internals and without parsing a
+       map to count it. The builder chooses and proves one mechanism, for example a counting wrapper over the
+       stack-formatting path Node uses when maps are on (distinct script files of the frames it formats), installed
+       once at boot, in src/lib/source-map-count.ts, which exports `sourceMapsParsed()` for the census to read. If Node has no seam that sees every parse, the count is a LOWER bound and the row says so
+       (`parsed_basis: "formatted-frames"`), next to the census upper bound.
+    2. The daemon.memory row carries `source_maps: {enabled, parsed}` (W1-T9720 design item 3). Keep
+       `source_maps_enabled` as long as any reader uses it; the PR names the readers it checked.
+    3. sourceMapCacheHolder reports `parsed x` the calibrated per-map bytes when the count is available
+       (basis naming the count), and the census upper bound only when it is not.
+    4. Proof in production: the source-map-cache holder's bytes p50 per boot_head_sha, before and after W1-T9720,
+       read from daemon.memory. No new constant; the per-map bytes stay the census calibration.
+    Tests go in test/daemon-memory-counts-the-source-maps-parsed.test.ts, titled verbatim as in the proofs. One test
+    runs a real child node with --enable-source-maps and --import tsx. It formats a stack across two mapped modules
+    and requires parsed to be 2, then formats one again and requires it to stay 2; with maps off it requires 0.
+  acceptance:
+    - claim: "the parsed count rises by one per distinct mapped module whose stack frames are formatted, and is 0 with maps off"
+      proof: 'grep: test("W1-T9822: the parsed count follows the maps a formatted stack touched" in test/daemon-memory-counts-the-source-maps-parsed.test.ts'
+    - claim: "the daemon.memory row carries source_maps enabled and parsed"
+      proof: 'grep: test("W1-T9822: the daemon memory row carries source_maps enabled and parsed" in test/daemon-memory-counts-the-source-maps-parsed.test.ts'
+    - claim: "the source-map-cache holder reports the parsed count when it has one, and the upper bound only when it does not"
+      proof: 'grep: test("W1-T9822: the source-map holder sizes the parsed maps, not the ceiling" in test/daemon-memory-counts-the-source-maps-parsed.test.ts'
+    - claim: "the census reads the count through sourceMapsParsed, exported by src/lib/source-map-count.ts"
+      proof: 'grep: sourceMapsParsed( in src/lib/daemon-memory-census.ts'
+  falsifier: |
+    On origin/main, no count exists: the row has `source_maps_enabled` and no `source_maps.parsed`, so the second test
+    fails. sourceMapCacheHolder returns 587 entries with parts.upper_bound however few maps were formatted, so the
+    third fails. No counting seam is installed, so the first fails.

@@ -5,6 +5,12 @@
  * that item when it is still listed, else at the position, so an item leaving the list between two
  * reads never restarts the walk or skips more than the one that left.
  */
+import { createHash } from "node:crypto";
+
+/** One content digest for the completed classification and its frozen census, excluding clocks. */
+export function classificationSnapshotKey(content: unknown, census: unknown): string {
+  return createHash("sha256").update(JSON.stringify([content, census])).digest("hex");
+}
 
 export interface ReadPage<T> {
   items: T[];
@@ -60,4 +66,44 @@ function decodeCursor(raw: string): { key: string; offset: number } | undefined 
     // deliberate: an undecodable cursor is the caller's error, reported by readPageRequest as a 400.
     return undefined;
   }
+}
+
+export interface SnapshotCursor {
+  snapshotKey: string;
+  section: string;
+  offset: number;
+}
+export interface SnapshotCursorFailure {
+  status: 400 | 409 | 503;
+  error: "invalid_cursor" | "inbox_snapshot_changed" | "inbox_snapshot_pending";
+  detail: string;
+  restartRequired?: true;
+  snapshotKey?: string;
+}
+
+/** Snapshot continuation tokens are bounded, versioned and exact; a key is never truncated. */
+export function snapshotCursor(cursor: SnapshotCursor): string {
+  return Buffer.from(JSON.stringify(["inbox-page-v1", cursor.snapshotKey, cursor.section, cursor.offset])).toString("base64url");
+}
+
+/** Only the completed producer may supply snapshotKey; an old cursor is an explicit restart. */
+export function readSnapshotCursor(raw: string | undefined, snapshotKey: string | undefined, section: string): SnapshotCursor | SnapshotCursorFailure {
+  if (snapshotKey === undefined || !/^[a-f0-9]{64}$/.test(snapshotKey)) return {
+    status: 503, error: "inbox_snapshot_pending", detail: "A completed classification identity is not available yet.",
+  };
+  if (raw === undefined) return { snapshotKey, section, offset: 0 };
+  const changed = (): SnapshotCursorFailure => ({ status: 409, error: "inbox_snapshot_changed", restartRequired: true,
+    snapshotKey, detail: "This cursor does not belong to the current classification and section; restart from its first page." });
+  if (raw.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(raw)) return { status: 400, error: "invalid_cursor", detail: "Malformed classification cursor." };
+  if (/^[0-9]+$/.test(raw)) return changed();
+  let value: unknown;
+  try { value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")); }
+  catch { return { status: 400, error: "invalid_cursor", detail: "Malformed classification cursor." }; }
+  if (Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && Number.isSafeInteger(value[1])) return changed();
+  if (!Array.isArray(value) || value.length !== 4 || value[0] !== "inbox-page-v1" || typeof value[1] !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value[1]) || typeof value[2] !== "string" || !Number.isSafeInteger(value[3]) || value[3] < 0) {
+    return { status: 400, error: "invalid_cursor", detail: "Malformed or unsupported classification cursor." };
+  }
+  if (value[1] !== snapshotKey || value[2] !== section) return changed();
+  return { snapshotKey, section, offset: value[3] as number };
 }

@@ -1,0 +1,64 @@
+- id: W1-T9853
+  title: "AN AUTO-TRIAGE FIRE THAT FAILS WITHOUT A VERDICT DOES NOT HOLD THE HEAD OF THE QUEUE — decideAutoTriage fires on the oldest status: new entry, and a run that throws leaves that entry unchanged, so the same entry is re-fired every floor interval: 15 of 15 fires since 2026-10-15T16:22Z went to fb-1789601878740-3711ab and 8 on 2026-10-15 to fb-1791856366578-58872f before it, while 74 entries waited"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which status: new entry an auto-triage fire picks after a failed fire; spans the pure decision (auto-triage.ts) and its composition (run-task.ts)
+  band_meaning: blast-radius
+  origin: "fan-out 2026-10-16 agent E1: why TRIAGE-fb-1789601878740-3711ab started 16 times and never wrote a verdict (investigator S1 lead)"
+  plan_refs: [W1-T9852, W1-T4203, W1-T4769, W1-T2986, W1-T469]
+  files: [src/lib/auto-triage.ts, src/run-task.ts, test/a-failed-auto-triage-fire-yields-the-head-of-the-queue.test.ts]
+  status: queued
+  priority: 2  # W1-T9852 clears today's wedge; this stops the next entry that throws from wedging the rung again
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16 on the core daemon's ledger (host remudero, ~/rmd-state2/state), read-only and niced, over the
+    live file and every 2026-10-15/16 rotation (all 25 forms contributed rows; the coverage control).
+    - auto_triage.run_failed rows 2026-10-15/16: 19. 15 name fb-1789601878740-3711ab (TypeError, see W1-T9852). 4 name
+      fb-1791856366578-58872f, each "Command failed: git -C .../run-TRIAGE-fb-1791856366578-58872f-<epoch> push
+      origin" (02:23Z, 04:03Z, 10:57Z, 13:52Z on 2026-10-15). That entry ran 10 times in two days and is still
+      status: new.
+    - Triage run.start rows per entry since 2026-10-14: fb-1791856366578-58872f 2 + 8, fb-1789601878740-3711ab 5 + 10.
+      Every other entry got at most 4. Each failed fire took a floor slot and a slot of the rolling 24 h cap.
+    READ at origin/main (symbols, not lines):
+    - auto-triage.ts `decideAutoTriage` takes `candidates` oldest first and fires on the first one not in
+      `heldCandidates`. run-task.ts `checkAutoTriage` (the composition beside `triageClaimSweepForPass`) drops the
+      W1-T4203 refused ids and the W1-T4769 live-held ids, and nothing else.
+    - daemon.ts runs the fire detached; a throw is ledgered as auto_triage.run_failed {feedback, error} and the
+      entry is untouched. The triage body's finally releases the claim, so the next pass sees a free oldest entry.
+    So one entry that throws for a deterministic reason takes every fire, and nothing reaches the 74 entries behind it.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the open heads (run-W1-T9541-*, run-W1-T6117-*
+    touch auto-triage.ts for host identity and the post-PR handoff). No shard backs off a failed fire.
+  design: |
+    No fixed count or cap. The pass-over is earned from the entry's own record and heals by itself.
+    1. auto-triage.ts: a pure `failedFireBackoff(rows, feedbackId, minIntervalMinutes, now)`. It reads the entry's
+       auto_triage.run_failed rows and its triage ends (pr.opened, triage.grill_opened, triage.relint_refused, any
+       verdict row for TRIAGE-<id>). `n` is the run of consecutive run_failed rows since the last such end. The
+       entry is passed over until `minIntervalMinutes * 2^n` after its newest run_failed, so the first failure
+       costs one floor interval and each repeat doubles it. A content change to the entry resets n: a run_failed
+       row older than the entry file's last commit on origin/main does not count.
+    2. `AutoTriageInputs` gains `backedOffCandidates` beside `heldCandidates`, with the same `undefined` = unreadable
+       rule (unreadable keeps today's behaviour). The fire goes to the oldest candidate in neither set. When every
+       candidate is backed off, the refusal names the count and the soonest re-offer time.
+    3. run-task.ts `checkAutoTriage` reads the rows through the existing step-filtered `readLedgerUnionRecordsSync`
+       call shape W1-T4203 uses. A passed-over entry is named on the fire reason, as W1-T4769 names a held one.
+    Tests go in a new file, test/a-failed-auto-triage-fire-yields-the-head-of-the-queue.test.ts, with `test(` titles
+    verbatim as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-failed-auto-triage-fire-yields-the-head-of-the-queue.test.ts"
+    - claim: "a failed fire passes the oldest entry over for the next one"
+      proof: 'grep: test("W1-T9853: a failed fire passes the oldest entry over for the next one" in test/a-failed-auto-triage-fire-yields-the-head-of-the-queue.test.ts'
+    - claim: "each repeat failure doubles the pass-over"
+      proof: 'grep: test("W1-T9853: each repeat failure doubles the pass-over" in test/a-failed-auto-triage-fire-yields-the-head-of-the-queue.test.ts'
+    - claim: "a triage end resets the backoff"
+      proof: 'grep: test("W1-T9853: a triage end resets the backoff" in test/a-failed-auto-triage-fire-yields-the-head-of-the-queue.test.ts'
+  falsifier: |
+    Leave the composition as it is, and after one run_failed row for the oldest entry the next decision fires on the
+    same entry, as the 15 fires on fb-1789601878740-3711ab did.
+  note: |
+    EFFECT, measured after merge with no numeric pass mark: auto_triage.fired rows spread across entries. No entry
+    takes consecutive fires after a run_failed until its backoff has elapsed.

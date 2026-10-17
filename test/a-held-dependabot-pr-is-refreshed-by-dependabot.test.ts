@@ -7,7 +7,7 @@
  * `@dependabot rebase` on #11788 produced a rebased head in two minutes.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -22,12 +22,13 @@ import {
   reconcileDependabotRefresh,
   type DependabotHeadCommit,
   type DependabotRefreshVerdict,
+  type DepReviewRequired,
 } from "../src/lib/dep-review.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import type { Plan } from "../src/lib/plan.js";
-import { buildSweepEffects, depReviewCommand, type DepReviewDeps } from "../src/run-task.js";
+import { buildSweepEffects, depReviewCommand, readDepReviewRequiredChecks, type DepReviewDeps } from "../src/run-task.js";
 import {
   BASE_RED_STOOD_DOWN_STEP,
   DEFAULT_SWEEP_POLICY,
@@ -352,4 +353,133 @@ test("W1-T9584: invalid refresh history refuses to forget requested heads", (t) 
     assert.deepEqual(comments, [], `${description}: never ask again with unreadable history`);
     assert.deepEqual(logs, [], `${description}: never claim a refresh outcome`);
   }
+});
+
+test("W1-T9929: the dep-review command arms past an advisory red and ledgers advisory_red", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9929-cmd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  let checks: Array<Record<string, string>> = [];
+  let required: DepReviewRequired = { kind: "required", names: ["ci-gate", "commitlint", "remudero-review"] };
+  const branches: string[] = [];
+  const descriptions: string[] = [];
+  const arms: string[] = [];
+  const deps: DepReviewDeps = {
+    config: { root, ledger: ledgerPath } as never,
+    clock: clockFromMillisFn(() => NOW),
+    gh: () => ({
+      number: 11968, url: "https://github.com/craigoley/remudero/pull/11968",
+      title: "chore(deps): bump example from 1.0.0 to 1.1.0", body: "", headRefOid: HEAD, baseRefName: "main",
+      headRefName: "dependabot/github_actions/example-1.1.0", author: { login: "app/dependabot" }, statusCheckRollup: checks,
+    }),
+    prDiff: () => "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n",
+    postStatus: (async (args) => { descriptions.push(args.description ?? ""); return { posted: true }; }) as DepReviewDeps["postStatus"],
+    arm: (url) => { arms.push(url); return "armed"; },
+    requiredChecks: async (branch) => { branches.push(branch); return required; },
+    issues: { create: () => "https://github.com/craigoley/remudero/issues/1", listOpen: () => [], closeWithComment: () => {} },
+    prMutations: { comment: () => {}, close: () => { throw new Error("never closes"); } },
+  };
+  const run = () => depReviewCommand("11968", ["--repo", "remudero"], deps);
+  const decided = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((r) => r.step === "dep-review.decided").at(-1);
+  const scan = { name: "Scan", conclusion: "FAILURE" };
+
+  checks = [{ name: "ci-gate", conclusion: "SUCCESS" }, { name: "commitlint", conclusion: "SUCCESS" }, scan];
+  assert.equal(await run(), 0, "an advisory-only red arms");
+  assert.deepEqual(arms, ["https://github.com/craigoley/remudero/pull/11968"]);
+  assert.match(descriptions[0], /; advisory red: Scan$/, "the remudero-review description names the advisory red");
+  assert.deepEqual(decided()?.advisory_red, ["Scan"]);
+  assert.equal(decided()?.judged_against, "required");
+  assert.equal(decided()?.required_fallback, undefined);
+  assert.deepEqual(branches, ["main"], "the required set is read once per run, for the PR's base branch");
+
+  // A pending advisory check never blocks the arm guard; a pending required one still does.
+  checks = [{ name: "ci-gate", conclusion: "SUCCESS" }, { name: "commitlint", conclusion: "SUCCESS" }, { name: "Scan", status: "IN_PROGRESS" }];
+  assert.equal(await run(), 0);
+  checks = [{ name: "ci-gate", status: "IN_PROGRESS" }, { name: "commitlint", conclusion: "SUCCESS" }, scan];
+  assert.equal(await run(), 1, "a pending required check holds the arm");
+  assert.equal(arms.length, 2);
+
+  checks = [{ name: "ci-gate", conclusion: "SUCCESS" }, { name: "commitlint", conclusion: "FAILURE" }, scan];
+  assert.equal(await run(), 1, "a red required check still holds");
+  assert.deepEqual(decided()?.redChecks, ["commitlint"]);
+  assert.deepEqual(decided()?.advisory_red, ["Scan"]);
+
+  required = { kind: "all-checks", fallback: "protection-unreadable:HTTP 403" };
+  checks = [{ name: "ci-gate", conclusion: "SUCCESS" }, { name: "commitlint", conclusion: "SUCCESS" }, scan];
+  assert.equal(await run(), 1, "an unreadable required set holds on every red");
+  assert.equal(decided()?.judged_against, "all-checks");
+  assert.equal(decided()?.required_fallback, "protection-unreadable:HTTP 403");
+  assert.equal(arms.length, 2, "nothing armed past a fallback hold");
+
+  // A legacy injected `gh` with no reader keeps today's hold-on-all, and says why.
+  delete deps.requiredChecks;
+  assert.equal(await run(), 1);
+  assert.equal(decided()?.required_fallback, "required-reader-not-injected");
+});
+
+test("W1-T9929: the default required-set reader unions branch protection and ci-gate's REQUIRED", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9929-req-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, ".github", "workflows"), { recursive: true });
+  writeFileSync(join(root, ".github", "workflows", "ci-gate.yml"),
+    "jobs:\n  ci-gate:\n    env:\n      REQUIRED: '[\"ci\",\"commitlint\"]'\n");
+  const reads: string[][] = [];
+  const protection = async (args: string[]) => { reads.push(args); return JSON.stringify({ contexts: ["ci-gate", "remudero-review"] }); };
+  assert.deepEqual(await readDepReviewRequiredChecks("craigoley", "remudero", "main", root, protection),
+    { kind: "required", names: ["ci", "ci-gate", "commitlint", "remudero-review"] });
+  assert.deepEqual(reads, [["api", "repos/craigoley/remudero/branches/main/protection/required_status_checks"]]);
+  const refused = async () => { throw new Error("HTTP 403: Resource not accessible by integration"); };
+  assert.deepEqual(await readDepReviewRequiredChecks("craigoley", "remudero", "main", root, refused),
+    { kind: "all-checks", fallback: "protection-unreadable:HTTP 403: Resource not accessible by integration" });
+});
+
+test("W1-T9913: the dep-review command recreates an armed head blocked by a stale event instead of re-posting", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t9913-cmd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  let mergeStateStatus = "BLOCKED";
+  const posts: string[] = [];
+  const arms: string[] = [];
+  const comments: string[] = [];
+  const deps: DepReviewDeps = {
+    config: { root, ledger: ledgerPath } as never,
+    clock: clockFromMillisFn(() => NOW),
+    gh: (args) => {
+      const fields = String(args[args.indexOf("--json") + 1]).split(",");
+      for (const field of ["baseRefName", "mergeStateStatus", "autoMergeRequest"]) {
+        assert.ok(fields.includes(field), `the command requests ${field}`);
+      }
+      return {
+        number: 11968, url: "https://github.com/craigoley/remudero/pull/11968",
+        title: "chore(deps): bump example from 1.0.0 to 1.0.1", body: "", headRefOid: HEAD,
+        headRefName: "dependabot/github_actions/example-1.0.1", author: { login: "app/dependabot" },
+        mergeStateStatus, autoMergeRequest: { enabledAt: "2026-10-16T14:33:10Z" },
+        statusCheckRollup: [
+          { name: "ci-gate", conclusion: "FAILURE", startedAt: "2026-10-15T10:43:00Z", completedAt: "2026-10-15T11:03:00Z" },
+          { name: "ci-gate", conclusion: "SUCCESS", startedAt: "2026-10-15T15:10:50Z", completedAt: "2026-10-15T15:30:00Z" },
+          { context: "remudero-review", state: "SUCCESS", startedAt: "2026-10-16T14:33:00Z" },
+          { name: "Scan", conclusion: "FAILURE" },
+        ],
+      };
+    },
+    requiredChecks: async () => ({ kind: "required", names: ["ci-gate", "remudero-review"] }),
+    prDiff: () => "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n",
+    postStatus: (async (args) => { posts.push(args.state); return { posted: true }; }) as DepReviewDeps["postStatus"],
+    arm: (url) => { arms.push(url); return "armed"; },
+    prMutations: { comment: (_url, body) => { comments.push(body); }, close: () => { throw new Error("never closes"); } },
+  };
+  const run = () => depReviewCommand("11968", ["--repo", "remudero"], deps);
+  const ledger = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(await run(), 1);
+  assert.equal(await run(), 1);
+  assert.deepEqual(comments, [DEPENDABOT_RECREATE_COMMAND], "the second sighting asks Dependabot to recreate");
+  assert.deepEqual(posts, [], "no review is re-posted on a stale-event block");
+  assert.deepEqual(arms, [], "nothing is re-armed");
+  assert.equal(ledger().filter((r) => r.step === "dep-review.stale_event.recreate_requested").length, 1);
+  assert.equal(ledger().filter((r) => r.step === "dep-review.decided").at(-1)?.decision, "arm");
+  assert.deepEqual(ledger().filter((r) => r.step === "dep-review.decided").at(-1)?.advisory_red, ["Scan"]);
+  mergeStateStatus = "CLEAN";
+  assert.equal(await run(), 0, "a head GitHub does not block takes the ordinary arm path");
+  assert.deepEqual(posts, ["success"]);
 });

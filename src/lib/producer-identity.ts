@@ -95,6 +95,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   "MEMORY-BUDGET": producer("memory-budget", "Memory Budget"),
   MINT: producer("mint", "Task-Id Mint"),
   "MODEL-CATALOG": producer("model-catalog", "Model Catalog"),
+  "BENCHMARK-AA": producer("benchmark-aa", "Benchmark A/A"),
   "ESCALATION-ANSWERS": producer("escalation-answers", "Escalation Answers"),
   INCIDENT: producer("incident", "Incident Ingest"),
   inbox: producer("inbox", "Inbox"),

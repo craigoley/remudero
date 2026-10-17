@@ -14,9 +14,15 @@
  * would silently delete a live finding via a proposal an operator had already refused.
  */
 import assert from "node:assert/strict";
+import { appendFileSync } from "node:fs";
+import { world } from "./helpers/why-me-world.js";
+import { loadPlan } from "../src/lib/plan.js";
+import { defaultInboxGardenerPorts, runInboxGardener } from "../src/lib/inbox-gardener.js";
+import { proofDebtPopulationPermit, stampMechanicalAsk } from "../src/lib/inbox-retirement.js";
+import { readPersistedInbox } from "../src/lib/fleet-lane.js";
 import { test } from "node:test";
 
-import { classifyProposal, supersedingProposalId, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
+import { classifyProposal, updateProposalRegistry, supersedingProposalId, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
 import type { Plan } from "../src/lib/plan.js";
 
 const PRED = "proof-debt:W1-T965:3";
@@ -34,10 +40,23 @@ function ctxWith(openIds: string[], declined: string[] = []): ReadinessContext {
 }
 const proposal = (id: string): Proposal => ({ id, summary: id, evidenceAnchors: [] }) as Proposal;
 
-test("W1-T3511: a per-criterion proposal RETIRES once its per-task successor is open", () => {
-  const c = classifyProposal(proposal(PRED), undefined, ctxWith([SUCC]));
-  assert.equal(c.state, "retired");
-  assert.match(c.retiredReason ?? "", /superseded by proof-debt:W1-T965/);
+test("W1-T3511: a per-criterion proposal RETIRES once its per-task successor is open", async t => {
+  const f = await world(t);
+  appendFileSync(f.planPath, "- id: W1-T965\n  title: Mechanical proof repair\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n");
+  const task = loadPlan(f.planPath).byId.get("W1-T965")!, permit = proofDebtPopulationPermit([task]);
+  const anchors = [{ description: "unresolved criterion3", path: "plan/tasks.yaml", pattern: "grep: missing in src/missing.ts" }];
+  const typed = (id: string) => stampMechanicalAsk({ id, summary: id, evidenceAnchors: anchors }, task.id, permit);
+  updateProposalRegistry(f.registry, all => [...all, typed(PRED), typed(SUCC)]);
+  await f.refresh();
+  const scope = { repository: f.repository, instance: f.instance, root: f.root };
+  const ports = defaultInboxGardenerPorts({ stateDir: f.state, scope, planPath: f.planPath, codeSha: "a".repeat(40), githubJson: async () => [] });
+  const result = await runInboxGardener({ stateDir: f.state, scope, ports, mode: "act" });
+  assert.equal("retired" in result && result.retired, 1);
+  await f.refresh(); const c = readPersistedInbox(f.state)!.classifications.find(c => c.proposalId === PRED)!;
+  assert.equal(c.state, "retired"); assert.equal(c.retirement?.proofKind, "successor");
+  assert.match(c.retiredReason ?? "", /successor positively resolves/);
+  const legacy = classifyProposal(proposal(PRED), undefined, ctxWith([SUCC]));
+  assert.notEqual(legacy.state, "retired", "an untyped legacy ID alone is no longer positive successor authority");
 });
 
 test("W1-T3511: with NO successor open, the predecessor is untouched — the finding is not dropped on a promise", () => {

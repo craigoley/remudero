@@ -29,9 +29,9 @@ function pinMtime(dir: string, name: string): string {
   return path;
 }
 
-test("W1-T4334: a second emergency read reuses the parsed archives", () => {
+test("W1-T4334: a second emergency read reuses the parsed archives", (scope) => {
   const ledger = writeLedger([row(EMERGENCY_STOP_CLEARED_LEDGER_STEP, "s1")], {
-    rotations: [
+    scope, rotations: [
       { at: "2026-09-01T00:00:00.000Z", rows: [row(EMERGENCY_STOP_ISSUED_LEDGER_STEP, "s1")] },
       { at: "2026-09-02T00:00:00.000Z", rows: [row("unrelated.step", "x")], gz: true },
     ],
@@ -44,16 +44,16 @@ test("W1-T4334: a second emergency read reuses the parsed archives", () => {
   assert.deepEqual(first.map((r) => r.step), [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEARED_LEDGER_STEP]);
 });
 
-test("W1-T4334: a stop written to the live ledger after the first read is seen on the next", () => {
-  const ledger = writeLedger([], { rotations: [{ at: "2026-09-01T00:00:00.000Z", rows: [row(EMERGENCY_STOP_ISSUED_LEDGER_STEP, "old")] }] });
+test("W1-T4334: a stop written to the live ledger after the first read is seen on the next", (scope) => {
+  const ledger = writeLedger([], { scope, rotations: [{ at: "2026-09-01T00:00:00.000Z", rows: [row(EMERGENCY_STOP_ISSUED_LEDGER_STEP, "old")] }] });
   assert.equal(emergencyStopRows(ledger.path).length, 1);
   ledger.append([row(EMERGENCY_STOP_ISSUED_LEDGER_STEP, "new")]);
   const rows = emergencyStopRows(ledger.path);
   assert.deepEqual(rows.map((r) => r.stop_id), ["old", "new"], "archive rows first, then the live one");
 });
 
-test("a new rotation parses only itself and never the archives already read", () => {
-  const ledger = writeLedger([], { rotations: [{ at: "2026-09-01T00:00:00.000Z", rows: [row(EMERGENCY_STOP_ISSUED_LEDGER_STEP, "a")] }] });
+test("a new rotation parses only itself and never the archives already read", (scope) => {
+  const ledger = writeLedger([], { scope, rotations: [{ at: "2026-09-01T00:00:00.000Z", rows: [row(EMERGENCY_STOP_ISSUED_LEDGER_STEP, "a")] }] });
   const archive = pinMtime(ledger.dir, "ledger.2026-09-01T00-00-00-000Z.ndjson");
   emergencyStopRows(ledger.path);
   spoil(archive);
@@ -62,7 +62,7 @@ test("a new rotation parses only itself and never the archives already read", ()
   assert.deepEqual(rows.map((r) => r.step), [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEARED_LEDGER_STEP], "the old archive's row still comes from its first parse");
 });
 
-test("W1-T4334: an unreadable state directory reads as no emergency rows", () => {
-  const ledger = writeLedger();
+test("W1-T4334: an unreadable state directory reads as no emergency rows", (scope) => {
+  const ledger = writeLedger([], { scope });
   assert.deepEqual(emergencyStopRows(join(ledger.dir, "missing", "ledger.ndjson")), []);
 });

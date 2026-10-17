@@ -1,0 +1,30 @@
+- id: W1-T9939
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — main.health.escalated landed 31 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.6
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:main.health.escalated"
+  files:
+    - test/scout-main-health-escalated.test.ts
+  acceptance:
+    - claim: "main.health.escalated stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9939: main.health.escalated no longer recurs\" in test/scout-main-health-escalated.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step main.health.escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 28 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filing reports recurrence counts but identifies no cause or individual failure evidence; its rationale explicitly leaves locating the emitter to future investigation. The claimed finding cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The task requests an implementation that stops recurrence while declaring only a new test file and a grep proof of a test title. That proof does not establish that the cause is fixed.; on the change's description/files alone, no diff was read — The proposed repair precedes the bounded observation proposal required by repository practice for recurring symptoms without an established common cause."
+    judged_at: "2026-10-16T23:10:05.271Z"
+    pin: "2829fe25e6138d8a2ab17f01099458fb8ee88760564d7c34da82335978d9a748"

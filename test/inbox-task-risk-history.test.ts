@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { classifyProposal, deriveTaskReferent, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
+import { stampVerificationAsk } from "../src/lib/inbox-retirement.js";
 import { loadPlanFromYaml, type Task } from "../src/lib/plan.js";
 
 const ID = "W1-T9002";
@@ -23,32 +24,35 @@ function context(fields = "", credited = false, present = true): ReadinessContex
     grepAnchorTrue: () => true, openProposalIds: new Set(), isRatified: () => false };
 }
 
-test("a risk-judge ask retires on exact explicit plan retirement while retaining its identity", () => {
+test("an untyped risk-judge ask stays visible after explicit plan retirement while retaining its identity", () => {
   for (const retirement of ["closed", "withdrawn", "retired"]) {
     const ctx = context();
     Object.assign(ctx.plan.byId.get(ID)!, { status: "blocked", retirement });
     const ask = proposal();
     const before = JSON.stringify(ask);
     const result = classifyProposal(ask, undefined, ctx);
-    assert.equal(result.state, "retired");
+    assert.equal(result.state, "not_ready");
     assert.equal(result.proposalId, ask.id);
-    assert.match(result.retiredReason ?? "", new RegExp(`explicitly ${retirement} in the plan`));
+    assert.match(result.needsTriageReason ?? "", /terminal state alone/);
     assert.equal(JSON.stringify(ask), before, "classification never deletes or rewrites a proposal");
     assert.equal(ctx.plan.byId.get(ID)!.verify, "auto", "no task approval or rewrite");
-    // W1-T5652: every task-referent ask on the retired task retires with it, whatever its kind.
     for (const sibling of [`proof-debt:${ID}:0`, `verify-human-automate:${ID}`]) {
-      assert.equal(classifyProposal(proposal(sibling), undefined, ctx).state, "retired", sibling);
+      const siblingResult = classifyProposal(proposal(sibling), undefined, ctx);
+      assert.equal(siblingResult.state, "not_ready", sibling);
+      assert.match(siblingResult.needsTriageReason ?? "", /terminal state alone/);
     }
     assert.notEqual(classifyProposal(proposal("machine-judge:W1-T9003"), undefined, ctx).state, "retired",
       "a different task's ask is not resolved by this task's retirement");
   }
 });
 
-test("a risk-judge ask retires only with authoritative merge credit for its present task", () => {
+test("authoritative merge credit alone preserves an untyped risk-judge ask for triage", () => {
   const ctx = context("", true);
-  const result = classifyProposal(proposal(), undefined, ctx);
-  assert.equal(result.state, "retired");
-  assert.match(result.retiredReason ?? "", /W1-T9002 has merged/);
+  const ask = proposal(), before = JSON.stringify(ask), result = classifyProposal(ask, undefined, ctx);
+  assert.equal(result.state, "not_ready");
+  assert.equal(result.proposalId, ask.id);
+  assert.match(result.needsTriageReason ?? "", /terminal state alone/);
+  assert.equal(JSON.stringify(ask), before);
   assert.equal(ctx.plan.byId.get(ID)!.status, "queued", "the merged resolver, not a status label, supplies credit");
   assert.notEqual(classifyProposal(proposal("machine-judge:W1-T9003"), undefined, ctx).state, "retired");
   assert.notEqual(classifyProposal(proposal(), undefined, context("", true, false)).state, "retired");
@@ -72,8 +76,11 @@ test("an active risk-judge ask survives automatic verification holds and unavail
     assert.notEqual(classifyProposal(proposal(sibling), undefined, ctx).state, "retired",
       `a verify-human release does not silently resolve the separate ${sibling} finding`);
   }
-  assert.equal(classifyProposal(proposal(`verify-human:${ID}`), undefined, ctx).state, "retired",
-    "positive control: obsolete verify-human asks still use their existing auto-verification rule");
+  assert.equal(classifyProposal(proposal(`verify-human:${ID}`), undefined, ctx).state, "not_ready",
+    "an untyped verify-human ID cannot borrow release authority");
+  const typedVerification = stampVerificationAsk(proposal(`verify-human:${ID}`), ID);
+  assert.equal(classifyProposal(typedVerification, undefined, ctx).state, "retired",
+    "positive control: an unchanged producer-owned verification ask uses its exact release");
 });
 
 test("task ask parsing rejects malformed risk IDs and unrelated proposal kinds", () => {

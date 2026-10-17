@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - src/lib/ledger-union.ts
     - test/a-slice-union-pass-reads-only-what-it-has-not-loaded.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

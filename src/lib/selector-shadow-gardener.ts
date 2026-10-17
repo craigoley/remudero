@@ -17,6 +17,7 @@ import { loadPlan, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { machineShardHeaderLines, machineShardLandingGuard } from "./machine-filing.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { sameTestFile } from "./test-path-resolver.js";
 
 /** W1-T4439: evidence from the full coverage shards before W1-T4406 may narrow PR CI. */
 // PRIMARY CONTROL: the live window one pass reads. Since W1-T5925 the verdict folds every stored
@@ -1438,10 +1439,11 @@ export async function runSelectorShadowGardener(
       const file = selectorShadowCauseOf(task.origin);
       if (file === undefined) continue;
       const isStructural = task.origin?.startsWith("selector-shadow-structural:") === true;
-      const held = planned.get(file);
+      const key = [...planned.keys()].find((path) => sameTestFile(path, file)) ?? file;
+      const held = planned.get(key);
       const better = !held || (isStructural && !held.structural) ||
         (!isStructural && !held.structural && held.retired && task.retirement === undefined);
-      if (better) planned.set(file, { id: task.id, retired: task.retirement !== undefined, structural: isStructural });
+      if (better) planned.set(key, { id: task.id, retired: task.retirement !== undefined, structural: isStructural });
       if (isStructural) structural[file] ??= task.id;
     }
   }
@@ -1481,10 +1483,11 @@ export async function runSelectorShadowGardener(
   let edgeReads = 0;
   for (const miss of unseen) {
     const key = selectorShadowMissKey(miss);
-    const plannedHome = planned.get(miss.file);
-    const home = structural[miss.file] ?? causes[miss.file] ?? plannedHome?.id;
+    const plannedHome = [...planned].find(([path]) => sameTestFile(path, miss.file))?.[1];
+    const structuralHome = Object.entries(structural).find(([path]) => sameTestFile(path, miss.file))?.[1];
+    const home = structuralHome ?? Object.entries(causes).find(([path]) => sameTestFile(path, miss.file))?.[1] ?? plannedHome?.id;
     // A suite that already has its one structural task only ever gains evidence.
-    const escalate = home !== undefined && structural[miss.file] === undefined && plannedHome?.structural !== true &&
+    const escalate = home !== undefined && structuralHome === undefined && plannedHome?.structural !== true &&
       plannedHome?.retired !== true && repaired(home, miss.file);
     if (home !== undefined && !escalate) {
       let paths: string[] = [];

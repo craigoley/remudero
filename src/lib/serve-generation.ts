@@ -139,24 +139,27 @@ export function onShedWorkersRequest(
   hooks: { shed: () => Promise<WorkerShedOutcome | void> | WorkerShedOutcome | void; restore: (reason: string) => Promise<void> | void },
   rss: () => number = () => process.memoryUsage().rss,
 ): void {
+  let pending: Promise<void> = Promise.resolve();
   channel.onMessage((message) => {
-    if (message.type === GENERATION_MESSAGES.restore_workers) {
-      void Promise.resolve()
+    if (message.type !== GENERATION_MESSAGES.shed_workers && message.type !== GENERATION_MESSAGES.restore_workers) return;
+    // A backstop can ask for restoration before an asynchronous shed finishes. Preserve
+    // request order so that the late shed cannot pause workers after they were restored.
+    const run = (): Promise<void> => {
+      if (message.type === GENERATION_MESSAGES.restore_workers) return Promise.resolve()
         .then(() => hooks.restore(message.reason ?? "restore_workers"))
         .then(
           () => channel.send({ type: GENERATION_MESSAGES.restore_workers_done }),
           (err: unknown) => channel.send({ type: GENERATION_MESSAGES.restore_workers_done, error: String((err as Error)?.message ?? err) }),
         );
-      return;
-    }
-    if (message.type !== GENERATION_MESSAGES.shed_workers) return;
-    const beforeBytes = rss();
-    void Promise.resolve()
-      .then(() => hooks.shed())
-      .then(
-        (outcome) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: outcome?.workers ?? 0, heapBytes: outcome?.heapBytes }),
-        (err: unknown) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: 0, error: String((err as Error)?.message ?? err) }),
-      );
+      const beforeBytes = rss();
+      return Promise.resolve()
+        .then(() => hooks.shed())
+        .then(
+          (outcome) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: outcome?.workers ?? 0, heapBytes: outcome?.heapBytes }),
+          (err: unknown) => channel.send({ type: GENERATION_MESSAGES.shed_workers_done, beforeBytes, afterBytes: rss(), workers: 0, error: String((err as Error)?.message ?? err) }),
+        );
+    };
+    pending = pending.then(run, run);
   });
 }
 

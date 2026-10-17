@@ -203,15 +203,15 @@ test("a verdict splits the daemon's growth at its footprint's median when the le
   recordShadowMemoryVerdict({ workerClass: "garden", reservationId: "start", root: ROOT }, ports(rows, footprint, SHORT_TAIL));
   const row = rows.find((r) => r.step === "memory_budget.shadow")!;
   const growth = (row.daemon_growth as Growth[])[0]!;
-  assert.equal(growth.growthMib, 2752 - 1700, "the peak is still the proc's VmHWM - VmRSS");
-  assert.equal(growth.typicalMib, (2206 + 2255) / 2 - 2039, "split at the footprint's median, not left whole");
+  assert.equal(growth.growthMib, 2752 - 1700, "W1-T9972: the footprint's peak less the proc's VmRSS + VmSwap");
+  assert.equal(growth.typicalMib, (2206 + 2255) / 2 - 1700, "split at the footprint's median, not left whole");
   assert.equal(growth.typicalBasis, "median of 12 footprint sample(s)");
   assert.equal(growth.footprint, "file: 12 sample(s) in the last hour");
   const numbers = row.numbers as Record<string, number>;
-  assert.equal(numbers.daemonGrowthTypicalMib, 191.5);
-  assert.equal(numbers.daemonGrowthTailMib, 1052 - 191.5);
-  // The daemon's spike (860.5) outranks the garden's tail (730): it is the container's one tail.
-  assert.equal(numbers.containerHeadroomMib, 8379 - 5000 - (90 + 860.5) - 191.5);
+  assert.equal(numbers.daemonGrowthTypicalMib, 530.5);
+  assert.equal(numbers.daemonGrowthTailMib, 1052 - 530.5);
+  // The garden's tail (730) outranks the daemon's spike (521.5): it is the container's one tail.
+  assert.equal(numbers.containerHeadroomMib, 8379 - 5000 - (90 + 730) - 530.5);
 
   // No footprint yet (the first hour after this ships): the tail is read as before, and the store's absence is named.
   resetShadowMemoryStateForTests();

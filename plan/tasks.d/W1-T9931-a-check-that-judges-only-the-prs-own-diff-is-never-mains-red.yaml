@@ -1,0 +1,65 @@
+- id: W1-T9931
+  title: "A CHECK THAT JUDGES ONLY THE PR'S OWN DIFF IS NEVER MAIN'S RED — decideBaseRed held #12394's prompt-surface-gate red as base red because a red main's run never carries that check, and the stand-down then became the 'stood-down' basis that called the PR's own failing tests 'already fixed on main'; no fix round ran for 79 minutes and #12394 escalated at the 45-minute stuck backstop on 2026-10-16"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which failing checks decideBaseRed may call inherited. The absent-check branch stays for checks main's tree can break; the fix rung, probes and refresh admission are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 PR-queue drain (agent PRQ, 20:00Z): #12394 escalated stuck while its own reds went unworked"
+  plan_refs: [W1-T4351, W1-T5490, W1-T6024, W1-T7848, W1-T8575, W1-T9375, W1-T9595, W1-T3077, W1-T9930]
+  files:
+    - src/lib/sweep.ts
+    - test/a-check-that-judges-only-the-prs-own-diff-is-never-mains-red.test.ts
+  status: queued
+  priority: 1  # a red main is when the most PRs are open; a learnings or prompt PR red on its own evidence loses its fix lane for the whole outage
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger (live ledger.ndjson, streamed read-only from the Azure host):
+    - #12394 (W1-T9628, head 0c535ce0, a learnings/ci.yaml entry) went red at about 18:30Z on ci-shard (7/8) and
+      prompt-surface-gate. At 18:39:47Z the sweep wrote `sweep.base_red.stood_down` with check_name
+      "prompt-surface-gate" at main bd42ca367 (main red on `ci`).
+    - prompt-surface-gate is a step of ci.yml's light-gates job, which runs only on pull_request and merge_group, and its
+      own step is guarded `if: github.event_name == 'pull_request'`. scripts/prompt-surface-gate.mjs judges
+      `git diff <base>...HEAD`, the PR's own prompt and learnings edits, and asks for golden evidence. Main's tree cannot
+      turn it red. Yet decideBaseRed's `absent` branch (src/lib/sweep.ts) returns `wait` for any failing name missing
+      from a red main's observedChecks, except PR_BODY_SCOPED_CHECKS (proof-discrimination, acceptance-author-gate,
+      commitlint).
+    - From 19:05Z every pass read the failing test files clear at main and wrote `sweep.base_fixed.inherited` with basis
+      "stood-down" (19:35:37Z). It disposed the PR "failing test file(s) ... already fixed on main" 9 times through 19:40Z.
+      The full pass's own `refresh.clearance` at 19:07:35Z read claude-md-rules-reach-their-scope.test.ts still FAILING
+      on the trial merge, and it fails 1/11 locally on the merge with origin/main a7362ff53
+      ("warn-never-reaches-lint-plan-exit-code: a task touching 'src/run-task.ts' must have this migrated fact
+      injected"). That is the PR's own red.
+    - `pr.stuck` fired at 19:31:22Z (own-red 47 min, BACKSTOP 45) and a question was logged at 19:35:37Z. The refresh
+      landed at 19:49:10Z (head 9601162d), and ci-shard (8/8) is red again on the new head. No fix round ran in between.
+    - Prior learnings PRs that merged (#11973, #11755) each carried a golden verdict under test/fixtures/golden-verdicts/,
+      so this red is what a fix round would repair.
+    NOT COVERED ELSEWHERE: W1-T9375 (queued) probes a held absent-check red before its REFRESH. It neither stops the hold
+    nor stops a stood-down record becoming the base-fixed basis. W1-T7848 narrows the absent branch only for a rule-suite
+    probe. W1-T9930 (queued, filed 2026-10-16) re-judges a red decided BELOW main's head and holds an absent check from such a
+    run only when a probe reproduces it. #12394's stand-down (18:39:47Z, no main_decided_by_sha) was decided AT the head
+    bd42ca367, so W1-T9930 leaves it held; a diff-only check needs no probe because main's tree cannot produce it. W1-T8575 exempts the main-repair PR. No open PR head touches decideBaseRed (open heads diffed 19:58Z).
+  design: |
+    1. Add prompt-surface-gate to the checks that judge only the PR's own input, beside PR_BODY_SCOPED_CHECKS: a
+       `PR_OWN_INPUT_CHECKS` list (body-scoped plus diff-scoped), each entry citing the script that proves it reads
+       only the PR (prompt-surface-gate: `git diff <base>...HEAD`). decideBaseRed's `absent`, `shared` and `recorded`
+       branches skip those names. A PR red only on them, with main red, is `own`.
+    2. A `base_fixed.inherited` "stood-down" basis requires the stand-down's check to be one main can carry. A
+       stand-down recorded on a PR_OWN_INPUT_CHECKS name is no basis, so the fix rung runs.
+    3. Unchanged: a check main's tree CAN break that main's push run never carries (lint-plan, rule-checks, claims and
+       the other light gates) is still held while main is red. Adding another name later needs its own evidence that
+       it reads only the PR.
+    No new bound and no LLM.
+  acceptance:
+    - claim: "a prompt-surface-gate red is the PR's own while main is red, and an inherited check beside it still holds"
+      proof: 'grep: test("W1-T9931: a prompt-surface-gate red is the PR own red while main is red" in test/a-check-that-judges-only-the-prs-own-diff-is-never-mains-red.test.ts'
+    - claim: "a check main's tree can break, absent from main's run, is still held while main is red"
+      proof: 'grep: test("W1-T9931: a light gate main can break is still held while main is red" in test/a-check-that-judges-only-the-prs-own-diff-is-never-mains-red.test.ts'
+    - claim: "a stand-down recorded on a PR-own-input check never makes the PR's failing tests already fixed on main"
+      proof: 'grep: test("W1-T9931: a stand-down on a PR-own-input check is no base-fixed basis" in test/a-check-that-judges-only-the-prs-own-diff-is-never-mains-red.test.ts'
+  falsifier: |
+    At origin/main, decideBaseRed on a PR failing only prompt-surface-gate, with main red on `ci` and observedChecks
+    lacking prompt-surface-gate, returns {kind: "wait", check: "prompt-surface-gate"}, so the first test fails.

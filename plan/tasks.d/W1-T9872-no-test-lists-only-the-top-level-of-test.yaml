@@ -1,0 +1,67 @@
+- id: W1-T9872
+  title: "THE CENSUS TESTS THAT LIST test/ WALK ITS SUBFOLDERS — 13 suites read only its top level (architecture-fitness, no-test-aims-a-write-at-procfs, mutation-ratchet, ...), so a moved file silently leaves their population; and a new top-level-only walk of test/ is refused (test restructure, letter D, part 4)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, top-level-only walks of test/; spans the census tests that do it
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter D (part 4 of 5)'
+  plan_refs: [W1-T9863]
+  files:
+    - test/architecture-fitness.test.ts
+    - test/host-capability-fixtures.test.ts
+    - test/no-test-aims-a-write-at-procfs.test.ts
+    - test/the-mutant-loader-resolves-every-relative-import.test.ts
+    - test/the-suite-is-green-on-a-developer-host.test.ts
+    - test/mutation-ratchet.test.ts
+    - test/orphan-sweep-names-the-third-party.test.ts
+    - test/git-fixture-gc-hygiene.test.ts
+    - test/no-test-lists-only-the-top-level-of-test.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section B, row 7: 13 census-shaped tests (18 sites) read only the top level of
+    test/, with TEST_DIR taken from import.meta.url. The population shrinks after a partial move. Once the census file
+    itself moves, it scans only its own subfolder.
+    The inventory names architecture-fitness, host-capability-fixtures, no-test-aims-a-write-at-procfs,
+    the-mutant-loader-resolves-every-relative-import, the-suite-is-green-on-a-developer-host, mutation-ratchet,
+    orphan-sweep-names-the-third-party and git-fixture-gc-hygiene (all present at 889966ea5).
+    A grep at 889966ea5 for readdirSync over a test-dir-anchored path adds these candidates for the builder to confirm
+    or rule out (some read their own fixture):
+    - a-census-suite-is-unreachable-from-the-symbols-a-diff-changes;
+    - a-mint-test-reads-only-its-own-fixture;
+    - a-shard-that-produced-no-summary-is-not-a-failure-set;
+    - mutation-per-file-runner;
+    - no-test-worktree-outlives-its-fixture;
+    - the-fast-lane-cannot-see-a-suite-that-joins-its-docs-path;
+    - the-gate-admission-population-is-checked-from-one-scan.
+    NOT INCLUDED: knowledge-gardener.ts and selector-shadow-gardener.ts were listed as flat readers in the taxonomy notes.
+    Both already walk test/ recursively at 889966ea5 (scanTestPinnedLearnings and the async walk in
+    selector-shadow-gardener), so neither needs a change.
+  design: |
+    1. Each confirmed suite enumerates test/ recursively with the literal pathspec `git ls-files -- 'test/**/*.test.ts'`
+       (architecture-fitness's proof greps that pathspec), filtering out test/fixtures/. It resolves test/ from the repo root, not from its own folder, so the result does not
+       change when the suite itself moves. It asserts the inspected count is > 0 and equals the git ls-files count.
+       The PR lists each candidate above that was ruled out, and why.
+    2. GUARD, test/no-test-lists-only-the-top-level-of-test.test.ts:
+       - It finds test files that call readdirSync or readdir on a path anchored to the repo's test/ directory, without
+         a recursive walk or `recursive: true`, and requires that list to be empty. Paths derived from mkdtemp or
+         fixtures do not count.
+       - It is fault-injected with a planted fixture file holding a top-level-only walk, and must go red on it.
+       - Its own inspected population is > 0.
+    W1-T9863 (repoRoot) depends on this task, because both edit these files. Tests stay flat.
+  acceptance:
+    - claim: 'a test that lists only the top level of test/ is refused by name'
+      proof: 'grep: test("W1-T9872: a test listing only the top level of test/ is refused" in test/no-test-lists-only-the-top-level-of-test.test.ts'
+    - claim: 'the guard inspects a non-empty population'
+      proof: 'grep: test("W1-T9872: the walk guard inspects a non-empty population" in test/no-test-lists-only-the-top-level-of-test.test.ts'
+    - claim: 'architecture-fitness walks test/ recursively'
+      proof: 'grep: test/\*\*/\*\.test\.ts in test/architecture-fitness.test.ts'
+  falsifier: |
+    On origin/main architecture-fitness and the others call readdirSync on their TEST_DIR, which is top-level only, so
+    the guard would list them. The guard file does not exist, so the first two greps miss. architecture-fitness has no
+    recursive pathspec, so the third misses.

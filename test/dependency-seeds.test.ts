@@ -61,13 +61,30 @@ test("dependency seed rejects missing, unreadable and escaping install inputs", 
   assert.throws(() => dependencySeedIdentity(checkout, identityOptions), /escaping/);
 }));
 
-test("dependency seed preserves occupied installs and dangling node_modules links", () => fixture((root, donor, checkout) => {
+test("dependency seed preserves occupied installs while refusing incomplete and dangling node_modules", () => fixture((root, donor, checkout) => {
   mkdirSync(join(checkout, "node_modules"));
-  assert.deepEqual(materializeDependencySeed(checkout), { status: "present" });
+  assert.throws(() => materializeDependencySeed(checkout), /missing dep/);
+  assert.ok(lstatSync(join(checkout, "node_modules")).isDirectory());
   rmSync(join(checkout, "node_modules"), { recursive: true });
   symlinkSync(join(root, "missing"), join(checkout, "node_modules"));
-  assert.deepEqual(materializeDependencySeed(checkout), { status: "present" });
+  assert.throws(() => materializeDependencySeed(checkout), /ENOENT/);
   assert.ok(lstatSync(join(checkout, "node_modules")).isSymbolicLink());
+}));
+
+test("occupied seed validates its generation before reuse and never installs over a stale consumer", () => fixture((root, donor, checkout) => {
+  const opts = { ...identityOptions, root: join(root, "seeds"), sourceDir: donor, proof: true };
+  const first = materializeDependencySeed(checkout, opts);
+  assert.equal(first.status, "materialized");
+  if (first.status !== "materialized") throw new Error("fixture seed absent");
+  const file = join(checkout, "node_modules", "dep", "index.js");
+  const inode = statSync(file).ino;
+  const refuseInstall = () => { throw new Error("must not install over occupied dependencies"); };
+  assert.deepEqual(materializeDependencySeed(checkout, { ...opts, runInstall: refuseInstall }), { status: "present" });
+  assert.throws(() => materializeDependencySeed(checkout, { ...opts, npmVersion: "changed", runInstall: refuseInstall }), /identity mismatch/);
+  assert.equal(statSync(file).ino, inode);
+  assert.equal(readFileSync(file, "utf8"), "module.exports = 1;\n");
+  writeFileSync(join(first.seed, "ready.json"), JSON.stringify({ version: 1, key: "wrong" }));
+  assert.throws(() => materializeDependencySeed(checkout, opts), /not ready/);
 }));
 
 test("dependency seed Linux materialization keeps package storage shared and caches private", () => fixture((root, donor, checkout) => {

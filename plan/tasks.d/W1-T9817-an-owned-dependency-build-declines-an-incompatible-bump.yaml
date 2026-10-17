@@ -1,0 +1,56 @@
+- id: W1-T9817
+  title: "AN OWNED DEPENDENCY BUILD IS NEVER TOLD IT MAY DECLINE — W1-T9797's outside-allowlist proposal, like every W1-T9586 own-red proposal, says rmd 'must land the SAME version moves', but #12191's mcp 1.29.0 to 1.30.0 bump is unsatisfiable (every Semgrep release pins mcp==1.29.0), so the owned build it files is told to do the impossible and has no stated way to stop"
+  repo: remudero
+  depends_on: [W1-T9797]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low  # Rule 19: one concern — the owned-build proposal text names when to decline and how to report it through the existing REFUSED channel; capture, registry, fold and every gate are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 13 (D1): #12191 closed by Dependabot as incompatible; D1 hand PR #12295 broke Scan on main and was reverted (#12305)"
+  plan_refs: [W1-T9797, W1-T9586, W1-T9584, W1-T3707]
+  files:
+    - src/lib/dep-review.ts
+    - test/an-owned-dependency-build-declines-an-incompatible-bump.test.ts
+  status: queued
+  priority: 3  # one observed case (#12191), already closed by Dependabot; the cost is a wasted owned build and a hand repair that broke main
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16):
+    - src/lib/dep-review.ts `renderDepReviewOwnRedFeedback` renders the one proposal text for every basis
+      ("main-passes", "survived-refresh", and W1-T9797's "outside-allowlist", #12303 merged 2926614bc). Its only
+      instruction is: "rmd must land the SAME version moves plus the companion edits on an owned task branch: tests
+      that pin the old version or action SHA literal, derived pins (...), and the bumps of every sibling Dependabot
+      PR named below that the fix needs." There is no case where the move itself is not allowed.
+    - `reconcileDependabotRefusedPath` (W1-T9797) and `reconcileDependabotOwnRed` (W1-T9586) both capture that text.
+    - #12191 (mcp 1.29.0 to 1.30.0 in /.github/semgrep) could not be landed by anyone: every Semgrep release pins
+      mcp==1.29.0 (tracker 2026-10-16, D1). Dependabot closed it. The hand repair #12295 moved the pin and broke the
+      Scan check on main for every PR; #12305 reverts it. An owned build following today's text would repeat #12295.
+    - The implement lane already has a structured refusal: `IMPLEMENT_REFUSAL_REPORT_CONTRACT` (src/run-task.ts)
+      lets the worker put a `REFUSED:` block in its REPORT with class `premise-rotted` or `needs-operator-input`, which
+      lib/review.ts parses and routes to an operator. Nothing tells a dependency build to use it.
+    - SWEEP: plan/tasks.d on main has no shard on declining a bump (W1-T9797 lists its renderer only as reused). No
+      open head since 10-12 diffs `renderDepReviewOwnRedFeedback` besides the merged run-W1-T9797-1792151961575.
+  design: |
+    1. One paragraph in `renderDepReviewOwnRedFeedback`, for every basis, placed before the "must land" sentence:
+       first prove the target version can be installed beside every consumer the repo already pins (for example a
+       co-installed tool whose own release metadata pins the package, as Semgrep pins mcp==1.29.0). If any consumer
+       forbids the target, DECLINE: make no version move, do not loosen or move the consumer's pin, and report
+       `REFUSED:` with class `premise-rotted`, naming the consumer, its pin and where it was read.
+    2. The "must land the SAME version moves" sentence is kept, conditioned on that check passing.
+    3. The proposal also carries the advisory id when the Dependabot body names one (GHSA-...), so a declined build's
+       operator route can name the alert to dismiss or accept. Read it from the body already in args; no new read.
+    4. No change to capture, the registry, the fold-by-bump-target, the refuse or hold arms, or any gate.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - each of the three bases renders the decline paragraph, naming `REFUSED:` and `premise-rotted`;
+       - a body naming a GHSA id carries it; a body naming none renders no advisory line (control).
+  acceptance:
+    - claim: "every owned-build proposal tells the build to decline a version move a pinned consumer forbids, through the REFUSED channel"
+      proof: 'grep: test("W1-T9817: an owned dependency build is told to decline an incompatible bump" in test/an-owned-dependency-build-declines-an-incompatible-bump.test.ts'
+    - claim: "the proposal names the advisory the bump was for when the Dependabot body names one"
+      proof: 'grep: test("W1-T9817: the owned-build proposal names its advisory" in test/an-owned-dependency-build-declines-an-incompatible-bump.test.ts'
+  falsifier: |
+    At origin/main, renderDepReviewOwnRedFeedback for #12191's shape (basis outside-allowlist, mcp 1.29.0 to 1.30.0,
+    offending .github/semgrep/requirements.txt) contains "must land the SAME version moves" and no "REFUSED:" or
+    "premise-rotted", so the first test fails.

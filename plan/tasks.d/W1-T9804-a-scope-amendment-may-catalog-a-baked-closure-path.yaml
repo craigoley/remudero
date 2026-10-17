@@ -1,0 +1,89 @@
+- id: W1-T9804
+  title: "A SCOPE AMENDMENT REFUSES EVERY WORKFLOW PATH, SO A SRC CHANGE THAT JOINS THE BAKED CLOSURE CAN NEVER BE FIXED BY THE LANE — requestScopeAmendment refuses any `.github/workflows/` path as `instrument-path`, but a module that joins the deployer or serve-supervisor import closure must also be named in acr-build.yml's trigger list and drift loop; #12289 (W1-T9541) got its deploy/install-host-units.sh amendment (#12292) and then needed a hand push (3d24f75dd) for acr-build.yml"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a scope amendment may name an instrument path whose worker diff only inserts tracked-path catalog tokens; every other instrument edit is refused as today, and INSTRUMENT_SURFACE itself is unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 lead 1 (D4 lead b): #12289 (W1-T9541) coverage-shard 5/8, 8/8 and coverage-ratchet red on the baked-closure censuses; hand push 3d24f75dd 13:08Z"
+  plan_refs: [W1-T6465, W1-T9561, W1-T9802, W1-T7959, W1-T297, W1-T9541]
+  files:
+    - src/lib/proof-amendment.ts
+    - src/run-task.ts
+    - test/a-scope-amendment-may-catalog-a-baked-closure-path.test.ts
+  status: blocked
+  retirement: retired  # operator ruling 2026-10-16 (Craig, to the operator session): REJECTED as a security weakening. The auto-mode classifier refused the edit as [Security Weaken], and builder B19 found that a "tracked-path token insertion" into codeql.yml or semgrep.yml `paths-ignore` passes this shard's rule and removes a path from scanning. Craig chose to PREVENT, not carve out: the fix lane never edits a workflow file; a baked-closure join is caught before the PR opens and the implement build updates the lists; a missed one escalates to a person. Superseded by W1-T9806 (the closure censuses are asked before the push and name the lists) and W1-T9851 (the implement build catalogs the join; a miss reaches a person)
+  superseded_by: W1-T9806
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16):
+    - src/lib/proof-amendment.ts `requestScopeAmendment`, per requested path:
+      `if (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || ...) return refuse("instrument-path", path);`
+      src/lib/review.ts `INSTRUMENT_SURFACE` lists `"^\\.github/workflows/"`, so every workflow file is refused,
+      whatever the edit is.
+    - A src change that adds a runtime import into the deployer or serve-supervisor closure must be catalogued in
+      three lists, which census suites hold to the closure:
+      - DEPLOY_LOGIC_PATHS (deploy/install-host-units.sh);
+      - BAKED_RUNTIME_SOURCE_PATHS (src/lib/baked-runtime-inputs.ts, held by test/baked-supervisor-inputs.test.ts);
+      - .github/workflows/acr-build.yml's `on.push.paths` list and its drift `for p in ...` loop (held by
+        test/acr-build-trigger.test.ts).
+      The first two can be amended. The third never can.
+    - #12289 (W1-T9541): ledger.ts and fs-race-safe.ts gained an import of the new src/lib/host-identity.ts. The fix
+      lane's amendment #12292 (201349cf5, 11:24:40Z) added only deploy/install-host-units.sh. The PR then merged on a
+      hand push, 3d24f75dd "catalog host-identity.ts as deploy logic and a baked supervisor input", which edited
+      acr-build.yml, install-host-units.sh and baked-runtime-inputs.ts.
+    - That acr-build.yml diff has two hunks. One adds the line `      - src/lib/host-identity.ts`. The other inserts the
+      single token `src/lib/host-identity.ts` into the `for p in ...` line. No other byte changes.
+    - Frequency: acr-build.yml changed on main with a src closure join in #11703 (10-14), #12058 (10-15) and #12289
+      (10-16). Neither W1-T7839's nor W1-T9651's shard declares it.
+    - Core ledger (read 2026-10-16, archives 10-13..16 plus live): #12289's `fix.scope_amendment` rows are only
+      `created` 11:12:56Z [deploy/install-host-units.sh] and `branch_update_requested` 11:42:59Z. The hand push
+      landed before a round could ask for acr-build.yml. The arm's live refusals of an instrument path:
+      #9873 2026-10-07T15:52Z [.github/workflows/ci-gate.yml], #10787 10-11, #11759 10-14 [src/lib/review.ts].
+    - W1-T9561's census of 10-04..14: 3 of 27 refused `fix.scope_amendment` rows were `instrument-path`.
+      W1-T6465's design point 3 kept instrument paths refused. This task narrows that point to one edit shape. It
+      does not reverse it.
+    - NOT COVERED: W1-T9802 (pr.terminal at a direct merge) and W1-T9792 (refused criterion to plan amendment) do
+      not touch the path refusals. No open head changes `requestScopeAmendment`'s instrument arm (swept the heads
+      updated since 10-12 for instrument-path|requestScopeAmendment).
+  design: |
+    1. THE SHAPE. src/lib/proof-amendment.ts exports a pure `isCatalogTokenInsertion(diffText, isTrackedPath)`. It is
+       true only when every hunk of the worker's diff of one file does one of two things:
+       - adds whole lines, each holding exactly one path token (a YAML `- path` or `- "path"` item, or a bare token
+         with an optional trailing `,` or `\`);
+       - replaces lines whose whitespace-split tokens equal the new lines' tokens with some tokens removed.
+       In both cases every inserted token must be a tracked path in the worker's tree. A removed or reordered token,
+       any other changed byte, a rename or a mode change makes it false.
+    2. THE REQUEST. `ScopeAmendmentRequest` gains an optional `instrumentDiffs: Record<path, diffText>`. The fix
+       rung's `amendScope` (src/run-task.ts) fills it, for each requested path INSTRUMENT_SURFACE matches, from
+       `git diff <roundStartSha or merge base> -- <path>` in the round's worktree. An unreadable diff leaves the
+       entry absent.
+    3. THE ARM. `requestScopeAmendment` refuses an instrument path as today unless all three hold:
+       - the path is under `.github/workflows/`;
+       - its `instrumentDiffs` entry is present;
+       - `isCatalogTokenInsertion` is true for it.
+       Every other INSTRUMENT_SURFACE path (ratchets, baselines, review.ts, gate scripts) is refused unchanged.
+    4. THE AMENDMENT SAYS SO. The amendment PR body names each catalog-entry instrument path and the tokens it
+       inserts, so the plan review and the risk judge see the instrument widening.
+    5. Tests (new file, `test(` titles verbatim as in the proofs below):
+       - #12289's acr-build.yml diff (the two hunks of 3d24f75dd as fixture text) on a task whose files lack it:
+         the amendment is created, and its body names the inserted token;
+       - a workflow diff that also changes a `run:` command, or removes a path token, is refused `instrument-path`;
+       - a `scripts/*-ratchet.mjs` or `scripts/*-baseline.json` path is refused even as a token insertion;
+       - a workflow path with no diff entry is refused (positive control for today's behaviour).
+  acceptance:
+    - claim: "a workflow path whose worker diff only inserts tracked-path catalog tokens gets its scope amendment"
+      proof: 'grep: test("W1-T9804: a baked-closure catalog entry in a workflow gets its scope amendment" in test/a-scope-amendment-may-catalog-a-baked-closure-path.test.ts'
+    - claim: "a workflow diff that changes anything beyond inserted path tokens is still refused as instrument-path"
+      proof: 'grep: test("W1-T9804: a workflow edit beyond a catalog token is still refused" in test/a-scope-amendment-may-catalog-a-baked-closure-path.test.ts'
+    - claim: "a ratchet, baseline or gate-script instrument path is refused even as a token insertion"
+      proof: 'grep: test("W1-T9804: a non-workflow instrument path is refused whatever its diff" in test/a-scope-amendment-may-catalog-a-baked-closure-path.test.ts'
+    - claim: "the fix rung passes each instrument path's worker diff into the request"
+      proof: "grep: instrumentDiffs in src/run-task.ts"
+  falsifier: |
+    At origin/main, requestScopeAmendment over a task whose files lack .github/workflows/acr-build.yml, with that path
+    in changedPaths and #12289's two catalog hunks as its diff, returns `{ kind: "refused", reason: "instrument-path" }`,
+    so the first test fails.

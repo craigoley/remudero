@@ -1,0 +1,30 @@
+- id: W1-T9943
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — host_resource.file_failed landed 4 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.8
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:host_resource.file_failed"
+  files:
+    - test/scout-host-resource-file-failed.test.ts
+  acceptance:
+    - claim: "host_resource.file_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9943: host_resource.file_failed no longer recurs\" in test/scout-host-resource-file-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step host_resource.file_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 3 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The record reports four recurring ledger rows but supplies no row details or diagnosed cause; its rationale explicitly leaves locating the emitter to future investigation. The finding cannot be verified from what is shown, meeting the stated escalation condition.; on the change's description/files alone, no diff was read — The task requires fixing the cause, but declares only a new test file and a grep proof matching a test title. That proof establishes text presence rather than the claimed cessation of recurrence."
+    judged_at: "2026-10-16T23:20:47.398Z"
+    pin: "d2caf3dc282bcf7c76206357425f4b8bd46b34f4fb6a7ca72d7797e6689afd66"

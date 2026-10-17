@@ -1,0 +1,76 @@
+- id: W1-T9875
+  title: "EVERY NEW-TEST MINTER PUTS THE TEST IN ITS COMPUTED FOLDER — the inbox drafting rule, six gardeners and plan.ts's shape constants all mint flat test/<slug>.test.ts today, so without this the layout drifts straight back; plus a doctrine entry saying where tests go (test restructure, letter E, part 2)"
+  repo: remudero
+  depends_on: [W1-T9874, W1-T9862]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, where every minter puts a new test; it spans the inbox drafter, six gardeners and plan.ts
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter E (part 2 of 2)'
+  plan_refs: [W1-T9874, W1-T9876]
+  files:
+    - src/lib/inbox.ts
+    - src/lib/hot-file-gardener.ts
+    - src/lib/ci-friction-gardener.ts
+    - src/lib/flow-gardener.ts
+    - src/lib/flow-remedy-gardener.ts
+    - src/lib/scout-gardener.ts
+    - src/lib/selector-shadow-gardener.ts
+    - src/lib/plan.ts
+    - CLAUDE.md
+    - AGENTS.md
+    - doctrine/plan-and-task-hygiene/
+    - test/new-test-minters-place-the-test.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    Citations re-verified at origin/main 889966ea5 (2026-10-16). (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section F)
+    - src/lib/inbox.ts:1723 sets the drafting rule: "A new file is either test/<task-title-slug>.test.ts or declared in
+      design on its own CREATES: <path> line". draftMissingPathViolations (~2144) exempts only the exact
+      `test/${slug}.test.ts`, so a nested new path without CREATES: is refused with draft-path-missing (block).
+    - The gardeners mint flat paths:
+      - hot-file-gardener.ts:245 `test/${hotFileShardStem(file)}.test.ts`;
+      - ci-friction-gardener.ts:1219 `test/${ciFrictionShardStem(key)}.test.ts`;
+      - flow-gardener.ts:483 `test/${flowFollowUpStem(stat)}.test.ts`;
+      - flow-remedy-gardener.ts:392 `test/${kind.stem}-${stem}.test.ts`;
+      - scout-gardener.ts:207 `test/scout-...test.ts`;
+      - selector-shadow-gardener.ts:1207 `test/affected-suites-selects-...test.ts`.
+    - src/lib/plan.ts:452 SCOUT_TEST_FILE = /^test\/scout-[\w.-]+\.test\.ts$/ and plan.ts:482
+      SELECTOR_SHADOW_MISS_TEST_PATH (used at ~490) recognise flat shapes only.
+    - CLAUDE.md, AGENTS.md and CONTRIBUTING.md say nothing about where tests live.
+  design: |
+    1. Each minter computes the folder with placeTest (W1-T9874) from the src modules its minted task names in files:
+       and from the test's slug, then mints test/<folder>/<slug>.test.ts. When placement has no signal, it uses the
+       folder of the module the finding is about (every gardener has a subject file); it never falls back to flat test/.
+    2. inbox.ts:
+       - the drafting rule text says a new test goes in test/<computed folder>/<slug>.test.ts;
+       - draftMissingPathViolations exempts that path;
+       - a new check, draft-test-unplaced (block), refuses a draft whose new test path sits directly under test/ or in
+         a folder that is not in scripts/test-placement/subsystem-map.json.
+    3. plan.ts: SCOUT_TEST_FILE accepts a scout test in any mapped folder. SELECTOR_SHADOW_MISS_TEST_PATH is compared
+       with sameTestFile (W1-T9862), so the shape survives the move.
+    4. DOCTRINE. Add a CLAUDE.md headline under "Plan and task hygiene": "**A new test goes in the test/<folder>/ that
+       `rmd test-place` computes from its imports — never directly under test/.** →
+       the new body page new-tests-go-in-their-computed-folder.md in the plan-and-task-hygiene doctrine section". The body cites this task and
+       placeTest. Run `npm run agents-md`.
+    New test flat in test/.
+  acceptance:
+    - claim: 'the inbox drafting lint accepts a new test in its computed folder'
+      proof: 'grep: test("W1-T9875: the drafting lint accepts a new test in its computed folder" in test/new-test-minters-place-the-test.test.ts'
+    - claim: 'the inbox drafting lint refuses a flat or unmapped new test path'
+      proof: 'grep: test("W1-T9875: the drafting lint refuses a flat or unmapped new test path" in test/new-test-minters-place-the-test.test.ts'
+    - claim: 'each of the six gardeners mints its test in the computed folder'
+      proof: 'grep: test("W1-T9875: each gardener mints its test in the computed folder" in test/new-test-minters-place-the-test.test.ts'
+    - claim: 'a nested scout test is still recognised as a scout shape'
+      proof: 'grep: test("W1-T9875: a nested scout test is still recognised as a scout shape" in test/new-test-minters-place-the-test.test.ts'
+    - claim: 'the inbox drafter places tests with placeTest'
+      proof: 'grep: placeTest( in src/lib/inbox.ts'
+    - claim: 'the doctrine index says where new tests go'
+      proof: 'grep: new-tests-go-in-their-computed-folder in CLAUDE.md'
+  falsifier: |
+    On origin/main every minter interpolates `test/${...}.test.ts` and draftMissingPathViolations exempts only the flat
+    slug path, so the drafting and gardener tests fail. SCOUT_TEST_FILE rejects a nested path. CLAUDE.md has no such
+    entry.

@@ -1,0 +1,82 @@
+- id: W1-T9974
+  title: A repair publication receipt names its actual head and inherited evidence
+  repo: remudero
+  depends_on: [W1-T307]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator instruction 2026-10-17: keep exact-head repair evidence truthful without rewriting canonical proofs or human prose"
+  plan_refs: [W1-T307, W1-T911, W1-T1264, W1-T9793, W1-T9973]
+  files: [src/lib/fix-publication.ts, src/run-task.ts, test/a-repair-publication-receipt-names-its-actual-head.test.ts, test/fixrung-body-claim.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED #12457 merged normally at2026-10-17T00:50:43Z from282c3369c against
+    caafe8c04 with14changed paths/10source. Its GitHub-stored body still described
+    d521c9df9's12paths/9source and said no baseline change was included. The byte-identical
+    old body and exact final-base diff are retained; no old receipt is retagged.
+    The original local/native paragraphs DID correctly name d521, so they remain history,
+    not proof the repaired final head ran those local checks. The normal required hosted
+    review/check success does not make the stale scope narrative current or native green.
+    An operator body-only correction reconciled that source merge separately.
+    Existing W307 deriveChangesetClaimUpdate deliberately recognizes a narrow exactly-N-files
+    form and runs only in body-coverage mode. It does not recognize arbitrary human prose
+    such as twelve changed paths, and expanding it into an NLP truth oracle is not the remedy.
+    W9124 watches body changes to invalidate review inputs; it does not publish repair receipts.
+  design: |
+    1. Add a small versioned, bounded repair-publication receipt at the maintained parent
+       runFixRung publication boundary. A pure renderer consumes the already-observed
+       repository/PR, actual head/base, current repo-relative changed paths and admission
+       classes. It labels inherited author/native/scoped evidence with its ORIGINAL SHA,
+       never upgrades it to the new head, and names new checks as pending/unknown until
+       current-head receipts actually exist. Reuse the existing body read/write seams.
+       Wire reconcileFixPublication from the real ci-log/conflict/review repair paths in
+       src/run-task.ts, not a fixture-only caller or dummy production text.
+    2. Own ONLY an explicitly delimited machine-managed section. Preserve the canonical
+       task trailer, Acceptance/claim/proof bytes, human rationale and historical receipts.
+       The section explicitly warns that preceding author narrative may predate this repair;
+       do not silently rewrite or certify free-form prose, introduce replacement grep proofs,
+       guess discrimination, invent review/merge results or amend the task to fit the diff.
+       No section is injected on a no-change pass. Repeated same-input repair is byte-idempotent.
+    3. Bind body update to the PR/head/body observation actually read. A moved head/body,
+       unreadable scope or failed write/readback remains an explicit bounded unknown with
+       retained evidence, not a successful publication receipt. Never overwrite a newer human
+       edit. No private absolute paths, tokens, registry bytes or state roots enter the public
+       section. A bounded manifest does not grant scope/publication authority; W9973 separately
+       checks newly introduced scope. No extra reviewer, global hold or gate waiver.
+    4. Drive actual runFixRung ci-log and conflict repairs with recording transports and
+       disposable Git defaults/catches. Use the real12-to14path shape and a different-size
+       positive control, plus unchanged-head/no-edit, stale native failure, skipped/unknown
+       checks, unsupported/malformed managed sections, sink failure and concurrent human edits.
+       Remove actual receipt forwarding to fail then restore to pass. Prove the stored body
+       still resolves unchanged canonical criteria with zero empty proofs; parsing is not proof
+       execution, hosted CI, review, merge, deployment or live uptake.
+    5. Fresh duplicate/ALL-open subject/frontier/ownership checks precede work and publication.
+       Commit before verified TAP and source-mapped diff coverage for every changed SF;
+       shipped host slots and one native per changed committed tree, with every failure
+       compared on that run's actual unchanged base. Preserve all failures/unknowns.
+       Workers continue for isolated source/tests. No new schedule, live config/settings,
+       credential/access change, deployment, closure, scheduler activation or worker stop.
+       Keep registry/admission opt-in SHADOW ONLY, public Apache core and owner/admin override.
+  acceptance:
+    - claim: The maintained parent repair path invokes the new publication reconciler
+      proof: 'grep: reconcileFixPublication( in src/run-task.ts'
+    - claim: Real ci-log and conflict repair publication forwards the actual immutable head manifest
+      proof: 'unit test: real repair publication forwards a head-bound evidence manifest'
+    - claim: Old native and scoped receipts keep their original SHA and cannot become repaired-head passes
+      proof: 'unit test: repair manifests never relabel historical validation as current-head success'
+    - claim: Canonical proof and human text bytes survive an idempotent machine-section update
+      proof: 'unit test: repair manifests preserve canonical proofs human text and idempotence'
+    - claim: Moved human input and failed or unreadable writes stay unknown rather than certified
+      proof: 'unit test: repair manifest races and unreadable sinks never certify publication'
+    - claim: Removing the real publication forwarding fails the end-to-end manifest recorder
+      proof: 'unit test: repair publication manifest forwarding is load-bearing'
+  falsifier: |
+    The #12457-shaped repair must produce a manifest naming14actual paths and the final
+    head while the original d521 native failure stays bound to d521. Delete real forwarding:
+    the end-to-end recorder must fail despite the pure renderer still passing. Restore it
+    and prove healthy no-change and concurrent-human controls remain unchanged.

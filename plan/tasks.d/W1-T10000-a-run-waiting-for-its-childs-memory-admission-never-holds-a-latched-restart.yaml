@@ -1,0 +1,117 @@
+- id: W1-T10000
+  title: "A RUN WAITING FOR ITS CHILD'S MEMORY ADMISSION NEVER HOLDS A LATCHED RESTART — under run-child mode on, spawnRunChild awaits the memory admission queue before the child exists, so the daemon counts the run as in-process work: on 2026-10-17 W1-T9871 (queued since 03:51:53Z) became the 04:07Z latch's holdout and W1-T9864 (refilled 04:15:15Z as runs_as_child) joined it, and the restart waited 32+ min on two runs that had started nothing"
+  repo: remudero
+  depends_on: [W1-T9969]  # its open PR #12523 adds AdmissionRequest.signal and sinceMs to awaitMemoryAdmission; this task passes both
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, how a latched restart treats a run whose child has not started (waiting for admission, or fallen back in-process); the drain, its bound, W1-T9069's holdout rule and W1-T9924's predicate are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 ~04:40Z, investigator R39: why core's a89ed1c86 -> 733bb46f3 restart stayed latched on W1-T9871 and W1-T9864 with run-child mode on"
+  plan_refs: [W1-T147, W1-T9969, W1-T9924, W1-T9069, W1-T9085, W1-T9086, W1-T9089, W1-T9910, W1-T9812, W1-T9761, W1-T8172]
+  files:
+    - src/lib/run-child.ts
+    - src/run-task.ts
+    - src/lib/daemon.ts
+    - test/a-run-waiting-for-its-childs-memory-admission-never-holds-a-latched-restart.test.ts
+  status: queued
+  priority: 1  # a latched restart waits for the whole implement admission queue (28-35 min waits today); it recurred 3 times on 10-17 alone
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 on the core ledger (host ~/rmd-state2/state: live ledger.ndjson plus the 01:34Z and 03:10Z
+    archives, niced bounded greps streamed to the Mac). Daemon pid 122, DAEMON-1792207115995, code a89ed1c86.
+    - W1-T9871: `dispatch.lane_refilled` 03:51:48Z, `child_entry.spawned` (run-child, bundle, source-hash-match)
+      03:51:53Z. No `run_child.spawned`, no `run_child.fallback`, no `run.start`, no `worker.*` row since. Its run dir
+      runs/run-W1-T9871-1792209107793-9a97 was created at 03:51:53.886Z and is EMPTY (no spec.json, no status.json).
+    - W1-T9864: `dispatch.lane_refilled` 04:15:15Z with `restart_pending: true`, `waiting_on: ["W1-T9871"]`,
+      `latch_admission: "runs_as_child"`; `child_entry.spawned` 04:16:20Z; run dir run-W1-T9864-1792210514811-04fd,
+      created 04:16:13Z, EMPTY. Nothing else.
+    - The engine was current for both: the launch row is written only after `newestCurrentEngine` returned one, and
+      W1-T9861 and W1-T9863 spawned children on current engines at 03:52:13Z and 04:01:20Z.
+    - Implement starts in that queue waited 1,723,697 ms (W1-T9861, `memory_budget.enforce_admit` 03:52:13Z) and
+      2,118,156 ms (W1-T9863, 04:01:20Z). A fix start waited 1,801,535 ms (W1-T9284, 04:41:30Z). Advisory rows read
+      `waiting: 10` at 04:44:47Z.
+    - Latch 04:07:05.179Z (`daemon.freshness_drain.started`). Every `daemon.freshness_restart_waiting` since reads
+      `waiting_on: "in_process_work"`; at 04:39:32Z waited_ms 1,946,890 with W1-T9871 (holdout true) and W1-T9864
+      (admitted_under_latch true).
+    - The 04:05:34Z `engine.prune_deferred` ("run run-W1-T9871-… is unreadable and names no engine (missing:
+      ENOENT … spec.json)") is the same empty directory: it makes the engine prune undecidable while the run waits.
+    - RECURRENCE: at 01:26:48Z (pid 123) W1-T9864 refilled under the 01:19:58Z latch; its `run_child.spawned` came at
+      01:57:25Z, and the 01:28-01:52Z restart-waiting rows list it as in_process_work. On 10-16 21:04-22:08Z (pid 586648,
+      in-process mode) W1-T9864, W1-T9089 and W1-T9757 waited 59-61 min in worker admission while that restart waited.
+    READ at origin/main 2f93023e5 (symbols, not lines):
+    - src/lib/run-child.ts `spawnRunChild`: `listEngines`, `mainTipSha`, `newestCurrentEngine`, `input.plan()`, then
+      `mkdirSync(dir)`, the launch (`child_entry.spawned`), then `await reserve(...)` = `reserveRunChild`, which awaits
+      `awaitMemoryAdmission`. Only after it: `writePlanSnapshot`, `writeSpec`, the spawn, `run_child.spawned`.
+    - src/lib/host-memory-admission.ts `awaitMemoryAdmission` writes `memory_budget.enforce_wait` only when the
+      waiter reaches the queue head (`rankDemand`), so a queued run is silent. It takes no abort signal at main.
+    - src/run-task.ts `runInChildWhenOn` returns the handle only when `launched.started`; `runOne` calls
+      `runOptions.onChild` only then, and otherwise runs `runTaskFn` in-process.
+    - src/lib/daemon.ts: `children` is filled only by `onChild`, so `hasChildTask` is false for the whole admission
+      wait. `latchRestart` makes every in-flight `!hasChildTask` run a holdout; `onStarted` adds a refill to
+      `admittedUnderLatch` when `!hasChildTask`; `reportRestartWait` lists it under "in_process_work". A holdout
+      with no worker boundary has no `holdoutDeadlines` entry, so R is unknown and W1-T9069 parks every in-process
+      refill ("restart time unknown"), but `refillRunsAsChild` (W1-T9924) answers from the mode alone.
+    - So Q2 of the brief (did W1-T9069's R admit a refill that outlived the holdout?) is NO: W1-T9864 was admitted by
+      W1-T9924's `runs_as_child` arm, which skips both R and the drain bound, and its child then queued for admission.
+    NOT COVERED ELSEWHERE:
+    - W1-T9969 (#12523, open) adds the admission `signal` and `sinceMs` for a detached fix dispatch only; it never
+      reaches spawnRunChild or the restart latch.
+    - W1-T9924 (merged) decides refills; W1-T9069 (merged) holdout R; W1-T9812 (queued) orders the pre-exit pass
+      beside the drain; W1-T9089 (queued) retires the latch once runs are children but assumes a run IS a child
+      once dispatched; W1-T9910 (queued) settles spec-only run dirs, not empty ones made before a reservation;
+      W1-T9906/W1-T9838 are engine currency. None treats a run whose child has not started.
+    - Swept plan/ on origin/main for runs_as_child, refillRunsAsChild, reserveRunChild, awaitMemoryAdmission with
+      restart/holdout/latch: hits only W1-T9924 and W1-T9969 (above), W1-T9080 (merged, reservation root) and
+      W1-T9761/W1-T9706 (admission ranking). Swept the 7 open PR heads and the open plan-file-* head: only #12523
+      touches host-memory-admission.ts. Control: the same sweep finds W1-T9924 for refillRunsAsChild.
+    OVERLAP (lint duplicate-surface): W1-T147 is the overnight chaos drill. It shares src/lib/daemon.ts and
+    src/run-task.ts as broad files only and never decides how a latch treats a run whose child has not started.
+  design: |
+    Operator rulings: no hard thresholds (no fixed wait, age or count), lean into automation.
+    1. A PENDING CHILD IS VISIBLE. `spawnRunChild` reports the run as pending (a new `onPending({ runId, abort })`
+       port, threaded by `runInChildWhenOn` to a new `runOptions.onChildPending`) once its engine is chosen and it
+       enters the reservation, and ledgers `run_child.admission_waiting` once (task, run id, queue length). The run
+       directory is created only after the reservation is held, so a waiting run leaves no spec-less directory for
+       `namedByLiveRuns` to read as undecidable.
+    2. A PENDING CHILD NEVER HOLDS THE RESTART. In runDaemon, a run that is pending or a child is out-of-process:
+       `latchRestart` makes it no holdout, `onStarted` does not count it as `admittedUnderLatch` in-process work, and
+       `reportRestartWait` lists it as `pending_children`, not under in_process_work. A pending run admitted before the
+       restart fires becomes a child through `onChild` as today (adoptable).
+    3. THE RESTART ABANDONS A PENDING CHILD, NEVER RUNS IT IN-PROCESS. When the restart fires, each pending run is
+       aborted through W1-T9969's `AdmissionRequest.signal`. `spawnRunChild` returns a distinct abandoned launch
+       (it took no claim and wrote no spec), ledgers `run_child.spawn_abandoned` with waited_ms, and `runOne` does not
+       fall back to `runTaskFn`; the lane ends lane-local (the existing `TaskAdmissionError` path), so refill is not
+       closed. The next daemon's spawn for that task passes the carried wait as W1-T9969's `sinceMs`, so a restart
+       never sends a queued run to the back of the queue.
+    4. A CHILD THAT FALLS BACK IN-PROCESS UNDER THE LATCH IS JUDGED AS IN-PROCESS. A refill admitted as
+       `runs_as_child` whose spawn returns `started: false` (no engine, spawn failure) is judged at that moment by the
+       predicate it skipped (W1-T9924's `restartAdmission("dispatch-refill")`, W1-T9069's R while a holdout waits).
+       Refused, it does not start in-process: the lane ends lane-local and parks on the latch path with
+       `daemon.admission_held` naming the fallback reason.
+    5. Unchanged: work already running in-process, W1-T5721's fix-worker protection, the drain and its bound, and
+       admission order inside `awaitMemoryAdmission`.
+    6. Tests (new file, titles verbatim as in the proofs; drive runDaemon with an injected runOne that calls
+       `onChildPending` and resolves only when aborted, `adoptRunChildren`, restart-history lines and a fake clock as
+       W1-T9924's suite does, and drive spawnRunChild with an injected `reserve` that waits on its signal):
+       - a latch with only a pending child in flight restarts without waiting on it, and the run is abandoned, not run
+         in-process. At origin/main the run is a holdout and the restart waits for it;
+       - a pending child admitted before the restart fires becomes an adoptable child (positive control);
+       - while the reservation waits, no run directory exists; once it is held, the spec is written;
+       - a `runs_as_child` refill whose spawn falls back while the latch holds is refused when its class median exceeds
+         the drain's time left, and still runs when it fits.
+  acceptance:
+    - claim: "a latched restart never waits on a run whose child is still waiting for memory admission, and abandons it without running it in-process"
+      proof: 'grep: test("W1-T10000: a pending run child never holds a latched restart" in test/a-run-waiting-for-its-childs-memory-admission-never-holds-a-latched-restart.test.ts'
+    - claim: "a pending run child admitted before the restart fires becomes an adoptable child"
+      proof: 'grep: test("W1-T10000: a pending child admitted before the restart becomes a child" in test/a-run-waiting-for-its-childs-memory-admission-never-holds-a-latched-restart.test.ts'
+    - claim: "a run child's directory is created only once its reservation is held"
+      proof: 'grep: test("W1-T10000: no run directory exists while the reservation waits" in test/a-run-waiting-for-its-childs-memory-admission-never-holds-a-latched-restart.test.ts'
+    - claim: "a runs_as_child refill that falls back in-process under the latch is judged as in-process"
+      proof: 'grep: test("W1-T10000: a child refill that falls back in-process is judged as in-process" in test/a-run-waiting-for-its-childs-memory-admission-never-holds-a-latched-restart.test.ts'
+  falsifier: |
+    At origin/main, runDaemon with `adoptRunChildren` wired, one in-flight run whose runOne never calls `onChild`
+    (its child is waiting for admission) and a restart latch: `latchRestart` makes it a holdout and every
+    `daemon.freshness_restart_waiting` row lists it under in_process_work, so the restart never fires and the first
+    test fails.

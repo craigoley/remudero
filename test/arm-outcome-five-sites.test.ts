@@ -521,7 +521,8 @@ test("dep-review drives its arm branch to a real outcome and reports that outcom
       gh: () => ({
         number: 80,
         url: "https://github.com/craigoley/remudero/pull/80",
-        title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm-minor-and-patch group",
+        // Kept <= 100 characters: a longer Dependabot title is retitled first (W1-T9828) and holds.
+        title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm group",
         body: "Updates `@anthropic-ai/claude-agent-sdk` from 0.3.209 to 0.3.210",
         headRefOid: "beefcafe1234",
         author: { login: "app/dependabot" },
@@ -663,7 +664,7 @@ async function driveDepReview(opts: {
 test("impl-FR: a minor/patch bump whose arm did NOT take is detected and escalated", async () => {
   const rec = issueRecorder();
   const r = await driveDepReview({
-    title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm-minor-and-patch group",
+    title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm group",
     arm: () => "ledger-refused",
     issues: rec.gateway,
   });

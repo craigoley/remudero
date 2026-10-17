@@ -8,10 +8,14 @@ import { test } from "node:test";
 import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { inboxThreadId } from "../src/lib/inbox-thread.js";
 import { createService } from "../src/lib/service.js";
+import { updateProposalRegistry } from "../src/lib/inbox.js";
+import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 
 const RELEASED = "verify-human:W1-T217";
-const UNRELEASED = "verify-human:W1-T216";
+const UNRELEASED_TASK = "W1-T218";
+const UNRELEASED = `verify-human:${UNRELEASED_TASK}`;
+const HELD = "verify-human:W1-T216";
 const RULING = "ruling:operator-choice";
 
 function fixture(corruptArchive = false, heldTaskId?: string) {
@@ -19,7 +23,7 @@ function fixture(corruptArchive = false, heldTaskId?: string) {
   mkdirSync(join(root, "plan"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
-  writeFileSync(planPath, ["W1-T216", "W1-T217"].map((id) => `
+  writeFileSync(planPath, ["W1-T216", "W1-T217", UNRELEASED_TASK].map((id) => `
 - id: ${id}
   title: "A controlled security ruling"
   repo: remudero
@@ -36,9 +40,11 @@ function fixture(corruptArchive = false, heldTaskId?: string) {
       proof: "unit test: controlled check"
 `).join(""));
   const registryPath = join(root, "state", "inbox-proposals.json");
-  writeFileSync(registryPath, JSON.stringify({
-    proposals: [UNRELEASED, RELEASED, RULING].map((id) => ({ id, summary: `Review ${id}`, evidenceAnchors: [] })),
-  }));
+  updateProposalRegistry(registryPath, () => [
+    ...["W1-T216", "W1-T217", UNRELEASED_TASK].map(id => proposalFromJudgedShard({ id, title: "A controlled security ruling", rationale: "operator review",
+      acceptance: ["a controlled check"], ageDays: 1, depsAllMerged: true, citedInSrc: false }, { decision: "needs_operator", reason: "The operator owns this release" })),
+    { id: RULING, summary: `Review ${RULING}`, evidenceAnchors: [] },
+  ]);
   const ledgerPath = join(root, "state", "ledger.ndjson");
   writeFileSync(ledgerPath, "");
   writeFileSync(join(root, "state", "ledger.2026-09-27T00-00-00-000Z.ndjson"),
@@ -86,6 +92,7 @@ test("W1-T4768: archived positive release retires exact ask", async (t) => {
     assert.equal(census.items.find((item) => item.proposalId === RELEASED)?.attention, "history");
     assert.ok(census.items.find((item) => item.proposalId === RELEASED)?.sourceFacts.some((fact) => fact.detail.includes("RELEASE-217")));
     assert.equal(census.items.find((item) => item.proposalId === UNRELEASED)?.attention, "decision");
+    assert.equal(census.items.find((item) => item.proposalId === HELD)?.attention, "decision");
     const repeat = await get(base, "/v1/inbox/attention-census") as { snapshotKey: string };
     assert.equal(repeat.snapshotKey, census.snapshotKey, "unchanged archive evidence keeps one stable snapshot");
     const detail = await get(base, `/v1/inbox/thread?id=${encodeURIComponent(inboxThreadId(RELEASED))}`) as {
@@ -148,15 +155,16 @@ test("an archived release does not hide a task with an explicit dispatch hold", 
 test("W1-T4768: a live positive release remains proven when a retained archive is unreadable", async (t) => {
   const world = fixture(true);
   t.after(() => rmSync(world.root, { recursive: true, force: true }));
-  appendFileSync(world.ledgerPath, JSON.stringify({ step: "ratify.approved", task_id: "W1-T216",
-    released: "verify-human", run_id: "LIVE-216", ts: "2026-09-29T12:00:00.000Z" }) + "\n");
+  appendFileSync(world.ledgerPath, JSON.stringify({ step: "ratify.approved", task_id: UNRELEASED_TASK,
+    released: "verify-human", run_id: "LIVE-218", ts: "2026-09-29T12:00:00.000Z" }) + "\n");
   await withServer(world.deps, async (base) => {
     const census = await get(base, "/v1/inbox/attention-census") as {
       sources: { archiveLedger: string }; items: Array<{ proposalId: string; attention: string; sourceFacts: Array<{ detail: string }> }>;
     };
     assert.equal(census.sources.archiveLedger, "unavailable");
     assert.equal(census.items.find((item) => item.proposalId === UNRELEASED)?.attention, "history");
-    assert.ok(census.items.find((item) => item.proposalId === UNRELEASED)?.sourceFacts.some((fact) => fact.detail.includes("LIVE-216")));
+    assert.ok(census.items.find((item) => item.proposalId === UNRELEASED)?.sourceFacts.some((fact) => fact.detail.includes("LIVE-218")));
+    assert.equal(census.items.find((item) => item.proposalId === HELD)?.attention, "decision");
     assert.equal(census.items.find((item) => item.proposalId === RELEASED)?.attention, "decision",
       "the archived-only release remains unproven during the read fault");
   });

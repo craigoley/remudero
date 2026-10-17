@@ -11,8 +11,8 @@
   band_meaning: blast-radius
   origin: "2026-10-13 operator-approved follow-up; issue #8446"
   plan_refs: ["W1-T4742","W1-T4261"]
-  files: ["src/lib/inbox-responder.ts","src/lib/inbox-view.ts","src/lib/panel-graph.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/every-inbox-page-shares-its-classification-snapshot.test.ts"]
-  status: queued
+  files: ["test/an-inbox-option-is-a-button-that-does-what-it-says.test.ts","test/a-failed-human-judge-is-visible-as-triage.test.ts","src/lib/inbox-responder.ts","test/serves-main-thread-never-classifies-the-inbox.test.ts","test/every-view-body-matches-its-schema.test.ts","src/lib/fleet-lane.ts","src/lib/read-page.ts","src/lib/views.ts","src/lib/service.ts","src/lib/console-snapshot-cache.ts","test/the-inbox-and-feedback-views-answer-from-memory.test.ts","test/human-gate-classification.test.ts","test/human-gate-surface-counts.test.ts","src/lib/inbox-view.ts","src/lib/panel-graph.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/every-inbox-page-shares-its-classification-snapshot.test.ts"]
+  status: merged
   attempts: 0
   rationale: |
     Issue #8446 shows that generatedAt and independently retained source asOf values cannot prove equal-count pages belong to one classification. buildAttentionCensus already creates a content-derived snapshotKey. The operator approved reusing that identity, not starting reader-triggered classification.

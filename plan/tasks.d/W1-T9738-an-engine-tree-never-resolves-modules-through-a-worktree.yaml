@@ -14,7 +14,7 @@
     - src/lib/engine-tree.ts
     - src/run-task.ts
     - test/an-engine-tree-never-resolves-modules-through-a-worktree.test.ts
-  status: queued
+  status: merged
   priority: 1  # security: harness code resolving modules from a worker-writable path
   attempts: 0
   rationale: |

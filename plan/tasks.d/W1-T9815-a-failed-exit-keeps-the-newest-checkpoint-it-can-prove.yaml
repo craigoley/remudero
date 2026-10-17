@@ -1,0 +1,94 @@
+- id: W1-T9815
+  title: "A FAILED RUN EXIT KEEPS THE NEWEST CHECKPOINT IT CAN PROVE — W1-T9786 keeps a restored checkpoint only on runTaskBody's run.error arm; the WorkerAbandonedError and Codex output-limit arms of the same catch still end 'failed' with no implement.checkpoint_kept row, and a thrown run that pushed its OWN branch (a failed PR create) keeps nothing at all, so that branch blocks its task as run-branch-already-pushed until the 24 h orphan grace and the next build restarts from main"
+  repo: remudero
+  depends_on: []  # W1-T8676 and W1-T9786 (both merged) wrote the kept row for two exits; this gives every failed exit the same rule
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — every failed exit of runTaskBody keeps the newest checkpoint it can prove through the one kept row the daemon already reads; the fold, the guard and the restore are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-16 filing agent Q3 leads 10 and 11 (I3): W1-T9786's own NOT IN SCOPE list (#12283) and its test 'a thrown run that pushed its own branch keeps nothing'"
+  plan_refs: [W1-T9786, W1-T8676, W1-T7837, W1-T1045, W1-T6352, W1-T4655, W1-T9482, W1-T9047]
+  files:
+    - src/run-task.ts
+    - test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts
+    - test/a-failed-exit-keeps-the-newest-checkpoint-it-can-prove.test.ts
+  status: queued
+  priority: 2  # rare (W1-T9786 measured 1 hit of the thrown class since 09-28), but each hit holds the task up to a day and discards its paid checkpoints
+  attempts: 0
+  rationale: |
+    READ at origin/main db88033a3 (2026-10-16):
+    - src/run-task.ts `runTaskBody`, its `catch (err)`, has four exits after the QuietRoundEndedError handoff:
+      - `if (err instanceof WorkerAbandonedError)`: logs `verdict` failed, stage `worker.abandoned`, removes the
+        worktree, returns. No `checkpointToKeep()` call, no `implement.checkpoint_kept` row.
+      - `if (isCodexWorkerOutputLimitError(err))`: logs `verdict` failed, stage `worker.bounded_output`, removes the
+        worktree, returns. Same gap.
+      - the generic arm: `keptThroughThrow = verdictWritten ? undefined : checkpointToKeep();` then
+        `endThrownRun(log, verdictWritten, "run.error", err, costUsd)` and the kept row (W1-T9786, #12284 merged).
+      - `failOnWorkerError` (not in the catch) keeps it for a worker-error `failed` verdict (W1-T8676).
+    - `checkpointToKeep` returns the RESTORED checkpoint only when `git rev-parse --verify --quiet
+      refs/remotes/origin/<branch>` exits 1. Its doc says a run that pushed its own branch keeps nothing because "the
+      newer checkpoint" is that branch (W1-T7837). But nothing writes a receipt for that branch:
+      `pendingWorkerBoundaryHandoffs` (src/lib/daemon.ts) makes a receipt only from `run.freshness_handoff`, a
+      `handed_off`/`freshness_yield` verdict with no pr_url, or `implement.checkpoint_kept`. The failed verdict deletes
+      any pending receipt for the task.
+    - So `runBranchStateFrom` (daemon.ts) has no checkpoint to excuse the run's own `run-<id>-<epoch>` ref, and
+      `stillBlockedByPushedRunBranch` (src/lib/drain.ts) holds the task until `orphanRunBranchReleased` frees it at
+      `ORPHAN_RUN_BRANCH_GRACE_MS` (24 h). The next run's `pendingWorkerBoundaryHandoffs(...).get(taskId)` is empty,
+      so it builds from main and the pushed work is not restored.
+    - test/a-restored-checkpoint-outlives-its-runs-thrown-error.test.ts `W1-T9786: a thrown run that pushed its own
+      branch keeps nothing` pins exactly this: the worker pushes `HEAD:refs/heads/<own>`, throws "Command failed: gh pr
+      create --head x\nHTTP 502", and the test asserts no kept row and `pendingWorkerBoundaryHandoffs(...).size === 0`.
+      `runErrorCause` already names that throw `pr-create-failed`.
+    - The gap is one fix point: the failed exits of one catch, sharing one predicate. Leads 10 and 11 are filed as
+      one task for that reason; the W1-T9786 test above must change in the same PR.
+    - SWEEP: plan/tasks.d on main (checkpoint_kept, checkpointToKeep, WorkerAbandonedError, output limit) reads
+      W1-T8676 and W1-T9786 only; W1-T6352/W1-T8203 keep a Codex over-budget run's verdict, not its checkpoint.
+      Recent open heads (since 10-12) diffing these symbols: run-W1-T9786-1792141830465 (merged) and
+      run-W1-T9667-1792085606060 (an import line only). W1-T9482 (queued) releases a SPENT checkpoint branch on a
+      requeue; it does not keep an unspent one.
+  design: |
+    No new count, timer or bound. The row is the one W1-T8676 already reads.
+    1. ONE HELPER. Replace `checkpointToKeep` with one helper every failed exit calls while the worktree stands:
+       - the run's own branch proven ABSENT on origin (rev-parse exits 1) and a restored checkpoint: keep the
+         restored checkpoint, as today;
+       - the run's own branch PRESENT on origin, this run opened no PR (track `pr.opened` in the same log wrapper
+         that sets `verdictWritten`), and its tip sha read: keep `{branch, headSha: <origin tip>}`, the newer
+         checkpoint W1-T7837 already names;
+       - anything unproven (a refused worktree pointer, an unreadable tip): keep nothing and log
+         `implement.checkpoint_keep_unproven`, never replacing the run's own error (W1-T9786 behaviour).
+    2. EVERY FAILED EXIT. The WorkerAbandonedError arm, the Codex output-limit arm, the run.error arm and
+       `failOnWorkerError` all write the kept row through the helper right after their own verdict, with
+       `failed_stage` (worker.abandoned, worker.bounded_output, run.error, or the worker stage) and the cause they
+       already compute. The abandoned and output-limit arms read the helper BEFORE their `worktreeRemove`.
+       A budget verdict (`blocked_budget`) still keeps nothing.
+    3. Change nothing else. `pendingWorkerBoundaryHandoffs` already re-pends any kept row whose branch matches
+       `run-<taskId>-`, `runBranchStateFrom` excuses a ref whose sha equals the receipt's, and the next run restores
+       it. A checkpoint that keeps failing is bounded by the existing circuit breaker and lifetime judge (W1-T8676).
+    4. Tests (new file, `test(` titles verbatim as in the proofs below), driving a real runTask dispatch over a
+       gitRepo() fixture with a local git identity and a bare origin, as W1-T9786's file does:
+       - a worker that is abandoned (and, separately, one over its Codex output budget) after restoring a checkpoint
+         leaves the restored receipt pending;
+       - a run that pushed its own branch and then threw a PR create failure leaves its OWN pushed head pending, and
+         `runBranchStateFrom` no longer counts that ref as blocking;
+       - a run that pushed its own branch AND opened a PR keeps nothing (positive control).
+       Update W1-T9786's `a thrown run that pushed its own branch keeps nothing` to the new rule (its own head is
+       kept, the restored one is not re-pended).
+  acceptance:
+    - claim: "the abandoned and Codex output-limit exits keep a restored checkpoint pending"
+      proof: 'grep: test("W1-T9815: an abandoned or over-budget worker keeps its restored checkpoint" in test/a-failed-exit-keeps-the-newest-checkpoint-it-can-prove.test.ts'
+    - claim: "a thrown run that pushed its own branch and opened no PR keeps that branch's head as its receipt, so the ref stops blocking"
+      proof: 'grep: test("W1-T9815: a thrown run keeps its own pushed head when it opened no PR" in test/a-failed-exit-keeps-the-newest-checkpoint-it-can-prove.test.ts'
+    - claim: "a run that opened a PR keeps nothing"
+      proof: 'grep: test("W1-T9815: a run that opened a PR keeps no checkpoint" in test/a-failed-exit-keeps-the-newest-checkpoint-it-can-prove.test.ts'
+  falsifier: |
+    At origin/main, a WorkerAbandonedError thrown by the implement worker of a run that restored a checkpoint writes
+    verdict failed, stage worker.abandoned, and no implement.checkpoint_kept row, so pendingWorkerBoundaryHandoffs
+    over the rows is empty and the first test fails. A worker that pushes its own branch and throws "Command failed: gh
+    pr create" leaves pendingWorkerBoundaryHandoffs empty (W1-T9786's own test asserts it), so the second test fails.
+  note: |
+    EFFECT, measured after merge from the core ledger with no numeric pass mark: for each verdict failed with stage
+    worker.abandoned, worker.bounded_output or run.error (cause pr-create-failed) in a run that restored or pushed a
+    checkpoint, an implement.checkpoint_kept row from the same run, and no dispatch.skipped reason
+    run-branch-already-pushed for that task afterwards.

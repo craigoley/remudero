@@ -1,0 +1,56 @@
+- id: W1-T9920
+  title: "THE DAEMON LEDGERS HOW EACH WORKER ENTRY WAS RESOLVED — only serve calls setWorkerEntryLog, so startWorker's worker.entry_resolved row never fires in the daemon, and startWorker's off-switch, not-under-src and bundled arms write no row in any process; 132 rows since 2026-10-13, all from SERVE, none saying why a daemon worker ran under tsx"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, which worker-entry decisions reach the ledger; no entry decision changes
+  band_meaning: blast-radius
+  origin: 'W1-T9722 builder report (PR 12390), follow-up; coordinator brief batch1016b item 3'
+  plan_refs: [W1-T9370, W1-T9722, W1-T8777, W1-T9845]
+  files:
+    - src/lib/child-entry-argv.ts
+    - src/run-task.ts
+    - test/the-daemon-ledgers-how-each-worker-entry-was-resolved.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main fb566039c (symbols, not lines):
+    - src/lib/child-entry-argv.ts: startWorker writes `worker.entry_resolved` (module, kind, reason) through the
+      module-level `entryLog`, once per module on its first decision and again on a demotion. setWorkerEntryLog
+      sets entryLog, and src/lib/serve.ts is its only caller (W1-T9370). daemonCommand in src/run-task.ts never
+      calls it, so in the daemon process entryLog is undefined and no decision is written.
+    - Three startWorker arms return before any decision and write nothing, even in serve: the off switch
+      (RMD_BUNDLED_WORKERS=0), a module not under a src/ directory, and runsBundled() (bundledWorkerUrl). The
+      `override` arm is the test seam and stays silent.
+    - Daemon-side startWorker callers include src/lib/benchmark-cohort.ts. Its W1-T9845 doc comment says "the
+      daemon's pass runs in a one-shot worker", started with startWorker.
+    - The daemon's read plane (src/lib/read-plane.ts) builds its own `new Worker` with a tsx eval loader when the
+      URL ends in .ts. It never reaches startWorker. W1-T9722 (PR 12390, open) adds a `read_plane.worker_started`
+      row that names the entry. This task covers the general startWorker path only.
+    OBSERVED: core's ledger union for files modified since 2026-10-13 (94 .gz plus the live file) holds 132
+    `worker.entry_resolved` rows. All 132 have task_id SERVE and kind bundle, reason source-hash-match. There are
+    0 from the daemon. Control: the same scan finds serve's rows, so it read the corpus. The daemon has no row
+    from which to tell a bundle start from a tsx fallback, or to read a fallback's reason.
+  design: |
+    1. daemonCommand calls setWorkerEntryLog with its ledger log at boot, beside its other boot wiring, so the
+       daemon's startWorker decisions are written. The row's lane and run_id come from the daemon's own log.
+    2. startWorker writes one worker.entry_resolved row per module for each early arm, with kind tsx and reasons
+       `bundled-workers-off`, `not-under-src`, or kind bundle and reason `bundled-isolate`. Each arm is still
+       written once per module per process, like a decision.
+    3. No entry decision changes. No new step name, env var or constant.
+    Tests go in test/the-daemon-ledgers-how-each-worker-entry-was-resolved.test.ts, titled verbatim as in the
+    proofs. Prove item 1 by driving daemonCommand's boot wiring (or the function it extracts for it) and starting a
+    worker through startWorker with injected construct/check seams.
+  acceptance:
+    - claim: "after the daemon's boot wiring, a startWorker decision writes worker.entry_resolved to the daemon's log"
+      proof: 'grep: test("W1-T9920: the daemon writes worker\.entry_resolved for its workers" in test/the-daemon-ledgers-how-each-worker-entry-was-resolved.test.ts'
+    - claim: "startWorker's off-switch and not-under-src arms each write one worker.entry_resolved row naming why the worker runs under tsx"
+      proof: 'grep: test("W1-T9920: an early startWorker arm writes its entry row once" in test/the-daemon-ledgers-how-each-worker-entry-was-resolved.test.ts'
+  falsifier: |
+    On origin/main, daemonCommand never calls setWorkerEntryLog, so a worker the daemon starts writes no row and the
+    first test fails. startWorker with RMD_BUNDLED_WORKERS=0 returns construct(self) before any entryLog call, so
+    the second fails.

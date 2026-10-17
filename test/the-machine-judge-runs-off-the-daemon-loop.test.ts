@@ -39,6 +39,8 @@ test("W1-T5361: the daemon starts no in-process machine-filing judge; the judge 
   writeFileSync(planPath, "[]\n");
   const oldHome = process.env.HOME;
   const oldSre = process.env.RMD_SRE_LANE;
+  const oldInboxMode = process.env.RMD_INBOX_GARDENER_MODE;
+  process.env.RMD_INBOX_GARDENER_MODE = "off";
   process.env.HOME = home;
   delete process.env.RMD_SRE_LANE;
   const started: Array<{ stop: () => void }> = [];
@@ -47,6 +49,8 @@ test("W1-T5361: the daemon starts no in-process machine-filing judge; the judge 
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
     if (oldSre !== undefined) process.env.RMD_SRE_LANE = oldSre;
+    if (oldInboxMode === undefined) delete process.env.RMD_INBOX_GARDENER_MODE;
+    else process.env.RMD_INBOX_GARDENER_MODE = oldInboxMode;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -65,8 +69,10 @@ test("W1-T5361: the daemon starts no in-process machine-filing judge; the judge 
   const gardens = captured?.gardens ?? [];
   assert.equal(gardens.length, names.length, "the daemon's gardens list is exactly the registry");
   for (const start of gardens) started.push(start(60 * 60 * 1000));
-  for (let waited = 0; spawned.length < names.length && waited < 5_000; waited += 10) await wait(10);
-  assert.deepEqual([...spawned].sort(), [...names].sort(), "every garden, the judge included, runs through the garden spawn");
+  const enabledNames = names.filter(name => name !== "inbox");
+  for (let waited = 0; spawned.length < enabledNames.length && waited < 5_000; waited += 10) await wait(10);
+  assert.deepEqual([...spawned].sort(), [...enabledNames].sort(), "every enabled garden, the judge included, runs through the garden spawn");
+  assert.equal(spawned.includes("inbox"), false, "the separately governed Inbox gardener defaults off");
 
   const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
     .split("\n")

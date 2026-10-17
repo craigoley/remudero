@@ -1,0 +1,108 @@
+- id: W1-T9972
+  title: "THE DAEMON'S TAIL IS ITS RECENT PEAK, NOT ITS LIFETIME PEAK — every enforced admission charges the core daemon's boot-time VmHWM - VmRSS (1.4-2.8 GB) as the host's one tail allowance for the whole life of the process, so 'unrealized-reservations' holds fixes and reviews for 20-44 minutes while the worker reservations themselves are charged 250-600 MiB"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which daemon growth the per-start verdict charges as the daemon's tail; the reasons, the reserve, the policy modes, the admission tiers and the worker claims are unchanged
+  band_meaning: span
+  origin: "operator brief 2026-10-17 ~01:45Z (M35 investigation): 9 workers waiting on unrealized-reservations, fix rounds for #12385/#12406/#12411/#12390 held; file the root cause at priority 1; standing rulings: no hard fixed thresholds, never raise core memory.max"
+  plan_refs: [W1-T7094, W1-T9557, W1-T9762, W1-T9647, W1-T9106]
+  files:
+    - src/lib/host-memory-shadow.ts
+    - test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts
+    - test/the-memory-budget-treats-the-daemon-as-one-more-tail.test.ts
+    - test/the-memory-budget-measures-what-the-host-can-show.test.ts
+  status: merged
+  priority: 1  # operator-2026-10-17: the tail behind every unrealized-reservations wait since W1-T9762 decayed the worker claims
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 21:29Z to 2026-10-17 01:50Z, core instance (state2), read-only. Sources: 192
+    memory_budget.enforce_* rows, memory_budget.shadow rows, daemon.alive rows and state/daemon-footprint.json, from the
+    live ledger and the 23-33-42 and 01-34-43 archives.
+    - THE RESERVATIONS DO NOT LEAK. The store /mnt/scratch/rmd/test-slots/host-memory held 5-7 entries at 01:48Z. All
+      were this container generation's own, verified within the last second, with bound roots: a fix, a fix, a test,
+      a garden and an implement (opened 00:27Z). No entry from an ended generation survived. A waiting start holds no
+      reservation: awaitMemoryAdmission opens one only on admit. The daemon.detached_action_abandoned rows (6 at
+      21:39:22Z, 6 at 21:48:52Z) are fix-dispatch actions aged 2,523,561 ms that a freshness drain gave up on. They
+      are a CONSEQUENCE of the admission wait, not a holder.
+    - W1-T9762 IS LIVE AND WORKS. The daemon runs 19f5e43a2, which contains ac85588ca. Every shadow row's claims carry
+      its `decay`. The worker typical claim (hostTypicalMib) was 160-900 MiB, mostly 230-600.
+    - THE HOST TAIL IS THE DAEMON'S LIFETIME PEAK. On every row since each boot settled, numbers.hostTailMib equals
+      numbers.daemonGrowthTailMib: 1,000-2,800 MiB, with daemonGrowthTypicalMib 0. It is 75-90% of hostClaimMib.
+      Example, 01:50:30Z: hostClaim 2,608 = typical 308 + daemon tail 2,300, with daemon_growth basis
+      "proc 123: VmHWM 4058 MiB - VmRSS 1758 MiB". The reason fires on base - hostClaimMib < hostReserveMib (2,048), so
+      a host needs about 4.7 GB of MemAvailable to admit anything. The 7.5-10 GB "reservations" an operator reads is
+      numbers.unrealizedMib, the undecayed p90 sum, which is kept for comparison only and decides nothing.
+    - THE PEAK IS A BOOT SPIKE THAT NEVER RECURS. VmHWM jumped within about 10 minutes of each boot and then stayed
+      fixed while VmRSS moved between 1.2 and 2.6 GB:
+        - boot 22:25Z: 954 MiB, then 3,679 by 22:32Z;
+        - boot 00:24:18Z: 1,785 MiB at 00:28Z, then 4,058 by 00:37Z (daemon.alive at 00:31:50Z: rss 2,156 + swap
+          2,594 MiB).
+      The daemon's own footprint (rss+swap) over 00:49-01:48Z was 1,920-2,648 MiB, so its last-hour max less its
+      latest was 0-700 MiB.
+    - SWAP INFLATES IT. VmHWM is a resident peak and VmRSS excludes swap, so a host that swaps the daemon out RAISES the
+      charge. At 01:10Z VmRSS was 1,193 MiB and the charge 2,865 MiB, while the daemon held 1.0-1.1 GB in swap.
+    - REPLAY. The 36 rows naming unrealized-reservations were re-judged with the daemon's tail taken from its last-hour
+      rss+swap series instead of VmHWM - VmRSS. 22 fit. Every one from 01:32Z on fits, including the 01:45-01:47Z waits
+      behind the 9-worker queue. The rows from 00:37-01:30Z stay short because that hour's series still holds the boot
+      spike. That is the intended behaviour: a spike inside the window is still charged.
+    READ at origin/main 0209f6837 (symbols):
+      - `ownDaemonGrowth` (src/lib/host-memory-shadow.ts) prefers `daemonGrowthFromStatus` (VmHWM - VmRSS from
+        /proc/<pid>/status) whenever the pid is readable. It uses the sample series (`daemonSeries`:
+        `footprintGrowthOf`/`daemonGrowthOf`, max - latest over the last hour) only for the typical split, and as the
+        fallback.
+      - `evaluateShadowMemory` charges `growthMib - typicalMib` as a daemon tail. That tail competes with the trees'
+        tails for the one allowance (`hostTail`, `containerTail`).
+      - W1-T9557 (merged) moved only the CAPACITY DECISION to the typical part. Its rationale kept the per-start tail on
+        the lifetime figure ("the per-start verdict already charges it as the one tail allowance"). This task is that
+        remaining half.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and all 442 open heads for VmHWM, daemonGrowth,
+    daemonGrowthFromStatus and changes to host-memory-shadow.ts. The hits were W1-T9557 (the capacity decision only),
+    W1-T9542 (serve handoff sizing), W1-T9647 (names the heap) and W1-T9106 (heap ceiling: it shrinks the spike, not
+    how it is charged). Only stale run-W1-T8472/W1-T8711 checkpoint heads touch the shadow file, and not this code.
+    The boot spike itself (about 4 GB within 10 minutes of each boot) is a separate item for W1-T9647/W1-T9106.
+  design: |
+    No new constant, interval, count or byte threshold. The window is the series' existing hour (HOUR_MS) and
+    `daemonGrowthMinSamples`.
+    1. THE DAEMON'S GROWTH IS ITS RECENT PEAK. When the own daemon's sample series (`daemonSeries`) has at least
+       `daemonGrowthMinSamples` samples in the last hour, its growth is the series' max rss+swap less the CURRENT
+       rss+swap, and its typical part is the median less the current. Read the current value from the pid's
+       /proc status as VmRSS + VmSwap when readable, else the latest sample. The swap belongs in the figure because the
+       series is rss+swap.
+       A spike inside the window is still charged in full. The lifetime VmHWM no longer sizes the tail.
+    2. TOO FEW SAMPLES: as today. The proc's VmHWM - VmRSS is the growth, all of it typical, and the basis says so.
+       This covers the first minutes after a boot with no footprint.
+    3. RECORD BOTH. Each `daemon_growth` entry keeps the lifetime figure as `lifetimePeakGrowthMib` with its proc
+       basis, for comparison only. Its `basis` names the series that sized the growth. `numbers` gains
+       `daemonGrowthLifetimePeakMib`, the sum of the lifetime figures, and `hostTailOwner`: "daemon:<instance>", the
+       owning claim's worker class, or "start". A row naming unrealized-reservations then says whose tail tipped it.
+       The comparison fields decide nothing.
+    Update the existing assertions that pin the proc figure as the growth, in
+    test/the-memory-budget-treats-the-daemon-as-one-more-tail.test.ts ("the peak is still the proc's VmHWM - VmRSS")
+    and test/the-memory-budget-measures-what-the-host-can-show.test.ts ("VmHWM - VmRSS of the daemon pid"). Each
+    becomes the series figure where the fixture has enough samples, and stays the proc figure where it has too few.
+    New tests go in the new file, with `test(` titles verbatim as in the proofs below. The fixture comes from the
+    01:50:30Z row: /proc status VmHWM 4,058 MiB, VmRSS 1,758 MiB, VmSwap 600 MiB; 30 footprint samples over the last
+    hour at 1,920-2,648 MiB; MemAvailable 4,300 MiB; a worker typical of 256 MiB; reserve 2,048. Under the lifetime
+    rule that fixture defers on unrealized-reservations, and under the recent rule it fits.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts"
+    - claim: "a boot-time lifetime peak outside the last hour is not charged as the daemon's tail"
+      proof: 'grep: test("W1-T9972: a lifetime peak outside the last hour is not charged as the daemon tail" in test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts'
+    - claim: "a spike inside the last hour is still charged in full"
+      proof: 'grep: test("W1-T9972: a spike inside the last hour is still charged as the daemon tail" in test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts'
+    - claim: "with too few samples the lifetime figure is charged and the basis says so"
+      proof: 'grep: test("W1-T9972: too few samples charge the lifetime peak and say so" in test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts'
+    - claim: "the current rss+swap, not VmRSS alone, is what the growth is measured from"
+      proof: 'grep: test("W1-T9972: swapped-out daemon pages do not raise the daemon tail" in test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts'
+    - claim: "a verdict names whose tail it charged and keeps the lifetime figure for comparison"
+      proof: 'grep: test("W1-T9972: a verdict names its host tail owner and the lifetime peak growth" in test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts'
+  falsifier: |
+    Keep `daemonGrowthFromStatus` as the growth whenever the pid is readable. The 01:50:30Z fixture then defers on
+    unrealized-reservations, and the first test fails.
+    Measure from VmRSS without VmSwap: the swap test fails.
+    Drop `hostTailOwner`: the last test fails.

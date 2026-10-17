@@ -18,6 +18,9 @@
  * "finished" would retire live findings, which is the expensive direction.
  */
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
+import { makeTempDir } from "../src/lib/tmp.js";
+import { inboxSemanticDigest, inboxProposalRevision, inboxRetirementFor, proofDebtPopulationPermit, stampMechanicalAsk, writeInboxGardenerStore, readInboxGardenerStore } from "../src/lib/inbox-retirement.js";
 import { test } from "node:test";
 
 import { classifyProposal, deriveTaskReferent, type Proposal, type ReadinessContext } from "../src/lib/inbox.js";
@@ -47,25 +50,32 @@ function ctxWith(plan: Plan, mergedIds: string[]): ReadinessContext {
 
 const proposal = (id: string): Proposal => ({ id, summary: id, evidenceAnchors: [] }) as Proposal;
 
-test("W1-T3385: a proof-debt proposal whose task has MERGED is retired, not left READY", () => {
-  const c = classifyProposal(proposal("proof-debt:W1-T201:3"), undefined, ctxWith(planOf("W1-T201"), ["W1-T201"]));
-  assert.equal(c.state, "retired", "a proposal about finished work must not stay in the operator's queue");
-  assert.match(c.retiredReason ?? "", /W1-T201 has merged/);
+test("W1-T3385: a proof-debt proposal whose task has MERGED is retired, not left READY", t => {
+  const plan = planOf("W1-T201"), task = plan.tasks[0]!, ctx = ctxWith(plan, [task.id]);
+  const p = stampMechanicalAsk({ id: "proof-debt:W1-T201:3", summary: "repair", evidenceAnchors: [{ description: "criterion3", pattern: "missing", path: "plan/tasks.yaml" }] }, task.id, proofDebtPopulationPermit([task]));
+  const root = makeTempDir("merged-ask-receipt"); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scope = { repository: "owner/remudero", instance: "core", root }, proof = { kind: "merged-task" as const, taskId: task.id, repository: scope.repository, instance: scope.instance,
+    number: 201, url: "https://github.com/owner/remudero/pull/201", state: "MERGED" as const, headRefName: "run-W1-T201-1234", headSha: "a".repeat(40), mergeSha: "b".repeat(40), body: "Remudero-Task: W1-T201", credit: "trailer" as const, implementationCredit: true as const, paths: ["src/lib/inbox.ts"] };
+  writeInboxGardenerStore(root, { version: 1, scope, entries: {}, events: [{ receipt: { id: "c".repeat(64), kind: "retire", scope: { repository: scope.repository, instance: scope.instance, proposalId: p.id, taskId: task.id }, snapshotKey: "d".repeat(64), at: new Date().toISOString(), authority: "automatic", heldAtRetirement: false },
+    reason: "W1-T201 has merged under positive source proof", proof, proofId: inboxSemanticDigest(proof), inputDigest: "e".repeat(64), proposalRevision: inboxProposalRevision(p), operatorIntent: inboxSemanticDigest([]), codeSha: "a".repeat(40), mirrored: true }] });
+  ctx.retirement = proposal => inboxRetirementFor(readInboxGardenerStore(root, scope), proposal, inboxSemanticDigest([]));
+  const c = classifyProposal(p, undefined, ctx);
+  assert.equal(c.state, "retired"); assert.match(c.retiredReason ?? "", /W1-T201 has merged/);
+  assert.equal(c.retirement?.proofKind, "merged-task");
 });
 
-test("W1-T3385: a verify-human proposal whose shard has MERGED is retired too", () => {
+test("an untyped human ask remains visible when its related task merged", () => {
   const c = classifyProposal(proposal("verify-human:W1-T992"), undefined, ctxWith(planOf("W1-T992"), ["W1-T992"]));
-  assert.equal(c.state, "retired");
+  assert.equal(c.state, "not_ready"); assert.match(c.needsTriageReason ?? "", /terminal state alone/);
 });
 
-test("a closed verify-human task leaves a history item, not a new decision", () => {
+test("closed task facts alone do not answer an untyped human or mechanical ask", () => {
   const closed = { ...task("W1-T1041"), verify: "human" as const, status: "blocked" as const, retirement: "closed" as const };
   const plan = { tasks: [closed], byId: new Map([[closed.id, closed]]) } as Plan;
-  const c = classifyProposal(proposal("verify-human:W1-T1041"), undefined, ctxWith(plan, []));
-  assert.equal(c.state, "retired");
-  assert.match(c.retiredReason ?? "", /explicitly closed in the plan/);
-  // W1-T5652: an explicit task retirement resolves every task-referent ask on it, proof-debt included.
-  assert.equal(classifyProposal(proposal("proof-debt:W1-T1041:0"), undefined, ctxWith(plan, [])).state, "retired");
+  for (const id of ["verify-human:W1-T1041", "proof-debt:W1-T1041:0"]) {
+    const c = classifyProposal(proposal(id), undefined, ctxWith(plan, []));
+    assert.equal(c.state, "not_ready"); assert.match(c.needsTriageReason ?? "", /terminal state alone/);
+  }
   assert.notEqual(classifyProposal(proposal("proof-debt:W1-T1042:0"), undefined, ctxWith(plan, [])).state, "retired",
     "a retirement on one task does not erase another task's finding");
 });

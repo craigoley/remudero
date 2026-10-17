@@ -1,0 +1,96 @@
+- id: W1-T9982
+  title: "A FRESH DAEMON'S TAIL IS WHAT ITS EARLIER BOOTS GREW — in the first minutes after a boot the memory budget charges the core daemon VmHWM - VmRSS of a process that has not grown yet (6-106 MiB at 02:33-02:35Z), so it admitted two implements and an advisory minutes before the daemon grew by 2.1 GB, as it did 2.2-2.7 GB after each of the three boots before; the footprint series cannot tell boots apart because every container generation is pid 123"
+  repo: remudero
+  depends_on: [W1-T9972]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — what the per-start verdict charges for its own daemon while that daemon is inside the boot phase its earlier boots showed; the reasons, the reserve, the tiers and the worker claims are unchanged
+  band_meaning: span
+  origin: "operator brief 2026-10-17 ~02:55Z (agent F13): host MemAvailable 6.5 GB to ~1.0 GB within 9 minutes of the 02:33Z core boot, load 77, ssh dead 02:40-02:54Z; asked whether admission plans for the post-boot daemon spike; standing rulings: no hard fixed thresholds, never raise core memory.max"
+  plan_refs: [W1-T9972, W1-T9557, W1-T9762, W1-T9647, W1-T9106, W1-T9981, W1-T8883]
+  files:
+    - src/lib/daemon-footprint.ts
+    - src/lib/host-memory-shadow.ts
+    - test/a-fresh-daemons-tail-is-what-its-earlier-boots-grew.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-17: admission was blind to the boot growth behind the 02:33Z host collapse
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 on the core ledger (state2), read-only: memory_budget.shadow, memory_budget.enforce_*,
+    dispatch_memory_observed, daemon.boot_first_dispatch, daemon.memory and daemon.host_memory_reservations.swept rows,
+    and state/daemon-footprint.json.
+    - EVERY BOOT GROWS ~2.2 GB WITHIN MINUTES (VmHWM, daemon.memory):
+        - boot 22:27:09Z: 1,515 MiB at uptime 230 s, 3,679 by 421 s;
+        - boot 00:25:18Z: 1,785 MiB at 247 s, 4,058 by 429 s;
+        - boot 02:33:15Z: 985 MiB at 10 s (proc in the 02:33:25Z shadow row), 3,107 at 232 s (VmRSS 3,102).
+      The sibling task W1-T9981 names the cause: the first full pass's reader-agreement check. Other growth can come in
+      the same phase. The ledger_fold stage held 1.3 GB live at 02:37:01Z.
+    - THE BUDGET CHARGED ALMOST NOTHING FOR IT. The daemon_growth basis on each memory_budget.shadow row, 1 sample each:
+        - 02:33:25Z: VmHWM 985 - VmRSS 979 = 6 MiB, MemAvailable 6,637 MiB;
+        - 02:34:02Z: 1,530 - 1,424 = 106 MiB;
+        - 02:35:36Z: 1,857 - 1,808 = 48 MiB, MemAvailable 5,679 MiB, advisory admitted.
+      daemon.boot_first_dispatch 02:34:46Z admitted 2 implements (W1-T9869, W1-T9862) at host_available 6,676 MiB, against
+      a dispatch floor of 3,072. The daemon then grew by 2.1 GB by 02:36:17Z. Only once the spike had happened did the
+      charge rise (02:36:24Z: VmHWM 3,173 - VmRSS 1,550 = 1,623 MiB).
+    - WHAT FOLLOWED:
+        - 02:39:12-13Z: three review starts admitted within one second at MemAvailable 4,892-4,986 MiB;
+        - 02:39:37Z: MemAvailable 2,812 MiB, with psi, container-ceiling and unrealized-reservations;
+        - 02:40:41Z: reservations swept: 8 live, 12,623 MiB reserved;
+        - Azure metrics (brief): host MemAvailable ~1.0-1.4 GB by 02:42Z, load 77, last heartbeat 02:35:01Z.
+    - THE SERIES CANNOT SEE EARLIER BOOTS. state/daemon-footprint.json at 03:03Z held 6 samples
+      {at, bytes, pid: 123}. Its first sample (02:31:03Z) belongs to the previous generation. Every container
+      generation's daemon is pid 123, FOOTPRINT_RETAIN_MS keeps one hour, and createDaemonFootprint reloads the file at
+      boot. So the series mixes the last generation's steady hour with the new one's first minutes, and no store keeps
+      what a boot phase grew.
+    READ at origin/main 35839d2ca (symbols):
+    - ownDaemonGrowth (src/lib/host-memory-shadow.ts) charges daemonGrowthFromStatus (VmHWM - VmRSS) whenever the pid is
+      readable. W1-T9972 (queued, claimed) changes it to the last hour's max rss+swap less the current one when the
+      series has daemonGrowthMinSamples. With too few samples it keeps VmHWM - VmRSS, "all of it typical". That is the
+      first minutes after a boot, so the boot spike is still unplanned after W1-T9972 lands.
+    - FootprintSample (src/lib/daemon-footprint.ts) is {at, bytes, pid}. It has no generation.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and 49 shards on open heads for boot phase, post-boot, VmHWM,
+    daemonGrowth and daemon-footprint. W1-T9972 leaves the too-few-samples case as it is. W1-T9557 moved the capacity
+    decision to the typical part. W1-T9106 caps the heap ceiling. W1-T9981 shrinks the spike's main cause but not the
+    rule that a fresh daemon is charged nothing. Serve is not this task: its current RSS is already inside MemAvailable.
+  design: |
+    No new constant, interval, count or byte threshold. Windows and counts come from existing ones or from what the
+    record observed.
+    1. SAMPLES NAME THEIR GENERATION. FootprintSample gains `boot`, the daemon generation's start (ms since epoch, the
+       same instant as its DAEMON-<ms> run id). A sample without it reads as an unknown generation. The series used by
+       W1-T9972 counts only samples from the current generation once it has daemonGrowthMinSamples of them. Before
+       that it keeps today's behaviour.
+    2. A BOOT-GROWTH RECORD. The daemon keeps one entry per generation in its footprint store:
+       {boot, first_bytes, peak_bytes, peak_uptime_ms}. It is updated from the samples it already records, with no new
+       reading. Entries are kept for the window the heap-ceiling learning already uses (daemon.heap_ceiling_shadow
+       window_ms). A failed read or persist is named, never zero.
+    3. THE BOOT PHASE IS LEARNED. A generation is in its boot phase while its uptime is below the largest
+       peak_uptime_ms among the recorded earlier generations. During it, the own daemon's growth is the largest
+       earlier (peak_bytes - first_bytes) less what this generation has already grown (current rss+swap -
+       first_bytes), floored at the proc figure. Its typical part is the median of the same remainders. The basis names
+       the generations used ("boot-phase: N earlier boots, +X MiB by uptime Y s"). After the phase, or with no earlier
+       generation recorded, the rule is W1-T9972's, and the basis says which applied.
+    4. The verdict's daemon_growth entry gains `phase`: "boot" or "steady". The reasons, hostReserveMib, the tiers and
+       the worker claims are unchanged.
+    Tests go in the new file, with titles verbatim as in the proofs. The fixture comes from the three boots above:
+    earlier generations at first ~1,000-1,800 MiB and peak ~3,700-4,100 MiB by uptime 230-430 s; a current
+    generation at uptime 60 s with VmHWM 985 / VmRSS 979 MiB; MemAvailable 6,637 MiB; an implement start (estimate 3,196 MiB, typical 447,
+    as on the 02:39:12Z row); reserve 2,048. Under today's rule the start fits. Under the boot-phase rule it defers on unrealized-reservations.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-fresh-daemons-tail-is-what-its-earlier-boots-grew.test.ts"
+    - claim: "inside the learned boot phase the daemon is charged the growth its earlier boots showed, less what it has already grown"
+      proof: 'grep: test("W1-T9982: inside the boot phase the daemon is charged what earlier boots grew" in test/a-fresh-daemons-tail-is-what-its-earlier-boots-grew.test.ts'
+    - claim: "past the learned phase, or with no earlier boot recorded, the steady rule applies and the basis says so"
+      proof: 'grep: test("W1-T9982: past the boot phase or with no earlier boot the steady rule applies" in test/a-fresh-daemons-tail-is-what-its-earlier-boots-grew.test.ts'
+    - claim: "footprint samples name their generation, and an earlier generation's samples never size the current one's steady growth"
+      proof: 'grep: test("W1-T9982: a sample names its generation and an earlier one never sizes the steady growth" in test/a-fresh-daemons-tail-is-what-its-earlier-boots-grew.test.ts'
+    - claim: "each generation's first, peak and peak uptime are recorded from the samples, and an unreadable store is named"
+      proof: 'grep: test("W1-T9982: each generation records its first and peak footprint and when it peaked" in test/a-fresh-daemons-tail-is-what-its-earlier-boots-grew.test.ts'
+  falsifier: |
+    Keep daemonGrowthFromStatus as the growth at uptime 60 s. The fixture start fits with a 6 MiB daemon charge, and the
+    "inside the boot phase" test goes red. Drop `boot` from the samples: the previous generation's last-hour samples
+    size the new generation's steady growth, and the "names its generation" test goes red. Learn the phase as a fixed
+    10 minutes instead of from peak_uptime_ms: a fixture whose earlier boots peaked at 20 minutes is charged nothing at
+    minute 12, and the "inside the boot phase" test goes red.
