@@ -55,6 +55,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertInspected, gitTrackedCount } from "./helpers/inspected-population.js";
 import { repoRoot as findRepoRoot } from "./helpers/repo-root.js";
 
 const REPO_ROOT = findRepoRoot();
@@ -344,7 +345,8 @@ test("the #3331-versus-#3335 shape (a shared table counted in one test, enumerat
 
 test("scanning the live, git-tracked test/ tree is not vacuous (it walks a real, sizeable corpus) and reports zero unsafe count assertions -- measured at sha 7e86a241, 886 tracked test/**/*.test.ts files, no pre-existing hit to grandfather", () => {
   const files = trackedTestFiles(REPO_ROOT);
-  assert.ok(files.length > 500, `expected a real test/ corpus, not an empty or synthetic one -- got ${files.length} files`);
+  // W1-T9863: the walked count must be above zero AND equal an independent count (no fixed minimum).
+  assertInspected("test/**/*.test.ts scan", files.length, gitTrackedCount(REPO_ROOT, "test", ".test.ts"));
 
   const violations = scanRepo(REPO_ROOT, files);
   assert.equal(violations.length, 0, `unexpected unsafe count assertion(s) -- re-derive rather than trust this: ${JSON.stringify(violations)}`);

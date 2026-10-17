@@ -1,30 +1,16 @@
 #!/usr/bin/env node
 // W1-T9863 — rewrite every own-location repo-root computation in test/*.test.ts to the one helper,
-// test/helpers/repo-root.ts. CONTENT ONLY: no file moves, no other edit.
-//
+// test/helpers/repo-root.ts. CONTENT ONLY: no file moves.
 //   node scripts/test-repo-root-codemod.mjs            # dry run: print the per-shape counts
 //   node scripts/test-repo-root-codemod.mjs --write    # rewrite the files in place
-//
-// A test that computes the root as `..` from its own folder breaks silently when the file moves one
-// level down: it reads `test/src`, and a census walking it compares nothing and passes. The helper
-// lives at a fixed depth, so the `..` count is written once.
-//
-// WHAT IT HANDLES (each shape is counted and printed):
-//   dirname-url        join|resolve(dirname(fileURLToPath(import.meta.url)), "..")
-//   dirname-global     join|resolve(__dirname, "..")
-//   import-meta-dir    join|resolve(import.meta.dirname, "..")
-//   url-dotdot         fileURLToPath(new URL("..", import.meta.url))          (trailing slash)
-//   url-dot-then-dotdot join(fileURLToPath(new URL(".", import.meta.url)), "..")
-//   url-pathname       [join(]new URL("..", import.meta.url).pathname[)]      (trailing slash)
-//
-// WHAT IT NEVER GUESSES. A match is rewritten only where it sits in CODE — never inside a comment, a
-// string, or a template's literal text (a fixture that quotes the shape stays as written). A
-// trailing-slash shape bound to a name that the file then concatenates as a string (`${NAME}x`,
-// `NAME + `) is left too, because the helper returns no trailing slash. Every one left is printed
-// with its reason, for the PR body.
-//
-// Computations under test/helpers, test/setup, test/lib and test/fixtures are out of scope: those
-// files do not move.
+// A test computing the root as `..` from its own folder breaks silently when it moves down a level:
+// a census then walks test/src and compares nothing. The helper sits at a fixed depth instead.
+// Shapes handled (each counted and printed): dirname-url, dirname-global, import-meta-dir,
+// url-dot-then-dotdot (slash-free), url-dotdot and url-pathname (trailing slash).
+// NEVER GUESSED: a match is rewritten only in CODE — not a comment, string or template text. A
+// trailing-slash root bound to a name the file concatenates as a string is left, because the helper
+// has no trailing slash. Every one left is printed with its reason, for the PR body.
+// Out of scope: test/helpers, test/setup, test/lib, test/fixtures — those files do not move.
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
