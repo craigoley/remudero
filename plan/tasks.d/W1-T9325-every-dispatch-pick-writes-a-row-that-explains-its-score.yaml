@@ -11,7 +11,7 @@
   origin: "operator approval 2026-10-13: the dispatch diagnosis asked for a visible ledger row that explains each pick"
   plan_refs: [W1-T9323, W1-T4064, W1-T8771, W1-T8502, W1-T8514]
   files: [src/lib/dispatch-value.ts, src/lib/daemon.ts, test/every-dispatch-pick-writes-a-row-that-explains-its-score.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

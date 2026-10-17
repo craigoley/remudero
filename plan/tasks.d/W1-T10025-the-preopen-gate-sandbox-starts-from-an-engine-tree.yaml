@@ -14,7 +14,7 @@
     - src/lib/preopen-gate.ts
     - src/lib/review.ts
     - test/the-preopen-gate-sandbox-starts-from-an-engine-tree.test.ts
-  status: queued
+  status: merged
   priority: 1  # the gate is the last local check before a build PR spends ~16 min of CI; with it unmeasured on every run child, own reds (a missing module, a missing test) reach CI and the fix lane instead
   attempts: 0
   rationale: |

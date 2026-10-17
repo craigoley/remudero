@@ -14,7 +14,7 @@
     - package.json
     - scripts/test-location-codemod.mjs
     - test/a-test-imports-through-the-subpath-alias.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
