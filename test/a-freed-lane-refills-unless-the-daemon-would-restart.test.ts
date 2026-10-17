@@ -80,7 +80,7 @@ function harness(staleFiles: string[] | undefined) {
       },
       checkFreshness: () => (stale && staleFiles ? staleWith(staleFiles) : { stale: false }),
     } as unknown as DaemonDeps,
-    { max: 3, laneCount: 2 },
+    { freshnessMinLifetimeMs: 0, max: 3, laneCount: 2 },
   );
   return {
     steps,

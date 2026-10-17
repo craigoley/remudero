@@ -1017,11 +1017,13 @@ function stepErrorContext(lines: readonly string[]): number[] {
 export function extractCiFailureRegion(log: string, tailLines: number): string {
   const pool = poolVerdictRetention();
   const rule = ruleSuitesRetention();
+  const summary = testSummaryRetention();
   for (const line of log.split("\n")) {
     pool.push(line);
     rule.push(line);
+    summary.push(line);
   }
-  return rule.wrap(pool.wrap(extractCiFailureRegionBase(log, tailLines)));
+  return rule.wrap(pool.wrap(summary.wrap(extractCiFailureRegionBase(log, tailLines))));
 }
 
 function extractCiFailureRegionBase(log: string, tailLines: number): string {
@@ -1163,6 +1165,47 @@ export function ruleSuitesRetention(): { push(line: string): void; wrap(region: 
   };
 }
 
+/** W1-T9932: an artifact finalize failure annotates only itself and the self-hosted hint, never the passing
+ *  tests before it (#12415), so the job log is read for the region that names them. */
+const ARTIFACT_FINALIZE_ANNOTATION_LINE = /^(?:Failed to FinalizeArtifact:|If you are using self-hosted runners, )/;
+
+/** W1-T9932: the runner's closing counts and the tier manifest's "K/M file(s) reported" line. */
+const CI_RUNNER_COUNT_LINE = /^# (tests|pass|fail) \d+$/;
+const CI_MANIFEST_COMPLETE_LINE = /^test-tier-manifest: .* run complete — (\d+)\/(\d+) file\(s\) reported/;
+
+export const RETAINED_TEST_SUMMARY_HEADER = "--- test-runner summary line(s) retained from earlier in this job ---";
+
+/** W1-T9932: a step error's region starts at that step, so a job whose tests all passed before a later step
+ *  failed (#12415) lost the summary saying so. The last counts ride along beside it, plus every failing count
+ *  and partial manifest line, so a classifier reading the region fails closed, and the failed step's header. */
+export function testSummaryRetention(): { push(line: string): void; wrap(region: string): string } {
+  const last = new Map<string, string>();
+  const failing: string[] = [];
+  let stepHeader: string | undefined;
+  let failedStep: string | undefined;
+  let stepError = false;
+  return {
+    push(line) {
+      const trimmed = line.replace(ACTIONS_LOG_TIMESTAMP, "").trim();
+      if (trimmed.startsWith("##[group]Run ")) stepHeader = trimmed;
+      if (trimmed.startsWith("##[error]") && !stepError) [stepError, failedStep] = [true, stepHeader];
+      const count = CI_RUNNER_COUNT_LINE.exec(trimmed);
+      const manifest = CI_MANIFEST_COMPLETE_LINE.exec(trimmed);
+      if (count) last.set(count[1], trimmed);
+      if (manifest) last.set("manifest", trimmed);
+      const bad = (count?.[1] === "fail" && !trimmed.endsWith(" 0")) || (manifest && manifest[1] !== manifest[2]);
+      if (bad && !failing.includes(trimmed)) failing.push(trimmed);
+    },
+    wrap(region) {
+      const have = new Set(region.split("\n").map((l) => l.trim()));
+      const missing = [...new Set([...failing, ...last.values()])].filter((line) => !have.has(line));
+      if (!stepError || missing.length === 0) return region;
+      const step = failedStep !== undefined && !have.has(failedStep) ? [failedStep] : [];
+      return [RETAINED_TEST_SUMMARY_HEADER, ...missing, ...step, "", region].join("\n");
+    },
+  };
+}
+
 export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
   const regionCap = Math.max(1, tailLines);
   const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
@@ -1180,6 +1223,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
   const verdict = gateVerdictRetention();
   const pool = poolVerdictRetention();
   const rule = ruleSuitesRetention();
+  const summary = testSummaryRetention();
   const select = (at: number, line: string): void => {
     let slot = selected.length;
     while (slot > 0 && selected[slot - 1].index >= at) {
@@ -1196,6 +1240,7 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
       verdict.push(line);
       pool.push(line);
       rule.push(line);
+      summary.push(line);
       const trimmedRaw = rawLine.trim();
       if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
         remedies.push(trimmedRaw);
@@ -1223,12 +1268,12 @@ export function ciFailureRegionReducer(tailLines: number): { push(rawLine: strin
       if (tail.length > tailLines) tail.shift();
     },
     finish(): string {
-      const region =
+      const region = summary.wrap(
         kept === 0 && failingTestsState !== "unseen"
           ? failingTests.join("\n").trim()
           : kept > 0 || stepErrors > 0
             ? selected.map((entry) => entry.line).join("\n").trim()
-            : tail.join("\n").trim();
+            : tail.join("\n").trim());
       const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
       const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
       return verdict.wrap(rule.wrap(pool.wrap(retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n"))));
@@ -1305,6 +1350,7 @@ function* ciFailuresSteps(
     const jobId = checkJobId(c);
     let annotationFallback: CiAnnotationFallback | undefined;
     let runnerTimeoutLines: string | undefined;
+    let finalizeAnnotation: string | undefined;
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
@@ -1319,6 +1365,13 @@ function* ciFailuresSteps(
           logUnavailable = undefined;
           tailSource = "annotations";
           annotationFallback = { outcome: "runner-timeout-only" };
+        } else if (evidence.some((m) => /^Failed to FinalizeArtifact:/.test(m.trim())) &&
+            evidence.every((m) => ARTIFACT_FINALIZE_ANNOTATION_LINE.test(m.trim()))) {
+          finalizeAnnotation = evidence.join("\n").split("\n").slice(-tailLines).join("\n");
+          logTail = finalizeAnnotation;
+          logUnavailable = undefined;
+          tailSource = "annotations";
+          annotationFallback = { outcome: "artifact-finalize-only" };
         } else if (evidence.length > 0) {
           logTail = evidence.join("\n").split("\n").slice(-tailLines).join("\n");
           logUnavailable = undefined;
@@ -1346,7 +1399,8 @@ function* ciFailuresSteps(
     } else if (jobId) {
       annotationFallback = { outcome: "skipped-limit" };
     }
-    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code" || runnerTimeoutLines !== undefined)) {
+    if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code" || runnerTimeoutLines !== undefined ||
+        finalizeAnnotation !== undefined)) {
       try {
         const readRegion = fetch.readJobLogRegion;
         if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
@@ -1364,6 +1418,12 @@ function* ciFailuresSteps(
           logTail = logTail.trim() === "" ? runnerTimeoutLines : `${runnerTimeoutLines}\n${logTail}`;
           logUnavailable = undefined;
           tailSource = logTail === runnerTimeoutLines ? "annotations" : "log";
+        } else if (finalizeAnnotation !== undefined) {
+          // The region carries the same `##[error]` line after the test summary it now keeps (W1-T9932), so it
+          // replaces the annotation rather than sitting beside it; an empty log keeps the annotation.
+          if (logTail.trim() === "") logTail = finalizeAnnotation;
+          logUnavailable = undefined;
+          tailSource = logTail === finalizeAnnotation ? "annotations" : "log";
         } else {
           logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
           if (logUnavailable === undefined) tailSource = "log";
@@ -1381,6 +1441,10 @@ function* ciFailuresSteps(
         if (runnerTimeoutLines !== undefined) {
           // The log could not be read, but the runner's own timeout lines were: keep exactly what was read before.
           logTail = runnerTimeoutLines;
+          logUnavailable = undefined;
+          tailSource = "annotations";
+        } else if (finalizeAnnotation !== undefined) {
+          logTail = finalizeAnnotation;
           logUnavailable = undefined;
           tailSource = "annotations";
         } else {

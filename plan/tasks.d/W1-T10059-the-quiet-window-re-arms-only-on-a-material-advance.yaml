@@ -1,0 +1,76 @@
+- id: W1-T10059
+  title: "THE FRESHNESS QUIET WINDOW RE-ARMS ONLY ON A MATERIAL ADVANCE, NOT ON EVERY NEW MAIN SHA (B3) — observeFreshnessAdvance resets lastAdvanceAtMs whenever origin/main's head changes, so once the daemon reads stale every plan-only merge pushes window_ends_at_ms out by the full 10 min; a replay of 1,406 commits of 2026-10-12..17 shows the fix alone adds 0.7 restarts a day and is restart-neutral under the 90-minute minimum lifetime"
+  repo: remudero
+  depends_on: []  # must land AFTER the 90-minute minimum lifetime hand-fix (branch fix-freshness-min-lifetime-1792255168191); see rationale
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which advance re-arms the W1-T6093 quiet window; the window length, scoring and threshold are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017c item 4 (bug B3 of the 2026-10-17 ~16:10Z restart analysis); operator approved the freshness-restart follow-ups 2026-10-17 ~16:20Z (PLAN-box-cpu-memory.md)'
+  plan_refs: [W1-T6093, W1-T4945, W1-T9092, W1-T7851]
+  files:
+    - src/lib/daemon.ts
+    - test/the-freshness-quiet-window-re-arms-only-on-a-material-advance.test.ts
+  status: queued
+  priority: 2.5  # correctness of the coalescing rows; restart-neutral once the minimum lifetime is in (sim below)
+  attempts: 0
+  rationale: |
+    READ at origin/main 81f49f019 (symbols, not lines):
+    - self-sync.ts: a stale freshness reading carries newSha = origin/main's head (`newSha: originSha`) and the
+      changes of the whole boot..head range, so once stale, every later merge (plan-only included) gives a new
+      newSha.
+    - daemon.ts `observeFreshnessAdvance(newSha, nowMs)`: `if (newSha !== lastAdvanceSha) { lastAdvanceSha = newSha;
+      lastAdvanceAtMs = nowMs; advancesCoalesced++; }`. `decideFreshness` passes lastAdvanceAtMs to
+      deploy-judge.ts `coalesceFreshnessRestart`, whose window ends at lastAdvanceAtMs + FRESHNESS_COALESCE_WINDOW_MS
+      (10 min). A plan-only merge, which `freshnessAdvanceWorth` scores 0 and W1-T9092 does not count as material,
+      therefore postpones window_quiet exactly as a daemon-code merge does.
+    OBSERVED in replay (logs-8864/batch1017c-b3sim.ts: restartsim-sim.ts with one change, the window re-arms only
+    when a commit marked material in restartsim-commits.ndjson landed since the last arming; results in
+    batch1017c-b3sim.txt; 1,406 commits, 10-12T00:00Z..10-17T14:50Z, the real decideFreshnessRestart and
+    coalesceFreshnessRestart from origin/main):
+    - today 18.2 freshness restarts/day, B3 fixed 18.9 (window_quiet releases 38 → 57, upper_age 46 → 32); drain
+      371 → 392 min/day. With the B1/B2 scoring fix: 18.2 → 18.7.
+    - with the 90-minute minimum lifetime and B1/B2: 10.9 → 10.9/day, staleness lag p50 26 → 25 min, daemon-fix
+      delivery max 118 → 117 min; window_quiet 1 → 2 of about 61 restarts.
+    INFERRED: fixed alone, B3 adds restarts (the window stops being postponed by plan merges); after the floor the
+    count is unchanged and the coalescing rows (window_ends_at_ms, advances_coalesced, held_ms) start meaning what
+    they say.
+    DEPENDS ON THE MINIMUM LIFETIME (not yet a filed id): the operator ruled FRESHNESS_MIN_LIFETIME_MS = 90 min on
+    2026-10-17 ~16:20Z; the hand-fix is branch fix-freshness-min-lifetime-1792255168191 (wt-min-lifetime, not
+    pushed at 16:47Z), which also edits decideFreshness and coalesceFreshnessRestart. This task must not merge
+    before it, or it adds about 0.7 restarts a day.
+    NOT COVERED ELSEWHERE: W1-T6093 (merged) introduced the window; W1-T9092 (merged) made staleness closure-based
+    but left the re-arm on the head SHA. Swept origin/main plan/tasks.d (4,093 shards) and the plan diffs of all 438
+    remote heads (ls-remote 16:46:49Z) for quiet window, observeFreshnessAdvance, lastAdvanceAtMs and
+    FRESHNESS_COALESCE_WINDOW: 0 head hits; main hits are W1-T6093, W1-T7851, W1-T9092, W1-T9352, W1-T8198.
+  design: |
+    1. daemon.ts: the window re-arms only when the advance adds a commit not seen before in this lifetime whose
+       freshness weight (`freshnessAdvanceWorth`, the score decideFreshnessRestart already sums) is above 0; an
+       unreadable advance (changes undefined) re-arms, as an unknown advance never waits. The first stale reading
+       still arms it. Score first, then observe, in `decideFreshness`; the dirty arm of `logNotStaleFreshness` uses
+       the same rule.
+    2. daemon.freshness_coalesced gains `immaterial_advances` (head changes that did not re-arm since the last
+       arming) beside advances_coalesced, which now counts re-arming advances only.
+    3. No count, bound, threshold or env var is added; the 10-minute window is unchanged.
+    4. TESTS in test/the-freshness-quiet-window-re-arms-only-on-a-material-advance.test.ts, `test(` titles verbatim
+       as in the proofs, driving runDaemon's freshness reads with fake advances on an injected clock (minimum
+       lifetime set to 0 so the window is reached).
+  acceptance:
+    - claim: "a plan-only advance inside the quiet window does not move its end"
+      proof: 'grep: test("W1-T10059: a plan-only advance inside the quiet window does not move its end" in test/the-freshness-quiet-window-re-arms-only-on-a-material-advance.test.ts'
+    - claim: "a material advance inside the quiet window still re-arms it"
+      proof: 'grep: test("W1-T10059: a material advance inside the quiet window still re-arms it" in test/the-freshness-quiet-window-re-arms-only-on-a-material-advance.test.ts'
+    - claim: "an unreadable advance re-arms the window"
+      proof: 'grep: test("W1-T10059: an unreadable advance re-arms the window" in test/the-freshness-quiet-window-re-arms-only-on-a-material-advance.test.ts'
+    - claim: "the coalesced row counts the advances that did not re-arm"
+      proof: 'grep: immaterial_advances in src/lib/daemon.ts'
+  falsifier: |
+    At origin/main a plan-only advance 8 min into the window moves window_ends_at_ms by its own arrival, so the
+    daemon still holds at the original window end and the first test fails. Restoring the head-SHA comparison
+    (deleting the fix) gives `# fail N`, the fix `# fail 0`.
+  note: |
+    EFFECT, measured after merge: daemon.freshness_coalesced rows show immaterial_advances > 0 on plan-heavy
+    stretches while window_ends_at_ms stays put. Healthy shape: freshness restarts per day unchanged against the
+    minimum-lifetime baseline (sim 10.9/day). OPERATOR DECISIONS: none; the window length is unchanged.

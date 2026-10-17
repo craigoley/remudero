@@ -9,9 +9,9 @@ const { summarizeReports, verifyControl, verifyParserControl, parserControlSourc
 const ruleId = "rmd-native-qualification-sentinel";
 function reports(paths = ["old.js", "new.js"]) {
   return {
-    report: { version: "1.180.0", engine_requested: "OSS", errors: [], skipped_rules: [], paths: { scanned: paths, skipped: [] },
+    report: { version: "1.181.0", engine_requested: "OSS", errors: [], skipped_rules: [], paths: { scanned: paths, skipped: [] },
       results: paths.map(path => ({ path, check_id: ruleId })) },
-    sarif: { version: "2.1.0", runs: [{ tool: { driver: { semanticVersion: "1.180.0", rules: [{ id: ruleId }] } },
+    sarif: { version: "2.1.0", runs: [{ tool: { driver: { semanticVersion: "1.181.0", rules: [{ id: ruleId }] } },
       invocations: [{ executionSuccessful: true, toolExecutionNotifications: [] }],
       results: paths.map(path => ({ ruleId, locations: [{ physicalLocation: { artifactLocation: { uri: path } } }] })) }] },
   };
@@ -180,7 +180,7 @@ test("native Semgrep real subprocess fixture exercises CLI contracts without pre
     writeFileSync(command, `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-if (args[0] === '--version') { console.log('1.180.0'); process.exit(0); }
+if (args[0] === '--version') { console.log('1.181.0'); process.exit(0); }
 const value = flag => args[args.indexOf(flag) + 1];
 const invalid = value('--config').endsWith('invalid.json');
 const paths = args.includes('--baseline-commit') ? ['new.js'] : ['old.js', 'new.js'];

@@ -1,0 +1,73 @@
+- id: W1-T10074
+  title: "SERVE'S MAIN LOOP STALLS 5 TO 22 S EVERY MINUTE, SO A 91 MS INBOX READ TIMES OUT AT THE CONSOLE'S 5 S, AND NOTHING NAMES THE BLOCKING FRAMES: serve's runtime.loop_lag row carries p50/p99/max only; it gains the daemon's loop-stall profiler (W1-T7746) and a top-frames row, and the frames it names are fixed off the loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, attributing and then removing serve's main-thread stalls; no route, view or wire shape changes
+  band_meaning: span
+  origin: "operator console end-to-end test 2026-10-17 fault (a): GET /v1/inbox?section=needsYou timed out at 5000 ms on about half of loads at 18:2xZ"
+  plan_refs: [W1-T7746, W1-T9361, W1-T5897, W1-T4041, W1-T6467, W1-T9766]
+  files:
+    - src/lib/serve.ts
+    - src/lib/incident-invariants.ts
+    - src/lib/loop-stall-profiler.ts
+    - test/serves-main-loop-stalls-are-profiled-and-named.test.ts
+  status: queued
+  priority: 1  # operator 2026-10-17: the console cannot load its inbox while serve's loop is blocked
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 on the fleet host (core ledger, read-only, niced):
+    - WHO SERVES IT: the console's GET /v1/inbox reaches the remudero-serve container (host 4c8e30eea463,
+      pid 302774, port 4317), not the core daemon (host 80ac7b9c3585). Serve answers it from the slow lane's
+      persisted classification (panel-graph.ts buildInboxRoute -> inboxRead -> readSlowLaneInbox, W1-T5897):
+      no classification on the request path, and the body carries snapshotKey and classifiedAt.
+    - serve.route_reads 18:00-19:00Z: /v1/inbox read 26 times by the console; only 15 have a latency entry
+      (2xx p99 91.3 ms, 304 under 1 ms). INFERRED: the other 11 were abandoned by the console's 5 s timeout
+      before serve answered. /v1/views/inbox: 508 reads, p50 250 ms, max 985 ms.
+    - runtime.loop_lag (serve, one row a minute) 18:46-19:03Z: maxMs 7126, 17012, 17138, 16903, 20334,
+      19529, 9714, 22247, 456, 8624, 21274, 21022, 17230, 7650, 14705, 5323, 17935. p50 is 20 ms throughout.
+      So nearly every minute holds one 5-22 s block; a request that arrives in it waits the block out, and the
+      handler latency (measured after dispatch) never sees it.
+    - The daemon's freshness_drain loop lag (daemon.loop_lag 1,510-6,730 ms, 18:25-18:37Z) is in a different
+      process. It shares the host: 8 cores, load 18.9, swap 5.7 GB used, and serve's own supervisor deferred every
+      handoff 18:17-19:03Z on "swap-in 1306-13970 pages/s > 256". Its sync spawns are W1-T10075.
+    - CANDIDATES, none proven (serve has no frame attribution, which is the defect this task fixes):
+      (1) the board gateway's closed channel, 10,073 PRs: board_snapshot.committed bytes 38,696,111 at 18:56:28Z,
+      then board_snapshot.unchanged at 18:56:37Z, then no serve row until 18:57:02Z and runtime.loop_lag maxMs
+      21,274 for that window; (2) GC over a 4.5 GB RSS (heap 0.88 GB) under swap-in; (3) the legacy inbox view's
+      per-request inboxLanes + inboxViewBodies over 1,398 proposals (p50 250 ms x 508/h).
+    - NOT PROFILED BY THIS SESSION: the house rules forbid signalling a host process, so no SIGUSR1/CDP profile
+      was taken. The daemon already has the in-process watchdog (loop-stall-profiler.ts, W1-T7746/W1-T9361) that
+      profiles a stall while it happens with no signal; serve does not use it.
+    NOT COVERED ELSEWHERE: swept origin/main plan/tasks.d for runtime.loop_lag, loop-stall-profiler and serve
+    stall; W1-T4384/W1-T5651/W1-T5687 add alarms, none attributes a serve stall.
+  design: |
+    1. serve.ts startIncidentInvariantsMonitor (the minute tick that writes runtime.loop_lag) also feeds each
+       reading to a loop-stall profiler built by loop-stall-profiler.ts, the SAME module the daemon uses. Its bound
+       is derived exactly as the daemon's (loopStallBoundMs: the tick interval plus the observed-lag quantile); no
+       new number. The profiler's row is written under serve's lane as `runtime.loop_stall_profile`, with the same
+       fields the daemon's row has (profiled_ms, unprofiled_ms, top self frames, their callers).
+    2. A profiler failure writes runtime.loop_stall_profile_failed with its reason and disables the watchdog for
+       the boot, as the daemon's does.
+    3. Once rows exist, each named frame that holds the loop for more than one tick interval is moved off the main
+       thread (a worker, an async read, or a memo keyed on its input identity), each in its own follow-up task
+       unless it is a one-line memo in serve.ts. The legacy inbox view's per-request inboxLanes/inboxViewBodies is
+       one such memo: key it on readSlowLaneInbox's identity, as slowLaneInboxOf already does for read.lanes().
+    4. TESTS in test/serves-main-loop-stalls-are-profiled-and-named.test.ts, test( titles verbatim as below.
+  acceptance:
+    - claim: "a serve main-thread stall longer than its bound writes a profile row naming its top frame"
+      proof: 'grep: W1-T10074: a serve main-thread stall longer than its bound writes a profile row naming its top frame in test/serves-main-loop-stalls-are-profiled-and-named.test.ts'
+    - claim: "a failing inspector disables serve's watchdog and says why"
+      proof: 'grep: W1-T10074: a failing inspector disables serve\.s watchdog and says why in test/serves-main-loop-stalls-are-profiled-and-named.test.ts'
+    - claim: "serve writes the stall profile row"
+      proof: 'grep: runtime\.loop_stall_profile in src/lib/serve.ts'
+  falsifier: |
+    At origin/main serve's monitor writes only runtime.loop_lag, so a test that blocks the loop past the bound
+    finds no runtime.loop_stall_profile row and fails; deleting the wiring reddens it again.
+  note: |
+    EFFECT, measured after merge on the fleet host: runtime.loop_stall_profile rows appear in the minutes whose
+    runtime.loop_lag maxMs exceeds the bound, naming frames; the console's /v1/inbox read count in serve.route_reads
+    equals its latency n (no abandoned reads) once the named frames are moved.

@@ -31,14 +31,14 @@ interface Checkout {
 function behindByASourceChange(t: TestContext): Checkout {
   const origin = gitRepo({ bare: true, kind: "midmerge-origin" });
   const author = gitRepo({ kind: "midmerge-author" });
-  mkdirSync(join(author.dir, "loop"), { recursive: true });
-  writeFileSync(join(author.dir, "loop", "sweep.ts"), "export const v = 1;\n");
+  mkdirSync(join(author.dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(author.dir, "src", "lib", "sweep.ts"), "export const v = 1;\n");
   author.git("add", "-A");
   author.git("commit", "--quiet", "-m", "seed");
   author.addRemote("origin", origin.dir);
   author.git("push", "--quiet", "origin", "main");
   const live = gitRepo({ cloneFrom: origin.dir, kind: "midmerge-live" });
-  writeFileSync(join(author.dir, "loop", "sweep.ts"), "export const v = 2;\n");
+  writeFileSync(join(author.dir, "src", "lib", "sweep.ts"), "export const v = 2;\n");
   author.git("commit", "--quiet", "-am", "fix(sweep): the triage evidence reads its slice off the loop");
   author.git("push", "--quiet", "origin", "main");
   live.git("fetch", "--quiet", "origin", "main");
@@ -55,14 +55,14 @@ function behindByASourceChange(t: TestContext): Checkout {
 
 /** What `git merge --ff-only` has done before it moves HEAD: the new blobs are on disk, nothing else. */
 function midFastForward(live: GitRepo): void {
-  writeFileSync(join(live.dir, "loop", "sweep.ts"), live.git("show", "origin/main:loop/sweep.ts") + "\n");
+  writeFileSync(join(live.dir, "src", "lib", "sweep.ts"), live.git("show", "origin/main:src/lib/sweep.ts") + "\n");
 }
 
 test("a reading taken mid-fast-forward never escalates, and the finished merge ends the episode", async (t) => {
   const c = behindByASourceChange(t);
   midFastForward(c.live);
   const first = await c.rung(T0);
-  assert.deepEqual(first.paths, ["loop/sweep.ts"], "the half-applied merge reads as an edit");
+  assert.deepEqual(first.paths, ["src/lib/sweep.ts"], "the half-applied merge reads as an edit");
   assert.equal(c.escalations.length, 0, "one reading never opens an issue");
   assert.notEqual(first.tier, 2, first.reason);
   c.live.git("reset", "--quiet", "--hard", "origin/main"); // the merge's last steps: index and HEAD reach main
@@ -73,12 +73,13 @@ test("a reading taken mid-fast-forward never escalates, and the finished merge e
 
 test("a tracked edit that a second reading still sees escalates on that reading", async (t) => {
   const c = behindByASourceChange(t);
-  writeFileSync(join(c.live.dir, "loop", "sweep.ts"), "export const v = 'hand edit';\n");
+  const handEditPath = join(c.live.dir, "src", "lib", "sweep.ts");
+  writeFileSync(handEditPath, "export const v = 'hand edit';\n");
   const first = await c.rung(T0);
   assert.equal(c.escalations.length, 0, first.reason);
   const second = await c.rung(T0 + 300_000);
   assert.equal(second.tier, 2, second.reason);
   assert.equal(c.escalations.length, 1);
-  assert.match(c.escalations[0]!.detail, /loop\/sweep\.ts/);
-  assert.equal(readFileSync(join(c.live.dir, "loop", "sweep.ts"), "utf8"), "export const v = 'hand edit';\n", "still deferred, never discarded");
+  assert.match(c.escalations[0]!.detail, /src\/lib\/sweep\.ts/);
+  assert.equal(readFileSync(handEditPath, "utf8"), "export const v = 'hand edit';\n", "still deferred, never discarded");
 });

@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts
-  status: queued
+  status: merged
   priority: 1  # the PR it produces cannot go green by any in-scope repair, so it parks behind a person; the fix lane's NEEDS_SCOPE path refuses it because the fix worker never wrote the file
   attempts: 0
   rationale: |

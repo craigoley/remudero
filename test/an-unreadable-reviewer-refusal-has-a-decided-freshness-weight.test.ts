@@ -108,7 +108,7 @@ async function busyDaemonDecisions(readLedgerLines: () => readonly string[]): Pr
       checkFreshness: staleFreshness,
       readLedgerLines,
     },
-    { sweepWallClockBoundMs: 60_000 },
+    { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 60_000 },
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = new Promise<"timed-out">((resolve) => (timer = setTimeout(() => resolve("timed-out"), 5_000)));

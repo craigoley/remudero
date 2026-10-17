@@ -28,7 +28,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { judgeFixProgress,
+import { firstFixRoundVerdict, judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -76,6 +76,8 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
+// @ts-expect-error W1-T10064: the daemon's own copy of the W1-T9864 codemod, which has no declaration file.
+import { rewriteSource as codemodRewriteSource } from "../scripts/test-location-codemod.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -1315,6 +1317,7 @@ import {
   readBlobsAtRef,
   mergePlanBlobs,
   loadPlanAtRefAsync,
+  TaskAdmissionError,
 } from "./lib/plan.js";
 import { exitCodeFor, GENERIC_EXIT_CODE, RmdError } from "./lib/errors.js";
 import { flushThenExit } from "./lib/flush-exit.js";
@@ -12714,10 +12717,10 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = await judgeFixProgress(input, progressJudge);
+      const decision = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
@@ -39037,6 +39040,10 @@ export interface RunInChildInput {
   options: RunChildSpecOptions;
   planSync: (options: { allowStale?: boolean }) => SyncedPlan | Promise<SyncedPlan>;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T10000: the daemon is told while the run waits for its child's admission. */
+  onPending?: (pending: RunChildPending) => void;
+  /** W1-T10000: asked before the run stays in-process; `false` ends the lane with a {@link TaskAdmissionError}. */
+  mayRunInProcess?: (reason: string) => boolean;
 }
 
 /** W1-T9085: under `sweep.runChild.mode: on` the run's settling promise from a detached child, else `undefined` (stays in-process; ledgered). */
@@ -39045,23 +39052,35 @@ export async function runInChildWhenOn(
   seams: { readMode?: () => RunChildMode; evidence?: () => RunChildModeEvidence; spawn?: typeof spawnRunChild; ports?: SpawnRunChildPorts } = {},
 ): Promise<RunChildHandle | undefined> {
   const mode = runChildModeIsOn(seams.readMode, seams.evidence);
-  const fallback = (reason: string): undefined => {
-    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+  const inProcess = (reason: string): undefined => {
+    if (input.mayRunInProcess?.(reason) === false) {
+      throw new TaskAdmissionError(`restart latched: task ${input.taskId} was admitted to run as a child, and cannot run in-process (${reason})`);
+    }
     return undefined;
   };
+  const fallback = (reason: string): undefined => {
+    input.log(RUN_CHILD_FALLBACK_STEP, { task_id: input.taskId, reason });
+    return inProcess(reason);
+  };
   if (mode.unreadable !== undefined) return fallback(`sweep.runChild.mode unreadable: ${mode.unreadable}`);
-  if (!mode.on) return undefined;
+  if (!mode.on) return inProcess("sweep.runChild.mode is not on");
   if (input.options.skipGitSync) return fallback("an explicit --plan is read literally; the run stays in-process");
   const start = seams.spawn ?? ((spawnInput, spawnPorts) => spawnRunChild(spawnInput, spawnPorts));
   const launched = await start({
     taskId: input.taskId, stateRoot: join(input.config.root, "state"), repoDir: input.repoDir, root: input.config.root,
     log: input.log, options: input.options,
     plan: async () => input.planSync({ allowStale: input.allowStale }),
+    ...(input.onPending ? { onPending: input.onPending } : {}),
   }, {
     abort: { teardownMs: () => restartWorkHistory(readRestartHistoryLines(dirname(ledgerPathFor(input.config))), systemClock.now()).yieldCost.ms },
     ...seams.ports,
   });
-  return launched.started ? launched : undefined;
+  if (launched.started) return launched;
+  // W1-T10000: an abandoned wait took no claim and wrote no spec; the next daemon dispatches it, never this one in-process.
+  if (launched.abandoned) {
+    throw new TaskAdmissionError(`task ${input.taskId}'s run child was abandoned after ${launched.waitedMs} ms waiting for memory admission`);
+  }
+  return inProcess(launched.reason);
 }
 
 export async function daemonCommand(
@@ -40158,6 +40177,7 @@ export async function daemonCommand(
           // W1-T9085: under sweep.runChild.mode on the run executes in a detached child; a child that cannot start runs in-process.
           const inChild = await runInChildWhenOn({
             taskId, config, repoDir: effectiveRepoRoot, allowStale, options: childOptions, log: childLog, planSync: planSyncCoalescer.sync,
+            onPending: runOptions?.onChildPending, mayRunInProcess: runOptions?.mayRunInProcess,
           }, { readMode: childPolicy, evidence: childModeTracker.evidence });
           if (inChild) {
             runOptions?.onChild?.(inChild);
@@ -43162,6 +43182,62 @@ export interface WorkerEditCommit {
   /** W1-T5227: the declared paths still holding a conflict marker; nothing staged, MERGE_HEAD left live. */
   readonly conflictMarkerFiles?: readonly string[];
   readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
+  readonly aliasRewrite?: AddedTestAliasRewrite;
+}
+
+/** W1-T10064: the W1-T9864 codemod's `rewriteSource` contract. */
+export type TestAliasRewriter = (text: string, file: string) => { text: string; rewritten: number; unresolved: string[] };
+
+/** W1-T10064: what the alias rewrite did to the new tests a harness commit stages. */
+export interface AddedTestAliasRewrite {
+  readonly rewritten: string[];
+  readonly unresolved: { path: string; specifier: string }[];
+  readonly failed: { path: string; error: string }[];
+}
+
+/**
+ * W1-T10064: REWRITE THE RELATIVE IMPORTS OF THE TESTS THE WORKER ADDED to `#src/`/`#scripts/`/`#test/`, the
+ * mechanical edit the W1-T9864 census asks of every new test. Only `??`/`A` test files absent from a merge's
+ * MERGE_HEAD are touched; an existing file is never rewritten. A throw leaves the file as written and is named.
+ */
+export function rewriteAddedTestImports(
+  repoDir: string,
+  status: string,
+  staged: readonly string[],
+  runGit: GitRunner,
+  rewrite: TestAliasRewriter = codemodRewriteSource,
+): AddedTestAliasRewrite {
+  const result: AddedTestAliasRewrite = { rewritten: [], unresolved: [], failed: [] };
+  let candidates = status.split("\0").filter((entry) => ["?? ", "A  ", "AM "].includes(entry.slice(0, 3)))
+    .map((entry) => entry.slice(3)).filter((path) => staged.includes(path) && /^test\/.+\.test\.m?ts$/.test(path) &&
+      !path.split("/").includes("..") && existsSync(join(repoDir, path)) && lstatSync(join(repoDir, path)).isFile());
+  if (candidates.length > 0 && mergeHeadPresent(runGit)) {
+    const fromMain = new Set(runGit(["ls-tree", "-r", "--name-only", "MERGE_HEAD", "--", ...candidates]).split("\n"));
+    candidates = candidates.filter((path) => !fromMain.has(path));
+  }
+  for (const path of candidates) {
+    try {
+      const out = rewrite(readFileSync(join(repoDir, path), "utf8"), path);
+      result.unresolved.push(...out.unresolved.map((specifier) => ({ path, specifier })));
+      if (out.rewritten > 0) {
+        writeFileSync(join(repoDir, path), out.text);
+        result.rewritten.push(path);
+      }
+    } catch (error) {
+      result.failed.push({ path, error: String((error as Error)?.message ?? error) });
+    }
+  }
+  return result;
+}
+
+/** W1-T10064: the `implement.harness_commit` fields of an alias rewrite, each present only when non-empty. */
+export function aliasRewriteFields(rewrite: AddedTestAliasRewrite | undefined): Record<string, unknown> {
+  if (rewrite === undefined) return {};
+  return {
+    ...(rewrite.rewritten.length > 0 ? { alias_rewritten: rewrite.rewritten } : {}),
+    ...(rewrite.unresolved.length > 0 ? { alias_unresolved: rewrite.unresolved } : {}),
+    ...(rewrite.failed.length > 0 ? { alias_rewrite_failed: rewrite.failed } : {}),
+  };
 }
 
 /** Read worker edits against HEAD, or committed registrations against their merge base. */
@@ -43296,7 +43372,7 @@ export function commitWorkerEdits(
   acceptance: readonly AcceptanceCriterion[] = [],
   // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
   // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
-  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean } = {},
+  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean; aliasRewriter?: TestAliasRewriter } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
@@ -43384,6 +43460,8 @@ export function commitWorkerEdits(
       reason: `${CONFLICT_MARKER_REFUSAL_PREFIX} ${markerFiles.join(", ")}; nothing was staged` };
   }
 
+  const aliasRewrite = rewriteAddedTestImports(repoDir, status, staged, runGit, options.aliasRewriter);
+
   // W1-T6639: an index deletion a merge already staged (`D `, absent on disk) matches nothing, so
   // `git add -A -- <it>` dies "pathspec did not match" and takes the whole commit with it. It stays
   // in the index and is committed as the deletion it already is; a worktree-only ` D` is still added.
@@ -43428,6 +43506,7 @@ export function commitWorkerEdits(
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
     ...(admittedTests.length > 0 ? { admittedTests } : {}),
     ...(admittedRegistrations.length > 0 ? { admittedRegistrations } : {}),
+    ...(aliasRewrite.rewritten.length + aliasRewrite.unresolved.length + aliasRewrite.failed.length > 0 ? { aliasRewrite } : {}),
   };
 }
 
@@ -43771,6 +43850,7 @@ export function harnessCommitForShellLessWorker(
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
     ...(committed.conflictMarkerFiles?.length ? { conflict_marker_files: committed.conflictMarkerFiles } : {}),
+    ...aliasRewriteFields(committed.aliasRewrite),
   });
   if (!committed.committed) {
     input.onRefusal?.(refusalReason, committed.undeclared, committed.conflictMarkerFiles);
@@ -54734,7 +54814,7 @@ import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
 import {
   RUN_CHILD_FALLBACK_STEP, adoptRunChildren, chainAbortSignal, createAdmittedPlanSlot, runChildModeIsOn, spawnRunChild, startRunChildProbe, tapPlanSnapshot,
-  type AdoptedRunChild, type RunChildHandle, type SpawnRunChildPorts,
+  type AdoptedRunChild, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts,
 } from "./lib/run-child.js";
 import { loadRunChildMode, type RunChildMode } from "./lib/policy.js";
 import { bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor, type RunChildModeEvidence } from "./lib/run-child-mode.js";

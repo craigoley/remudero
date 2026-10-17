@@ -131,17 +131,22 @@ function reachesRuntime(change: DeployWorthChange): boolean {
 }
 
 export function deterministicDeployWorth(change: DeployWorthChange): DeployWorthVerdict {
+  if (!planOnlyChange(change) && touchesImage(change)) {
+    return {
+      score: 18,
+      reason: "image input changed: only a recycle onto the rebuilt image delivers it",
+      source: "deterministic",
+    };
+  }
+  return sourceDeployWorth(change);
+}
+
+/** The plan/src/scripts rules alone: what a process restart onto the mounted checkout delivers. */
+function sourceDeployWorth(change: DeployWorthChange): DeployWorthVerdict {
   if (planOnlyChange(change)) {
     return {
       score: 0,
       reason: "plan-only change: deterministic zero; the judge is not consulted",
-      source: "deterministic",
-    };
-  }
-  if (touchesImage(change)) {
-    return {
-      score: 18,
-      reason: "image input changed: only a recycle onto the rebuilt image delivers it",
       source: "deterministic",
     };
   }
@@ -396,14 +401,28 @@ export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVer
       source: "deterministic",
     };
   }
-  if (change.subject !== undefined && DAEMON_SELF_COMMIT_SCOPE.test(change.subject)) {
+  if (change.subject !== undefined && DAEMON_SELF_COMMIT_SCOPE.test(change.subject) && reachesDaemonRuntime(change)) {
     return {
       score: 18,
       reason: "the commit is scoped to the daemon's own machinery",
       source: "deterministic",
     };
   }
-  return deterministicDeployWorth(change);
+  // B1 (2026-10-17): an image input is NOT full weight here. A daemon process restart reruns the mounted checkout on
+  // the image it already has, so it cannot deliver a rebuilt image; the recycle does (deployer.ts). 31 of the 1406
+  // commits of 10-12..10-17 scored 18 by this rule alone. An image input now scores by its files, as below.
+  return sourceDeployWorth(change);
+}
+
+/**
+ * B2 (2026-10-17): a daemon-scoped subject is full weight only when the commit reaches what the daemon process runs.
+ * A `test(sweep): …` commit touching only test/ changes nothing a restart would load. An empty file list is unread,
+ * not empty, so it keeps the scope's weight: an unknown advance never waits.
+ */
+function reachesDaemonRuntime(change: DeployWorthChange): boolean {
+  return change.files.length === 0 || change.files.some((file) =>
+    file.startsWith("src/") || file.startsWith("bin/") || file === "package.json" || file === "package-lock.json" ||
+    (!file.includes("/") && file.startsWith("tsconfig")));
 }
 
 export interface FreshnessDecision {
@@ -508,6 +527,16 @@ export function changesInstallInputs(changes: readonly DeployWorthChange[] | und
   return (changes ?? []).some((change) => change.files.some((file) => file === "package.json" || file === "package-lock.json"));
 }
 
+/**
+ * OPERATOR RULING 2026-10-17: a daemon lifetime runs at least 90 minutes before a freshness restart takes it. On
+ * 2026-10-17 the daemon read stale ~20 min after each boot and upper_age released it 30 min later, so it restarted
+ * about every 75 min (18.2 freshness restarts/day over 10-12..10-17); replaying those 1406 commits with this floor
+ * gave 10.9/day. Only the fast paths pass it: install inputs, withheld reviews and an unreadable advance.
+ */
+export const FRESHNESS_MIN_LIFETIME_MS = 90 * 60_000;
+/** The coalesce reason, and the ledger's `held_by`, for a restart held by {@link FRESHNESS_MIN_LIFETIME_MS}. */
+export const MIN_LIFETIME_HOLD = "min_lifetime";
+
 export function coalesceFreshnessRestart(input: {
   decision: FreshnessDecision;
   newSha: string;
@@ -518,16 +547,26 @@ export function coalesceFreshnessRestart(input: {
   threshold?: RecordedDeployRestartThreshold;
   ageHorizonMs?: number;
   installInputsChanged?: boolean;
+  /** When this daemon lifetime began, on the clock `nowMs` reads. */
+  lifetimeStartedAtMs: number;
+  /** Defaults to {@link FRESHNESS_MIN_LIFETIME_MS}. */
+  minLifetimeMs?: number;
 }): { action: "restart" | "hold" | "defer"; reason: string; heldMs?: number; windowEndsAtMs?: number } {
   const { decision } = input;
   if (decision.action === "defer") return decision;
   const windowEndsAtMs = input.lastAdvanceAtMs + input.window.value;
-  if (decision.restartTrigger !== "change") {
-    const reason = decision.restartTrigger === "unreadable" ? "unreadable_advance"
-      : decision.restartTrigger === "withheld_reviews" ? "withheld_reviews" : decision.reason;
+  if (decision.restartTrigger === "unreadable" || decision.restartTrigger === "withheld_reviews") {
+    const reason = decision.restartTrigger === "unreadable" ? "unreadable_advance" : "withheld_reviews";
     return { action: "restart", reason, heldMs: 0, windowEndsAtMs };
   }
   const heldMs = Math.max(0, input.nowMs - input.staleSinceMs);
+  // Every other release (change, age, idle; window_quiet and upper_age below) waits out the minimum lifetime.
+  if (input.nowMs - input.lifetimeStartedAtMs < (input.minLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS)) {
+    return input.installInputsChanged
+      ? { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs }
+      : { action: "hold", reason: MIN_LIFETIME_HOLD, heldMs, windowEndsAtMs };
+  }
+  if (decision.restartTrigger !== "change") return { action: "restart", reason: decision.reason, heldMs: 0, windowEndsAtMs };
   if (input.installInputsChanged) return { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs };
   const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
   const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
