@@ -13,6 +13,7 @@
  * refresh) stays in the parent, because a child starts fresh every pass.
  */
 import { spawn } from "node:child_process";
+import { inboxGardenerMode } from "./inbox-retirement.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { readFileSync } from "node:fs";
 import { homedir, setPriority as osSetPriority } from "node:os";
@@ -68,9 +69,14 @@ export const REGISTERED_GARDEN_NAMES = [
   "knowledge",
   // W1-T8864: every open issue re-checked against current evidence, shadow-first.
   "issue-revalidation",
+  "inbox",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
+/** Disabled Inbox mode is represented consistently in starters, due probes and runtime health. */
+export function registeredGardenEnabled(name: RegisteredGardenName, isSelf: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
+  return isSelf && (name !== "inbox" || inboxGardenerMode(env) !== "off");
+}
 
 export function isRegisteredGardenName(name: string): name is RegisteredGardenName {
   return (REGISTERED_GARDEN_NAMES as readonly string[]).includes(name);
@@ -163,6 +169,7 @@ const sameInterval = (intervalMs: number) => intervalMs;
 const FLOW_DUE_PROBE_INTERVAL_MS = 60 * 60 * 1000;
 
 export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
+  if (name === "inbox") return { intervalFor: i => Math.max(i, 15 * 60_000), minIntervalMs: 15 * 60_000, hourly: false };
   if (name === "host-resource") {
     return { intervalFor: (i) => Math.max(1_000, Math.min(i, HOST_RESOURCE_MIN_INTERVAL_MS)), minIntervalMs: HOST_RESOURCE_MIN_INTERVAL_MS, hourly: false };
   }

@@ -1,3 +1,5 @@
+import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
+export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   checkProofCommand, checkProofTimeoutMs,
   CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
@@ -9,6 +11,10 @@ export {
   releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
 } from "./lib/check-proof.js";
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { runInboxGardener } from "./lib/inbox-gardener.js";
+import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
+import { registeredGardenEnabled } from "./lib/garden-registry.js";
+import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
@@ -32547,6 +32553,7 @@ export function defaultProofDebtCadenceInput(
     const unmergedIds = new Set(classifyFailingMergeEvidence(openIds, dump).without);
     const tasks = plan.tasks.filter((t) => unmergedIds.has(t.id));
     return {
+      sourcePermit: proofDebtPopulationPermit(tasks),
       tasks,
       resolveNameFilteredCandidates:
         deps.resolveNameFilteredCandidates ?? ((rawName) => resolveNameFilteredCandidates(repoRoot, rawName)),
@@ -38856,6 +38863,7 @@ function refreshKnowledgeAssertions(root: string): string[] {
 
 /** What {@link buildRegisteredGarden} builds a garden over: the daemon's own config, repo and ledger writers. */
 export interface GardenBuildContext {
+  codeSha?: string;
   pollIntervalMs?: number;
   config: Config;
   repoRoot: string;
@@ -38916,6 +38924,7 @@ export function issueRevalidationRunTaskPorts(
 }
 
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
+
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
   const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
   const stateDir = join(config.root, "state");
@@ -38945,6 +38954,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
+    case "inbox": {
+      return withDue(async () => {
+        const { scope, ports } = await inboxGardenerRunTaskPorts(ctx);
+        const result = await runInboxGardener({ stateDir, scope, mode: inboxGardenerMode(), ports });
+        log("inbox.gardener_pass", result);
+      }, () => registeredGardenEnabled("inbox", true));
+    }
     case "knowledge": {
       // Preserve knowledge's open-PR reuse, review and assertion-refresh ports in the child,
       // rather than reducing it to the generic garden workspace and losing those semantics.
@@ -39197,6 +39213,7 @@ export function daemonGardenPassSpawn(
 }
 
 export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean | Promise<boolean> {
+  if (!registeredGardenEnabled(name, true)) return () => false;
   let probe: (() => boolean | Promise<boolean>) | undefined;
   Promise.resolve(buildRegisteredGarden(name, ctx)).then(
     (pass) => { probe = pass.due; },
@@ -39889,17 +39906,19 @@ export async function daemonCommand(
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
-  const gardenContext: GardenBuildContext ={ config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs };
+  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
   const gardenerRuntime = createGardenerRuntimeWriter({ stateDir: join(config.root, "state"), repository: `${target.owner}/${target.repo}`,
     daemonRunId: runId, codeSha: daemonLoadedCodeSha, log,
-    gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: target.isSelf,
+    gardens: REGISTERED_GARDEN_NAMES.map((name) => ({ name, enabled: registeredGardenEnabled(name, target.isSelf),
       cadenceMs: Math.max(gardenSchedule(name).intervalFor(opts.pollIntervalMs ?? 60_000), gardenSchedule(name).minIntervalMs),
       scope: name === "host-resource" ? "host" : name === "overseer" ? "fleet" : "repository" })) });
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
+    registeredGardenEnabled(name, target.isSelf)
+      ? startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) })
+      : { stop() {} };
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -52412,8 +52431,10 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   // ratified even if the registry entry itself drifted (the P19 incident).
   const ledgerLinesForRatify = readLedgerLines(ledgerPath);
 
+  const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
   const classifications = proposals.map((p) =>
     classifyProposal(p, drafts[p.id], {
+      retirement: lifecycleContext,
       plan,
       isMerged,
       depsUnobservable,
@@ -52496,6 +52517,7 @@ function loadProposalForRatify(
     isMerged,
     depsUnobservable,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+    retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
@@ -52536,6 +52558,7 @@ function loadProposalsForRatify(
     isMerged,
     depsUnobservable,
     grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
+    retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),

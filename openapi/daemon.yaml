@@ -10718,6 +10718,11 @@ components:
         - plain
         - reasons
       properties:
+        retirement:
+          $ref: '#/components/schemas/InboxRetirement'
+        needsTriageReason:
+          type: string
+
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10998,6 +11003,13 @@ components:
       type: object
       description: A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`).
       properties:
+        event:
+          type: object
+          required: [key, kind]
+          properties:
+            key: {type: string}
+            kind: {type: string, enum: [reframed, declined, restored, approved, released, redrafted, task_filed, released_to_fleet, refused, retired, retirement_outcome]}
+
         did:
           $ref: "#/components/schemas/InboxThreadActionTaken"
         suggestedAction:
@@ -11132,6 +11144,11 @@ components:
       type: object
       required: [threadId, proposalId, kind, waitingOn, attention, classification, whyMe, sourceFacts]
       properties:
+        retirement:
+          $ref: '#/components/schemas/InboxRetirement'
+        needsTriageReason:
+          type: string
+
         threadId:
           type: string
         proposalId:
@@ -11419,6 +11436,13 @@ components:
         source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
       required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
       properties:
+        retirements:
+          type: array
+          description: At most 16 KiB of serialized retirement views; completeness is retirementHistory.
+          items: {$ref: '#/components/schemas/InboxRetirement'}
+        retirementHistory:
+          $ref: '#/components/schemas/InboxRetirementHistory'
+
         whyMeFeedback:
           $ref: "#/components/schemas/InboxWhyMeFeedback"
         dismissalAudit:
@@ -11717,6 +11741,76 @@ components:
               action: {type: string, enum: [reframe]}
               tier: {type: string, enum: [low]}
               path: {type: string}
+
+    InboxRetirementScope:
+      type: object
+      required: [repository, instance, proposalId, taskId]
+      properties:
+        repository: {type: string, minLength: 1, maxLength: 512}
+        instance: {type: string, minLength: 1, maxLength: 512}
+        proposalId: {type: string, minLength: 1, maxLength: 512}
+        taskId: {type: [string, 'null'], maxLength: 160, pattern: '^W[0-9]+-T[A-Za-z0-9]+$'}
+    InboxRetirement:
+      type: object
+      required: [retirementId, snapshotKey, scope, proofId, proofKind, reason, state]
+      properties:
+        retirementId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$', description: Immutable original retirement snapshot anchor.}
+        scope: {$ref: '#/components/schemas/InboxRetirementScope'}
+        proofId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        proofKind: {type: string, enum: [merged-task, plan-retirement, handoff, successor]}
+        reason: {type: string, maxLength: 300}
+        state: {type: string, enum: [retired, restored_for_review]}
+    InboxRetirementHistory:
+      type: object
+      description: Byte-bounded maintained classification projection, separate from the full audit denominator.
+      required: [state, total, returned, truncated, countSemantics]
+      properties:
+        state: {type: string, enum: [observed, absent, unavailable]}
+        total: {type: [integer, 'null'], minimum: 0, description: Null when absent or unavailable; observed empty is zero.}
+        returned: {type: integer, minimum: 0}
+        truncated: {type: boolean}
+        countSemantics: {type: string, enum: [maintained_classification_retirements]}
+    InboxRetirementRestoreRequest:
+      type: object
+      additionalProperties: false
+      required: [repository, instance, proposalId, threadId, intentId, retirementId, snapshotKey, taskId, reason]
+      properties:
+        repository: {type: string, minLength: 1, maxLength: 512}
+        instance: {type: string, minLength: 1, maxLength: 512}
+        proposalId: {type: string, minLength: 1, maxLength: 512}
+        threadId: {type: string, description: 'Exactly thread:<proposalId>::inbox::-::-.'}
+        intentId: {type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$'}
+        retirementId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+        taskId: {type: [string, 'null'], maxLength: 160, pattern: '^W[0-9]+-T[A-Za-z0-9]+$'}
+        reason: {type: string, minLength: 1, maxLength: 2000, description: Nonblank, preserved verbatim.}
+    InboxRetirementRestoreReceipt:
+      type: object
+      required: [id, kind, scope, snapshotKey, retirementId, at, authority, operator, intentId]
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        kind: {type: string, enum: [restore]}
+        scope: {$ref: '#/components/schemas/InboxRetirementScope'}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+        retirementId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        at: {type: string, format: date-time}
+        authority: {type: string, enum: [operator]}
+        operator: {type: string, minLength: 1}
+        intentId: {type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$'}
+    InboxRetirementRestoreResult:
+      type: object
+      required: [repository, instance, ok, accepted, delivery, audit, materialization, receipt]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        ok: {type: boolean, enum: [true]}
+        accepted: {type: boolean, enum: [true]}
+        delivery: {type: string, enum: [delivered]}
+        audit: {type: string, enum: [journal_recorded]}
+        materialization: {type: string, enum: [pending_refresh]}
+        replayed: {type: boolean, enum: [true]}
+        receipt: {$ref: '#/components/schemas/InboxRetirementRestoreReceipt'}
 
     InboxWhyMeCorrectionRequest:
       type: object
@@ -18303,6 +18397,35 @@ paths:
         '404': {description: Proposal absent from this instance's active registry.}
         '409': {description: Requested repository or instance does not match the route.}
         '503': {description: Instance proposal source unavailable.}
+
+  /v1/i/{instance}/inbox/retirement-restore:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    post:
+      summary: Restore one automatically retired ask for review under verified operator authority.
+      description: >
+        Exact original retirement scope and snapshot anchor are required. New admission requires a
+        fresh owned maintained source. Exact same-operator, same-intent, same-payload settled replay
+        precedes source checks and returns the immutable acknowledgement. Acceptance records an
+        authoritative journal event; materialization happens on the next completed slow-lane refresh.
+        A different new intent after restoration is refused and is not accepted as a replay.
+      x-rmd-write-tier: low
+      security: [{bearerWrite: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InboxRetirementRestoreRequest'}
+      responses:
+        '200':
+          description: Durable restoration acknowledgement; publication is pending a completed refresh.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InboxRetirementRestoreResult'}
+        '400': {description: Malformed payload or unsupported fields.}
+        '403': {description: Verified operator identity required.}
+        '409': {description: Foreign scope, mismatched original anchor, changed intent or already restored.}
+        '503': {description: Source, journal, lock or delivery unavailable; uncertainty remains explicit.}
 
   /v1/i/{instance}/inbox/why-me-correction:
     parameters:
