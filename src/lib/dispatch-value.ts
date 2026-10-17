@@ -138,7 +138,7 @@ const SURVIVAL_ROUNDING = 1e-12;
  * below. A censored wait (a task still waiting) stays at risk through its own time, so the tail that never
  * started holds the curve up where a survivor-only median drops it. Undefined when the curve never crosses.
  */
-export function censoredMedianWaitMs(events: readonly number[], censored: readonly number[]): number | undefined {
+function censoredMedianWaitMs(events: readonly number[], censored: readonly number[]): number | undefined {
   const observations = [...events.map(at => [at, 1] as const), ...censored.map(at => [at, 0] as const)].sort(([a], [b]) => a - b);
   let atRisk = observations.length;
   let survival = 1;

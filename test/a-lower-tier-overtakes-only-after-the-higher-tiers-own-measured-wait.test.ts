@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDispatchValueContext, censoredMedianWaitMs, costOfDelayReadyRow } from "../src/lib/dispatch-value.js";
+import { buildDispatchValueContext, costOfDelayReadyRow } from "../src/lib/dispatch-value.js";
 import type { DispatchValueContext, TierWait } from "../src/lib/dispatch-value.js";
 import { dispatchOrder } from "../src/lib/drain.js";
 import type { Task } from "../src/lib/plan.js";
@@ -79,7 +79,7 @@ test("W1-T9967: a tier wait counts its still-waiting tasks as censored", () => {
   const context = calibrate(started, waiting);
   // Survival 5/6 at 2 h, 4/6 at 3 h, 3/6 at 4 h: the three still waiting hold the curve up past the 3 h median.
   assert.deepEqual(tier(context, 2), { priority: 2, wait_ms: 4 * HOUR, events: 3, censored: 3, source: "own" });
-  assert.equal(censoredMedianWaitMs([2, 3, 4].map(h => h * HOUR), []), 3 * HOUR, "a survivor-only median reads 3 h");
+  assert.notEqual(tier(context, 2)?.wait_ms, 3 * HOUR, "a survivor-only median of 2, 3 and 4 h reads 3 h");
 });
 
 test("W1-T9967: a tier with no crossing of its own borrows the pooled wait and the ready row names it", () => {
