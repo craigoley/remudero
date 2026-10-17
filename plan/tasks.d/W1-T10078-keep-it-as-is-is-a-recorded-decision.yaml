@@ -1,0 +1,58 @@
+- id: W1-T10078
+  title: "KEEP IT AS IS IS A RECORDED DECISION WITH A ROUTE: the keep intent's optionAction returns undefined, so an operator who picks it records nothing and the item stays under Needs your decision forever; POST /v1/inbox/keep records inbox.kept with the item's observed state, takes it out of needsYou, and the item returns only when that state materially changes, saying why"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, the keep verb; approve, decline, reframe, reply, archive and snooze are unchanged
+  band_meaning: span
+  origin: "operator console end-to-end test 2026-10-17 fault (d), from the decision-recording agent: skill-lifecycle:ci-state-forensics stays in Needs your decision after Keep"
+  plan_refs: [W1-T8826, W1-T8831, W1-T4086, W1-T10077, W1-T10079]
+  files:
+    - src/lib/inbox-plain.ts
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-view.ts
+    - test/keep-it-as-is-is-a-recorded-decision.test.ts
+  status: queued
+  priority: 1  # operator 2026-10-17: a choice the console offers must do something
+  attempts: 0
+  rationale: |
+    READ at origin/main a1343d257 (symbols):
+    - inbox-plain.ts optionAction: case "keep" returns undefined, so servePlainOptions serves the option with an
+      intent and no action. The templates offer it ("Leave undecided", "Let the fleet handle it"), and the drafting
+      prompt asks every message to tag one as keep.
+    - panel-graph.ts inboxLanes puts every operator-owned item in needsYou by lane; nothing reads a keep.
+    - The nearest verbs are archive and snooze (W1-T8831, state/inbox-triage.json, inbox.archived/inbox.snoozed),
+      which set an item aside by operator mark, not by decision, and never come back on a state change.
+    OBSERVED 2026-10-17 by the decision-recording agent: an operator who picked Keep on
+    skill-lifecycle:ci-state-forensics recorded nothing, and the item stayed under Needs your decision.
+  design: |
+    1. POST /v1/inbox/keep {proposalId, reason?}: write-scoped, tier low (it decides to do nothing and is
+       reversible). 404 for a proposal not in the active registry, 409 for a ratified or declined one. It appends
+       inbox.kept with the proposal's observed identity: its lane, its classification state and reasons, and a hash
+       of its summary and plain message. The mark is kept in state/inbox-triage.json as `keptAt` and `keptState`
+       (where ledger rotation cannot shed it, as archive is).
+    2. inboxLanes lists a kept item in a new `kept` section and in no needsYou lane or count, while its current
+       observed identity equals `keptState`. When it differs, the mark lapses: the item returns to its lane with
+       `keptChanged` naming what changed ("its proof is now ready", "the proposal was redrafted").
+    3. optionAction maps keep to {method: POST, path: /v1/inbox/keep, fields: {proposalId}, input: reason}.
+       Acting on a kept item with any other verb clears the mark, as acting on an archived item does.
+    4. POST /v1/inbox/keep with `kept: false` clears the mark at once.
+    5. TESTS in test/keep-it-as-is-is-a-recorded-decision.test.ts, test( titles verbatim as below.
+  acceptance:
+    - claim: "picking keep records inbox.kept and takes the item out of needsYou"
+      proof: 'grep: W1-T10078: picking keep records inbox\.kept and takes the item out of needsYou in test/keep-it-as-is-is-a-recorded-decision.test.ts'
+    - claim: "a kept item returns when its observed state changes and says what changed"
+      proof: 'grep: W1-T10078: a kept item returns when its observed state changes and says what changed in test/keep-it-as-is-is-a-recorded-decision.test.ts'
+    - claim: "the keep option is served with its route"
+      proof: 'grep: path: "/v1/inbox/keep" in src/lib/inbox-plain.ts'
+  falsifier: |
+    At origin/main the keep option carries no action and no /v1/inbox/keep route exists, so the first test's POST
+    is a 404 and the item is still in needsYou; deleting the lane filter reddens the first test again.
+  note: |
+    API CONTRACT for the console (new): POST /v1/inbox/keep {proposalId: string, reason?: string, kept?: boolean}
+    -> 200 {ok: true, proposalId, kept: boolean, keptAt?: string}; GET /v1/inbox gains section `kept` (paged like
+    archived) and counts.kept; a returned item may carry `keptChanged` (string); the keep option's `action` is
+    {method: "POST", path: "/v1/inbox/keep", fields: {proposalId}, input: "reason"}.
