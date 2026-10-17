@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execWhitelistedProof, parseWhitelistedProof, type ProofExecutor, type WhitelistedProof } from "./review.js";
+import { execWhitelistedProof, parseWhitelistedProof, resolveProofTestPath, type ProofExecutor, type WhitelistedProof } from "./review.js";
 
 const PILOT_SIZE = 30;
 
@@ -70,8 +70,10 @@ function isNonTestPath(path: string): boolean {
     !path.split("/").includes("__tests__") && !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path);
 }
 
-function taskProofs(item: SyntheticSourceItem): WhitelistedProof[] | undefined {
-  const parsed = item.proofs.map((entry) => parseWhitelistedProof(entry.proof));
+function taskProofs(item: SyntheticSourceItem, root?: string): WhitelistedProof[] | undefined {
+  const parsed = item.proofs.map((entry) => parseWhitelistedProof(
+    root === undefined ? entry.proof : resolveProofTestPath(entry.proof, root).proof,
+  ));
   if (!parsed.some((proof) => proof !== null && proof.kind === "test")) return undefined;
   return parsed.every((proof) => proof !== null) ? parsed as WhitelistedProof[] : undefined;
 }
@@ -123,10 +125,10 @@ export function mineSyntheticTasks(items: readonly SyntheticSourceItem[], option
       git(candidateDir, ["checkout", "--quiet", "--detach", mainSha]);
       const modules = join(options.repoDir, "node_modules");
       if (existsSync(modules)) symlinkSync(modules, join(candidateDir, "node_modules"), "dir");
-      const mainGrade = grade(proofs, candidateDir, execProof);
+      const mainGrade = grade(taskProofs(item, candidateDir)!, candidateDir, execProof);
       if (mainGrade.outcome !== "pass") { reject(`proof on main was ${mainGrade.outcome}: ${mainGrade.reason}`); continue; }
       git(candidateDir, ["apply", "--reverse", "--binary", "-"], reversePatch);
-      const candidateGrade = grade(proofs, candidateDir, execProof);
+      const candidateGrade = grade(taskProofs(item, candidateDir)!, candidateDir, execProof);
       if (candidateGrade.outcome !== "fail") {
         reject(candidateGrade.outcome === "pass" ? "proof stayed green after reversal" : `candidate proof was unmeasurable: ${candidateGrade.reason}`);
         continue;
