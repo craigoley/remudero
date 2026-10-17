@@ -907,7 +907,6 @@ import {
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   decideDraftDeferral,
-  declinedReasonInLedger,
   type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
@@ -977,6 +976,7 @@ import {
   ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
+import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
 import {
@@ -48827,7 +48827,7 @@ export function buildInboxDraftHook(
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+          isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
@@ -49145,7 +49145,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
-      isDeclined: (id) => declinedReasonInLedger(ledgerLinesForRatify, id),
+      isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -49224,7 +49224,7 @@ function loadProposalForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -49265,7 +49265,7 @@ function loadProposalsForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];

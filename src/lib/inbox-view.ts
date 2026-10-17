@@ -18,6 +18,7 @@ import { buildInboxDismissalAudit, inboxDismissalReceipts } from "./inbox-dismis
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
 import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, materializeInboxAttentionCensus, nextInboxSnoozeWake, peekClassifiedInbox, pruneInboxTriage, readInboxStores, recordInboxFirstSeen, readSlowLaneInbox, type ClassifiedInbox, type InboxStores, type PanelGraphDeps } from "./panel-graph.js";
 import { projectWhyMeFeedback, type WhyMeFeedback } from "./inbox-why-me.js";
+import { writeVerdictReceipts } from "./inbox-verdict-receipts.js";
 import { readSnapshotCursor, snapshotCursor } from "./read-page.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
@@ -148,6 +149,8 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   recordInboxFirstSeen(stateDir, proposals.map((p) => p.id), fixedClock(now).iso());
   // W1-T8831: a proposal that left the registry drops its archive/snooze mark. An empty registry read prunes nothing: it may be a torn read.
   if (!deps.inboxSourceIdentity && proposals.length > 0) pruneInboxTriage(stateDir, proposals.map((p) => p.id));
+  // A decline outlives the live ledger's per-step carry cap: the receipts of every proposal still registered are kept.
+  if (classified.verdictReceipts && proposals.length > 0) writeVerdictReceipts(stateDir, classified.verdictReceipts, proposals.map((p) => p.id));
   // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
   const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
   const sourceThreads = readAllThreads({ threadStorePath: join(stateDir, "inbox-threads.jsonl") });
