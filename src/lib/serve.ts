@@ -166,8 +166,11 @@ import {
   evaluateIncidentInvariants,
   eventLoopLagLedgerLine,
   invariantFindingLedgerLine,
+  loopStallLedgerLine,
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
+import { startLoopStallProfiler, type LoopStallProfiler, type LoopStallProfilerOptions, type LoopStallSteps } from "./loop-stall-profiler.js";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { checkServiceFreshness } from "./self-sync.js";
 import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan, type PlanSourceHolder } from "./serve-plan-reload.js";
@@ -616,6 +619,8 @@ export interface ServeDeps {
     clock?: Clock;
     setInterval?: typeof setInterval;
     clearInterval?: typeof clearInterval;
+    /** W1-T10074: the loop-stall profiler's seams (its watchdog spawn); absent, the real watchdog worker. */
+    stallProfiler?: Omit<LoopStallProfilerOptions, "steps">;
   };
   /** W1-T5175: the memory sample/relief loop's seams (serve-memory.ts); absent, this process, its cgroup and an unref'd 3-minute timer. */
   serveMemory?: Pick<ServeMemoryMonitorOptions, "intervalMs" | "setInterval" | "clearInterval" | "clock"> & {
@@ -3213,23 +3218,54 @@ interface ServeServerAssembly {
 
 export const INCIDENT_INVARIANTS_INTERVAL_MS = 60_000;
 
+/** The sampling resolution of serve's `runtime.loop_lag` histogram: the timer whose lateness it records, and so
+ *  the cadence serve's loop is expected to turn at. W1-T10074: the loop-stall profiler's interval is this number. */
+export const SERVE_LOOP_LAG_RESOLUTION_MS = 20;
+
+/** W1-T10074: serve's loop-stall profiler rows, written beside `runtime.loop_lag` under serve's own prefix. */
+export const SERVE_LOOP_STALL_STEPS: LoopStallSteps = {
+  profile: "runtime.loop_stall_profile",
+  failed: "runtime.loop_stall_profile_failed",
+};
+
+/**
+ * Serve's minute tick: `runtime.loop_lag`, then each invariant finding over the tailed ledger.
+ *
+ * W1-T10074: serve's loop stalled 5-22 s in nearly every minute of 2026-10-17 (maxMs 7-28 s, p50 20 ms) and nothing
+ * named what held it. Each lag reading now also feeds the daemon's loop-stall profiler (loop-stall-profiler.ts,
+ * W1-T7746), which profiles a stall WHILE it happens and writes `runtime.loop_stall_profile` naming its top frames.
+ * ITS BOUND IS THE DAEMON'S FORMULA (loop-stall-profiler.ts's loopStallBoundMs) over serve's own numbers: the
+ * interval is the lag histogram's resolution (the timer serve's loop is expected to turn at), and each observed lag
+ * is a minute's p99.
+ * The minute itself is only the reporting cadence: as the interval, it would put the bound above every stall seen.
+ * A profiler failure writes `runtime.loop_stall_profile_failed` and disables it for the boot; the tick goes on.
+ */
 export function startIncidentInvariantsMonitor(
   ledgerPath: string,
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
-): () => void {
+): (() => void) & { stallProfiler: LoopStallProfiler } {
   const readLedger = deps.readLedger ?? readLedgerLines;
   const writeLedger = deps.writeLedger ?? appendLedger;
-  const eventLoopLag = deps.eventLoopLag ?? createEventLoopLagMonitor();
+  const eventLoopLag = deps.eventLoopLag
+    ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));
   const clock = deps.clock ?? systemClock;
   const setTimer = deps.setInterval ?? setInterval;
   const clearTimer = deps.clearInterval ?? clearInterval;
   const intervalMs = deps.intervalMs ?? INCIDENT_INVARIANTS_INTERVAL_MS;
+  const stallProfiler = startLoopStallProfiler({ ...deps.stallProfiler, steps: SERVE_LOOP_STALL_STEPS });
+  const stallLog = (step: string, fields?: Record<string, unknown>): void => {
+    writeLedger(ledgerPath, loopStallLedgerLine(step, fields, clock.now()));
+  };
 
   const tick = (): void => {
     const nowMs = clock.now();
     try {
       const lag = eventLoopLag();
-      if (lag) writeLedger(ledgerPath, eventLoopLagLedgerLine(lag, nowMs));
+      if (lag) {
+        writeLedger(ledgerPath, eventLoopLagLedgerLine(lag, nowMs));
+        // Never throws: the profiler turns its own start, heartbeat and watchdog failures into its failure row.
+        stallProfiler.observe({ lagMs: lag.p99Ms, intervalMs: SERVE_LOOP_LAG_RESOLUTION_MS }, stallLog);
+      }
     } catch (e) {
       deps.log?.("serve.incident_invariants.loop_lag_failed", { reason: String((e as Error)?.message ?? e) });
     }
@@ -3245,7 +3281,10 @@ export function startIncidentInvariantsMonitor(
 
   const timer = setTimer(tick, intervalMs);
   timer.unref?.();
-  return () => clearTimer(timer);
+  return Object.assign(() => {
+    clearTimer(timer);
+    stallProfiler.stop();
+  }, { stallProfiler });
 }
 
 /**
