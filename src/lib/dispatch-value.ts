@@ -434,6 +434,31 @@ export function validityShareNearAge(
   return { valid, total };
 }
 
+interface TierPass { readonly id: string; readonly tier: number; readonly blocked: boolean; readonly pass0: number; readonly passF: number }
+
+/**
+ * W1-T9968 (operator 2026-10-17: fan-out never jumps a tier): the no-fan-out passes fix which tier owns each
+ * position; inside a tier the members take that tier's passes in their with-fan-out order. Every cross-tier
+ * comparison reads what it would with no fan-out, and the result stays a total order. A pairwise rule
+ * (without fan-out across tiers, with it inside one) is not transitive. Blocked tasks (an open dependency) trade
+ * slots only among themselves: a chain's blocked members carry the fan-out and would push a ready task back.
+ * MEASURED 2026-10-16: W1-T9874 (P2, 29 open dependents) scored 17x the fresh P1 W1-T9926.
+ */
+function fanoutWithinTier(passes: readonly TierPass[]): Map<string, number> {
+  const byGroup = new Map<string, TierPass[]>();
+  for (const entry of passes) {
+    const group = `${entry.tier}:${entry.blocked}`;
+    (byGroup.get(group) ?? byGroup.set(group, []).get(group)!).push(entry);
+  }
+  const stridePassByTaskId = new Map<string, number>();
+  for (const members of byGroup.values()) {
+    const slots = members.map(m => m.pass0).sort((a, b) => a - b);
+    const ranked = [...members].sort((a, b) => a.passF - b.passF || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    ranked.forEach((m, k) => stridePassByTaskId.set(m.id, slots[k]));
+  }
+  return stridePassByTaskId;
+}
+
 function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
@@ -539,7 +564,7 @@ function costOfDelayContext(
   const total = samples.reduce((sum, [, tally]) => sum + tally.total, 0);
   const prior = (valid + 1) / (total + 2);
   const costOfDelayByTaskId = new Map<string, number>();
-  const stridePassByTaskId = new Map<string, number>();
+  const passes: TierPass[] = [];
   const costOfDelayImputed: string[] = [];
   for (const task of [...tasks].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) {
     if (!openIds.has(task.id)) continue;
@@ -559,14 +584,17 @@ function costOfDelayContext(
     // gives every class a share even when its raw merge count is zero.
     const mergeProbability = estimate.alpha / (estimate.alpha + estimate.beta);
     const urgency = dispatchUrgency(tierOf(task), age / (unitByTier.get(tierKey(task)) as number));
-    const score = probability * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0)) * (classScore ?? NaN) * mergeProbability * urgency;
+    const score0 = probability * (classScore ?? NaN) * mergeProbability * urgency;
+    const score = score0 * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0));
     // Each unique dispatch consumes one stride. Rebuilding from all starts survives restarts
     // and keeps a frequently selected high-score task from monopolizing a fixed frontier.
-    const pass = (1 + (counts.get(task.id) ?? 0)) / score;
-    if (!Number.isFinite(score) || !Number.isFinite(pass) || score <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-score`] };
+    const strides = 1 + (counts.get(task.id) ?? 0);
+    const pass0 = strides / score0, passF = strides / score;
+    if (![score0, score, pass0, passF].every(Number.isFinite) || score0 <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-score`] };
     costOfDelayByTaskId.set(task.id, score);
-    stridePassByTaskId.set(task.id, pass);
+    passes.push({ id: task.id, tier: tierKey(task), blocked: task.depends_on.some(id => openIds.has(id)), pass0, passF });
   }
+  const stridePassByTaskId = fanoutWithinTier(passes);
   return {
     kind: "ready",
     context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayTierWaits, ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
