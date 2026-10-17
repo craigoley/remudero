@@ -1,23 +1,20 @@
 import assert from 'node:assert/strict';
-import {execFileSync, spawnSync} from 'node:child_process';
+import {spawnSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
-import {copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {copyFileSync, readFileSync, realpathSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {performance} from 'node:perf_hooks';
-import {test} from 'node:test';
+import {test, type TestContext} from 'node:test';
+import {gitRepo} from './helpers/git-repo.js';
 // @ts-expect-error -- operator ESM diagnostics are independently source-mapped.
 import {checkAuthorCheckout} from '../scripts/lib/author-checkout-preconditions.mjs';
 // @ts-expect-error -- shared with the dependency-free operator launcher.
 import {remainingSubprocessTimeout, spawnWithinBudget} from '../scripts/lib/bounded-subprocess.mjs';
 
 const upstream = 'https://github.com/craigoley/remudero.git';
-function fixture(t: {after(fn: () => void): void}) {
-  const root = mkdtempSync(join(tmpdir(), 'rmd-checkout-controls-'));
-  t.after(() => rmSync(root, {recursive: true, force: true}));
-  const git = (...args: string[]) => execFileSync('git', args, {cwd: root, encoding: 'utf8',
-    env: {...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null'}}).trim();
-  git('init', '--quiet'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+function fixture(t: Pick<TestContext, 'after'>) {
+  const repo = gitRepo({scope: t, seedCommit: false, kind: 'checkout-controls'});
+  const root = repo.dir, git = repo.git;
   git('commit', '--quiet', '--allow-empty', '-m', 'fixture base ' + randomUUID());
   const head = git('rev-parse', 'HEAD'); git('remote', 'add', 'origin', upstream); git('update-ref', 'refs/remotes/origin/main', head);
   const deps = {dependency: () => ({state: 'present', dependencyRoot: root, assurance: 'synthetic dependency observation'})};
