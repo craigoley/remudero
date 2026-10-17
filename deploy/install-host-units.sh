@@ -1032,6 +1032,17 @@ trap edge_heal_on_exit EXIT
 EDGE_HEAL
 }
 
+# Serve has no daemon watchdog of its own. Give its existing guarded controller one
+# owner: the core watchdog, including legacy core installs. Satellites must not race
+# the same sample/learned ceiling. This runs inside the normal non-boot tuning guard.
+render_serve_memory_tuning() {
+  case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
+  cat <<'SERVE_MEMORY_TUNING'
+    ${MHT_TMO[@]+"${MHT_TMO[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
+      --container 'remudero-serve' --state-dir "$STATE_DIR" || true
+SERVE_MEMORY_TUNING
+}
+
 # 2026-10-11 -- THE WATCHDOG'S OWN ALARMS REACH THE ESCALATION SPOOL. The crash-loop marker had no
 # reader, and each refusal below was one journal line per tick. Each now also asks `rmd host-alert`
 # (src/lib/launcher-host-alerts.ts): it counts a refusal per consecutive tick, spools a needs-human
@@ -1370,6 +1381,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
     \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
       --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
+$(render_serve_memory_tuning)
   fi
   # W1-T9409 -- A RECYCLE PAUSE WHOSE WRITER DIED BEFORE IT STOPPED THE CONTAINER IS RELEASED. On
   # 2026-10-14 the recycle this tick ran died in its wait (rc=2) and its PAUSE held core dispatch for

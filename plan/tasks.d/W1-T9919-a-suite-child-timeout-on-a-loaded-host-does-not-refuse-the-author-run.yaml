@@ -1,0 +1,72 @@
+- id: W1-T9919
+  title: "A CENSUS CHILD TIMEOUT ON A LOADED HOST DOES NOT REFUSE THE AUTHOR RUN — census-precheck's census suite child has a 60 s BACKSTOP sized for 'seven suites, 6-10 s on an 8-core host'; at load 11-14 it fired on a healthy tree and preflight-author refused the whole run (OBSERVED twice in the W1-T9722 build, once in W1-T9071's), while the same precheck passed standalone and pre-push already treats it as not measured"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, what preflight-author does when the census suite child hits its time bound; the bound itself is unchanged
+  band_meaning: blast-radius
+  origin: 'W1-T9722 builder report (PR 12390); coordinator brief batch1016b item 2'
+  plan_refs: [W1-T5617, W1-T5693, W1-T9722]
+  files:
+    - scripts/preflight-author.mjs
+    - scripts/census-precheck.mjs
+    - test/a-suite-child-timeout-on-a-loaded-host-does-not-refuse-the-author-run.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (builder logs in logs-8864, host load from each log's header or the builder's notes):
+    - 9722-round5.log (16:31Z) and 9722-round6.log (16:58Z), 2026-10-16: `census-precheck: census suites NOT
+      MEASURED - the census suite child could not run to completion: spawnSync /usr/bin/ionice ETIMEDOUT`, then
+      `author preflight REFUSED: census precheck could not measure the author tree; expensive validation was not
+      started`. The builder reports load 11-14. Its 9722-census-precheck.log shows the same tree passing
+      standalone (load 10.32 12.85 13.89, exit 0 in 70 s), and the next preflight-author at 17:09Z passed it.
+    - preflight-9071.txt, 2026-10-13: the same ETIMEDOUT refusal on a full-fallback run.
+    - Control: a grep of every logs-8864 file found these 3 timeout refusals and 104 files with a census-precheck
+      PASS or OK. None shows a census child that hung, meaning one that never finished given more time.
+    READ at origin/main fb566039c (symbols, not lines):
+    - scripts/census-precheck.mjs: `CENSUS_SUITE_CHILD_TIME_BOUND_MS = 60_000`, commented "BACKSTOP only: the
+      seven admitted suites take 6-10 s together on an 8-core host; this ends a hung child as not measured".
+      runCensusSuitesViaChild runs them under TEST_PRIORITY's wrap (ionice and nice), and assertChildFinished
+      throws on the spawn error, so main() reports NOT MEASURED and exits 2.
+    - CENSUS_ADMITTED_MEMBERS in src/lib/ci-parity.ts records measuredMs summing to about 5.3 s.
+    - scripts/preflight-author.mjs throws "census precheck could not measure the author tree" on census status 2,
+      a signal or an error. `git log -S` puts that throw at d42d049ee (PR 9198, 2026-10-05), one day after the bound
+      was set (c99bd3f7f, PR 9127, W1-T5617). The W1-T5693 shard still describes a timeout as "NOT MEASURED (exit 2,
+      non-blocking)". The pre-push hook still says "could not measure — not blocking on an unreadable check".
+    HEALTHY-CONDITION CHECK (CLAUDE.md investigation discipline): the bound exists to separate a hung child from a
+    slow one. No hung child appears in this corpus, and all three firings were on trees that passed when re-run. It
+    fires on a healthy, loaded host, so the defect is the refusal, not the number.
+    INFERRED: under the builders' `taskset -c 4-7 nice -n 19` wrap plus TEST_PRIORITY's ionice, a cold tsx
+    transform of the admitted suites' imports (src/run-task.ts is about 58k lines) dominates the child's time.
+  design: |
+    DEFAULT (no constant changes):
+    1. census-precheck reports a census suite child that hit its time bound as its own NOT MEASURED reason. The line
+       names the elapsed ms, the bound, the suite count and the 1-minute load average at the start and the end.
+       Every other unmeasurable keeps its current text.
+    2. preflight-author does not refuse on that reason alone. It prints "census suites NOT MEASURED (time bound) —
+       CI runs them", records it in the receipt, and goes on with the expensive validation, as pre-push already
+       does. Every other census status 2 (no `# tests` summary, a signal, an unreadable tree, an instrument-surface
+       failure) still refuses, so a broken tree still stops before the expensive run.
+    3. A census violation (exit 1) still fails the run, unchanged.
+    OPERATOR DECISION, NAMED AND NOT TAKEN HERE: the bound's value and any scaling, for example
+    60 s x max(1, load1 / cores) or a per-suite allowance over CENSUS_ADMITTED_MEMBERS' measuredMs. Item 1's line
+    records the data needed to size it. A change to CENSUS_SUITE_CHILD_TIME_BOUND_MS needs the operator's approval.
+    Tests go in test/a-suite-child-timeout-on-a-loaded-host-does-not-refuse-the-author-run.test.ts, titled verbatim
+    as in the proofs. Drive runCensusSuitesViaChild with an injected `run` that returns an ETIMEDOUT spawn error.
+    Drive preflight-author's census decision through whatever seam the builder extracts. No real 60 s wait.
+  acceptance:
+    - claim: "a census suite child that hits its time bound is reported as a time-bound NOT MEASURED naming elapsed ms, bound, suite count and load"
+      proof: 'grep: test("W1-T9919: a timed-out census child names its elapsed time, bound, suite count and load" in test/a-suite-child-timeout-on-a-loaded-host-does-not-refuse-the-author-run.test.ts'
+    - claim: "preflight-author continues past a time-bound NOT MEASURED census and says CI runs those suites"
+      proof: 'grep: test("W1-T9919: a time-bound census child does not refuse the author run" in test/a-suite-child-timeout-on-a-loaded-host-does-not-refuse-the-author-run.test.ts'
+    - claim: "any other census NOT MEASURED still refuses the author run before the expensive validation"
+      proof: 'grep: test("W1-T9919: any other unmeasured census still refuses the author run" in test/a-suite-child-timeout-on-a-loaded-host-does-not-refuse-the-author-run.test.ts'
+  falsifier: |
+    On origin/main, an ETIMEDOUT census child yields "could not run to completion: spawnSync ... ETIMEDOUT" with no
+    elapsed time, bound, suite count or load, so the first test fails. preflight-author throws "census precheck
+    could not measure the author tree" on that exit 2, so the second fails. The third passes before and after; it
+    guards against a fix that stops refusing on every unmeasured census.

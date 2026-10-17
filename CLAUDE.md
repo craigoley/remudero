@@ -93,8 +93,8 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
   `mergeable_state: dirty` — check mergeability before waiting on CI.** → doctrine/ci-and-merging/conflicting-pr-zero-checks.md
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
   the ours-side block yourself; esbuild says only `Unexpected end of file`.** → doctrine/ci-and-merging/close-the-ours-side-block.md
-- **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
-  nothing.** → doctrine/ci-and-merging/title-needs-a-re-run.md
+- **A RETITLE ALONE re-runs the title lint — `pr-title-lint.yml` fires on `edited`; push no sha to
+  clear a title red.** → doctrine/ci-and-merging/edit-relints-the-title.md
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
   recycle, not at merge — confirm with `docker inspect` before calling it shipped.** → doctrine/ci-and-merging/a-baked-path-merge-ships-itself.md
 - **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet

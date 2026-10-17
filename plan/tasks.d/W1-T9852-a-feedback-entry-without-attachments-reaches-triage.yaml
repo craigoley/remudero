@@ -11,7 +11,7 @@
   origin: "fan-out 2026-10-16 agent E1: why TRIAGE-fb-1789601878740-3711ab started 16 times and never wrote a verdict (investigator S1 lead)"
   plan_refs: [W1-T41, W1-T2700, W1-T4203, W1-T4769, W1-T3320]
   files: [src/lib/feedback.ts, test/a-feedback-entry-without-attachments-reaches-triage.test.ts]
-  status: queued
+  status: merged
   priority: 1  # live: auto-triage is wedged on one entry; every fire since 2026-10-15T16:22Z is spent on it
   attempts: 0
   rationale: |

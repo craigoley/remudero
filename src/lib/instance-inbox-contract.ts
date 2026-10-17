@@ -19,14 +19,20 @@
  *
  * Approval and retirement are NOT part of this slice; no confirmation tier changes here.
  */
+import { systemClock } from "./clock.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
 import { proposalIdOfThread } from "./inbox-thread.js";
 import { bearerTokenId, sendJson } from "./panel-actions.js";
-import { RAW_BODY_CACHE, readBoundedRawBody, type Route } from "./service.js";
+import { RAW_BODY_CACHE, readBoundedRawBody, verifiedActor, type Route } from "./service.js";
+
+import { readPersistedInbox } from "./fleet-lane.js";
+import { INBOX_RECEIPT_DIR, WHY_ME_ACTION, whyMePresencePath, correctionOf, whyMePayload, type WhyMeCorrection } from "./inbox-why-me.js";
+import { INBOX_STALE_AFTER_MS } from "./inbox-freshness.js";
+export { INBOX_RECEIPT_DIR } from "./inbox-why-me.js";
 
 /** The conversation contract: each capability, the instance-relative path it mounts at, and the source route it wraps. */
 export const INSTANCE_INBOX_ROUTES = [
@@ -37,6 +43,7 @@ export const INSTANCE_INBOX_ROUTES = [
   { capability: "inbox/thread", method: "GET", kind: "view", source: "/v1/inbox/thread" },
   { capability: "inbox/thread/reply", method: "POST", kind: "write", action: "reply", source: "/v1/inbox/thread/reply" },
   { capability: "inbox/thread/read", method: "POST", kind: "write", action: "read", source: "/v1/inbox/thread/read" },
+  { capability: "inbox/why-me-correction", method: "POST", kind: "write", action: "why-me-correction", source: "/v1/inbox/why-me-correction" },
   { capability: "inbox/reframe", method: "POST", kind: "write", action: "reframe", source: "/v1/inbox/reframe" },
 ] as const;
 
@@ -49,7 +56,6 @@ export const INSTANCE_INBOX_SOURCE_PATHS: ReadonlySet<string> = new Set(INSTANCE
 
 /** The daemon's inbox registry; an instance without one predates the contract and is read-only. */
 export const INBOX_CONTRACT_MARKER = "inbox-proposals.json";
-export const INBOX_RECEIPT_DIR = "inbox-intent-receipts";
 
 export type InstanceInboxContractState =
   | { mode: "read-write" }
@@ -93,6 +99,8 @@ export interface InstanceInboxBinding {
   routes: readonly Route[];
   /** Override the contract probe (tests); defaults to {@link instanceInboxContractState} per request. */
   contract?: () => InstanceInboxContractState;
+  /** Fault seam for the durable correction write; the default is the real atomic receipt store. */
+  recordWhyMeReceipt?: typeof writeAtomic;
 }
 
 interface Captured {
@@ -253,6 +261,12 @@ function sameBinding(a: IntentBinding, b: IntentBinding): boolean {
 }
 
 function canonicalPayload(action: string, body: Body): { error: string } | { payload: unknown } {
+  if (action === WHY_ME_ACTION) {
+    const payload = whyMePayload(body);
+    if ("error" in payload) return payload;
+    if (payload.proposalId !== proposalIdOfThread(String(body.threadId))) return { error: "proposalId must identify the requested thread" };
+    return { payload };
+  }
   if (action === "reframe") {
     if (typeof body.feedback !== "string" || !body.feedback.trim() || body.feedback.length > 4000) return { error: "feedback must contain 1-4000 characters" };
     if (typeof body.snapshotKey !== "string" || !/^[a-f0-9]{64}$/.test(body.snapshotKey)) return { error: "proposal snapshotKey is required" };
@@ -276,6 +290,9 @@ function replayAnswer(stored: IntentReceipt, binding: IntentBinding): { status: 
   if (!sameBinding(stored, binding)) {
     return { status: 409, body: { error: "inbox_intent_conflict", delivery: "not_delivered", detail: "this intent was already used for a different thread, action or payload", receipt: receiptView(stored) } };
   }
+  if (stored.status === "settled" && binding.action === WHY_ME_ACTION && correctionOf(stored, binding) === undefined) {
+    return { status: 409, body: { error: "inbox_intent_unknown", delivery: "unknown", detail: "the stored correction acknowledgement is unverified; this intent is not retried", receipt: { ...receiptView(stored), status: "unknown" } } };
+  }
   if (stored.status === "settled" && stored.httpStatus !== undefined && stored.body !== undefined) {
     return { status: stored.httpStatus, body: { ...stored.body, receipt: receiptView(stored), replayed: true } };
   }
@@ -284,17 +301,42 @@ function replayAnswer(stored: IntentReceipt, binding: IntentBinding): { status: 
 }
 
 /** A stored receipt, or why it cannot be read: an unreadable receipt proves nothing, so the caller answers `unknown`. */
-function readReceipt(path: string): { receipt: IntentReceipt } | { reason: string } {
+function readReceipt(path: string): { receipt: IntentReceipt } | { reason: string; code?: string } {
   try {
-    return { receipt: JSON.parse(readFileSync(path, "utf8")) as IntentReceipt };
+    const receipt: IntentReceipt = JSON.parse(readFileSync(path, "utf8"));
+    if (!receipt || typeof receipt !== "object" || [receipt.operator, receipt.repository, receipt.instance, receipt.threadId,
+      receipt.action, receipt.payloadHash, receipt.intentId, receipt.key].some(value => typeof value !== "string") ||
+      !["pending", "settled", "unknown"].includes(receipt.status)) throw new Error("malformed intent receipt");
+    if (receipt.action === WHY_ME_ACTION && basename(path) !== `${receipt.key}.json`) throw new Error("correction receipt identity differs from its filename");
+    return { receipt };
   } catch (error) {
-    return { reason: `this intent's receipt is unreadable: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}` };
+    return { code: (error as NodeJS.ErrnoException).code, reason: `this intent's receipt is unreadable: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}` };
   }
+}
+
+async function answerIntentReplay(path: string, intent: IntentBinding, binding: InstanceInboxBinding, res: ServerResponse): Promise<void> {
+  const read = readReceipt(path);
+  const answer = "reason" in read
+    ? { status: 409, body: { error: "inbox_intent_unknown", delivery: "unknown", detail: read.reason } }
+    : replayAnswer(read.receipt, intent);
+  if (answer !== "join") {
+    sendScoped(res, binding, answer.status, answer.body);
+    return;
+  }
+  const running = inflight.get(path);
+  if (running === undefined) {
+    sendScoped(res, binding, 409, { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent was claimed but its outcome was never recorded; it is not retried", receipt: receiptView((read as { receipt: IntentReceipt }).receipt) });
+    return;
+  }
+  const joined = await running;
+  sendScoped(res, binding, joined.status, { ...joined.body, replayed: true });
+  return;
 }
 
 function writeRoute(spec: ContractRoute & { action: string }, source: Route, binding: InstanceInboxBinding): Route {
   return {
     ...source,
+    method: "POST", scope: "write", tier: "low", cacheQualification: undefined,
     path: `/v1/i/${binding.instance}/${spec.capability}`,
     handler: async (req, res, ctx) => {
       const params = new URL(req.url ?? "/", "http://localhost").searchParams;
@@ -335,6 +377,9 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
         sendScoped(res, binding, 400, { error: "invalid_request", detail: payload.error });
         return;
       }
+      if (spec.action === WHY_ME_ACTION && !verifiedActor(req)) {
+        sendScoped(res, binding, 403, { error: "verified_operator_required", delivery: "not_delivered" }); return;
+      }
       const operator = bearerTokenId(req);
       const intent: IntentBinding = {
         operator, repository: binding.repository, instance: binding.instance, threadId: body.threadId, action: spec.action,
@@ -342,6 +387,42 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
       };
       const key = createHash("sha256").update(JSON.stringify([operator, binding.instance, body.intentId])).digest("hex");
       const path = intentReceiptPath(binding.stateDir, key);
+      let correction: WhyMeCorrection | undefined;
+      if (spec.action === WHY_ME_ACTION) {
+        const prior = readReceipt(path);
+        if ("receipt" in prior || prior.code !== "ENOENT") {
+          await answerIntentReplay(path, intent, binding, res); return;
+        }
+        let qualified: ReturnType<NonNullable<Route["cacheQualification"]>>;
+        try { qualified = source.cacheQualification?.(req); }
+        catch { /* A failed read-only qualifier is unavailable evidence, never write readiness. */ qualified = undefined; }
+        if (!qualified || "status" in qualified) {
+          sendScoped(res, binding, 503, { error: "why_me_source_unavailable", delivery: "not_delivered" }); return;
+        }
+        const persisted = readPersistedInbox(binding.stateDir);
+        const age = persisted ? systemClock.now() - Date.parse(persisted.generatedAt) : Number.NaN;
+        if (persisted === undefined || persisted.attentionCensus === undefined || !persisted.snapshotKey || !Number.isFinite(age) || age < 0 || age > INBOX_STALE_AFTER_MS ||
+          persisted.snapshotScope?.instance !== binding.instance || persisted.snapshotScope.repository !== binding.repository) {
+          sendScoped(res, binding, 503, { error: "why_me_source_unavailable", delivery: "not_delivered" }); return;
+        }
+        if (qualified.key !== persisted.snapshotKey || body.snapshotKey !== persisted.snapshotKey) {
+          sendScoped(res, binding, 409, { error: "inbox_snapshot_changed", delivery: "not_delivered", snapshotKey: persisted.snapshotKey }); return;
+        }
+        const item = persisted.attentionCensus.items.find(item => item.proposalId === body.proposalId && item.threadId === body.threadId);
+        if (!item || (item.attention !== "decision" && item.attention !== "reply")) {
+          sendScoped(res, binding, 404, { error: "why_me_item_unavailable", delivery: "not_delivered" }); return;
+        }
+        const input = payload.payload as WhyMeCorrection;
+        if (input.supersedes) {
+          const before = readReceipt(intentReceiptPath(binding.stateDir, input.supersedes));
+          const priorCorrection = "receipt" in before ? correctionOf(before.receipt, binding) : undefined;
+          if (!priorCorrection || priorCorrection.proposalId !== item.proposalId || priorCorrection.operator !== operator) {
+            sendScoped(res, binding, 409, { error: "why_me_supersedes_mismatch", delivery: "not_delivered" }); return;
+          }
+        }
+        correction = { ...input, ...identity(binding), threadId: body.threadId, intentId: body.intentId, receiptId: key, operator,
+          recordedAt: systemClock.iso(), original: { whyMe: item.whyMe, sourceFacts: item.sourceFacts, ...(item.judgment ? { judgment: item.judgment } : {}) } };
+      }
       const pending: IntentReceipt = { ...intent, intentId: body.intentId, key, status: "pending" };
       try {
         mkdirSync(join(binding.stateDir, INBOX_RECEIPT_DIR), { recursive: true });
@@ -352,24 +433,10 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
           sendScoped(res, binding, 503, { error: "inbox_receipt_store_unavailable", delivery: "not_delivered", detail: String((error as NodeJS.ErrnoException).code ?? error) });
           return;
         }
-        const read = readReceipt(path);
-        const answer = "reason" in read
-          ? { status: 409, body: { error: "inbox_intent_unknown", delivery: "unknown", detail: read.reason } }
-          : replayAnswer(read.receipt, intent);
-        if (answer !== "join") {
-          sendScoped(res, binding, answer.status, answer.body);
-          return;
-        }
-        const running = inflight.get(path);
-        if (running === undefined) {
-          sendScoped(res, binding, 409, { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent was claimed but its outcome was never recorded; it is not retried", receipt: receiptView((read as { receipt: IntentReceipt }).receipt) });
-          return;
-        }
-        const joined = await running;
-        sendScoped(res, binding, joined.status, { ...joined.body, replayed: true });
+        await answerIntentReplay(path, intent, binding, res);
         return;
       }
-      const run = deliver(spec, source, binding, req, ctx, raw, pending, path);
+      const run = correction ? Promise.resolve(recordWhyMe(path, pending, correction, binding)) : deliver(spec, source, binding, req, ctx, raw, pending, path);
       inflight.set(path, run);
       try {
         const outcome = await run;
@@ -379,6 +446,20 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
       }
     },
   };
+}
+
+/** One settled receipt IS the correction effect and its audit. Failed durability is never success. */
+function recordWhyMe(path: string, pending: IntentReceipt, correction: WhyMeCorrection, binding: InstanceInboxBinding): { status: number; body: Body } {
+  const body = { ok: true, delivery: "delivered", authority: "feedback_only", audit: "receipt_recorded", correction,
+    receipt: receiptView({ ...pending, status: "settled" }) };
+  try {
+    // This conservative index survives lost classifications; it never substitutes for a receipt.
+    mkdirSync(whyMePresencePath(binding.stateDir!, correction, correction.proposalId), { recursive: true });
+    (binding.recordWhyMeReceipt ?? writeAtomic)(path, JSON.stringify({ ...pending, status: "settled", httpStatus: 200, body }) + "\n");
+    return { status: 200, body };
+  } catch (error) {
+    return { status: 503, body: { error: "why_me_receipt_unavailable", delivery: "unknown", audit: "unavailable", detail: String(error), receipt: receiptView(pending) } };
+  }
 }
 
 /** Record an outcome; a failed record leaves the claim `pending`, which a replay without a live join answers `unknown`. */
@@ -444,7 +525,9 @@ async function deliver(
 export function mountInstanceInboxRoutes(binding: InstanceInboxBinding): Route[] {
   const out: Route[] = [];
   for (const spec of INSTANCE_INBOX_ROUTES) {
-    const source = binding.routes.find((r) => r.method === spec.method && r.path === spec.source);
+    const source = spec.kind === "write" && spec.action === WHY_ME_ACTION
+      ? binding.routes.find(r => r.method === "GET" && r.path === "/v1/inbox/attention-census")
+      : binding.routes.find((r) => r.method === spec.method && r.path === spec.source);
     if (source === undefined) continue;
     out.push(spec.kind === "write" ? writeRoute(spec, source, binding) : viewRoute(spec, source, binding));
   }

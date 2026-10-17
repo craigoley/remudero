@@ -5,7 +5,7 @@
 // tree's own scripts/build-child-entries.mjs after the install. These tests drive real git slots and a real child
 // process; the fixture's build script stands in for esbuild by writing the manifest where the real one writes it.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -99,4 +99,37 @@ test("a build that throws a non-Error still reads failed, with its time", async 
   let at = 100;
   const verdict = await buildSlotChildEntries(dir, async () => { at += 40; throw "killed\nby a signal"; }, clockFromMillisFn(() => at));
   assert.deepEqual(verdict, { outcome: "failed", reason: "killed", ms: 40 });
+});
+
+test("a failed child-entry build keeps stderr ahead of a long command context", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}slot-reason-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, "long-slot-".repeat(20));
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT), FAILS);
+  assert.ok(`${process.execPath} ${CHILD_ENTRY_BUILD_SCRIPT} failed in ${dir}: `.length > 200);
+  const verdict = await buildSlotChildEntries(dir);
+  assert.equal(verdict.outcome, "failed");
+  assert.equal(verdict.reason, "CHILD-ENTRY BUILD FAILED: boom");
+  await assert.rejects(runCommand(process.execPath, [CHILD_ENTRY_BUILD_SCRIPT], dir), (error: Error) => {
+    assert.equal(error.message.split("\n")[0], "CHILD-ENTRY BUILD FAILED: boom");
+    assert.ok(error.message.includes(`${process.execPath} ${CHILD_ENTRY_BUILD_SCRIPT} failed in ${dir}`), "full command context remains available");
+    return true;
+  });
+});
+
+test("a silent child-entry failure names its exit, spawn error or signal before path context", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}slot-silent-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, "long-slot-".repeat(20));
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT), "process.exit(7);\n");
+  assert.match(String((await buildSlotChildEntries(dir)).reason), /^7: /);
+  await assert.rejects(runCommand(join(dir, "no-such-executable"), [], dir), (error: Error) => {
+    assert.match(error.message, /^ENOENT: /);
+    assert.ok(error.message.includes(`failed in ${dir}`));
+    return true;
+  });
+  writeFileSync(join(dir, CHILD_ENTRY_BUILD_SCRIPT), 'process.kill(process.pid, "SIGTERM");\n');
+  assert.match(String((await buildSlotChildEntries(dir)).reason), /^SIGTERM: /);
 });
