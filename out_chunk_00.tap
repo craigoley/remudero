@@ -1,0 +1,22 @@
+TAP version 13
+# Subtest: scripts/test-duration-reporter.mjs
+ok 1 - scripts/test-duration-reporter.mjs
+  ---
+  duration_ms: 212.359632
+  type: 'test'
+  ...
+# would rewrite 0 of 3694 test files
+#   dirname-url: 0 occurrence(s) in 0 file(s)
+#   dirname-global: 0 occurrence(s) in 0 file(s)
+#   import-meta-dir: 0 occurrence(s) in 0 file(s)
+#   url-dot-then-dotdot: 0 occurrence(s) in 0 file(s)
+#   url-dotdot: 0 occurrence(s) in 0 file(s)
+#   url-pathname: 0 occurrence(s) in 0 file(s)
+# left as written: 1
+#   test/the-literal-masker-parses-a-nested-template-substitution.test.ts:16 [url-dotdot] REPO is concatenated as a string and the helper value has no trailing slash
+# Subtest: scripts/test-repo-root-codemod.mjs
+ok 2 - scripts/test-repo-root-codemod.mjs
+  ---
+  duration_ms: 2176.761597
+  type: 'test'
+  ...
