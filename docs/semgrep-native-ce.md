@@ -58,6 +58,27 @@ References: [PyPA local versions](https://packaging.python.org/en/latest/specifi
 [wheel format](https://packaging.python.org/en/latest/specifications/binary-distribution-format/),
 and [core metadata](https://packaging.python.org/en/latest/specifications/core-metadata/).
 
+### Exact reviewed layout support
+
+The independent auditor identifies shared namespace contributors by distribution,
+version and whole-artifact SHA256, including a lone contributor. The reviewed
+`google` and `opentelemetry` roots remain implicit namespaces: root modules,
+root `__init__.py`, case aliases and unreviewed contributors are refused.
+
+Nested vendor metadata and the one nested OpenTelemetry customization member
+require exact owner/version/artifact/path/body-size/body-SHA tuples and the original
+install destination. A same-content `.data` alias or different destination is not
+the reviewed member. No general startup-hook, foreign-metadata, namespace, tool,
+stdlib, collision, dependency or RECORD guard is disabled.
+
+The initial 117-case layout inventory retained the original 107 controls and added
+ten exact layout controls. The complete inventory now contains 168 literal controls,
+including metadata declaration and trusted source-recipe controls. Synthetic tuple
+controls are not original-artifact proof; real
+approved-archive positives and wrong-owner/version/hash/path/body/destination
+negatives must be retained separately. Source controls do not establish installed
+closure, scanner operation, Python 3.12.15 qualification or pilot activation.
+
 ## Install boundary
 
 Operator-approved CE 1.180.0 replaces 1.167.0, whose dependency constraints forced
@@ -113,6 +134,47 @@ References: [pip secure installs](https://pip.pypa.io/en/stable/topics/secure-in
 [Peewee's pinned build requirements](https://github.com/coleifer/peewee/blob/3.18.3/pyproject.toml),
 [Peewee's supported source-build switch](https://github.com/coleifer/peewee/blob/3.18.3/setup.py),
 and [Semgrep licensing](https://semgrep.dev/docs/licensing/).
+
+## Inert metadata declaration policy
+
+The inert artifact auditor supports metadata 2.5 import declarations as untrusted
+data, never as a namespace or installation permission. It checks identifier/private
+syntax, empty-name semantics, same-project ambiguity and bounded cross-project
+exclusive-name collisions. A shared parent may contain distinct exclusive children;
+one exclusive parent cannot capture another project's namespace child. Existing
+whole-artifact/destination/RECORD/tool/startup guards still decide installation safety.
+Importability is not inferred from metadata and remains unproved by this inert audit.
+Unsupported metadata versions still refuse. Final wheel dependencies are enforced
+even when marked Dynamic; unresolved source dependencies/import declarations refuse.
+
+Metadata controls are a separately hash-bound first-party module. Every existing
+literal test identity is retained, and source staging, policy-change detection and
+receipt verification include the module. No source-size limit is increased.
+References: [core metadata](https://packaging.python.org/en/latest/specifications/core-metadata/)
+and [PEP 794](https://peps.python.org/pep-0794/).
+
+## Trusted source-recipe staging, before lock adoption
+
+The compatibility workflow stages four regular, committed first-party files for
+every phase: the auditor, `runtime_source_recipe.py`, source assembler and policy.
+Each is checked against its independent workflow SHA256 before execution; unit
+controls additionally bind their complete source inventory. A mutable checkout,
+symlink, wrong digest or unknown recipe cannot replace those committed bytes.
+
+The added recipe accepts only the reviewed local distribution and MCP 1.30.0 pins.
+Source assembly occurs in the isolated parent, after checking the recorded Linux
+x86_64, CPython 3.12.15 and zlib 1.3 profile. The exact whole-wheel hash must match
+before the wheel joins the original-artifact population. Raw TLS acquisition is
+separate from inert assembly. Newly created build/runtime environments have private
+directory entries; existing entries and their permissions are never repaired or reused.
+
+This staging does not modify either lock or the Scan workflow, and does not resolve
+the current committed Semgrep/MCP incompatibility by itself. Merge the trusted
+workflow staging before a separate lock/Scan adoption PR. Original and built
+metadata audits, offline hash installation, standard `pip check` and installed
+version/engine checks remain mandatory. Source controls, relocated private Python
+checks and inert artifact audits do not qualify the production runner, MCP startup,
+HTTP authentication, repository scans or the pilot.
 
 ## Deadline-aware native author validation
 
