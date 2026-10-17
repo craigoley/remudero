@@ -56,30 +56,23 @@ jobs:
       - name: Install hash-locked Community Edition
         shell: bash
         env:
-          # Only Peewee's reviewed/hashed sdist builds; disable its SQLite extensions, not Semgrep's engine.
+          # The separately trusted auditor builds only approved Peewee; Semgrep assembly stays inert.
           NO_SQLITE: "1"
         run: |
-          VENV="$(mktemp -d "${RUNNER_TEMP}/semgrep-ce.XXXXXX")"
-          python -m venv "$VENV"
-          "$VENV/bin/python" -m pip --isolated install \
-            --index-url https://pypi.org/simple \
-            --require-hashes --only-binary=:all: --no-deps --force-reinstall \
-            -r .github/semgrep/build-requirements.txt
-          # Cache downloads, not an executable environment or unverified built wheel.
-          "$VENV/bin/python" -m pip --isolated download \
-            --index-url https://pypi.org/simple \
-            --require-hashes --only-binary=:all: --no-binary=peewee \
-            --no-build-isolation --no-deps --dest "$VENV/artifacts" \
-            -r .github/semgrep/requirements.txt
-          # Recheck bytes; build Peewee offline with locked tools, no wheel-cache reuse; verify closure.
-          "$VENV/bin/python" -m pip --isolated install \
-            --no-index --find-links "$VENV/artifacts" --no-cache-dir \
-            --require-hashes --only-binary=:all: --no-binary=peewee \
-            --no-build-isolation --no-deps --force-reinstall \
-            -r .github/semgrep/requirements.txt
-          "$VENV/bin/python" -m pip check
-          test "$("$VENV/bin/semgrep" --version)" = "1.180.0"
-          ENGINE="$("$VENV/bin/python" -c 'from semgrep.semgrep_core import SemgrepCore; print(SemgrepCore.executable_path())')"
+          ROOT="$(mktemp -d "${RUNNER_TEMP}/semgrep-ce.XXXXXX")"
+          python -I -S -B .github/semgrep/source-runtime-qualification.py \
+            --install-root "$ROOT" --workspace "$GITHUB_WORKSPACE" --head "$(git rev-parse HEAD)"
+          python -I -S -B - "$ROOT/install-mcp-qualification.json" <<'PY'
+          import json, pathlib, sys
+          result = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+          assert result['state'] == 'HASH_BOUND_INSTALL_AND_MCP_CONTROLS_COMPLETE'
+          assert all(result[name] is True for name in ('installedClosureQualified', 'mcpApiQualified', 'httpAuthQualified', 'pilotDefaultOff', 'ownerOverrideUnchanged'))
+          assert result['productionOAuthIdentity'] == 'NOT_QUALIFIED'
+          assert result['runtimeQualified'] is False and result['wholeCorpusQualified'] is False
+          PY
+          VENV="$ROOT/runtime-env"
+          test "$("$VENV/bin/semgrep" --version)" = "1.181.0"
+          ENGINE="$("$VENV/bin/python" -I -B -c 'from semgrep.semgrep_core import SemgrepCore; print(SemgrepCore.executable_path())')"
           case "$ENGINE" in "$VENV"/*) ;; *) echo "CE engine escaped locked environment" >&2; exit 1 ;; esac
           printf 'SEMGREP_QUALIFICATION_ENGINE=%s\n' "$ENGINE" >> "$GITHUB_ENV"
           printf '%s\n' "$VENV/bin" >> "$GITHUB_PATH"
