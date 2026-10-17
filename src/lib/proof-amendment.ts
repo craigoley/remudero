@@ -18,7 +18,7 @@
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -29,6 +29,7 @@ import { parseTasksFromYaml, type Task } from "./plan.js";
 import { lintTask, type LintViolation } from "./task-linter.js";
 import { taskIdFromRunBranch } from "./status.js";
 import { isTaskShardName } from "./task-shard-name.js";
+import { createOrReadPublished, readFileIfExists } from "./fs-race-safe.js";
 
 /** One worker-proposed replacement, parsed from the fix-rung report (see {@link
  *  parseProofAmendmentProposal}) or constructed directly by a test. `claim`/`oldProof` must be
@@ -710,12 +711,16 @@ function scopeWorkRecoveryPath(input: ScopeAmendmentWork): string {
 
 // Recovery copies contain regular files or deletions only; neither a source nor a destination may
 // follow a worker-controlled symlink out of the worktree (including an ancestor directory).
-function scopeWorkPath(root: string, path: string): string {
+function scopeWorkParts(path: string): string[] {
   if (!path || /[\\\x00-\x1f\x7f:]/.test(path) || path.split("/").some((p) => !p || p === "." || p === ".." || p === ".git")) {
     throw new Error(`unsafe scope recovery path: ${path}`);
   }
+  return path.split("/");
+}
+
+function scopeWorkPath(root: string, path: string): string {
   let current = resolve(root);
-  const parts = path.split("/");
+  const parts = scopeWorkParts(path);
   for (let i = 0; i < parts.length; i++) {
     current = join(current, parts[i]);
     const stat = lstatSync(current, { throwIfNoEntry: false });
@@ -728,10 +733,35 @@ function scopeWorkPath(root: string, path: string): string {
 
 interface ScopeWorkEntry { path: string; data: string | null; mode: number }
 
-function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
-  const file = scopeWorkRecoveryPath(input);
-  if (!existsSync(file)) throw new Error("missing saved work from the round that asked for scope");
-  const saved = JSON.parse(readFileSync(file, "utf8"));
+function readScopeWorkEntry(root: string, path: string): ScopeWorkEntry {
+  const parts = scopeWorkParts(path);
+  const descriptorRoot = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+  const descriptors = openSync(descriptorRoot, constants.O_RDONLY | constants.O_DIRECTORY);
+  closeSync(descriptors);
+  let fd = openSync(resolve(root), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    // Pin each ancestor before opening its child; a renamed directory cannot redirect the read.
+    for (let i = 0; i < parts.length; i++) {
+      const next = openSync(`${descriptorRoot}/${fd}/${parts[i]}`, constants.O_RDONLY | constants.O_NOFOLLOW |
+        (i < parts.length - 1 ? constants.O_DIRECTORY : constants.O_NONBLOCK));
+      closeSync(fd); fd = next;
+    }
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`scope recovery requires a regular path: ${path}`);
+    return { path, data: readFileSync(fd).toString("base64"), mode: stat.mode & 0o777 };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { path, data: null, mode: 0 };
+    if (code === "ELOOP" || code === "ENOTDIR") {
+      throw new Error(`scope recovery requires a regular path: ${path}`, { cause: error });
+    }
+    throw error;
+  } finally { closeSync(fd); }
+}
+
+function readScopeWork(input: ScopeAmendmentWork, raw = readFileIfExists(scopeWorkRecoveryPath(input))): ScopeWorkEntry[] {
+  if (raw === undefined) throw new Error("missing saved work from the round that asked for scope");
+  const saved = JSON.parse(raw);
   if (saved.identity !== scopeWorkIdentity(input) || typeof saved.payload !== "string" ||
       saved.digest !== createHash("sha256").update(saved.payload).digest("hex")) {
     throw new Error("scope recovery identity or digest did not verify");
@@ -750,24 +780,25 @@ function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
  *  immutable copy instead of replacing the asking round's work with an empty, later checkout. */
 export function saveScopeAmendmentWork(input: ScopeAmendmentWork): string {
   const file = scopeWorkRecoveryPath(input);
-  if (!existsSync(file)) {
-    const entries = [...new Set(input.paths)].sort().map((path): ScopeWorkEntry => {
-      const source = scopeWorkPath(input.worktreePath, path);
-      const stat = lstatSync(source, { throwIfNoEntry: false });
-      return { path, data: stat ? readFileSync(source).toString("base64") : null, mode: stat ? stat.mode & 0o777 : 0 };
-    });
+  mkdirSync(dirname(file), { recursive: true });
+  const claim = createOrReadPublished(file, 0o600);
+  if (!claim.created) {
+    readScopeWork(input, claim.raw);
+    return file;
+  }
+  try {
+    const entries = [...new Set(input.paths)].sort().map((path) => readScopeWorkEntry(input.worktreePath, path));
     const payload = JSON.stringify(entries);
     const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
       digest: createHash("sha256").update(payload).digest("hex") });
-    mkdirSync(dirname(file), { recursive: true });
     writeFileSync(join(input.root, "recovery", ".rmd-scratch-keep"), "preserved scope-amendment work\n", { flush: true });
-    writeFileSync(file, text, { flag: "wx", mode: 0o600, flush: true });
+    claim.publish(text);
     if (readFileSync(file, "utf8") !== text) throw new Error("saved scope recovery bytes did not verify");
     for (const path of [dirname(file), dirname(dirname(file)), input.root]) {
       const fd = openSync(path, "r");
       try { fsyncSync(fd); } finally { closeSync(fd); }
     }
-  }
+  } finally { claim.release(); }
   readScopeWork(input);
   return file;
 }

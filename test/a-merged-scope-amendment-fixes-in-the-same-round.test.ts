@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse } from "yaml";
@@ -203,6 +204,111 @@ test("scope recovery refuses symlinks and traversal at both save and restore", (
   assert.throws(() => saveScopeAmendmentWork({ ...input, amendmentNumber: 100 }), /regular path/);
   assert.equal(existsSync(join(outside, "rule-suites.ts")), false);
   assert.throws(() => saveScopeAmendmentWork({ ...input, paths: ["../outside.ts"] }), /unsafe/);
+});
+
+test("scope recovery keeps the winning save when another writer publishes before exclusive creation", (t) => {
+  const f = fixture(t);
+  const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42, amendmentNumber: 99, paths: [path] };
+  writeFileSync(join(f.repo.dir, path), content);
+  const saved = saveScopeAmendmentWork(input);
+  const winner = readFileSync(saved, "utf8"); rmSync(saved);
+  writeFileSync(join(f.repo.dir, path), "later losing work\n");
+  const open = fs.openSync, write = fs.writeFileSync;
+  let raced = false;
+  const publishWinner = (target: unknown, flags: unknown) => {
+    if (target === saved && flags === "wx" && !raced) { raced = true; write(saved, winner, { mode: 0o600 }); }
+  };
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    publishWinner(args[0], args[1]); return open(...args);
+  });
+  t.mock.method(fs, "writeFileSync", (...args: Parameters<typeof fs.writeFileSync>) => {
+    publishWinner(args[0], typeof args[2] === "object" && args[2] !== null ? args[2].flag : undefined);
+    return write(...args);
+  });
+  syncBuiltinESMExports();
+  try { assert.equal(saveScopeAmendmentWork(input), saved); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.equal(raced, true, "the competing publisher must win the creation race");
+  assert.equal(readFileSync(saved, "utf8"), winner);
+  assert.deepEqual(restoreScopeAmendmentWork(input), [path]);
+  assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), content);
+});
+
+test("scope recovery saves the opened file's bytes and mode when its pathname becomes a symlink", (t) => {
+  const f = fixture(t);
+  const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42, amendmentNumber: 99, paths: [path] };
+  const source = join(f.repo.dir, path), outside = join(f.repo.dir, "outside.ts");
+  writeFileSync(source, content); chmodSync(source, 0o755); writeFileSync(outside, "outside work\n");
+  const read = fs.readFileSync;
+  let swapped = false;
+  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+    if (!swapped && (typeof args[0] === "number" || args[0] === source)) {
+      swapped = true; rmSync(source); symlinkSync(outside, source);
+    }
+    return read(...args);
+  });
+  syncBuiltinESMExports();
+  let saved: string;
+  try { saved = saveScopeAmendmentWork(input); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.equal(swapped, true, "replace the pathname immediately before its bytes are read");
+  const entries = JSON.parse(JSON.parse(readFileSync(saved, "utf8")).payload);
+  assert.deepEqual(entries, [{ path, data: Buffer.from(content).toString("base64"), mode: 0o755 }]);
+  assert.equal(readFileSync(outside, "utf8"), "outside work\n");
+});
+
+test("scope recovery pins an opened ancestor before a symlink replaces its pathname", (t) => {
+  const f = fixture(t);
+  const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42, amendmentNumber: 99, paths: [path] };
+  const parent = join(f.repo.dir, "src/lib"), outside = join(f.repo.dir, "outside"), pinned = join(f.repo.dir, "pinned");
+  mkdirSync(outside); writeFileSync(join(outside, "rule-suites.ts"), "outside work\n");
+  writeFileSync(join(f.repo.dir, path), content);
+  const open = fs.openSync, lstat = fs.lstatSync;
+  let swapped = false;
+  const replaceParent = () => {
+    swapped = true; renameSync(parent, pinned); symlinkSync(outside, parent);
+  };
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    const fd = open(...args);
+    if (!swapped && String(args[0]).endsWith("/lib")) replaceParent();
+    return fd;
+  });
+  t.mock.method(fs, "lstatSync", (...args: Parameters<typeof fs.lstatSync>) => {
+    const stat = lstat(...args);
+    if (!swapped && args[0] === parent) replaceParent();
+    return stat;
+  });
+  syncBuiltinESMExports();
+  let saved: string;
+  try { saved = saveScopeAmendmentWork(input); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.equal(swapped, true, "replace an ancestor before its child is opened");
+  const entries = JSON.parse(JSON.parse(readFileSync(saved, "utf8")).payload);
+  assert.equal(Buffer.from(entries[0].data, "base64").toString(), content);
+  assert.equal(readFileSync(join(outside, "rule-suites.ts"), "utf8"), "outside work\n");
+});
+
+test("scope recovery propagates source errors and releases an unpublished save for retry", (t) => {
+  const f = fixture(t);
+  const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42, amendmentNumber: 99, paths: [path] };
+  const source = join(f.repo.dir, path);
+  mkdirSync(source);
+  assert.throws(() => saveScopeAmendmentWork(input), /regular path/);
+  rmSync(source, { recursive: true }); writeFileSync(source, content);
+  const open = fs.openSync;
+  const denied = Object.assign(new Error("source read denied"), { code: "EACCES" });
+  t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
+    if (String(args[0]).endsWith("/rule-suites.ts")) throw denied;
+    return open(...args);
+  });
+  syncBuiltinESMExports();
+  try { assert.throws(() => saveScopeAmendmentWork(input), (error) => error === denied); }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  const saved = saveScopeAmendmentWork(input);
+  assert.equal(statSync(saved).mode & 0o777, 0o600);
+  rmSync(source);
+  assert.deepEqual(restoreScopeAmendmentWork(input), [path]);
+  assert.equal(readFileSync(source, "utf8"), content);
 });
 
 test("an unverifiable asking-round save is named in the ledger and the worker evidence", async (t) => {
