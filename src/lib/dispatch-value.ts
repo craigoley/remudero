@@ -51,7 +51,7 @@ export interface DispatchScoreInputs {
 /** Explain the captured selection evidence without rebuilding it or consulting a clock. */
 export function explainDispatchScore(task: DispatchValueTask, context?: DispatchValueContext) {
   const priority = Number.isFinite(task.priority) ? task.priority! : null;
-  if (!context?.stridePassByTaskId || context.costOfDelayFallback) return { basis: "priority-first" as const, priority };
+  if (context?.stridePassByTaskId === undefined || context.costOfDelayFallback) return { basis: "priority-first" as const, priority };
   const inputs = context.costOfDelayInputsByTaskId?.get(task.id);
   return {
     basis: "cost-of-delay" as const, priority,
