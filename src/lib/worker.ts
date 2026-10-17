@@ -97,7 +97,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // W1-T2777: same primitive `ensureInstallFresh` (run-task.ts) uses, shared via the extracted `install-hash` module so both
 // freshness paths compare the same hash — never a parallel implementation that could drift silently. See lib/install-hash.ts
 // for the extraction reason.
-import { hashInstallInputs } from "./install-hash.js";
+import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { systemClock, type Clock } from "./clock.js";
@@ -4696,9 +4696,29 @@ function assertSamePackageInstallInputs(
     });
     return;
   }
-  if (hashInstallInputs(worktreePath) !== hashInstallInputs(sourceDir)) {
+  if (hashInstallInputs(worktreePath) !== linkedInstallInputsHash(source)) {
     throw new WorktreeNodeModulesRefusedError(worktreeName.name, worktreePath, source);
   }
+}
+
+/** The install-input hash `source` was really installed from: the marker `ensureInstallFresh` (run-task.ts) writes inside the
+ *  RESOLVED install, else that install's own package files. Never the linking tree's: an engine tree links the canonical
+ *  install, which a restart re-installs, while its own package files stay at the revision it was cut from — on
+ *  2026-10-17 that refused every implement run for 4 h against engine 649bcb7, an install current since 14:53Z. */
+export function linkedInstallInputsHash(source: string): string {
+  let real = source;
+  try {
+    real = realpathSync(source);
+  } catch (error) {
+    void error; // an unresolvable link is judged where it sits
+  }
+  try {
+    const marker = readFileSync(installHashMarkerPath(dirname(real)), "utf8").trim();
+    if (/^[0-9a-f]{64}$/.test(marker)) return marker;
+  } catch (error) {
+    void error; // no marker: the install's own package files are the record
+  }
+  return hashInstallInputs(dirname(real));
 }
 
 /** Give a fresh worktree a `node_modules`, by SYMLINK — never by installing. INVARIANT: a symlink, never `npm ci`. An install
