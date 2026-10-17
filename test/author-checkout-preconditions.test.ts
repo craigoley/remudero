@@ -5,11 +5,11 @@ import {copyFileSync, readFileSync, realpathSync, symlinkSync, writeFileSync} fr
 import {join} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {test, type TestContext} from 'node:test';
-import {gitRepo} from './helpers/git-repo.js';
+import {gitRepo} from '#test/helpers/git-repo.js';
 // @ts-expect-error -- operator ESM diagnostics are independently source-mapped.
-import {checkAuthorCheckout} from '../scripts/lib/author-checkout-preconditions.mjs';
+import {checkAuthorCheckout} from '#scripts/lib/author-checkout-preconditions.mjs';
 // @ts-expect-error -- shared with the dependency-free operator launcher.
-import {remainingSubprocessTimeout, spawnWithinBudget} from '../scripts/lib/bounded-subprocess.mjs';
+import {remainingSubprocessTimeout, spawnWithinBudget} from '#scripts/lib/bounded-subprocess.mjs';
 
 const upstream = 'https://github.com/craigoley/remudero.git';
 function fixture(t: Pick<TestContext, 'after'>) {
