@@ -99,7 +99,7 @@ async function rig(options: {
     },
     log: (step: string, fields?: Record<string, unknown>) => rows.push({ step, fields: fields ?? {} }),
     sleep: () => new Promise<void>((resolve) => sleeps.push(resolve)),
-  } as unknown as DaemonDeps, { laneCount: options.laneCount, max: 12, sweepWallClockBoundMs: BOUND_MS });
+  } as unknown as DaemonDeps, { laneCount: options.laneCount, max: 12, sweepWallClockBoundMs: BOUND_MS, freshnessMinLifetimeMs: 0 });
   void run.then(() => { done = true; }, () => { done = true; });
   for (let i = 0; i < 5; i++) await flush();
   const settleTick = async () => { sleeps.shift()?.(); for (let i = 0; i < 10; i++) await flush(); };

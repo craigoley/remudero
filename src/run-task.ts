@@ -28,7 +28,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { judgeFixProgress,
+import { firstFixRoundVerdict, judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -12706,10 +12706,10 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = await judgeFixProgress(input, progressJudge);
+      const decision = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {

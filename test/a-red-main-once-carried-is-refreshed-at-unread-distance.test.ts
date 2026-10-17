@@ -109,7 +109,8 @@ test("an unread distance with no record of main carrying the red keeps the PR on
   const h = harness([{ step: "main.health.observed", sha: MAIN, state: "green" }]);
   await runSweep([redPr()], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.refreshed, []);
-  assert.deepEqual(h.judged, [PR], "its own red still goes to the judge before a fix round");
+  assert.deepEqual(h.fixed, [PR], "its own red goes to its own fix lane");
+  assert.deepEqual(h.judged, [], "W1-T10039: its first round is not put to the judge");
   assert.equal(h.rows.filter((r) => r.step === "sweep.base_fixed.inherited").length, 0);
 
   // A head measured as already carrying main has nothing to take, whatever main once failed.

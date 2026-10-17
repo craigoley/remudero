@@ -29,7 +29,7 @@ const LATCHED = "this fix progress loop is already escalated; awaiting new evide
 const pr = (over: Partial<OpenPrView> = {}): OpenPrView => ({
   prNumber: 2035, prUrl: "https://github.com/o/console/pull/2035", taskId: TASK,
   headSha: "3dccfbb", checksState: "red", reviewState: "pending", unmetCriteria: [],
-  priorStrikes: 0, autoMergeArmed: false, lastActivityAt: new Date(NOW).toISOString(),
+  priorStrikes: 1, autoMergeArmed: false, lastActivityAt: new Date(NOW).toISOString(),
   ciFailures: [{ name: "console-ci", logTail: "write-parity: undeclared core read" }], ...over,
 });
 
