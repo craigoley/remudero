@@ -1,0 +1,69 @@
+- id: W1-T10064
+  title: "THE HARNESS COMMIT REWRITES A NEW TEST'S RELATIVE IMPORTS TO #src/#scripts/#test BEFORE IT STAGES — on 2026-10-17 four PRs (#12582, #12601, #12604, #12600) went red on the W1-T9864 census because a worker's new test imported ../src, and W1-T9864's codemod (scripts/test-location-codemod.mjs `rewriteSource`) already makes exactly that edit deterministically; nothing runs it before a commit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the harness commit rewrites the import specifiers of test files the worker ADDED; which paths are staged, the scope fence, the census and the codemod itself are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 filing agent F17 item 1 (the mechanism half), from the hand fixes of #12582, #12601, #12604 and #12600 (16:40-18:15Z)"
+  plan_refs: [W1-T9864, W1-T9865, W1-T9866, W1-T9867, W1-T9868, W1-T4072, W1-T10063]
+  files:
+    - src/run-task.ts
+    - test/a-new-test-is-committed-through-the-subpath-alias.test.ts
+  status: queued
+  priority: 1  # each miss costs a CI round and a fix round, and the shape recurs until every neighbouring test is migrated
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 (operator tracker 17:18Z-17:32Z): #12582, #12601, #12604 and #12600 each went red on
+    test/a-test-imports-through-the-subpath-alias.test.ts "W1-T9864: a new test file carries no location-relative
+    specifier". The hand fixes were each a mechanical `../src/` -> `#src/` rewrite of the PR's new test file.
+    READ at origin/main 70b15edf7 (symbols, not lines):
+    - scripts/test-location-codemod.mjs exports `rewriteSource(text, file)` -> {text, rewritten, unresolved,
+      selfPathRemoved} and `hasLocationRelativeSpecifier`; the census test drives both. It rewrites static and dynamic
+      relative imports of src/, scripts/ and test/ and lists, never guesses, what it cannot rewrite (package.json reads).
+    - src/run-task.ts `commitWorkerEdits` is the one harness commit both lanes use (`implement.harness_commit` is logged
+      for implement runs and fix rounds alike, e.g. #12582 round 1 at 15:38:02Z). It reads `git status --porcelain`,
+      decides `declared`/`undeclared`, and stages; nothing touches content.
+    - No worker prompt mentions the aliases (`git grep '#src/' -- src` finds imports only), and AGENTS.md and
+      learnings/ name none. Workers run with settingSources [] and never read doctrine.
+    WHY A COMMIT-PATH REWRITE AND NOT A PROMPT LINE: the edit is fully mechanical, the codemod is tested, and the
+    alias resolves to the same module under tsx and tsc (W1-T9864's probe), so the rewrite cannot change behaviour. A
+    prompt line is advisory, costs tokens on every round, and loses to the ~3,000 neighbouring tests that still import
+    ../src until W1-T9865..W1-T9868 migrate them. Craig's rule: prefer automation over guardrails.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9864..W1-T9868 migrate EXISTING tests; nothing rewrites a test written after
+    them. W1-T10063 makes the census visible before the push (needed for the shapes the codemod lists as unresolved). Swept
+    origin/main plan/tasks.d for test-location-codemod, rewriteSource, subpath alias and commitWorkerEdits, and the
+    plan diffs of the 3 open PR heads (18:26Z): none rewrites at commit.
+  design: |
+    1. In `commitWorkerEdits`, before anything is staged, take the paths the commit will stage that are test files the
+       worker ADDED (`??` or `A` in the status it already reads, under test/, ending `.test.ts` or `.test.mts`).
+    2. For each, apply the harness's OWN copy of the codemod's `rewriteSource` (imported from the daemon's module,
+       never executed from the worktree, whose copy the worker can edit). Write the file back only when `rewritten > 0`.
+       Existing test files are never rewritten: the census holds only new files and the base count.
+    3. The commit row carries `alias_rewritten: [paths]` and `alias_unresolved: [{path, specifier}]` when non-empty, on
+       the existing `implement.harness_commit` step (no new step).
+    4. A rewrite that throws leaves the file as the worker wrote it and is named on the row; the commit proceeds and
+       the census still judges it.
+    5. TESTS in test/a-new-test-is-committed-through-the-subpath-alias.test.ts, `test(` titles verbatim as in the
+       proofs, over a temp git repo built with the gitRepo() fixture: an added test importing `../src/lib/x.js` is
+       committed importing `#src/lib/x.js`; an existing test that imports `../src` is committed byte-identical; a
+       `../package.json` read is left and listed as unresolved.
+  acceptance:
+    - claim: "a test file the worker added is committed with its relative imports rewritten to the subpath aliases"
+      proof: 'grep: test("W1-T10064: an added test is committed through the subpath alias" in test/a-new-test-is-committed-through-the-subpath-alias.test.ts'
+    - claim: "an existing test file is committed exactly as the worker left it"
+      proof: 'grep: test("W1-T10064: an existing test file is never rewritten by the harness commit" in test/a-new-test-is-committed-through-the-subpath-alias.test.ts'
+    - claim: "a specifier the codemod cannot rewrite is left in place and named on the commit row"
+      proof: 'grep: test("W1-T10064: an unresolved specifier is left and named on the commit row" in test/a-new-test-is-committed-through-the-subpath-alias.test.ts'
+  falsifier: |
+    At origin/main `commitWorkerEdits` over a temp repo whose worker added test/a.test.ts with `import { x } from
+    "../src/lib/x.js"` commits that line unchanged, so the first test fails. Rewriting every test file fails the
+    second test. Deleting the rewrite gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: the harness editing worker content, even mechanically. The rewrite is limited to
+    import specifiers of files the worker created in this commit. EFFECT, measured after merge: CI reds on
+    "W1-T9864: a new test file carries no location-relative specifier" on fleet-built heads. Healthy shape: none
+    except shapes listed in alias_unresolved.
