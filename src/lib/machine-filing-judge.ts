@@ -640,7 +640,7 @@ export interface MachineJudgePorts {
   flakeEvidence?: FlakeJudgeEvidencePort;
   /** W1-T9043: read once per pass, the newest operator ruling on a task that its record does not carry
    *  (a ledgered release, `rmd release`, an `rmd note`). A ruling at or after the escalation stops its withdrawal.
-   *  Absent: only the record's own rulings count. Throwing: nothing is withdrawn this pass. */
+   *  Absent or throwing: nothing is withdrawn this pass. */
   operatorRulings?: () => (taskId: string) => string | undefined;
 }
 
@@ -847,6 +847,7 @@ function unansweredEscalations(c: {
   released: ReadonlySet<string>;
   excluded: ReadonlySet<string>;
 }): Withdrawal[] {
+  if (c.ports.operatorRulings === undefined) return [];
   const nowMs = c.ports.clock.now();
   const aged = c.plan.tasks.filter((t) =>
     t.author_class === "machine" && parkedEscalation(t, c.released) && !c.excluded.has(judgementFamily(t)) &&
@@ -854,7 +855,7 @@ function unansweredEscalations(c: {
   if (aged.length === 0) return [];
   let ruledAt: (taskId: string) => string | undefined;
   try {
-    ruledAt = c.ports.operatorRulings?.() ?? (() => undefined);
+    ruledAt = c.ports.operatorRulings();
   } catch (e) {
     // Withdrawing a record the operator may have ruled on would answer for him; this pass withdraws none.
     c.ports.log("machine_judge.withdraw_skipped", { task_ids: aged.map((t) => t.id), reason: `operator rulings are unreadable: ${String((e as Error)?.message ?? e)}` });
@@ -1129,6 +1130,8 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         const text = readFileIfExists(join(root, relPath));
         const out = text === undefined
           ? { refused: `${relPath} is absent from the landing tree` }
+          : taskRulingPin(shardRecord(text, relPath)) !== taskRulingPin(task)
+          ? { refused: `${task.id} changed since its unanswered escalation was read` }
           : renderRetiredShard(text, relPath, unansweredWithdrawalReason(w, ports.clock.iso()), "withdrawn");
         if ("refused" in out) {
           (state.declined ??= {})[task.id] = taskRulingPin(task);
