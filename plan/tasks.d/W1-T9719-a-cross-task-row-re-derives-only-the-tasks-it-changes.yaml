@@ -14,7 +14,7 @@
     - src/lib/board-projection.ts
     - src/lib/status.ts
     - test/a-cross-task-row-re-derives-only-the-tasks-it-changes.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
