@@ -9,10 +9,10 @@ import {
   acquireTestSlot, beatTestSlot, probeReservedTree, releaseTestSlotForOwner, startTestSlotHeartbeat, TEST_SLOT_DIR_ENV, TEST_SLOT_HEARTBEAT_MS,
   TEST_SLOT_PARENT_ENV, TEST_SLOT_RUN_ENV, type ReservedTreeEvidence, type TestSlotHolder, type TestSlotOptions,
   testSlotReservationIdentity,
-} from "../src/lib/test-slot.js";
-import { acquireSlotMutation, createGuardHolderProbe, defaultGuardHolderProbe, reclaimOrphanedSlotMutation, type GuardHolderEvidence } from "../src/lib/test-slot-mutation.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
+} from "#src/lib/test-slot.js";
+import { acquireSlotMutation, createGuardHolderProbe, defaultGuardHolderProbe, reclaimOrphanedSlotMutation, type GuardHolderEvidence } from "#src/lib/test-slot-mutation.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { makeRuntimeFixture } from "#test/helpers/native-runtime-fixture.js";
 
 const SLOT_MODULE = new URL("../src/lib/test-slot.ts", import.meta.url).href;
 const IDLE = () => ({ cores: 8, load1: 0 });
