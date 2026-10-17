@@ -21,7 +21,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -32,7 +32,7 @@ import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 import { sameHost } from "./host-identity.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { observeSlotCapacity, publishSlotCapacity, retireOwnedSlotCapacity, SlotCapacityCleanupError } from "./test-slot-capacity.js";
-import { acquireSlotMutation, slotMutationPending } from "./test-slot-mutation.js";
+import { acquireSlotMutation, defaultGuardHolderProbe, slotMutationPending, type GuardHolderEvidence, type OrphanGuardRecovery } from "./test-slot-mutation.js";
 import { observeTestSlotParent } from "./test-slot-parent.js";
 
 /** Names the slot directory every container and the host share (the scratch mount's bind). */
@@ -55,6 +55,14 @@ export const TEST_SLOT_WAIT_BOUND_MS = 45 * 60_000;
  *  every shard boundary, so a record this stale names a holder that died without releasing. */
 export const TEST_SLOT_LEASE_MS = 90 * 60_000;
 const TEST_SLOT_POLL_MS = 5_000;
+/** The marker every covered step descendant inherits; its value is the reservation's ownerNonce (W1-T9928). */
+export const TEST_SLOT_RUN_ENV = "RMD_TEST_SLOT_RUN";
+/** A beating lease's cadence. A record names it only while a live event loop really beats it. */
+export const TEST_SLOT_HEARTBEAT_MS = 60_000;
+/** Missed recorded beats before a waiter logs one silence observation. Silence is never quiescence. */
+export const TEST_SLOT_SILENT_BEATS = 3;
+/** A guard older than this many times the longest hold this waiter measured itself may be probed as orphaned. */
+export const MUTATION_GUARD_HOLD_FACTOR = 1000;
 const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 
 /**
@@ -263,6 +271,163 @@ export interface TestSlotHolder {
   ownershipProtocol?: "private-capacity-v1";
   /** A private owner has finished its work; same-uid recovery need not wait for its long-lived parent to exit. */
   releaseRequestedAt?: string;
+  /** Present only while a live event loop beats this record at this cadence; absent keeps the pid judgment. */
+  heartbeatIntervalMs?: number;
+}
+
+/** Whether the reserved process tree ended. Only `ended` frees capacity; `unknown` names what it could not see. */
+export interface ReservedTreeEvidence {
+  state: "ended" | "live" | "unknown";
+  coverage: string;
+  reason: string;
+}
+
+/** Seams for {@link probeReservedTree}; every field defaults to this host. */
+export interface ReservedTreeProbeHost {
+  platform?: NodeJS.Platform;
+  bootId?: string;
+  pidNs?: string;
+  list?: () => string[];
+  read?: (path: string) => string;
+}
+
+const goneProcess = (error: unknown): boolean => ["ENOENT", "ESRCH"].includes(String((error as NodeJS.ErrnoException)?.code));
+
+/**
+ * Exact-tree evidence for one reservation (W1-T9928). The tree is the recorded owner (pid + kernel start)
+ * plus every process carrying `RMD_TEST_SLOT_RUN=<ownerNonce>`, which reparented and detached descendants
+ * inherit. A process that started before the owner cannot descend from it. Any later process this probe
+ * cannot read, another boot or pid namespace, missing identity, or a host with no /proc is `unknown`.
+ */
+export function probeReservedTree(held: TestSlotHolder, host: ReservedTreeProbeHost = {}): ReservedTreeEvidence {
+  const platform = host.platform ?? process.platform;
+  const unknown = (reason: string, coverage = "none"): ReservedTreeEvidence => ({ state: "unknown", coverage, reason });
+  if (platform !== "linux") return unknown(`no exact-tree probe on ${platform}`);
+  if (!held.ownerNonce || !held.processStart?.startsWith("proc:")) return unknown("owner identity unknown: no reservation nonce or kernel process start");
+  const bootId = "bootId" in host ? host.bootId : readBootId();
+  const pidNs = "pidNs" in host ? host.pidNs : readPidNamespace();
+  if (held.bootId === undefined || held.bootId !== bootId) return unknown("boot identity unproven");
+  if (held.pidNs === undefined || held.pidNs !== pidNs) return unknown("pid namespace differs or is unrecorded");
+  const ownerStart = Number(held.processStart.slice("proc:".length));
+  const read = host.read ?? ((path: string) => readFileSync(path, "utf8"));
+  let pids: string[];
+  try { pids = (host.list ?? (() => readdirSync("/proc")))().filter(name => /^[0-9]+$/.test(name)); }
+  catch (error) { return unknown(`process table unreadable: ${String(error)}`); }
+  const marker = `${TEST_SLOT_RUN_ENV}=${held.ownerNonce}`;
+  const unreadable: string[] = [];
+  let scanned = 0;
+  for (const pid of pids) {
+    let start: number;
+    try {
+      const raw = read(`/proc/${pid}/stat`);
+      start = Number(raw.slice(raw.lastIndexOf(") ") + 2).trim().split(/\s+/)[19]);
+      if (!raw.includes(") ") || !Number.isSafeInteger(start)) throw new Error("unparseable stat");
+    } catch (error) {
+      if (!goneProcess(error)) unreadable.push(pid);
+      continue;
+    }
+    if (Number(pid) === held.pid && start === ownerStart) return { state: "live", coverage: "proc-environ", reason: `owner pid ${pid} is alive with its recorded start` };
+    if (start < ownerStart) continue;
+    let environ: string;
+    try { environ = read(`/proc/${pid}/environ`); }
+    catch (error) {
+      if (!goneProcess(error)) unreadable.push(pid);
+      continue;
+    }
+    if (environ.split("\0").includes(marker)) return { state: "live", coverage: "proc-environ", reason: `covered descendant pid ${pid} still carries the reservation marker` };
+    scanned += 1;
+  }
+  if (unreadable.length > 0) return unknown(`incomplete: ${unreadable.length} process(es) started since the owner could not be read (pid ${unreadable.slice(0, 5).join(",")})`, "proc-environ (incomplete)");
+  return { state: "ended", coverage: "proc-environ", reason: `owner gone; none of ${scanned} process(es) started since the owner carries ${TEST_SLOT_RUN_ENV}` };
+}
+
+/** What a beating process needs to rewrite exactly one reservation; the lease's own identity, never a new one. */
+export interface TestSlotHeartbeatHandle {
+  path: string;
+  ownerNonce: string;
+  pid: number;
+  processStart: string;
+  host: string;
+  intervalMs: number;
+  /** Every covered step descendant inherits this, so {@link probeReservedTree} can see it after its parent dies. */
+  coverageEnvironment: Record<string, string>;
+}
+
+/**
+ * One beat under the slot's mutation guard: rewrites heartbeatAt (and states the cadence, or withdraws it)
+ * in place, only while the record still names this exact owner. A busy guard defers; drift is `lost`.
+ */
+export function beatTestSlot(handle: TestSlotHeartbeatHandle, opts: { withdraw?: boolean; now?: () => Date } = {}): "beat" | "withdrawn" | "deferred" | "lost" {
+  const mutation = acquireSlotMutation(handle.path);
+  if (mutation.state !== "acquired") return "deferred";
+  try {
+    let fd: number;
+    try { fd = openSync(handle.path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "lost";
+      throw error;
+    }
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile() || (st.mode & 0o077) === 0 || st.size < 1 || st.size > 1024 * 1024) return "lost";
+      const bytes = Buffer.alloc(st.size);
+      if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return "lost";
+      const held = parseTestSlotHolder(bytes.toString("utf8"));
+      if (!held || held.ownerNonce !== handle.ownerNonce || held.pid !== handle.pid || held.processStart !== handle.processStart ||
+          !sameHost(held.host, handle.host) || held.releaseRequestedAt !== undefined || held.ownershipProtocol !== undefined) return "lost";
+      const when = (opts.now ?? (() => new Date()))();
+      const next: TestSlotHolder = { ...held, heartbeatAt: when.toISOString() };
+      delete next.heartbeatIntervalMs;
+      if (!opts.withdraw) next.heartbeatIntervalMs = handle.intervalMs;
+      const body = Buffer.from(JSON.stringify(next));
+      let offset = 0;
+      while (offset < body.length) {
+        const written = writeSync(fd, body, offset, body.length - offset, offset);
+        if (written < 1) throw new Error("test slot heartbeat write made no progress");
+        offset += written;
+      }
+      ftruncateSync(fd, body.length);
+      futimesSync(fd, when, when);
+      return opts.withdraw ? "withdrawn" : "beat";
+    } finally { closeSync(fd); }
+  } finally { mutation.release(); }
+}
+
+/**
+ * Beat a reservation on an unref'd interval of THIS process's live event loop (W1-T9928). `stop(true)`
+ * withdraws the cadence once the covered work has ended; `stop(false)` leaves it, so a waiter must find
+ * exact-tree evidence before reclaiming. A failed or deferred beat is a diagnostic, never a release.
+ */
+export function startTestSlotHeartbeat(handle: TestSlotHeartbeatHandle,
+  log: (row: Record<string, unknown>) => void = row => void process.stderr.write(`${JSON.stringify(row)}\n`)): { stop(coveredWorkEnded: boolean): void } {
+  let stopped = false;
+  const tick = (): void => {
+    if (stopped) return;
+    try {
+      if (beatTestSlot(handle) !== "lost") return;
+      stopped = true;
+      clearInterval(timer);
+      log({ step: "test_slot.heartbeat_lost", path: handle.path, reason: "reservation no longer names this owner; beating stopped" });
+    } catch (error) {
+      log({ step: "test_slot.heartbeat_failed", path: handle.path, error: String(error) });
+    }
+  };
+  const timer = setInterval(tick, handle.intervalMs);
+  timer.unref?.();
+  tick();
+  return {
+    stop(coveredWorkEnded: boolean): void {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      if (!coveredWorkEnded) {
+        log({ step: "test_slot.heartbeat_stopped", path: handle.path, reason: "covered work may outlive the step; cadence kept for exact-tree judgment" });
+        return;
+      }
+      try { beatTestSlot(handle, { withdraw: true }); }
+      catch (error) { log({ step: "test_slot.heartbeat_withdraw_failed", path: handle.path, error: String(error) }); }
+    },
+  };
 }
 
 /** Kernel-derived start identity and parent, including on hosts without /proc. */
@@ -439,6 +604,61 @@ function reclaimPrivateTestSlot(path: string, expected: { dev: number; ino: numb
   });
 }
 
+/** The exact reservation an owner lane asks to release: the identity it observed, never a pattern. */
+export interface OwnerReleaseRequest {
+  ownerNonce: string;
+  pid: number;
+  processStart: string;
+}
+
+export type OwnerReleaseResult =
+  | { outcome: "released"; evidence: ReservedTreeEvidence }
+  | { outcome: "refused" | "deferred" | "held"; reason: string };
+
+/**
+ * An identity-checked, owner-assisted release of one legacy reservation after its covered work ended
+ * (W1-T9928). Refused while the owner process or any covered descendant is observed live, when the record
+ * lacks or differs from the requested identity (PID reuse, a replaced reservation), and for private-capacity-v1
+ * records. A record that changes during release is held for re-observation. Nothing is signalled.
+ */
+export function releaseTestSlotForOwner(path: string, request: OwnerReleaseRequest, opts: {
+  treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
+  isPidAlive?: (pid: number) => boolean;
+  log?: (line: string) => void;
+} = {}): OwnerReleaseResult {
+  const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const mutation = acquireSlotMutation(path);
+  if (mutation.state !== "acquired") return { outcome: "deferred", reason: "slot mutation pending; re-observe" };
+  try {
+    const st = lstatSync(path);
+    if (!st.isFile() || (st.mode & 0o077) === 0) return { outcome: "refused", reason: "private or non-file reservation: owner-lane release required" };
+    const held = readTestSlotHolder(path, st);
+    if (!held?.ownerNonce || !held.processStart) return { outcome: "refused", reason: "owner identity unknown" };
+    if (held.ownerNonce !== request.ownerNonce || held.pid !== request.pid || held.processStart !== request.processStart) {
+      return { outcome: "refused", reason: "reservation identity differs from the request: PID reuse or a replaced reservation" };
+    }
+    const facts = testSlotProcessFacts(held.pid);
+    if (facts?.start === held.processStart || (facts === undefined && (opts.isPidAlive ?? defaultIsPidAlive)(held.pid))) {
+      return { outcome: "refused", reason: `owner pid ${held.pid} is alive` };
+    }
+    const evidence = (opts.treeProbe ?? probeReservedTree)(held);
+    if (evidence.state === "live") return { outcome: "refused", reason: `covered work still live: ${evidence.reason}` };
+    const result = reclaimStaleLock(path, {
+      parseHolder: parseTestSlotHolder,
+      isStale: current => JSON.stringify(current) === JSON.stringify(held),
+      onReclaim: () => log(JSON.stringify({ step: "test_slot.owner_release", path, pid: held.pid, label: held.label,
+        ownerNonce: held.ownerNonce, processStart: held.processStart, bootId: held.bootId, pidNs: held.pidNs,
+        evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason })),
+      onLostReclaim: () => {},
+    });
+    if (result.outcome === "reclaimed") return { outcome: "released", evidence };
+    return { outcome: "held", reason: "reservation changed during release; re-observe" };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { outcome: "refused", reason: "no reservation at this path" };
+    throw error;
+  } finally { mutation.release(); }
+}
+
 /** Seams for {@link acquireTestSlot}; every field defaults to the real host. */
 export interface TestSlotOptions {
   /** Explicit ceiling; it only lowers CPU/memory-derived capacity. */
@@ -478,6 +698,10 @@ export interface TestSlotOptions {
   filePeaks?: readonly TestFileSize[];
   /** The host's memory headroom in bytes; default {@link readMemoryHeadroom}. */
   memoryHeadroom?: () => number | undefined;
+  /** Exact-tree evidence for a cadence-bearing holder whose owner pid is gone; default {@link probeReservedTree}. */
+  treeProbe?: (held: TestSlotHolder) => ReservedTreeEvidence;
+  /** Whether any process holds a mutation guard open; default {@link defaultGuardHolderProbe}. */
+  guardProbe?: (guardPath: string, guard: Stats) => GuardHolderEvidence;
 }
 
 /** A held slot (or the named reason none is held), plus the concurrency the run should use. */
@@ -491,6 +715,8 @@ export interface TestSlotLease {
   note: string;
   /** Only a positively identified real descendant may borrow this owner; absent for unslotted runs. */
   childEnvironment?: Record<string, string>;
+  /** Lets a process with a live event loop beat this legacy reservation while its owner blocks. */
+  heartbeat?: TestSlotHeartbeatHandle;
   refresh(): void;
   release(): void;
 }
@@ -563,7 +789,10 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
   const privateWriter = opts.ownershipProtocol === "private-capacity-v1";
   const parentPolicy = opts.privateParentPolicy === "require-entry-protection";
-  let privateRequired = privateWriter || opts.privateCoordinationRequired === true || parentPolicy;
+  const basePrivate = privateWriter || opts.privateCoordinationRequired === true || parentPolicy;
+  // Re-derived at every poll from what that poll observes (W1-T9928); only incomplete cleanup is sticky.
+  let cleanupIncomplete = false;
+  let privateRequired = basePrivate;
   const privateStale = (held: TestSlotHolder): boolean => {
     if (held.ownershipProtocol !== "private-capacity-v1") return false;
     if (held.releaseRequestedAt !== undefined && Number.isFinite(Date.parse(held.releaseRequestedAt)) && Date.parse(held.releaseRequestedAt) <= clock.now()) return true;
@@ -588,10 +817,42 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   const finishMutation = (mutation: Extract<ReturnType<typeof acquireSlotMutation>, { state: "acquired" }>): boolean => {
     try { mutation.release(); return true; }
     catch (error) {
-      privateRequired = true;
+      cleanupIncomplete = true; privateRequired = true;
       cleanupLog({ step: "test_slot.mutation_cleanup_incomplete", label, ownerRecoveryRequired: true, error: String(error) });
       return false;
     }
+  };
+  const treeProbe = opts.treeProbe ?? ((held: TestSlotHolder) => probeReservedTree(held, { platform: opts.platform, bootId: bootId(), pidNs: pidNamespace() }));
+  const observed = new Set<string>();
+  /** One row per distinct observation: a bounded diagnostic, not one per poll. */
+  const observeOnce = (key: string, row: Record<string, unknown>): void => {
+    if (observed.has(key)) return;
+    observed.add(key);
+    log(JSON.stringify(row));
+  };
+  const guardHolds: number[] = [];
+  const guardSeen = new Map<string, number>();
+  let poll = 0;
+  const guardRecovery: OrphanGuardRecovery = {
+    boundMs: (guard) => {
+      const key = `${guard.dev}:${guard.ino}:${guard.mtimeMs}`, first = guardSeen.get(key);
+      if (first === undefined) guardSeen.set(key, poll);
+      // Judge only a guard this waiter already met on an EARLIER poll, against holds it measured itself.
+      if (first === undefined || first === poll || guardHolds.length === 0) return undefined;
+      return MUTATION_GUARD_HOLD_FACTOR * Math.max(...guardHolds);
+    },
+    now: () => Date.now(),
+    probe: opts.guardProbe ?? ((guardPath, guard) => defaultGuardHolderProbe(guardPath, guard)),
+    log: row => observeOnce(`${String(row.step)}:${String(row.path)}:${String(row.mtime)}:${String(row.reason)}`, { ...row, label }),
+  };
+  /** The waiter's own guard acquisitions, each acquire→release duration kept for this acquisition only. */
+  const takeMutation = (path: string): ReturnType<typeof acquireSlotMutation> => {
+    const began = performance.now();
+    const mutation = acquireSlotMutation(path, guardRecovery);
+    if (mutation.state !== "acquired") return mutation;
+    return { state: "acquired", release: () => {
+      try { mutation.release(); } finally { guardHolds.push(performance.now() - began); }
+    } };
   };
   const load = opts.load ?? readHostLoad;
   // An opted-in policy must not reach the test resolver's mkdir side effect before inspection.
@@ -715,6 +976,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
   }
   function* waitForSlot(): Generator<number, TestSlotLease> {
     for (;;) {
+      poll += 1;
+      privateRequired = basePrivate || cleanupIncomplete;
       // Recover only our own, privately inspected dead holders BEFORE calculating memory.
       // Otherwise a dead peer closes the free slot beside it, or its old projection collides
       // with the replacement. Public metadata alone never authorizes foreign recovery.
@@ -724,7 +987,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
           const st = lstatSync(path);
           if (st.isFile() && (st.mode & 0o077) === 0) privateRequired = true;
           if (!privateWriter) continue;
-          const mutation = acquireSlotMutation(path);
+          const mutation = takeMutation(path);
           if (mutation.state !== "acquired") continue;
           try { recoverPrivateSlot(path, i, st); } finally { finishMutation(mutation); }
         } catch (error) {
@@ -735,7 +998,7 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
       for (let i = 1; i <= slots; i += 1) {
         const path = join(dir, `slot-${i}.json`);
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          const mutation = acquireSlotMutation(path);
+          const mutation = takeMutation(path);
           if (mutation.state !== "acquired") {
             // The usable shared parent was inspected already; failed guard acquisition
             // cannot prove no private coordination exists, including after guard creation.
@@ -799,6 +1062,8 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
               ...((opts.pid ?? process.pid) === process.pid && sameHost(host(), hostname()) && processStart ? {
                 childEnvironment: { [TEST_SLOT_PARENT_ENV]: JSON.stringify({ path, pid: process.pid, nonce: ownerNonce, start: processStart, concurrency }),
                   [TEST_SLOT_DIR_ENV]: dir },
+                ...(privateWriter ? {} : { heartbeat: { path, ownerNonce, pid: process.pid, processStart, host: host(),
+                  intervalMs: TEST_SLOT_HEARTBEAT_MS, coverageEnvironment: { [TEST_SLOT_RUN_ENV]: ownerNonce } } }),
               } : {}),
               note: `host-wide test slot ${i}/${slots} (${scope}: ${dir})` +
                 `${announced ? `, after waiting ${Math.round(waitedMs / 1000)}s` : ""}; --test-concurrency=${concurrency}, niced${basisNote}`,
@@ -900,9 +1165,40 @@ function* testSlotAcquisition(label: string, opts: TestSlotOptions): Generator<n
             holders.push(`slot ${i}: private owner still occupied; owner-lane release required`);
             break;
           }
+          let quiescent: { held: TestSlotHolder; evidence: ReservedTreeEvidence } | undefined;
           const reclaim = reclaimStaleLock(path, {
             parseHolder: parseTestSlotHolder,
-            isStale: (held) => testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace }),
+            isStale: (held) => {
+              quiescent = undefined;
+              const pidStale = testSlotHolderStale(held, clock.now(), { hostname: host, bootId, isPidAlive, pidNamespace });
+              const cadence = held.heartbeatIntervalMs, myNs = pidNamespace();
+              const local = sameHost(held.host, host()) && !(held.pidNs !== undefined && myNs !== undefined && held.pidNs !== myNs);
+              // A cadence-less or foreign record keeps today's judgment exactly (pid probe; boot id, then lease).
+              if (cadence === undefined || !Number.isSafeInteger(cadence) || cadence < 1 || !local) return pidStale;
+              const silentMs = clock.now() - Date.parse(held.heartbeatAt);
+              if (silentMs > TEST_SLOT_SILENT_BEATS * cadence) {
+                observeOnce(`silent:${i}:${held.ownerNonce}`, { step: "test_slot.heartbeat_silent", label, slot: i, pid: held.pid, holder: held.label,
+                  heartbeatAt: held.heartbeatAt, heartbeatIntervalMs: cadence, silentMs, decision: "retained: a missed beat is diagnostic, never quiescence" });
+              }
+              if (!pidStale) return false;
+              // The owner pid is gone or reused: only exact-tree terminal evidence frees its capacity.
+              const evidence = treeProbe(held);
+              if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
+              observeOnce(`withheld:${i}:${held.ownerNonce}:${evidence.state}:${evidence.reason}`, { step: "test_slot.reclaim_withheld", label, slot: i,
+                pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
+                evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason });
+              return false;
+            },
+            onReclaim: (detail) => {
+              if (quiescent === undefined) {
+                console.error(`[reclaimStaleLock] ${detail.lockPath}: reclaiming stale holder before unlink: ${detail.raw}`);
+                return;
+              }
+              const { held, evidence } = quiescent;
+              log(JSON.stringify({ step: "test_slot.reclaimed_quiescent", label, slot: i, pid: held.pid, holder: held.label,
+                ownerNonce: held.ownerNonce, processStart: held.processStart, bootId: held.bootId, pidNs: held.pidNs,
+                coverage: evidence.coverage, reason: evidence.reason, silentMs: clock.now() - Date.parse(held.heartbeatAt) }));
+            },
             onLostReclaim: () => {},
           });
           if (reclaim.outcome === "live") {

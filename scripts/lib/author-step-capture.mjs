@@ -8,14 +8,20 @@ const SCRIPT = fileURLToPath(import.meta.url);
 export const AUTHOR_OUTPUT_LIMIT_BYTES = 100 * 1024 * 1024;
 export const AUTHOR_STEP_RUNTIME_MS = 4 * 60 * 60 * 1000;
 
-/** A small spooler owns the pipes while the synchronous author waits. No test reruns. */
+/**
+ * A small spooler owns the pipes while the synchronous author waits. No test reruns.
+ * `heartbeat` (a test-slot lease's handle, W1-T9928): spawnSync blocks the author's event loop for the
+ * whole step, so the SPOOLER, whose loop stays live, beats the reservation, and every covered descendant
+ * inherits the reservation marker so a waiter can still see the work after the author dies.
+ */
 export function captureStepSync(file, args, { cwd, env = process.env, stdoutPath, stderrPath, resultPath,
-  maxBytes = AUTHOR_OUTPUT_LIMIT_BYTES, runtimeMs = AUTHOR_STEP_RUNTIME_MS, spawnCapture = spawnSync } = {}) {
-  const config = { file, args, cwd, stdoutPath, stderrPath, resultPath, maxBytes, runtimeMs };
+  maxBytes = AUTHOR_OUTPUT_LIMIT_BYTES, runtimeMs = AUTHOR_STEP_RUNTIME_MS, spawnCapture = spawnSync, heartbeat } = {}) {
+  const config = { file, args, cwd, stdoutPath, stderrPath, resultPath, maxBytes, runtimeMs, ...(heartbeat ? { heartbeat } : {}) };
   // A full verified file list can exceed Linux's single-argument limit even when
   // the real child's many small arguments fit. Stdin avoids adding that extra limit.
-  const transport = spawnCapture(process.execPath, [SCRIPT], {
-    cwd, env, input: JSON.stringify(config), encoding: 'utf8', maxBuffer: 1024 * 1024,
+  const transport = spawnCapture(process.execPath, heartbeat ? ['--import', 'tsx', SCRIPT] : [SCRIPT], {
+    cwd, env: heartbeat ? { ...env, ...heartbeat.coverageEnvironment } : env,
+    input: JSON.stringify(config), encoding: 'utf8', maxBuffer: 1024 * 1024,
   });
   let outcome;
   try {
@@ -43,6 +49,8 @@ async function spool(config) {
   if (![config.maxBytes, config.runtimeMs].every((n) => Number.isSafeInteger(n) && n > 0)) {
     throw new Error('capture byte and runtime bounds must be positive safe integers');
   }
+  // Loaded before the child exists, so no 'close' can fire while this module is still importing.
+  const slotModule = config.heartbeat ? await import(new URL('../../src/lib/test-slot.ts', import.meta.url).href) : undefined;
   const startedAt=new Date().toISOString(),started=performance.now();
   const out = openSync(config.stdoutPath, 'wx', 0o600);
   let err;
@@ -80,12 +88,23 @@ async function spool(config) {
   child.stdout.on('data', (chunk) => record(out, chunk));
   child.stderr.on('data', (chunk) => record(err, chunk));
   child.on('error', (cause) => { spawnFailed = true; error ??= { message: cause.message, code: cause.code }; });
+  // The author blocks in spawnSync; this loop is the live one, so it beats the author's reservation.
+  const heartbeat = slotModule?.startTestSlotHeartbeat(config.heartbeat, (row) => record(err, Buffer.from(`${JSON.stringify(row)}\n`)));
   const interrupted = () => stop('capture interrupted before completion', 'ERR_AUTHOR_CAPTURE_INTERRUPTED');
   process.on('SIGTERM', interrupted);
   process.on('SIGINT', interrupted);
   const timer = setTimeout(() => stop(`native step exceeded ${config.runtimeMs} ms`, 'ERR_AUTHOR_STEP_TIMEOUT'), config.runtimeMs).unref();
   const native = await new Promise((resolve) => child.once('close', (status, signal) => resolve({ status, signal })));
   closed = true;
+  if (heartbeat) {
+    // Withdraw the cadence only once the step's whole process group is gone (signal 0 delivers nothing).
+    let groupEnded = process.platform === 'win32' || !child.pid;
+    if (!groupEnded) {
+      try { process.kill(-child.pid, 0); }
+      catch (cause) { groupEnded = cause.code === 'ESRCH'; }
+    }
+    heartbeat.stop(groupEnded);
+  }
   clearTimeout(timer);
   clearTimeout(escalation);
   process.off('SIGTERM', interrupted);
