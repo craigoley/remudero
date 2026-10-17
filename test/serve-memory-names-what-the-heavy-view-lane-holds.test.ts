@@ -32,7 +32,7 @@ import { makeTempDir } from "../src/lib/tmp.js";
 import { answerThreadHeaps, readWorkerHeaps, THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, type WorkerThread } from "../src/lib/worker-heaps.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
 
-type Part = { entries: number; bytes: number; used_bytes?: number; holds?: Record<string, { entries: number; bytes: number }> };
+type Part = { entries: number; bytes: number; used_bytes?: number; holds?: Record<string, { entries: number; bytes: number }>; holds_age_ms?: number };
 type Reading = memory.HolderReading & { used_bytes?: number; parts?: Record<string, Part> };
 type Holds = Record<string, { rows: number; keptBytes: number }>;
 
@@ -136,7 +136,7 @@ const LANE_FIXTURE = `import { parentPort, workerData } from "node:worker_thread
 const alive = setInterval(() => {}, 1000);
 parentPort.on("message", (m) => { if (m && m.type === "stop") { clearInterval(alive); parentPort.close(); } });
 if (workerData.lane === "fast") parentPort.postMessage({ type: "view_lane", view: "now", instance: "core", heavy: true, dueAt: 0 });
-else parentPort.postMessage({ type: "view_holds", lane: workerData.lane, holds: workerData.fixtureHolds });
+else parentPort.postMessage({ type: "view_holds", lane: workerData.lane, holds: workerData.fixtureHolds, observedAt: Date.now() });
 `;
 
 async function answered(views: ReadModelViewLane, book: ReturnType<typeof memory.trackWorkerThreads>, id: number): Promise<Reading[]> {
@@ -192,6 +192,7 @@ test("W1-T9403: serve.memory names the used heap of each thread and each held bo
   assert.equal(typeof part.used_bytes, "number", `the heavy lane's part carries its used heap: ${JSON.stringify(heavy)}`);
   assert.ok(part.used_bytes! > 0 && part.used_bytes! <= part.bytes, `used (${part.used_bytes}) is within committed (${part.bytes})`);
   assert.equal(heavy.used_bytes, part.used_bytes, "the reading sums its parts' used heap as it sums their bytes");
+  assert.ok(typeof part.holds_age_ms === "number" && part.holds_age_ms >= 0, "the real worker and default clock carry report age");
   assert.deepEqual(part.holds, {
     "board:core": { entries: holds.core!.rows, bytes: holds.core!.keptBytes },
     "board:site": { entries: holds.site!.rows, bytes: holds.site!.keptBytes },

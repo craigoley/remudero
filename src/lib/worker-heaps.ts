@@ -2,7 +2,7 @@
  * lib/worker-heaps.ts — W1-T5355, W1-T5480: the heap of every worker thread a thread spawns, named
  * by its spawn site, for serve's `serve.memory` row (serve-memory.ts re-exports all of it).
  *
- * A LEAF: it imports nothing from src, so the read-model worker, which answers for the threads IT
+ * A LEAF apart from the Clock port, so the read-model worker, which answers for the threads IT
  * spawns ({@link answerThreadHeaps}), can import it without a cycle through serve's own modules.
  *
  * W1-T9403: each part carries its USED heap (`used_bytes`) beside its committed heap (`bytes`), and a
@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Worker } from "node:worker_threads";
+import { systemClock, type Clock } from "./clock.js";
 
 /** What a thread's parent says the thread holds, by holder (`board:<instance>`): entries and bytes kept. */
 export type ThreadHolds = Record<string, { entries: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
@@ -37,11 +38,14 @@ export function createViewHoldBook() {
         if (text === undefined) throw new Error("payload has no JSON representation");
         holds[name] = { entries, bytes: Buffer.byteLength(text), unit, bytes_basis: "serialized-payload-estimate-not-exclusive-v8" };
       } catch {
-        holds[name] = { entries, unsized: "retained payload cannot be serialized safely", unit };
+        const reason = "retained payload cannot be serialized safely";
+        holds[name] = { entries, unsized: reason, unit };
       }
     },
     known(name: string, entries: number, bytes: number, unit = "rows"): void {
-      holds[name] = { entries, bytes, unit, bytes_basis: "insertion-accounted-payload-not-exclusive-v8" };
+      holds[name] = !Number.isFinite(bytes) || bytes < 0 || entries > 0 && bytes === 0
+        ? { entries, unsized: "non-empty retained state has no valid accounted payload size", unit }
+        : { entries, bytes, unit, bytes_basis: "insertion-accounted-payload-not-exclusive-v8" };
     },
     unsized(name: string, entries: number, reason: string, unit = "entries"): void {
       holds[name] = { entries, unsized: reason, unit };
@@ -269,11 +273,12 @@ export function answerThreadHeaps(
   msg: unknown,
   book: Pick<ReturnType<typeof trackWorkerThreads>, "live"> = workerThreads(),
   holds?: ThreadHoldsReader,
+  clock: Clock = systemClock,
 ): boolean {
   const request = msg as { type?: unknown; id?: number; timeoutMs?: number } | undefined;
   if (request?.type !== THREAD_HEAPS_REQUEST) return false;
   const timeoutMs = Math.floor((request.timeoutMs ?? WORKER_HEAP_TIMEOUT_MS) / 2);
-  void readWorkerHeaps(book.live(), timeoutMs, holds).then((readings) => port.postMessage({ type: THREAD_HEAPS_ANSWER, id: request.id, readings }));
+  void readWorkerHeaps(book.live(), timeoutMs, holds, clock).then((readings) => port.postMessage({ type: THREAD_HEAPS_ANSWER, id: request.id, readings }));
   return true;
 }
 
@@ -300,6 +305,7 @@ export async function readWorkerHeaps(
   workers: readonly TrackedWorker[],
   timeoutMs = WORKER_HEAP_TIMEOUT_MS,
   holds?: ThreadHoldsReader,
+  clock: Clock = systemClock,
 ): Promise<WorkerHeapReading[]> {
   const [heaps, nested] = await Promise.all([
     Promise.all(workers.map(async ({ kind, thread }) => ({ kind, threadId: thread.threadId, ...(await threadHeap(thread, timeoutMs)) }))),
@@ -316,7 +322,7 @@ export async function readWorkerHeaps(
     const attribution: Partial<WorkerHeapPart> = {};
     if (held) {
       attribution.holds = held;
-      const age = snapshot?.observedAt === undefined ? undefined : Date.now() - snapshot.observedAt;
+      const age = snapshot?.observedAt === undefined ? undefined : clock.now() - snapshot.observedAt;
       if (age !== undefined && Number.isFinite(age) && age >= 0) attribution.holds_age_ms = age;
       else attribution.holds_age_reason = "holder report time unavailable or ahead of sample clock";
       if ("used_bytes" in heap && heap.used_bytes !== undefined) {

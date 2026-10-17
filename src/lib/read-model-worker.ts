@@ -254,7 +254,6 @@ export type ReadModelWorkerMessage =
   | ThreadHeapsAnswer
   | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds; observedAt?: number };
 
-/** Legacy boards keep their row/source-byte fields; new holders use explicit entries/bytes or an unsized reason. */
 export type ReadModelViewHolds = Record<string, { rows?: number; keptBytes?: number; entries?: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
 
 export interface ReadModelLaneMove {
@@ -1411,7 +1410,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     for (const unit of units) {
       const made = isViewFactory(unit.view) ? unit.made : unit.view;
       if (made?.heldSizes) for (const [name, size] of Object.entries(made.heldSizes())) {
-        // Factory-owned caches must not overwrite another instance's identically named map.
         const key = unit.slot && name.includes(":") && !name.includes("@") ? `${name}@${unit.slot.instance.name}` : name;
         holds[key] = size;
       }

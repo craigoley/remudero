@@ -133,6 +133,11 @@ test("W1-T9983: payload counters replace, forget and leave unserializable state 
   assert.match(book.read()["fixture:payload"]!.unsized ?? "", /cannot be serialized/);
   book.account("fixture:missing", undefined, 1);
   assert.equal(book.read()["fixture:missing"]!.bytes, undefined);
+  book.known("fixture:known", 3, 120);
+  assert.equal(book.read()["fixture:known"]!.bytes, 120);
+  book.known("fixture:known", 3, 0);
+  assert.equal(book.read()["fixture:known"]!.bytes, undefined, "failed accounting is not zero bytes for retained rows");
+  book.forget("fixture:known");
   book.forget("fixture:payload");
   book.forget("fixture:missing");
   assert.deepEqual(book.read(), {});
@@ -145,21 +150,21 @@ test("W1-T9983: a views-lane part carries its unattributed used bytes", async ()
   }) as unknown as WorkerThread;
   const holds: Holds = { "workstreams:payload": { entries: 3, bytes: 120 },
     "workstreams:shared": { entries: 1, unsized: "shared plan identity; no exclusive byte size" } };
-  const observedAt = Date.now() - 1_000;
+  const observedAt = NOW - 1_000;
   type Part = { bytes: number; used_bytes?: number; holds?: Holds; holds_age_ms?: number; unattributed_used_bytes?: number; unattributed_used_reason?: string };
   const answers: Array<{ readings: Array<{ parts: Record<string, Part> }> }> = [];
   const port = { postMessage: (message: unknown) => void answers.push(message as typeof answers[number]) };
-  const ask = answerThreadHeaps as unknown as (p: typeof port, request: unknown, book: unknown, readHolds: (id: number) => { holds: Holds; observedAt: number }) => boolean;
+  const ask = answerThreadHeaps as unknown as (p: typeof port, request: unknown, book: unknown, readHolds: (id: number) => { holds: Holds; observedAt: number }, clock: Clock) => boolean;
   assert.equal(ask(port, { type: THREAD_HEAPS_REQUEST, id: 1 }, { live: () => [
     { kind: "fixture:views", thread: worker(7, true) }, { kind: "fixture:views", thread: worker(8, false) },
-  ] }, () => ({ holds, observedAt })), true);
+  ] }, () => ({ holds, observedAt }), CLOCK), true);
   for (let n = 0; n < 20 && !answers.length; n++) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(answers.length, 1, "the real heap-answer path completed");
   const parts = answers[0]!.readings[0]!.parts;
   assert.equal(parts["thread-7"]!.used_bytes, 650, "used heap plus external stays unchanged");
   assert.equal(parts["thread-7"]!.unattributed_used_bytes, 530, "known payload bytes are subtracted; unknown sizes are not invented");
   assert.deepEqual(parts["thread-7"]!.holds, holds);
-  assert.ok(parts["thread-7"]!.holds_age_ms! >= 1_000, "the reading says how old the attribution is");
+  assert.equal(parts["thread-7"]!.holds_age_ms, 1_000, "the clock port says exactly how old the attribution is");
   assert.equal(parts["thread-8"]!.unattributed_used_bytes, undefined, "unknown used heap is never zero");
   assert.match(parts["thread-8"]!.unattributed_used_reason ?? "", /used.*(unavailable|unknown|not reported)/i);
 });
