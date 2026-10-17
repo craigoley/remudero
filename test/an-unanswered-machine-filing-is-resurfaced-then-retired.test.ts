@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
-import { runnableCandidates } from "../src/lib/drain.js";
-import { machineShardHeaderLines } from "../src/lib/machine-filing.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { runnableCandidates } from "#src/lib/drain.js";
+import { machineShardHeaderLines } from "#src/lib/machine-filing.js";
 import {
   operatorRulingTimes,
   machineJudgeFoundWork,
@@ -15,12 +15,12 @@ import {
   renderRuledShard,
   runMachineFilingJudge,
   type MachineJudgePorts,
-} from "../src/lib/machine-filing-judge.js";
-import { loadPlan, parseTasksFromYaml } from "../src/lib/plan.js";
-import { buildStatusBoard, renderStatusBoardText } from "../src/lib/status-board.js";
-import type { GitHub } from "../src/lib/status.js";
-import { taskRulingPin } from "../src/lib/task-linter.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/machine-filing-judge.js";
+import { loadPlan, parseTasksFromYaml } from "#src/lib/plan.js";
+import { buildStatusBoard, renderStatusBoardText } from "#src/lib/status-board.js";
+import type { GitHub } from "#src/lib/status.js";
+import { taskRulingPin } from "#src/lib/task-linter.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const NOW = Date.parse("2026-10-17T12:00:00.000Z");
 const DAY = 86_400_000;
