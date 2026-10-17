@@ -470,9 +470,9 @@ test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept"
   const closed = defaultGuardHolderProbe(guard, lstatSync(guard));
   assert.notEqual(closed.state, "open");
   if (process.platform === "darwin") {
-    assert.deepEqual([closed.state, closed.probe, closed.reason],
-      ["unknown", "lsof", "a polling open-file observer is required on darwin"],
+    assert.deepEqual([closed.state, closed.probe], ["unknown", "lsof"],
       "the direct default never invents a completed Darwin open-file observation");
+    assert.match(closed.reason, /polling.*observer/i, "unknown says which observation is missing without fixing the diagnostic's wording");
   } else if (closed.state === "unknown") assert.match(closed.reason, /incomplete|no open-file probe|lsof/);
   assert.equal(defaultGuardHolderProbe(guard, { ...st, uid: (process.getuid?.() ?? 0) + 1 } as Stats).state, "unknown");
   // Darwin's lsof path: pids are open, a silent exit 1 is closed, any diagnostic is unknown.
