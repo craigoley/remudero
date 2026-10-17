@@ -48765,6 +48765,7 @@ export function buildSweepHook(
     let reviewerCodeStale: { oldSha: string; newSha: string } | undefined;
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
+    let thisPassReviewInputViews: NonNullable<SweepCycleOutcome["reviewInputViews"]> = [];
     try {
       if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
       const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : await prelude.time("open_pr_views", () =>
@@ -48777,6 +48778,8 @@ export function buildSweepHook(
         }));
       // W1-T4002 — derived ONLY from the `openPrs` just built: no second GitHub read.
       thisPassPlanOnlyRunBranchReceipts = planOnlyRunBranchReceipts(openPrs);
+      thisPassReviewInputViews = openPrs.map(({ prNumber, prUrl, headSha, reviewInputDigest, reviewState, taskId }) =>
+        ({ prNumber, prUrl, headSha, reviewInputDigest, reviewState, taskId }));
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
@@ -48920,10 +48923,11 @@ export function buildSweepHook(
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
     await draftHook(tickRead);
-    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0
+    return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0 || thisPassReviewInputViews.length > 0
       ? {
           ...(reviewerCodeStale ? { reviewerCodeStale } : {}),
           planOnlyRunBranchReceipts: thisPassPlanOnlyRunBranchReceipts,
+          reviewInputViews: thisPassReviewInputViews,
         }
       : undefined;
   };

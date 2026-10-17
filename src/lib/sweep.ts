@@ -12287,6 +12287,98 @@ export const HOST_GAP_REREVIEW_STEP = "sweep.capped_host_gap_rereview";
  *  checkout vanished (`review.post_refused` carrying `reviewer_code_host_gap`). Folded like {@link HOST_GAP_REREVIEW_STEP}. */
 export const REFUSED_POST_HOST_GAP_REREVIEW_STEP = "sweep.review_host_gap_rereview";
 
+/** W1-T9124: the ledger step that records one stale-body re-review request. */
+export const STALE_BODY_REREVIEW_STEP = "sweep.stale_body_rereview";
+
+/** The slice of an open PR view {@link detectStaleBody} reads. */
+export type StaleBodyPrView = Pick<OpenPrView, "prNumber" | "prUrl" | "headSha" | "reviewInputDigest" | "reviewState"> &
+  Partial<Pick<OpenPrView, "taskId">>;
+
+/** One PR whose latest delivered verdict judged a different head+body input than the PR carries now. */
+export interface StaleBodyFinding {
+  prNumber: number;
+  prUrl: string;
+  headSha: string;
+  taskId?: string;
+  /** The input digest the latest delivered verdict judged. */
+  reviewedDigest: string;
+  /** The input digest of the PR as it stands now: same head, edited body. */
+  currentDigest: string;
+  /** True once a {@link STALE_BODY_REREVIEW_STEP} row already names this head and current digest. */
+  queued: boolean;
+}
+
+/**
+ * W1-T9124 — a PR whose body was edited WITHOUT a push. The `remudero-review` status is keyed by head sha, so after
+ * a body-only edit GitHub keeps showing the old verdict while the ledger's `review_input_digest` (head + body) no
+ * longer matches the PR. Stale means: a verdict is showing (success or failure), the latest delivered `review.posted`
+ * for this exact head judged another digest, and nothing, delivered or pending, has judged the current one.
+ * Fails toward "not stale" whenever the PR has no digest or no delivered verdict on this head to compare against.
+ */
+export function detectStaleBody(
+  prs: ReadonlyArray<StaleBodyPrView>,
+  ledger: ReadonlyArray<Record<string, unknown>>,
+): StaleBodyFinding[] {
+  const findings: StaleBodyFinding[] = [];
+  for (const pr of prs) {
+    const current = pr.reviewInputDigest;
+    if (current === undefined || (pr.reviewState !== "success" && pr.reviewState !== "failure")) continue;
+    let lastDelivered: string | undefined;
+    let currentSeen = false;
+    let queued = false;
+    for (const row of ledger) {
+      if (row.pr_url !== pr.prUrl || row.head_sha !== pr.headSha) continue;
+      const digest = typeof row.review_input_digest === "string" ? row.review_input_digest : undefined;
+      if (row.step === STALE_BODY_REREVIEW_STEP) {
+        if (digest === current) queued = true;
+      } else if (row.step === "review.posted" || row.step === "review.pending_posted") {
+        if (digest === current) currentSeen = true;
+        else if (digest !== undefined && row.step === "review.posted" && row.state !== "pending") lastDelivered = digest;
+      }
+    }
+    if (currentSeen || lastDelivered === undefined) continue;
+    findings.push({
+      prNumber: pr.prNumber,
+      prUrl: pr.prUrl,
+      headSha: pr.headSha,
+      ...(pr.taskId !== undefined ? { taskId: pr.taskId } : {}),
+      reviewedDigest: lastDelivered,
+      currentDigest: current,
+      queued,
+    });
+  }
+  return findings;
+}
+
+/**
+ * W1-T9124 — queue ONE re-review per stale input by ledgering {@link STALE_BODY_REREVIEW_STEP}. The sweep's review
+ * claim is keyed by `review_input_digest`, so the edited input has no delivered key and the existing post-review rows
+ * admit exactly one fresh review of it; this row is the durable request that makes the demand visible and one-shot.
+ * Returns the findings newly queued.
+ */
+export function queueStaleBodyReReview(
+  findings: ReadonlyArray<StaleBodyFinding>,
+  ctx: { ledgerPath: string; runId: string; appendLine: (path: string, line: LedgerLine) => void },
+): StaleBodyFinding[] {
+  const queuedNow: StaleBodyFinding[] = [];
+  for (const finding of findings) {
+    if (finding.queued) continue;
+    ctx.appendLine(ctx.ledgerPath, {
+      run_id: ctx.runId,
+      task_id: finding.taskId ?? "SWEEP",
+      step: STALE_BODY_REREVIEW_STEP,
+      pr_number: finding.prNumber,
+      pr_url: finding.prUrl,
+      head_sha: finding.headSha,
+      review_input_digest: finding.currentDigest,
+      reviewed_input_digest: finding.reviewedDigest,
+      reason: "PR body changed since the last delivered verdict with no new head: queueing one re-review of the current input",
+    });
+    queuedNow.push(finding);
+  }
+  return queuedNow;
+}
+
 const rowMs = (row: Record<string, unknown>): number | undefined => {
   const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
   return Number.isNaN(at) ? undefined : at;
@@ -15575,6 +15667,13 @@ export async function runSweep(
   deps.markPrelude?.("armed_body_guard");
   const ledgerLines = readLedger(deps.ledgerPath);
   openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines));
+  // W1-T9124: a body-only edit leaves the head-keyed status on the old verdict; queue one re-review of the new input.
+  if (!deps.dryRun) {
+    const staleBodies = detectStaleBody(openPrs, ledgerLines);
+    for (const queued of queueStaleBodyReReview(staleBodies, { ledgerPath: deps.ledgerPath, runId: deps.runId, appendLine })) {
+      log("sweep.stale_body_detected", { pr_number: queued.prNumber, head_sha: queued.headSha });
+    }
+  }
   // W1-T7735 — ONE refresh value gate per pass, built on first use, so strictness is read at most once.
   let refreshGatePromise: Promise<RefreshValueGate> | undefined;
   const refreshGate = (): Promise<RefreshValueGate> =>
