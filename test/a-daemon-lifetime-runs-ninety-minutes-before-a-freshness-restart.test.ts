@@ -9,12 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { runDaemon, type DaemonFreshness } from "../src/lib/daemon.js";
+import { runDaemon, type DaemonFreshness } from "#src/lib/daemon.js";
 // A NAMESPACE import: the ruling's exports do not exist at the merge base, and a named import would fail the whole file
 // at load, which reads as "never ran" rather than as a red.
-import * as judge from "../src/lib/deploy-judge.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as judge from "#src/lib/deploy-judge.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MINUTE = 60_000;
 const START = Date.parse("2026-10-17T00:00:00Z");
