@@ -73,12 +73,13 @@ test("a reading taken mid-fast-forward never escalates, and the finished merge e
 
 test("a tracked edit that a second reading still sees escalates on that reading", async (t) => {
   const c = behindByASourceChange(t);
-  writeFileSync(join(c.live.dir, "src", "lib", "sweep.ts"), "export const v = 'hand edit';\n");
+  const handEditPath = join(c.live.dir, "src", "lib", "sweep.ts");
+  writeFileSync(handEditPath, "export const v = 'hand edit';\n");
   const first = await c.rung(T0);
   assert.equal(c.escalations.length, 0, first.reason);
   const second = await c.rung(T0 + 300_000);
   assert.equal(second.tier, 2, second.reason);
   assert.equal(c.escalations.length, 1);
   assert.match(c.escalations[0]!.detail, /src\/lib\/sweep\.ts/);
-  assert.equal(readFileSync(join(c.live.dir, "src", "lib", "sweep.ts"), "utf8"), "export const v = 'hand edit';\n", "still deferred, never discarded");
+  assert.equal(readFileSync(handEditPath, "utf8"), "export const v = 'hand edit';\n", "still deferred, never discarded");
 });
