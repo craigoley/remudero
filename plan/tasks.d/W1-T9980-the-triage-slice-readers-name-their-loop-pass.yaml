@@ -1,0 +1,66 @@
+- id: W1-T9980
+  title: "THE TWO ESCALATION-TRIAGE SLICE READERS NAME WHAT THEIR LOOP PASS READ — W1-T9710 put history_loop_read_bytes, history_loop_parsed_lines and history_seeded_rotations on worker.quiet_bound, but the daemon's other two createEscalationTriageHistoryReader holders (sweep.escalation-triage-history and run-task.escalation-triage-evidence, both built in run-task.ts buildSweepHook) expose lastPass() and no row reads it, so the fleet cannot see what a restart or a steady pass costs them"
+  repo: remudero
+  depends_on: [W1-T9710]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, the two triage holders' pass cost on the daemon.memory row; no read changes
+  band_meaning: span
+  origin: 'W1-T9710 build (PR #12506) follow-up named in its PR body; coordinator brief batch1017 item 1'
+  plan_refs: [W1-T9710, W1-T9764, W1-T9647, W1-T9390, W1-T9406, W1-T9957]
+  files:
+    - src/run-task.ts
+    - src/lib/daemon-memory-census.ts
+    - test/the-triage-slice-readers-name-their-loop-pass.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ at origin/main 35839d2ca, where W1-T9710 (PR #12506) has merged. Symbols, not lines.
+    - createEscalationTriageHistoryReader (src/lib/sweep.ts) now returns a reader with `lastPass()`: the last union
+      pass's readBytes, parsedLines and seededRotations (IncrementalUnionPass, src/lib/ledger-union.ts).
+    - createQuietBoundHistory (src/lib/quiet-worker-watchdog.ts) is the one reader that publishes it, as
+      history_loop_read_bytes, history_loop_parsed_lines and history_seeded_rotations on worker.quiet_bound.
+    - buildSweepHook (src/run-task.ts) builds the other two readers once per daemon start:
+      `escalationTriageHistory` (holder sweep.escalation-triage-history, read by sweepEscalationTriage) and
+      `escalationTriageEvidence` (holder run-task.escalation-triage-evidence, refreshed in the full prelude). No
+      row reads their lastPass(). sweepEscalationTriage writes no per-pass row, and sweep.full_prelude carries only
+      the triage_evidence timing.
+    - daemonCommand starts the memory census (startDaemonMemoryCensus over daemonHolderSource, in
+      src/lib/daemon-memory-census.ts). Its ledger-memos source already lists each union as
+      `incremental-union:<holder>` with entries and accounted bytes (W1-T9764), and nothing about its passes.
+    OBSERVED (core live ledger, the newest daemon.memory row, 2026-10-17T03:06:18Z): the holders list has
+    incremental-union:run-task.escalation-triage-evidence (7,335 entries, 5,694,624 bytes) and
+    incremental-union:sweep.escalation-triage-history (3,201 entries, 2,033,364 bytes). Neither has a pass field.
+    OBSERVED offline (W1-T9710's bench, logs-8864/9710-bench.ndjson, PR #12506 body): on a restart pass these two
+    holders went from 40 digest reads (400,562 B and 784,852 B) and 18,624 JSON.parse calls to 0 reads and 268 and
+    406 parses. INFERRED: on the host the same drop is real only if the fields exist to show it, which is this
+    task.
+    W1-T9957 (queued) changes where a short-lived run child gets the evidence slice. It does not touch the daemon's
+    census, so it is not this task.
+  design: |
+    1. daemon-memory-census.ts: DaemonHolderSources gains an optional `slicePasses`, a map from holder name to a
+       `() => IncrementalUnionPass` reader. A ledger-memos holder whose name is in it gets a `last_pass` part:
+       history_loop_read_bytes (readBytes), history_loop_parsed_lines (parsedLines) and history_seeded_rotations
+       (seededRotations). The names match worker.quiet_bound's, so one query reads all three holders. A holder
+       without a pass reader is unchanged.
+    2. run-task.ts: the two readers' lastPass reach the census. They are built in buildSweepHook, but the census is
+       started in daemonCommand. Build them in daemonCommand and pass them in through buildSweepHook's existing
+       trailing optional seams, or have the hook expose them. Do not add a new positional parameter in the middle.
+       `rmd sweep`, which builds a reader per call, is unchanged.
+    3. No read path, constant, env var or threshold changes. The census row grows by six integers per sample.
+    Tests go in test/the-triage-slice-readers-name-their-loop-pass.test.ts, titled verbatim as in the proofs.
+    Build a daemonHolderSource with real readers over a fixture state dir that has gzipped rotations. Run one
+    reader pass, sample, and read the holder entries.
+  acceptance:
+    - claim: "the daemon.memory census entry of each triage slice holder carries its last loop pass"
+      proof: 'grep: test("W1-T9980: both triage slice holders carry their last loop pass on the memory census" in test/the-triage-slice-readers-name-their-loop-pass.test.ts'
+    - claim: "the fields follow the reader: a second pass over unchanged rotations reads no digest bytes and the census says so"
+      proof: 'grep: test("W1-T9980: the census reads each holder pass as it changes" in test/the-triage-slice-readers-name-their-loop-pass.test.ts'
+  falsifier: |
+    On origin/main 35839d2ca, daemonHolderSource has no pass source. The census entry for
+    incremental-union:sweep.escalation-triage-history carries entries, bytes and basis only, so the first test
+    finds no history_loop_read_bytes and fails. The second fails the same way. Both pass once the census reads
+    each reader's lastPass().
