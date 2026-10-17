@@ -276,6 +276,10 @@ test("W1-T10085: each verdict ledgers the PSI bound with its inputs", async () =
   assert.equal(shadow.psiFullAvg10Bound.bound, 6);
   assert.match(String(shadow.psiFullAvg10Bound.basis), /^learned 6: 0% of 40 admitted starts at full avg10 2-6 were followed by stall or an OOM kill, against 10% of all 100 verdicts in that band \(noise 9%\)$/);
   assert.deepEqual(storedPsi(s).at(-1), [NOW, 4, 1, null, 1], "admitted, with oom_kill unread on this verdict");
+  s.files.delete("/proc/vmstat");
+  s.now.ms = NOW + 20_000;
+  recordShadowMemoryVerdict({ workerClass: "fix", root: ROOT }, { ...ports(s), policy: () => ({ ...POLICY, mode: "shadow" }) });
+  assert.deepEqual(storedPsi(s).at(-1), [NOW + 20_000, 4, 1, null, 1], "and with /proc/vmstat unreadable");
 
   // Enforce: a wait past the learned bound and the admit after it both carry it; only the admitted verdict is marked.
   const w = world(record());
