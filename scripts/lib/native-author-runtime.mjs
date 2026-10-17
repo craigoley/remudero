@@ -4,6 +4,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rea
 import { join, resolve, sep } from 'node:path';
 import { availableParallelism, cpus, hostname, release } from 'node:os';
 import { listTestFiles, medianMeasuredDurationMs, predictMakespanMs, weightedDurationMs } from '../test-tier-manifest.mjs';
+import { accountAuthorPhases } from './author-phase-accounting.mjs';
 
 export const RUNTIME_PROFILE_FORMAT = 'rmd-native-author-runtime-v1';
 export const AUTHOR_STATIC_RESERVE_MS = 15 * 60_000;
@@ -197,6 +198,110 @@ export function runtimeDeadlineFit(files, manifest, profile, { workers, deadline
     estimatedFiles: files.filter((file) => !measured.has(file)).length,
     unmeasuredLedgerFiles: files.filter((file) => !(manifest.files[file] > 0)).length,
     profileAt: profile.at, limits: 'Sample-calibrated estimate with explicit unmeasured costs; not full-corpus calibration, admission capacity, author assurance or a completion promise.' };
+}
+
+/** Re-read source-bound closed phase evidence. Partial/static-only author receipts
+ * cannot become a whole-gate calibration, even when all observed steps passed. */
+export function readWholeAuthorPhases(root, path, expected, now = Date.now()) {
+  const receipt = JSON.parse(readArtifactBytes(root, path, 2 * 1024 * 1024,
+    'whole author phases: oversized receipt').toString('utf8'));
+  if (sourceHead(root) !== expected.head || receipt.headSha !== expected.head ||
+      receipt.node !== expected.node || receipt.version !== 1 ||
+      execFileSync('git', ['status', '--porcelain'], {cwd: root, encoding: 'utf8', timeout: 10_000}).trim()) {
+    throw new Error('whole author phases: source/runtime binding mismatch');
+  }
+  const accounting = accountAuthorPhases(receipt), names = accounting.phases.map(step => step.name);
+  if (!accounting.trainingEligible || accounting.state !== 'measured' ||
+      new Set(names).size !== names.length ||
+      !['census-precheck', 'static-preflight', 'affected-tests'].every(name => names.includes(name))) {
+    throw new Error('whole author phases: incomplete or unsuccessful whole-gate evidence');
+  }
+  const physical = new Set(listTestFiles(root));
+  const tests = receipt.steps.find(step => step.name === 'affected-tests'), judge = tests.judge;
+  if (receipt.suites.some(file => !physical.has(file)) || judge?.complete !== true ||
+      judge.given !== receipt.suites.length || judge.reported !== receipt.suites.length ||
+      !Array.isArray(judge.unreported) || judge.unreported.length !== 0 || judge.exitSite !== null) {
+    throw new Error('whole author phases: unverified physical suite denominator');
+  }
+  for (const step of receipt.steps) {
+    const d = step.diagnostics;
+    if (!d?.nativeResult || d.mayBeIncomplete !== false || !d.stdout || !d.stderr) {
+      throw new Error('whole author phases: missing closed native capture');
+    }
+    const native = JSON.parse(readArtifactBytes(root, d.nativeResult, 1024 * 1024,
+      'whole author phases: oversized native capture').toString('utf8'));
+    const stdout = readArtifactBytes(root, d.stdout, 100 * 1024 * 1024,
+      'whole author phases: oversized stdout');
+    const stderr = readArtifactBytes(root, d.stderr, 100 * 1024 * 1024,
+      'whole author phases: oversized stderr');
+    const age = now - Date.parse(native.finishedAt);
+    if (!Number.isFinite(age) || !Number.isFinite(Date.parse(native.startedAt)) || age < 0 || age > RUNTIME_PROFILE_MAX_AGE_MS) {
+      throw new Error('whole author phases: stale or future native capture');
+    }
+    if (native.status !== 0 || native.error || native.signal || native.outputComplete !== true ||
+        native.durationMs !== step.durationMs || native.startedAt !== step.startedAt ||
+        native.finishedAt !== step.finishedAt || native.observedBytes !== native.storedBytes ||
+        native.storedBytes !== stdout.length + stderr.length ||
+        stdout.length !== d.stdoutBytes || stderr.length !== d.stderrBytes) {
+      throw new Error('whole author phases: incomplete, changed or unsuccessful capture');
+    }
+    if (step.name === 'affected-tests') {
+      const text = stdout.toString('utf8') + '\n' + stderr.toString('utf8');
+      for (const key of ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo']) {
+        const rows = [...text.matchAll(new RegExp('^# ' + key + ' ([0-9]+)$', 'gm'))];
+        if (rows.length !== 1 || Number(rows[0][1]) !== step.testSummary[key]) {
+          throw new Error('whole author phases: test summary does not match captured output');
+        }
+      }
+    }
+  }
+  return { head: expected.head, inputTree: expected.inputTree, accounting,
+    assurance: 'source-bound closed author phases; timing only', authorPassReused: false };
+}
+
+/** Shadow estimate for an entire future run, BEFORE census/static work starts.
+ * It consumes no lease and cannot authorize workers, execution or test-result reuse. */
+export function wholeAuthorDeadlineFit(files, manifest, profile, phases, options = {}) {
+  const testEstimate = runtimeDeadlineFit(files, manifest, profile, { ...options, staticReserveMs: 0 });
+  const binding = profile.timingCompatibility?.currentHead ?? profile.bindings?.head;
+  const accounting = phases?.accounting;
+  const availableMs = testEstimate.availableMs;
+  const base = { kind: 'estimated-native-whole-author', availableMs,
+    deadline: testEstimate.deadline, workers: testEstimate.workers,
+    testPredictedMs: testEstimate.predictedMs, shutdownReserveMs: AUTHOR_SHUTDOWN_RESERVE_MS,
+    dispatchAllowed: false, capacityGranted: false, authorPassReused: false, resourceFitQualified: false,
+    limits: 'Shadow planning only; no capacity grant, deadline renewal, native resource qualification or finish promise.' };
+  const names = Array.isArray(accounting?.phases) ? accounting.phases.map(step => step?.name) : [];
+  if (!binding || phases?.head !== binding || phases?.inputTree !== profile.bindings?.inputTree ||
+      !accounting?.trainingEligible || accounting.state !== 'measured' ||
+      new Set(names).size !== names.length ||
+      !['census-precheck', 'static-preflight', 'affected-tests'].every(name => names.includes(name)) ||
+      !Number.isSafeInteger(accounting.selectionAndAdmissionOverheadMs) ||
+      accounting.selectionAndAdmissionOverheadMs < 0 ||
+      accounting.phases.some(step => !step || step.ok !== true || !Number.isSafeInteger(step.durationMs) || step.durationMs < 0)) {
+    return { ...base, state: 'not-measured', fits: false, requiredMs: null,
+      serialPredictedMs: null, reason: 'closed-current-tree-whole-author-phases-unavailable' };
+  }
+  const nativeObservedMs = accounting.phases.reduce((sum, step) => sum + step.durationMs, 0);
+  if (!Number.isSafeInteger(nativeObservedMs) || accounting.nativeDurationMs !== nativeObservedMs ||
+      !Number.isSafeInteger(accounting.wallDurationMs) || accounting.wallDurationMs < nativeObservedMs ||
+      accounting.wallDurationMs - nativeObservedMs !== accounting.selectionAndAdmissionOverheadMs) {
+    return { ...base, state: 'not-measured', fits: false, requiredMs: null,
+      serialPredictedMs: null, reason: 'whole-author-phase-accounting-inconsistent' };
+  }
+  // Serial prechecks and selection overhead are NEVER divided by test workers.
+  // Tests are repriced once by the existing runtime estimator, not added twice.
+  const serialObservedMs = accounting.selectionAndAdmissionOverheadMs +
+    accounting.phases.filter(step => step.name !== 'affected-tests').reduce((sum, step) => sum + step.durationMs, 0);
+  const serialPredictedMs = Math.ceil(serialObservedMs * AUTHOR_RUNTIME_SAFETY_FACTOR);
+  const requiredMs = testEstimate.predictedMs + serialPredictedMs + AUTHOR_SHUTDOWN_RESERVE_MS;
+  if (![serialObservedMs, serialPredictedMs, requiredMs].every(Number.isSafeInteger)) {
+    throw new Error('whole author phases: unsafe timing total');
+  }
+  return { ...base, state: 'estimated', fits: requiredMs <= availableMs, requiredMs,
+    serialObservedMs, serialPredictedMs, serialSafetyFactor: AUTHOR_RUNTIME_SAFETY_FACTOR,
+    phaseNames: names, measuredTestFiles: testEstimate.measuredFiles,
+    estimatedTestFiles: testEstimate.estimatedFiles, observedHead: phases.head };
 }
 
 export function sourceHead(root) {
