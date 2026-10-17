@@ -162,3 +162,33 @@ else: raise AssertionError('symlink loop was accepted')
     assert.ok(existsSync(f.target));
   } finally { f.clean(); }
 });
+
+test("cache reference resolver canonicalizes double-root aliases and holds replaced intermediate directories", () => {
+  for (const fault of ["direct-double-root", "intermediate-double-root", "replace-directory"]) {
+    const f = fixture();
+    try {
+      const r = f.run(String.raw`fault=` + JSON.stringify(fault) + String.raw`
+if fault=='direct-double-root':
+ (root/'borrowed-dependencies').unlink();(root/'borrowed-dependencies').symlink_to('/'+str(target))
+elif fault=='intermediate-double-root':
+ alias=home/'tmp/alias';alias.symlink_to('/'+str(target))
+ (root/'borrowed-dependencies').unlink();(root/'borrowed-dependencies').symlink_to(alias)
+else:
+ pivot=home/'Developer/pivot';pivot.mkdir();(pivot/'placeholder').write_text('retained')
+ original_stat=os.stat;swapped=[False]
+ def changed(path,*args,**kwargs):
+  result=original_stat(path,*args,**kwargs)
+  if path=='pivot' and not swapped[0]:
+   swapped[0]=True;pivot.rename(pivot.with_name('retained-pivot'));pivot.symlink_to(target.parent,target_is_directory=True)
+  return result
+ os.stat=changed
+ try:g['resolved_reference'](home/'Developer','pivot/node_modules',budget)
+ except (ns['Hold'],OSError):pass
+ else:raise AssertionError('intermediate replacement accepted')
+ os.stat=original_stat
+`);
+      assert.deepEqual(r.shared, [f.target], JSON.stringify(r));
+      assert.ok(existsSync(join(f.root, "private-source.ts")));
+    } finally { f.clean(); }
+  }
+});

@@ -738,62 +738,111 @@ def peer_exchange(argv, request, budget):
     packet = DirectoryProgress.encode(request)
     if len(packet) > 65536:
         raise Hold("reference-peer-request-size")
-    child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, start_new_session=True)
-    out, err, offset = bytearray(), bytearray(), 0
-    try:
-        with selectors.DefaultSelector() as selector:
-            for stream, event in [(child.stdin, selectors.EVENT_WRITE),
-                                  (child.stdout, selectors.EVENT_READ), (child.stderr, selectors.EVENT_READ)]:
-                os.set_blocking(stream.fileno(), False)
-                selector.register(stream, event)
-            while selector.get_map():
+    budget.check()
+    # Keep a supervisor alive until cleanup: even after the probe leader exits,
+    # its process-group ID cannot be recycled into an unrelated worker's group.
+    # The approved argv is executed unchanged, without a shell or extra rights.
+    supervisor = """import os,select,signal,subprocess,sys
+signal.signal(signal.SIGTERM,lambda *_:None)
+probe=subprocess.Popen(sys.argv[3:])
+for fd in (0,1,2):os.close(fd)
+reported=False
+try:
+ while True:
+  status=probe.poll()
+  if status is not None and not reported:
+   os.write(int(sys.argv[1]),str(status).encode()+b'\\n')
+   os.close(int(sys.argv[1]));reported=True
+  if select.select([int(sys.argv[2])],[],[],0.05)[0]:break
+finally:os.killpg(os.getpgrp(),signal.SIGKILL)
+"""
+    with ExitStack() as handles:
+        status_read, status_write = os.pipe()
+        status_reader = handles.enter_context(os.fdopen(status_read, "rb", buffering=0))
+        status_writer = handles.enter_context(os.fdopen(status_write, "wb", buffering=0))
+        life_read, life_write = os.pipe()
+        life_reader = handles.enter_context(os.fdopen(life_read, "rb", buffering=0))
+        life_writer = handles.enter_context(os.fdopen(life_write, "wb", buffering=0))
+        child = subprocess.Popen([sys.executable, "-c", supervisor, str(status_write), str(life_read), *argv],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 pass_fds=(status_write, life_read), start_new_session=True)
+        status_writer.close()
+        life_reader.close()
+        out, err, status, offset = bytearray(), bytearray(), bytearray(), 0
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream, event in [(child.stdin, selectors.EVENT_WRITE),
+                                      (child.stdout, selectors.EVENT_READ), (child.stderr, selectors.EVENT_READ),
+                                      (status_reader, selectors.EVENT_READ)]:
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, event)
+                while selector.get_map():
+                    budget.check()
+                    for key, _event in selector.select(timeout=0.1):
+                        stream = key.fileobj
+                        if stream is child.stdin:
+                            try:
+                                offset += os.write(stream.fileno(), packet[offset:])
+                            except BlockingIOError:
+                                continue
+                            except BrokenPipeError:
+                                offset = len(packet)
+                            if offset == len(packet):
+                                selector.unregister(stream)
+                                stream.close()
+                        else:
+                            try:
+                                block = os.read(stream.fileno(), 16384)
+                            except BlockingIOError:
+                                continue
+                            budget.check(read_bytes=len(block))
+                            if not block:
+                                selector.unregister(stream)
+                                continue
+                            data = status if stream is status_reader else out if stream is child.stdout else err
+                            data.extend(block)
+                            if len(data) > (32 if data is status else 1024 * 1024 if data is out else 4096):
+                                raise Hold("reference-peer-output-size")
                 budget.check()
-                for key, _event in selector.select(timeout=0.1):
-                    stream = key.fileobj
-                    if stream is child.stdin:
-                        try:
-                            offset += os.write(stream.fileno(), packet[offset:])
-                        except BlockingIOError:
-                            continue
-                        except BrokenPipeError:
-                            offset = len(packet)
-                        if offset == len(packet):
-                            selector.unregister(stream)
-                            stream.close()
-                    else:
-                        try:
-                            block = os.read(stream.fileno(), 16384)
-                        except BlockingIOError:
-                            continue
-                        budget.check(read_bytes=len(block))
-                        if not block:
-                            selector.unregister(stream)
-                            continue
-                        data = out if stream is child.stdout else err
-                        data.extend(block)
-                        if len(data) > (1024 * 1024 if data is out else 4096):
-                            raise Hold("reference-peer-output-size")
-            budget.check()
-        try:
-            if child.wait(timeout=min(2, max(0.01, MAX_SECONDS-(time.monotonic()-budget.started)))) != 0 or err:
+            if not re.fullmatch(rb"-?[0-9]+\n", status) or int(status) != 0 or err:
                 raise Hold("reference-peer-unavailable")
-        except subprocess.TimeoutExpired as error:
-            raise Hold("reference-peer-unavailable") from error
-        try:
-            return json.loads(out)
-        except (ValueError, UnicodeError) as error:
-            raise Hold("reference-peer-response-invalid") from error
-    finally:
-        if child.poll() is None:
-            os.killpg(child.pid, signal.SIGTERM)  # only this newly created probe session
             try:
-                child.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=2)
-        for stream in (child.stdin, child.stdout, child.stderr):
-            stream.close()
+                return json.loads(out)
+            except (ValueError, UnicodeError, RecursionError) as error:
+                raise Hold("reference-peer-response-invalid") from error
+        finally:
+            closure_error = None
+            try:
+                # Never poll/wait/reap the supervisor before the last signal.
+                # Its reserved PID pins this group even if it died unexpectedly.
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(child.pid, sig)
+                    except ProcessLookupError:
+                        pass
+                    except OSError as error:
+                        closure_error = error
+                    if sig == signal.SIGTERM:
+                        time.sleep(0.05)
+                life_writer.close()  # EOF also kills the owned group if this parent disappears.
+                deadline = time.monotonic() + 2
+                try:
+                    child.wait(timeout=2)
+                    while True:
+                        try:
+                            os.killpg(child.pid, 0)  # Observation only after the supervisor is reaped.
+                        except ProcessLookupError:
+                            break
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("owned probe group still present")
+                        time.sleep(0.01)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    closure_error = error
+            finally:
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    stream.close()
+            if closure_error is not None:
+                raise Hold("reference-peer-closure-unverified") from closure_error
 
 
 def resolved_reference(parent, raw, budget):
@@ -803,38 +852,78 @@ def resolved_reference(parent, raw, budget):
     error. That is not negative evidence about references across accounts.
     Missing/dangling suffixes are allowed; inaccessible ones are not.
     """
-    remaining = list(Path(raw).parts)
-    resolved = Path("/") if Path(raw).is_absolute() else parent
-    links = 0
-    while remaining:
-        budget.check(entries=1)
-        part = remaining.pop(0)
-        if part in ("/", "."):
-            continue
-        if part == "..":
-            resolved = resolved.parent
-            continue
-        child = resolved / part
-        try:
-            before = child.lstat()
-        except OSError as error:
-            if error.errno not in (errno.ENOENT, errno.ENOTDIR):
-                raise
-            resolved = child
-            continue
-        if stat.S_ISLNK(before.st_mode):
-            links += 1
-            if links > 40:
-                raise Hold("reference-symlink-unresolvable")
-            referent = Path(os.readlink(child))
-            if identity(child.lstat()) != identity(before):
+    operand = Path(raw)
+    absolute = operand.is_absolute()
+    # POSIX permits a distinct // anchor. This Mac/Linux cleanup protocol does
+    # not: aliases must compare against the same single-root candidate paths.
+    remaining = list(operand.parts[1:] if absolute else operand.parts)
+    resolved = Path("/") if absolute else parent
+    links, seals = 0, []
+    with ExitStack() as stack:
+        anchors = {}
+
+        def directory(path, parent_fd=None, name=None, expected=None):
+            key = str(path)
+            if key not in anchors:
+                anchors[key] = stack.enter_context(checked_directory(path, budget, parent_fd, name, expected))
+            return anchors[key]
+
+        fd = directory(Path("/"))
+        start = Path("/")
+        # Pin the entire physical starting chain, not just its final component.
+        for part in resolved.parts[1:]:
+            start = start / part
+            fd = directory(start, fd, part)
+        while remaining:
+            budget.check(entries=1)
+            part = remaining.pop(0)
+            if part == ".":
+                continue
+            if part == "..":
+                resolved = resolved.parent
+                continue
+            child = resolved / part
+            fd = anchors.get(str(resolved))
+            if fd is None:
+                # A genuinely missing/non-directory prefix cannot contain a
+                # symlink. Its last existing physical parent remains sealed.
+                resolved = child
+                continue
+            try:
+                before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ENOTDIR):
+                    raise
+                seals.append((fd, part, None))
+                resolved = child
+                continue
+            observed = identity(before)
+            if stat.S_ISDIR(before.st_mode):
+                directory(child, fd, part, observed)
+                resolved = child
+            elif stat.S_ISLNK(before.st_mode):
+                links += 1
+                if links > 40:
+                    raise Hold("reference-symlink-unresolvable")
+                referent = Path(os.readlink(part, dir_fd=fd))
+                seals.append((fd, part, observed))
+                if referent.is_absolute():
+                    resolved = Path("/")
+                    remaining = list(referent.parts[1:]) + remaining
+                else:
+                    remaining = list(referent.parts) + remaining
+            else:
+                seals.append((fd, part, observed))
+                resolved = child
+        for fd, name, expected in seals:
+            budget.check()
+            try:
+                after = identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            except FileNotFoundError:
+                after = None
+            if after != expected:
                 raise Hold("reference-symlink-changed")
-            if referent.is_absolute():
-                resolved = Path("/")
-            remaining = list(referent.parts) + remaining
-        else:
-            resolved = child
-    return resolved
+        return resolved
 
 
 def matching_reference(referent, candidates, budget, shared):
@@ -897,7 +986,14 @@ def scan_reference_tree(home, path, depth, candidates, budget, shared, parent_fd
                 except PermissionError:
                     if allow_peer:
                         raise
-                    budget.unresolved_references.append([str(path), raw])
+                    referral = [str(path), raw]
+                    size = (getattr(budget, "unresolved_reference_bytes", 2)
+                            + len(DirectoryProgress.encode(referral))
+                            + bool(budget.unresolved_references))
+                    if size > 1024 * 1024:
+                        raise Hold("reference-peer-output-size")
+                    budget.unresolved_reference_bytes = size
+                    budget.unresolved_references.append(referral)
                     referent = None
                 budget.check()
                 if identity(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) != before:
@@ -972,7 +1068,9 @@ def reference_probe():
             raise Hold("reference-peer-request-invalid")
         candidates.append((workspace, target, k))
     # Remaining global limits are passed down, never multiplied per peer.
-    budget.started = time.monotonic() - (MAX_SECONDS-limits["seconds"])
+    # Reduce the original deadline; input/startup/validation time is not refunded.
+    budget.started -= MAX_SECONDS-limits["seconds"]
+    budget.check()
     budget.entries = MAX_ENTRIES-limits["entries"]
     initial_entries = budget.entries
     shared = set()
