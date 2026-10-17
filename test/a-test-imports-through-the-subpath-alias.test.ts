@@ -111,7 +111,10 @@ test("W1-T9864: a new test file carries no location-relative specifier", (t) => 
   }
   const added = [
     ...git(["diff", "--name-only", "--diff-filter=A", base, "--", "test"]).split("\n"),
-    ...git(["ls-files", "--others", "--exclude-standard", "--", "test"]).split("\n"),
+    ...git(["status", "--porcelain", "--untracked-files=all", "--", "test"])
+      .split("\n")
+      .filter((line) => line.startsWith("?? "))
+      .map((line) => line.slice(3)),
   ].filter((f) => f.endsWith(".test.ts"));
   const offenders = added.filter((f) => hasLocationRelativeSpecifier(readFileSync(join(ROOT, f), "utf8")));
   assert.deepEqual(offenders, [], "a new test imports through #src/*, #scripts/* and #test/*, never a relative path");
