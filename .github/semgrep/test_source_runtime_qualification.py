@@ -256,12 +256,15 @@ class SourceQualificationControls(unittest.TestCase):
             link.symlink_to(root, target_is_directory=True)
             with self.assertRaisesRegex(qualifier.QualificationBlocked, "PRIVATE_ROOT"):
                 qualifier.private_root(link)
-            os.chmod(root, 0o710)  # non-private group traversal; no read/write grant
-            try:
-                with self.assertRaisesRegex(qualifier.QualificationBlocked, "PRIVATE_ROOT"):
-                    qualifier.private_root(root)
-            finally:
-                os.chmod(root, 0o700)
+            invalid = root / "group-traversable"
+            # Only an empty child of an owner-only parent; the creator's umask is process-local.
+            subprocess.run([sys.executable, "-I", "-S", "-c",
+                            "import os,sys;os.umask(0o067);os.mkdir(sys.argv[1],0o710)", str(invalid)],
+                           check=True, timeout=5)
+            self.assertEqual(invalid.stat().st_mode & 0o777, 0o710, "real non-owner-bit control")
+            with self.assertRaisesRegex(qualifier.QualificationBlocked, "PRIVATE_ROOT"):
+                qualifier.private_root(invalid)
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700, "the real fixture stayed owner-only")
 
     def test_environment_does_not_inherit_credentials_or_injection(self):
         with patch.dict(os.environ, {"GITHUB_TOKEN": "trap", "SEMGREP_APP_TOKEN": "trap",
