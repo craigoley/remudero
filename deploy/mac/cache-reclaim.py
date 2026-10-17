@@ -826,7 +826,9 @@ finally:os.killpg(os.getpgrp(),signal.SIGKILL)
                     try:
                         os.killpg(child.pid, sig)
                     except ProcessLookupError:
-                        pass
+                        # An absent owned group needs no grace period. Keep
+                        # the supervisor unreaped until signalling is over.
+                        continue
                     except OSError as error:
                         closure_error = error
                     if sig == signal.SIGTERM:
@@ -863,27 +865,16 @@ def resolved_reference(parent, raw, budget):
     absolute = operand.is_absolute()
     # POSIX permits a distinct // anchor. This Mac/Linux cleanup protocol does
     # not: aliases must compare against the same single-root candidate paths.
-    remaining = list(operand.parts[1:] if absolute else operand.parts)
-    resolved = Path("/") if absolute else parent
+    remaining = [(part, True) for part in parent.parts[1:]] if not absolute else []
+    remaining += [(part, False) for part in (operand.parts[1:] if absolute else operand.parts)]
     links, seals = 0, []
-    with ExitStack() as stack:
-        anchors = {}
+    anchors = {}
 
-        def directory(path, parent_fd=None, name=None, expected=None):
-            key = str(path)
-            if key not in anchors:
-                anchors[key] = stack.enter_context(checked_directory(path, budget, parent_fd, name, expected))
-            return anchors[key]
-
-        fd = directory(Path("/"))
-        start = Path("/")
-        # Pin the entire physical starting chain, not just its final component.
-        for part in resolved.parts[1:]:
-            start = start / part
-            fd = directory(start, fd, part)
+    def visit(resolved, remaining):
+        nonlocal links
         while remaining:
             budget.check(entries=1)
-            part = remaining.pop(0)
+            part, physical_start = remaining.pop(0)
             if part == ".":
                 continue
             if part == "..":
@@ -905,8 +896,19 @@ def resolved_reference(parent, raw, budget):
                 resolved = child
                 continue
             observed = identity(before)
+            if physical_start and not stat.S_ISDIR(before.st_mode):
+                raise Hold("reference-start-not-physical")
             if stat.S_ISDIR(before.st_mode):
-                directory(child, fd, part, observed)
+                if str(child) not in anchors:
+                    # A lexical continuation owns each descriptor in an
+                    # ordinary with-block. Only the final Path escapes; raw
+                    # descriptors remain borrowed by this call's descendants.
+                    with checked_directory(child, budget, fd, part, observed) as child_fd:
+                        anchors[str(child)] = child_fd
+                        try:
+                            return visit(child, remaining)
+                        finally:
+                            del anchors[str(child)]
                 resolved = child
             elif stat.S_ISLNK(before.st_mode):
                 links += 1
@@ -916,9 +918,9 @@ def resolved_reference(parent, raw, budget):
                 seals.append((fd, part, observed))
                 if referent.is_absolute():
                     resolved = Path("/")
-                    remaining = list(referent.parts[1:]) + remaining
+                    remaining = [(p, False) for p in referent.parts[1:]] + remaining
                 else:
-                    remaining = list(referent.parts) + remaining
+                    remaining = [(p, False) for p in referent.parts] + remaining
             else:
                 seals.append((fd, part, observed))
                 resolved = child
@@ -931,6 +933,12 @@ def resolved_reference(parent, raw, budget):
             if after != expected:
                 raise Hold("reference-symlink-changed")
         return resolved
+    try:
+        with checked_directory(Path("/"), budget) as root_fd:
+            anchors["/"] = root_fd
+            return visit(Path("/"), remaining)
+    except RecursionError as error:
+        raise Hold("reference-chain-too-deep") from error
 
 
 def matching_reference(referent, candidates, budget, shared):

@@ -192,3 +192,29 @@ else:
     } finally { f.clean(); }
   }
 });
+
+test("cache reference resolver closes every pinned directory on success and refusal", () => {
+  const f = fixture();
+  try {
+    const r = f.run(String.raw`original_open,original_close=os.open,os.close
+opened=set()
+def tracked_open(*a,**kw):
+ fd=original_open(*a,**kw);opened.add(fd);return fd
+def tracked_close(fd):
+ original_close(fd);opened.discard(fd)
+os.open,os.close=tracked_open,tracked_close
+try:
+ for n in range(20):
+  assert g['resolved_reference'](root,str(target),budget)==target
+  assert opened==set(),opened
+  before=g['MAX_ENTRIES'];g['MAX_ENTRIES']=budget.entries+4
+  try:g['resolved_reference'](root,str(target),budget)
+  except ns['Hold'] as error:assert str(error)=='inspection-budget'
+  else:raise AssertionError('missing budget refusal')
+  finally:g['MAX_ENTRIES']=before;budget.exhausted=None
+  assert opened==set(),opened
+finally:os.open,os.close=original_open,original_close
+`);
+    assert.deepEqual(r.shared, [f.target]); assert.ok(existsSync(f.target));
+  } finally { f.clean(); }
+});
