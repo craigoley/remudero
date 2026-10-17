@@ -162,13 +162,17 @@ test("W1-T9403: serve.memory names the used heap of each thread and each held bo
   }
   assert.deepEqual(Object.keys(holds).sort(), ["core", "site"], "each instance's held projection is named");
   assert.ok(holds.core!.rows > 0 && holds.core!.keptBytes > 0, `the core projection keeps rows: ${JSON.stringify(holds)}`);
+  const fixtureHolds = { ...holds,
+    "workstreams:payload@core": { entries: 1, bytes: 42, unit: "body", bytes_basis: "fixture-accounted-payload" },
+    "workstreams:opaque@core": { entries: 1, unsized: "shared plan; exclusive bytes unavailable", unit: "container" },
+  };
 
   const dir = makeTempDir("w1-t9403-lanes");
   const fixture = join(dir, "lane.mjs");
   writeFileSync(fixture, LANE_FIXTURE);
   const book = memory.trackWorkerThreads();
   const views = threadViews({
-    data: { stateDir: dir, instances: [], tickMs: 20, holder: "w1-t9403", fixtureHolds: holds } as Parameters<typeof threadViews>[0]["data"],
+    data: { stateDir: dir, instances: [], tickMs: 20, holder: "w1-t9403", fixtureHolds } as Parameters<typeof threadViews>[0]["data"],
     relay: () => {}, log: () => {}, workerUrl: pathToFileURL(fixture), every: () => () => {},
   });
   t.after(async () => {
@@ -196,7 +200,9 @@ test("W1-T9403: serve.memory names the used heap of each thread and each held bo
   assert.deepEqual(part.holds, {
     "board:core": { entries: holds.core!.rows, bytes: holds.core!.keptBytes },
     "board:site": { entries: holds.site!.rows, bytes: holds.site!.keptBytes },
-  }, "each held board projection is named by instance with its rows and kept bytes");
+    "workstreams:payload@core": fixtureHolds["workstreams:payload@core"],
+    "workstreams:opaque@core": fixtureHolds["workstreams:opaque@core"],
+  }, "exact board bytes survive real-thread transport; canonical holders keep their names, basis and unknown sizes");
   const fastPart = Object.values(fast.parts ?? {})[0]!;
   assert.equal(typeof fastPart.used_bytes, "number", "every thread's part carries its used heap");
   assert.equal(fastPart.holds, undefined, "a lane that never built a now view has no holds");

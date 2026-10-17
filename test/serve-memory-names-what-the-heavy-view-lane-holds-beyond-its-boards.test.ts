@@ -1,4 +1,5 @@
-// W1-T9983: retained-view accounting is named, cached at fill, and never substitutes for a heap reading.
+// test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts — W1-T9983.
+// Retained-view accounting is named, cached at fill, and never substitutes for a heap reading.
 import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -138,9 +139,26 @@ test("W1-T9983: payload counters replace, forget and leave unserializable state 
   book.known("fixture:known", 3, 0);
   assert.equal(book.read()["fixture:known"]!.bytes, undefined, "failed accounting is not zero bytes for retained rows");
   book.forget("fixture:known");
+  book.known("fixture:empty", 0, 0);
+  assert.equal(book.read()["fixture:empty"]!.bytes, 0, "an actually empty accounted store is different from unknown accounting");
+  book.known("fixture:invalid", 1, Number.NaN);
+  assert.equal(book.read()["fixture:invalid"]!.bytes, undefined);
+  book.forget("fixture:empty");
+  book.forget("fixture:invalid");
   book.forget("fixture:payload");
   book.forget("fixture:missing");
   assert.deepEqual(book.read(), {});
+});
+
+test("W1-T9983: a future holder timestamp is unknown age, not fresh zero", async () => {
+  const thread = { threadId: 17, getHeapStatistics: async () => ({ total_heap_size: 1_000, used_heap_size: 600, external_memory: 50 }),
+    once: () => undefined } as unknown as WorkerThread;
+  const readings = await heapMemory.readWorkerHeaps([{ kind: "fixture:views", thread }], 1_000,
+    () => ({ holds: { "fixture:payload": { entries: 1, bytes: 10 } }, observedAt: NOW + 1 }), CLOCK);
+  const part = readings[0]!.parts!["thread-17"]!;
+  assert.equal(part.holds_age_ms, undefined);
+  assert.match(part.holds_age_reason ?? "", /ahead of sample clock/);
+  assert.equal(part.unattributed_used_bytes, 640, "the arithmetic is separate from report-time certainty");
 });
 
 test("W1-T9983: a views-lane part carries its unattributed used bytes", async () => {
