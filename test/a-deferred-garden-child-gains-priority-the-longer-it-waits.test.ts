@@ -203,11 +203,15 @@ test("W1-T9761: a restart does not reset the wait of a deferred garden", async (
         completions: 1, failures: 0, lastCompletedAt, lastSuccessAt: lastCompletedAt, lastFailureAt: null }] }));
 
     const restarted = fresh(); // a new process: no streak survives in memory
-    const outcome: GardenPassOutcome = await spawnIn(root, restarted)("gate", [], { stopped: false, deferral });
-    assert.equal(outcome, 0, "the restarted daemon's first ask runs the starved garden");
+    const spawn = spawnIn(root, restarted);
+    const first: GardenPassOutcome = await spawn("gate", [], { stopped: false, deferral });
+    assert.deepEqual(first, { kind: "deferred", reason: "memory-budget-shortfall" }, "the seed alone admits no first ask");
+    restarted.now.ms += 1_000;
+    const outcome: GardenPassOutcome = await spawn("gate", [], { stopped: false, deferral: { ...deferral, firstAsk: false } });
+    assert.equal(outcome, 0, "one observed deferral later, the seeded wait runs the starved garden");
     const [row] = rowsOf(restarted, ENFORCE_ADMIT_STEP, "gate");
     assert.equal(row!.tier, "aged");
-    assert.equal(row!.waited_ms, 9 * CADENCE_MS, "waited since it was last due: its last completed pass plus its cadence");
+    assert.equal(row!.seeded_ms, 9 * CADENCE_MS, "the age carried in since it was last due: its last completed pass plus its cadence");
     assert.equal(row!.cadence_basis, "scheduled");
 
     const control = fresh();
@@ -282,4 +286,37 @@ test("W1-T9761: the garden loop hands its spawn its measured cadence and ends a 
   } finally {
     mock.timers.reset();
   }
+});
+
+/** The design's fixture after a restart: the garden was last due ten cadences ago, by the previous generation's file. */
+const SEEDED = (w: World): AdmissionRequest["deferral"] => ({ cadenceMs: CADENCE_MS, cadenceBasis: "scheduled", dueSinceMs: w.now.ms - 10 * CADENCE_MS });
+
+test("W1-T9761: a restart seed alone never admits a first ask on the aged rung", async () => {
+  const w = fresh(); // a restarted process: no streak, only the seed
+  const first = await ask(w, "selector-shadow", SEEDED(w));
+  assert.equal(first.kind, "deferred", "the first ask after a restart is judged on its verdict, not on the seed");
+  const [row] = rowsOf(w, ENFORCE_DEFER_STEP, "selector-shadow");
+  assert.equal(row!.aged_blocked, "unobserved-seed", "the row names why the seed did not admit it");
+  assert.equal(row!.deferred_since, new Date(NOW - 10 * CADENCE_MS).toISOString(), "the seed joins the streak at its first deferral");
+  assert.equal(rowsOf(w, ENFORCE_ADMIT_STEP, "selector-shadow").length, 0);
+  w.now.ms += 1_000;
+  const second = await ask(w, "selector-shadow", { cadenceMs: CADENCE_MS, cadenceBasis: "scheduled" });
+  assert.equal(second.kind === "admitted" && second.tier, "aged", "after one observed deferral the seeded wait counts, so a restart does not reset it");
+});
+
+test("W1-T9761: an aged row reports its queueing wait apart from its seeded age", async () => {
+  const w = fresh();
+  w.state.availableMib = 1500; // measured short at the first ask, so it is deferred whatever the seed says
+  assert.equal((await ask(w, "evidence-coverage", SEEDED(w))).kind, "deferred");
+  w.state.availableMib = 5000;
+  w.now.ms += 30_000;
+  const outcome = await ask(w, "evidence-coverage", { cadenceMs: CADENCE_MS, cadenceBasis: "scheduled" });
+  assert.equal(outcome.kind === "admitted" && outcome.tier, "aged");
+  assert.equal(outcome.kind === "admitted" && outcome.waitedMs, 30_000);
+  const [row] = rowsOf(w, ENFORCE_ADMIT_STEP, "evidence-coverage");
+  assert.equal(row!.waited_ms, 30_000, "waited_ms is the queueing this process observed, from its first ask");
+  assert.equal(row!.seeded_ms, 10 * CADENCE_MS, "seeded_ms is the age the restart seed carried in before that ask");
+  assert.equal(row!.deferred_since, new Date(NOW - 10 * CADENCE_MS).toISOString());
+  assert.equal(row!.deferrals, 1);
+  assert.deepEqual(row!.reasons, ["psi", "unrealized-reservations"], "the aged row names its verdict's reasons like every admit row");
 });
