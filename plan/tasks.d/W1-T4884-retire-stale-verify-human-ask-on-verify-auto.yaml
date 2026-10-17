@@ -1,5 +1,5 @@
 - id: W1-T4884
-  title: "Retire a stale verify-human Inbox ask when the current plan explicitly changes its task to verify:auto"
+  title: "Retain verify-human Inbox history and require positive scoped resolution"
   repo: remudero
   depends_on: [W1-T4853]
   type: implement
@@ -19,24 +19,32 @@
     live core census exposed 24 such rows. They are not evidence of 24 outstanding human
     judgments. The registry and thread must remain auditable; a read-side classification
     change is safer than deleting records or fabricating a release receipt.
+  implementation_notes: |
+    W1-T9284 (operator-authorized 2026-10-16) supersedes the original verify:auto-alone
+    retirement rule with positive scoped resolution. The historical rationale and origin
+    above are retained. A verification-mode change does not answer an unrelated human ask;
+    current holds and untyped or changed-purpose asks stay visible. No historical source
+    receipt, release, producer purpose or operator consent is fabricated as a migration.
   design: |
-    In classifyProposal, retire only an exact verify-human:<taskId> proposal when the
-    current loaded plan contains that task, verify is auto, and dispatch_hold is not true.
-    Give a plan-qualified retirement reason. A missing/unreadable plan task, verify:human,
-    or an explicit dispatch hold must never trigger this rule. Keep the existing release,
-    merged-credit, and explicit-retirement routes intact. In the attention census, retain
-    a derived history item for this retired ask with classification and plan source facts;
-    do not write a decline/release row, erase the proposal/thread, or claim that partial
-    evidence is a verified zero. No machine action or dispatch change is authorized.
+    Keep an unanswered verify-human ask visible when its task changes to verify:auto.
+    A maintained producer-owned exact verification ask may become history only from its
+    same-family explicit release with present task ownership, unchanged proposal purpose,
+    no current hold and no restored-for-review lifecycle. Mechanical asks instead use
+    W1-T9284's positive scoped terminal receipt and reversible journal. A missing or
+    unavailable source never proves resolution. Preserve registry and thread history,
+    expose source-qualified history for a proven release, and keep partial evidence and
+    verified counts distinct. No machine approval or dispatch authority is introduced.
   acceptance:
-    - claim: "a current verify:auto task with no hold retires only its stale human ask without deleting its record"
-      proof: 'grep: test("W1-T4884: verify-auto retires only its stale human ask without erasing the registry" in test/a-released-human-ask-leaves-the-inbox.test.ts'
-    - claim: "a hold, missing task, or verify:human task cannot be dismissed by the gardener"
-      proof: 'grep: test("W1-T4884: a held or unverified task keeps its human ask" in test/a-released-human-ask-leaves-the-inbox.test.ts'
-    - claim: "the retired ask remains source-qualified history rather than a decision count"
-      proof: 'grep: test("W1-T4884: a stale verify-human ask remains in source-qualified history" in test/operator-attention-census.test.ts'
+    - claim: "verify:auto alone preserves an unanswered human ask and its registry history"
+      proof: 'grep: test("W1-T4884: verify-auto alone preserves an unanswered human ask without erasing the registry" in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "a held or unverified unanswered task ask remains visible without exact release evidence"
+      proof: 'grep: an ID without producer purpose cannot borrow the exact release in test/a-released-human-ask-leaves-the-inbox.test.ts'
+    - claim: "a positively released exact ask remains source-qualified history with honest partial counts"
+      proof: 'grep: the exact typed release supplies authority in test/operator-attention-census.test.ts'
   falsifier: |
-    Seed two verify-human proposals; the first task is now verify:auto without a hold,
-    the second remains verify:human or dispatch-held. Only the first loses its live Inbox
-    decision label and appears in census history with a plan reason. Remove the first
-    task from the plan and its ask becomes visible again, not silently retired.
+    Seed a normal producer-owned verify-human ask whose task is now verify:auto and an
+    unanswered held or untyped human ask. Without an exact release both remain visible.
+    An exact same-family release moves only the normal unchanged ask into history; a
+    copied purpose, missing task or current hold remains visible. Registry and thread
+    records stay intact and partial history is not a verified count. Reintroducing the
+    old verify:auto-alone override must fail the unanswered-ask preservation fixture.

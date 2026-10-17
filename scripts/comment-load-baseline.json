@@ -90,6 +90,7 @@
   "src/lib/analytics-route.ts": 278,
   "src/lib/arm-auto-merge.ts": 500,
   "src/lib/autonomy.ts": 90,
+  "src/lib/board-projection.ts": 500,
   "src/lib/board-review.ts": 244,
   "src/lib/board.ts": 500,
   "src/lib/branch-reaper.ts": 288,

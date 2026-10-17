@@ -17,9 +17,10 @@ import { loadPlan } from "../src/lib/plan.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   buildOpenPrViewsAsync, createTickReadProducer, startTickReadWorker, tickReadWorkerBoot, tickReadWorkerStartFacts,
-  tickReadWorkerUrl, type TickReadOptions,
+  tickReadWorkerUrl, type TickReadFacts, type TickReadOptions, type TickReadRequest,
 } from "../src/lib/tick-read-worker.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = "src/lib/tick-read-worker.ts";
@@ -127,7 +128,7 @@ async function workerAgainstInline(start: (options: TickReadOptions) => ReturnTy
   const worker = tree();
   const inline = tree();
   const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const plane = startReadPlane({
+  const plane = startReadPlane<TickReadRequest, TickReadFacts>({
     workerUrl: tickReadWorkerUrl(), workerInput: worker.options, spawn: () => start(worker.options),
     inline: () => { throw new Error("the inline fallback ran"); },
     log: (step, extra) => rows.push({ step, extra }),
@@ -135,6 +136,37 @@ async function workerAgainstInline(start: (options: TickReadOptions) => ReturnTy
   try {
     const generation = await plane.read({ plan: loadPlan(worker.planPath) });
     const expected = await createTickReadProducer(inline.options)({ plan: loadPlan(inline.planPath) });
+    // Main's revision-only requests must reach the narrow entry, including its bundled form.
+    const pinned = gitRepo({ kind: "tick-read-revision", seedCommit: false });
+    try {
+      const planPath = join(pinned.dir, "plan", "tasks.yaml");
+      mkdirSync(join(pinned.dir, "plan", "tasks.d"), { recursive: true });
+      writeFileSync(planPath, readFileSync(worker.planPath, "utf8"));
+      writeFileSync(join(pinned.dir, "plan", "tasks.d", "c.yaml"),
+        "- {id: C, title: c, repo: r, type: implement, files: [src/c.ts], depends_on: [], status: queued}\n");
+      const plan = loadPlan(planPath);
+      pinned.git("add", "plan");
+      pinned.git("commit", "--quiet", "-m", "plan revision");
+      const commit = pinned.git("rev-parse", "HEAD");
+      const key = `${pinned.git("rev-parse", "HEAD:plan/tasks.yaml")}:${pinned.git("rev-parse", "HEAD:plan/tasks.d")}`;
+      const request: TickReadRequest = { planRevision: { key, commit, repoDir: pinned.dir, relPath: "plan/tasks.yaml" } };
+      writeFileSync(planPath, "[]\n"); // The pinned commit, including its shard, wins over the working tree.
+      const revised = await plane.read(request);
+      assert.equal(revised.source, "worker", "revision-only requests never degrade to the inline fallback");
+      assert.equal("plan" in revised.facts, false, "the worker never clones the revision's plan back");
+      const direct = await createTickReadProducer(inline.options)({ plan });
+      assert.ok(direct.projection.some(([id]) => id === "C"), "the pinned shard participates in the read");
+      const { plan: _plan, ...directFacts } = direct;
+      assert.deepEqual(portable(revised.facts, worker.root), portable(directFacts, inline.root));
+      pinned.cleanup();
+      const cached = await plane.read(request);
+      assert.equal(cached.source, "worker");
+      assert.equal("plan" in cached.facts, false);
+      assert.deepEqual(cached.facts.projection, revised.facts.projection,
+        "the worker retains its newest plan revision between reads without rereading git");
+    } finally {
+      pinned.cleanup();
+    }
     return { generation, expected, rows, worker, inline };
   } finally {
     await plane.stop();

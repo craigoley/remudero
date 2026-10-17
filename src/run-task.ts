@@ -1,4 +1,16 @@
 import {
+  GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
+  originPlanBlobs, planAtRevisionAsync, planBlobsAtRevision, planSyncGitRunnerAsync,
+  readOriginShardsAtRefAsync, shardListingArgs, shardPathsFromListing, shardReadFailure, tickReadProducer,
+  type GitRunnerAsync, type PlanRevision, type PlanRevisionStore, type RevisionLoad,
+  type TickReadFacts, type TickReadInput, type TickReadRequest,
+} from "./lib/tick-read-worker.js";
+export {
+  GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
+  planAtRevisionAsync, planSyncGitRunnerAsync, readOriginShardsAtRefAsync, tickReadProducer,
+  type GitRunnerAsync, type PlanRevision, type PlanRevisionStore, type TickReadRequest,
+} from "./lib/tick-read-worker.js";
+import {
   checkProofCommand, checkProofTimeoutMs,
   CHECK_PROOF_EXIT, CHECK_PROOF_FULL_SUITE_FLAG, buildBaseProofDir,
   releaseBaseProofDir, removeBaseProofWorktree, hostWorktreeGitAtTopLevel, type BaseProofDir,
@@ -15,7 +27,8 @@ import { judgeFixProgress,
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
   loadCapabilityInspectionSource, readInspectionJson } from "./lib/capability-inspection.js";
-import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration,
+  revisionedRead, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput } from "./lib/read-plane.worker.js";
 import { globSync, renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
@@ -4642,18 +4655,6 @@ function resolveOwner(): string {
   return resolveOwnerRepo().owner;
 }
 
-/**
- * A `git fetch`/`git show` step failed. Distinct from a generic Error so callers can tell
- * "the plan sync itself is broken" apart from any other failure and react the fail-closed
- * way (§ named ledger error, no spawn — W1-T60).
- */
-export class GitFetchError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "GitFetchError";
-  }
-}
-
 export interface SyncedPlan {
   plan: Plan;
   /** True when `git fetch` failed and `allowStale` let the run proceed on the last-known refs. */
@@ -4736,10 +4737,7 @@ function syncedPlanFromBlobs(
   staleDispatch: boolean,
   quarantine: ((quarantined: QuarantinedTask[]) => void) | undefined,
 ): SyncedPlan {
-  const blobs = [
-    { label: `origin/main:${relPath}`, text: blob },
-    ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
-  ];
+  const blobs = originPlanBlobs(relPath, blob, shards);
   if (!quarantine) return { plan: mergePlanBlobs(blobs), staleDispatch };
   // W1-T4421: the core daemon's boot degrades on a duplicate id instead of exiting.
   const { plan, quarantined } = mergePlanBlobsQuarantiningDuplicates(blobs);
@@ -4747,51 +4745,17 @@ function syncedPlanFromBlobs(
   return { plan, staleDispatch };
 }
 
-/** BACKSTOP, per git call of the awaited plan sync (fetch, show, ls-tree, cat-file). MEASURED 2026-10-06: the
- *  sync shard read held the daemon loop 3.4 s; a call still running at five minutes is hung, not slow. */
-export const PLAN_SYNC_GIT_TIMEOUT_MS = 300_000;
-
-/** An awaited plan-sync git call killed at its bound. Never read as "no shards": the sync refuses, naming it. */
-export class PlanSyncGitTimeoutError extends RmdError {
-  constructor(args: readonly string[], timeoutMs: number) {
-    super("git", GENERIC_EXIT_CODE, `git ${args[0]} timed out after ${timeoutMs}ms and was killed`, { verb: args[0], timeoutMs });
-    this.name = "PlanSyncGitTimeoutError";
-  }
-}
-
-/** {@link GitRunner}, awaited. */
-export type GitRunnerAsync = (args: string[], stdin?: string) => Promise<string>;
-
-/** The real {@link GitRunnerAsync}: `git -C <repoDir>` off the loop, `stdin` piped, SIGTERM then SIGKILL past its
- *  bound, which rejects with {@link PlanSyncGitTimeoutError}; any other failure rejects with git's own error. */
-export function planSyncGitRunnerAsync(
-  repoDir: string,
-  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string; maxBuffer?: number } = {},
-): GitRunnerAsync {
-  const timeoutMs = opts.timeoutMs ?? PLAN_SYNC_GIT_TIMEOUT_MS;
-  return (args, stdin) =>
-    new Promise((resolve, reject) => {
-      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: opts.maxBuffer ?? 1 << 26 }, (err, stdout) => {
-        bound.cancel();
-        if (bound.timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
-        return err ? reject(err) : resolve(stdout);
-      });
-      // EPIPE when git exits before reading its stdin: the exit itself reports that failure above.
-      child.stdin?.on("error", () => undefined);
-      child.stdin?.end(stdin ?? "");
-      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
-    });
-}
-
 /**
  * {@link syncPlanFromOrigin} through awaited, bounded git, for the daemon's dispatch lanes: the same fetch, the same
  * `origin/main` blob, the same shard read and merge. A call killed at its bound refuses as a {@link GitFetchError}
  * naming the timeout (`allowStale` still proceeds past a fetch that failed that way, as it does past any other).
+ * W1-T9763: with `revisions`, the plan is the store's one instance of the revision origin/main names after the fetch.
  */
 export async function syncPlanFromOriginAsync(
   repoDir: string,
   relPath: string,
-  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void; runGit?: GitRunnerAsync } = {},
+  opts: { allowStale?: boolean; quarantine?: (quarantined: QuarantinedTask[]) => void; runGit?: GitRunnerAsync;
+    revisions?: PlanRevisionStore } = {},
 ): Promise<SyncedPlan> {
   const runGit = opts.runGit ?? planSyncGitRunnerAsync(repoDir);
   let staleDispatch = false;
@@ -4801,6 +4765,13 @@ export async function syncPlanFromOriginAsync(
     if (!opts.allowStale) throw new GitFetchError(`git fetch origin failed in ${repoDir}: ${String(err)}`);
     staleDispatch = true;
   }
+  if (opts.revisions) {
+    const revision = await readPlanRevisionAsync(repoDir, relPath, runGit);
+    const read = await planAtRevisionAsync(opts.revisions, revision, runGit);
+    if (!opts.quarantine) return { plan: await strictPlanOf(read, revision, runGit), staleDispatch };
+    opts.quarantine(read.quarantined);
+    return { plan: read.plan, staleDispatch };
+  }
   let blob: string;
   try {
     blob = await runGit(["show", `origin/main:${relPath}`]);
@@ -4809,6 +4780,66 @@ export async function syncPlanFromOriginAsync(
   }
   const shards = await readOriginShardsAtRefAsync(repoDir, dirname(relPath), runGit);
   return syncedPlanFromBlobs(relPath, blob, shards, staleDispatch, opts.quarantine);
+}
+
+export async function readPlanRevisionAsync(repoDir: string, relPath: string, runGit: GitRunnerAsync,
+  ref = "origin/main"): Promise<PlanRevision> {
+  const shardDir = join(dirname(relPath), "tasks.d");
+  let commit: string;
+  let listing: string;
+  try {
+    commit = (await runGit(["rev-parse", "--verify", `${ref}^{commit}`])).trim();
+    listing = await runGit(["ls-tree", commit, "--", relPath, shardDir]);
+  } catch (err) {
+    throw new GitFetchError(`git cannot name the plan revision at ${ref} in ${repoDir}: ${String(err)}`);
+  }
+  const objects = new Map<string, string>();
+  for (const line of listing.split("\n")) {
+    const [head, path] = line.split("\t");
+    const sha = head?.split(" ")[2];
+    if (path && sha) objects.set(path, sha);
+  }
+  const monolith = objects.get(relPath);
+  if (!monolith) throw new GitFetchError(`git show ${commit}:${relPath} failed in ${repoDir}: no plan at that commit`);
+  return { key: `${monolith}:${objects.get(shardDir) ?? "-"}`, commit, repoDir, relPath };
+}
+
+async function strictPlanOf(read: RevisionLoad, revision: PlanRevision, runGit: GitRunnerAsync): Promise<Plan> {
+  if (read.quarantined.length === 0) return read.plan;
+  return mergePlanBlobs(await planBlobsAtRevision(revision, runGit));
+}
+
+/** W1-T9763: the daemon's boot sync, lane sync (the coalescer's), reload and tick read share ONE store, so one
+ *  revision is one instance for all of them. */
+export function daemonPlanReaders(planPath: string, quarantine: (quarantined: QuarantinedTask[]) => void,
+  runGit?: GitRunnerAsync): {
+  revisions: PlanRevisionStore;
+  boot: (opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
+  sync: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
+  reload: () => Promise<Plan>;
+  tickRead: (read: (input: TickReadRequest) => Promise<ReadGeneration<TickReadFacts>>) =>
+    (input: TickReadInput) => Promise<ReadGeneration<TickReadFacts>>;
+  inlineTickRead: (options: TickReadOptions, io: Parameters<typeof createTickReadProducer>[1]) => (input: TickReadRequest) => Promise<TickReadFacts>;
+} {
+  const revisions = createPlanRevisionStore();
+  const repoDir = dirname(dirname(planPath));
+  const sync = (dir: string, relPath: string, opts: { allowStale?: boolean }) =>
+    syncPlanFromOriginAsync(dir, relPath, { ...opts, quarantine, revisions, ...(runGit ? { runGit } : {}) });
+  return {
+    revisions, sync,
+    boot: (opts) => sync(repoDir, relative(repoDir, planPath), opts),
+    reload: () => reloadPlanRevisionAsync(revisions, planPath, runGit),
+    tickRead: (read) => revisionedRead(read, revisions.revisionOf),
+    inlineTickRead: (options, io) => tickReadProducer(options, io, revisions),
+  };
+}
+
+export async function reloadPlanRevisionAsync(store: PlanRevisionStore, planPath: string,
+  runGit?: GitRunnerAsync): Promise<Plan> {
+  const repoDir = dirname(dirname(planPath));
+  const git = runGit ?? planSyncGitRunnerAsync(repoDir);
+  const revision = await readPlanRevisionAsync(repoDir, relative(repoDir, planPath), git);
+  return strictPlanOf(await planAtRevisionAsync(store, revision, git), revision, git);
 }
 
 /** Injectable git invoker for {@link materializeOriginShards} — the real default shells out;
@@ -4853,56 +4884,6 @@ export function readOriginShardsAtRef(
   let texts: string[];
   try {
     texts = readBlobsAtRef(runGit, ref, shardRelPaths);
-  } catch (err) {
-    throw shardReadFailure(ref, shardRelDir, repoDir, err);
-  }
-  return shardRelPaths.map((relPath, i) => ({ relPath, text: texts[i] }));
-}
-
-function shardListingArgs(ref: string, shardRelDir: string): string[] {
-  return ["ls-tree", "--name-only", ref, `${shardRelDir}/`];
-}
-
-function shardPathsFromListing(listing: string): string[] {
-  return listing
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
-}
-
-function shardReadFailure(ref: string, shardRelDir: string, repoDir: string, err: unknown): GitFetchError {
-  return new GitFetchError(`git cat-file --batch over ${ref}:${shardRelDir}/ failed in ${repoDir}: ${String(err)}`);
-}
-
-/**
- * {@link readOriginShardsAtRef} through an awaited runner: the same listing, the same one `cat-file --batch` and
- * framing (`readBlobsAtRef` parses the bytes the awaited call returned). ONE DIFFERENCE, on purpose: a listing
- * killed at its bound throws {@link GitFetchError} naming it, where the sync read's catch would call it no shards
- * and silently drop every shard task from the dispatched plan.
- */
-export async function readOriginShardsAtRefAsync(
-  repoDir: string,
-  planRelDir: string,
-  runGit: GitRunnerAsync = planSyncGitRunnerAsync(repoDir),
-  ref = "origin/main",
-): Promise<Array<{ relPath: string; text: string }>> {
-  const shardRelDir = join(planRelDir, "tasks.d");
-  let shardListing: string;
-  try {
-    shardListing = await runGit(shardListingArgs(ref, shardRelDir));
-  } catch (err) {
-    if (err instanceof PlanSyncGitTimeoutError) throw new GitFetchError(`git ls-tree ${ref}:${shardRelDir}/ failed in ${repoDir}: ${err.message}`);
-    // No tasks.d/ at the ref (or a ref-dir lookup miss) is the no-shards case, exactly as the sync read reads it.
-    shardListing = "";
-  }
-  const shardRelPaths = shardPathsFromListing(shardListing);
-  if (shardRelPaths.length === 0) return [];
-  let texts: string[];
-  try {
-    const request = shardRelPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
-    const raw = await runGit(["cat-file", "--batch"], request);
-    // readBlobsAtRef builds this same request; any drift hands it no bytes, and it fails loud naming the first path.
-    texts = readBlobsAtRef((_args, stdin) => (stdin === request ? raw : ""), ref, shardRelPaths);
   } catch (err) {
     throw shardReadFailure(ref, shardRelDir, repoDir, err);
   }
@@ -37366,8 +37347,9 @@ export function resolveReloadPlan(
   target: { isSelf: boolean; planPath: string },
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  selfDeps: Parameters<typeof planReloader>[3] = {},
 ): (() => Promise<Plan | null>) | undefined {
-  return target.isSelf ? planReloader(target, allowStale, log) : dedicatedTargetPlanReloader(target, log);
+  return target.isSelf ? planReloader(target, allowStale, log, selfDeps) : dedicatedTargetPlanReloader(target, log);
 }
 
 /**
@@ -38820,8 +38802,6 @@ export async function gardenCommand(rest: string[]): Promise<number> {
   return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
 }
 
-type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
-
 export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
   tickRead?: Pick<TickReadFacts, "closedPrs">): PrTerminalReconcileSummary {
   const lookup = tickRead?.closedPrs ? closedPrLookup(tickRead.closedPrs) : (url: string) => closedPrFromRef(github.prByRef(url));
@@ -39254,7 +39234,8 @@ export async function daemonCommand(
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
-  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs };
+  const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
+  const gardenContext: GardenBuildContext ={ config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
   const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
@@ -39278,11 +39259,12 @@ export async function daemonCommand(
   } else if (target.isSelf && !flagValue(rest, "--plan")) {
     // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
     // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
-    const synced = syncPlanOrRefuse(target.planPath, {
+    const synced = await syncPlanOrRefuseAsync(target.planPath, {
       allowStale,
       log,
       say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
       quarantine: reportPlanQuarantine,
+      planSnapshot: planReaders.boot,
     });
     if ("error" in synced) return 1;
     plan = synced.plan;
@@ -39320,14 +39302,9 @@ export async function daemonCommand(
   // gateway still refetches every poll — warming changes a fetch's SHAPE, never whether one
   // happens (`buildInboxDraftHook`'s doc makes the identical argument, with measurements).
   const laneGithubFor = memoiseGatewayByRepo((o, r) => (deps.githubFactory ? deps.githubFactory(o, r) : gatewayFor(o, r)));
-  // W1-T2513 — ONE COALESCER FOR THIS WHOLE DAEMON PROCESS (never per tick, never per lane),
-  // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
-  // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
-  // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  // W1-T9647: every plan this daemon holds — boot, active, the tick read's and each lane's sync — is one copy on the
-  // `daemon.memory` row; a reload sharing task objects with the plan before it is counted once.
+  // W1-T9647/W1-T9763: the plans held are counted on `daemon.memory`; one revision is one instance there.
   const daemonPlanCopies = createPlanCopyBook({ refs: () => [plan, activePlanRef.current, tickReadGeneration?.facts.plan] });
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(quarantiningPlanSyncAsync(reportPlanQuarantine), daemonPlanCopies.observe));
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, observedPlanSync(planReaders.sync, daemonPlanCopies.observe));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
@@ -39883,13 +39860,13 @@ export async function daemonCommand(
     mint: deps.gitCredentialMint,
   });
   const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
-  let inlineProducer: ReturnType<typeof createTickReadProducer> | undefined;
+  let inlineProducer: ReturnType<typeof tickReadProducer> | undefined;
   const readPlane = deps.githubFactory ? undefined : startReadPlane({
     // W1-T9722: the worker starts from the narrow tick-read entry (a current bundle when one is vouched for).
     workerUrl: tickReadWorkerUrl(), workerInput: readOptions, log, spawn: () => startTickReadWorker(readOptions),
-    inline: (input: Parameters<ReturnType<typeof createTickReadProducer>>[0]) =>
-      (inlineProducer ??= createTickReadProducer(readOptions, { log }))(input),
+    inline: (input: TickReadRequest) => (inlineProducer ??= planReaders.inlineTickRead(readOptions, { log }))(input),
   });
+  const readTick = readPlane && planReaders.tickRead(readPlane.read);
   const loopTelemetry = startReadPlaneTelemetry();
   // The daemon's rolling rss+swap samples, kept across rotations and restarts for the memory budget's daemon split.
   const daemonFootprint = createDaemonFootprint(daemonFootprintPath(join(config.root, "state")));
@@ -39928,8 +39905,8 @@ export async function daemonCommand(
       plan,
       {
         refreshMerged,
-        refreshMergedAsync: readPlane ? buildDaemonReadRefresher({
-          read: readPlane.read, plan: () => activePlanRef.current, previous: () => lastProj,
+        refreshMergedAsync: readTick ? buildDaemonReadRefresher({
+          read: readTick, plan: () => activePlanRef.current, previous: () => lastProj,
           invalidate: () => { tickReadGeneration = undefined; },
           publish: (snapshot) => {
             tickReadGeneration = snapshot;
@@ -40065,7 +40042,11 @@ export async function daemonCommand(
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
         // W1-T1062: `owner: target.owner` must reach `runTask`, else a FOREIGN `--repo owner/name` run
         // falls back to this checkout's owner and opens its PR there (test/owner-dispatch-threading).
-        ...(childMode ? { adoptRunChildren: () => adoptedChildren } : {}),
+        // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
+        ...(childMode ? {
+          adoptRunChildren: () => adoptedChildren,
+          refillRunsAsChild: () => runChildModeIsOn(childPolicy, childModeTracker.evidence).on && !flagValue(rest, "--plan"),
+        } : {}),
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
           // W1-T9087: each dispatch asks the mode; under `auto` that is the evidence's current answer, ledgered when it changes.
@@ -40097,9 +40078,7 @@ export async function daemonCommand(
             // synchronous full-repo walk before its first yield, serialising lane starts (78 s apart).
             // See `laneGithubFor` for why it memoises per owner/repo rather than per drain target.
             githubFor: laneGithubFor,
-            // W1-T2513: the coalescer built above — every lane of a tick shares ONE origin
-            // fetch + ONE plan parse instead of paying for it per lane. Inert when
-            // `skipGitSync` is set (an explicit `--plan` never syncs at all, coalesced or not).
+            // W1-T2513/W1-T9763: the coalescer above, over the daemon's plan store; inert under `skipGitSync`.
             planSnapshot: tapPlanSnapshot(admittedPlan, planSyncCoalescer.sync),
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
@@ -40221,7 +40200,8 @@ export async function daemonCommand(
         // `!target.isSelf && !--plan`) exactly, so the reload source can never diverge from the
         // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
         // callsite stays a single reachable line regardless of which arm a given caller exercises.
-        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log),
+        reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log,
+          { load: planReaders.reload }),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".
@@ -40394,7 +40374,7 @@ export async function daemonCommand(
           ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
             config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
-          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
+          servedTickRead(onePassPerGeneration(() => tickReadGeneration, readTick,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
             () => tickReadGeneration),
           target.isSelf ? { root: repoRoot, inboxRoot: config.root, feedbackLand: {} } : undefined,

@@ -14,12 +14,15 @@
  * The worker's first row, `read_plane.worker_started`, says which it ran and what its isolate holds.
  */
 import { relative } from "node:path";
+import { boundChildByLoopTime } from "./loop-bounded-child.js";
+import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fileURLToPath } from "node:url";
 import { SHARE_ENV, Worker, workerData as threadData, type WorkerOptions } from "node:worker_threads";
-import { READ_PLANE_KIND } from "./read-plane.js";
+import { READ_PLANE_KIND, freezeReadGeneration, revisionedProducer, type RevisionedRequest } from "./read-plane.js";
 import { readPlaneWorkerInput, readPlaneWorkerLog, runReadPlaneWorker } from "./read-plane.worker.js";
 import { runsBundled, startWorker } from "./child-entry-argv.js";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync } from "./github-transport.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -37,7 +40,7 @@ import { appendLedger } from "./ledger.js";
 import { systemClock } from "./clock.js";
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
-import { loadPlan, DEFAULT_RISK, type MergedResolver, type Plan, type Task } from "./plan.js";
+import { loadPlan, DEFAULT_RISK, PlanBlobCache, mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { DEFAULT_SWEEP_POLICY, RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, type BaseChangedFiles } from "./sweep.js";
@@ -3090,8 +3093,199 @@ export function tickReadWorkerStartFacts(data: unknown = threadData): Record<str
   };
 }
 
+/**
+ * A `git fetch`/`git show` step failed. Distinct from a generic Error so callers can tell
+ * "the plan sync itself is broken" apart from any other failure and react the fail-closed
+ * way (§ named ledger error, no spawn — W1-T60).
+ */
+export class GitFetchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GitFetchError";
+  }
+}
+
+export function originPlanBlobs(relPath: string, blob: string, shards: Array<{ relPath: string; text: string }>): Array<{ label: string; text: string }> {
+  return [
+    { label: `origin/main:${relPath}`, text: blob },
+    ...shards.map((s) => ({ label: `origin/main:${s.relPath}`, text: s.text })),
+  ];
+}
+
+/** BACKSTOP, per git call of the awaited plan sync (fetch, show, ls-tree, cat-file). MEASURED 2026-10-06: the
+ *  sync shard read held the daemon loop 3.4 s; a call still running at five minutes is hung, not slow. */
+export const PLAN_SYNC_GIT_TIMEOUT_MS = 300_000;
+
+/** An awaited plan-sync git call killed at its bound. Never read as "no shards": the sync refuses, naming it. */
+export class PlanSyncGitTimeoutError extends RmdError {
+  constructor(args: readonly string[], timeoutMs: number) {
+    super("git", GENERIC_EXIT_CODE, `git ${args[0]} timed out after ${timeoutMs}ms and was killed`, { verb: args[0], timeoutMs });
+    this.name = "PlanSyncGitTimeoutError";
+  }
+}
+
+/** {@link GitRunner}, awaited. */
+export type GitRunnerAsync = (args: string[], stdin?: string) => Promise<string>;
+
+/** The real {@link GitRunnerAsync}: `git -C <repoDir>` off the loop, `stdin` piped, SIGTERM then SIGKILL past its
+ *  bound, which rejects with {@link PlanSyncGitTimeoutError}; any other failure rejects with git's own error. */
+export function planSyncGitRunnerAsync(
+  repoDir: string,
+  opts: { timeoutMs?: number; graceMs?: number; gitBin?: string; maxBuffer?: number } = {},
+): GitRunnerAsync {
+  const timeoutMs = opts.timeoutMs ?? PLAN_SYNC_GIT_TIMEOUT_MS;
+  return (args, stdin) =>
+    new Promise((resolve, reject) => {
+      const child = execFile(opts.gitBin ?? "git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: opts.maxBuffer ?? 1 << 26 }, (err, stdout) => {
+        bound.cancel();
+        if (bound.timedOut) return reject(new PlanSyncGitTimeoutError(args, timeoutMs));
+        return err ? reject(err) : resolve(stdout);
+      });
+      // EPIPE when git exits before reading its stdin: the exit itself reports that failure above.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(stdin ?? "");
+      const bound = boundChildByLoopTime(child, timeoutMs, { escalateAfterMs: opts.graceMs ?? GIT_FETCH_KILL_GRACE_MS });
+    });
+}
+
+/** W1-T9763: `key` is `<tasks.yaml blob>:<tasks.d tree>`; `commit` is where a reader without it reads it again. */
+export interface PlanRevision {
+  key: string;
+  commit: string;
+  repoDir: string;
+  relPath: string;
+}
+
+export type RevisionLoad = { plan: Plan; quarantined: QuarantinedTask[] };
+
+/** One parsed {@link Plan} per {@link PlanRevision}; `adopt` reuses each unchanged blob's tasks. */
+export interface PlanRevisionStore {
+  get(key: string): RevisionLoad | undefined;
+  adopt(revision: PlanRevision, blobs: Array<{ label: string; text: string }>): RevisionLoad;
+  revisionOf(plan: Plan): PlanRevision | undefined;
+  counts(): { parsed: number; reused: number; held: number; retained: number };
+}
+
+/** A plan is frozen, so a reader that mutates it throws instead of changing every reader's plan, and held weakly, so
+ *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests. */
+export function createPlanRevisionStore(opts: { retainLatest?: boolean } = {}): PlanRevisionStore {
+  const blobCache = new PlanBlobCache();
+  const held = new Map<string, WeakRef<Plan>>();
+  const meta = new WeakMap<Plan, { revision: PlanRevision; quarantined: QuarantinedTask[] }>();
+  const released = new FinalizationRegistry<string>((key) => {
+    if (held.get(key)?.deref() === undefined) held.delete(key);
+  });
+  let latest: Plan | undefined;
+  let parsed = 0;
+  let reused = 0;
+  const lookup = (key: string): RevisionLoad | undefined => {
+    const plan = held.get(key)?.deref();
+    const known = plan && meta.get(plan);
+    return plan && known ? { plan, quarantined: known.quarantined } : undefined;
+  };
+  const hit = (key: string): RevisionLoad | undefined => {
+    const load = lookup(key);
+    if (load) reused++;
+    return load;
+  };
+  return {
+    get: hit,
+    adopt: (revision, blobs) => {
+      const already = hit(revision.key);
+      if (already) return already;
+      const read = mergePlanBlobsQuarantiningDuplicates(blobs, blobCache);
+      parsed++;
+      freezeReadGeneration(read.plan);
+      held.set(revision.key, new WeakRef(read.plan));
+      meta.set(read.plan, { revision, quarantined: read.quarantined });
+      released.register(read.plan, revision.key);
+      if (opts.retainLatest) latest = read.plan;
+      return { plan: read.plan, quarantined: read.quarantined };
+    },
+    revisionOf: (plan) => meta.get(plan)?.revision,
+    counts: () => ({ parsed, reused, held: held.size, retained: latest ? 1 : 0 }),
+  };
+}
+
+export async function planBlobsAtRevision(revision: PlanRevision, runGit: GitRunnerAsync): Promise<Array<{ label: string; text: string }>> {
+  let blob: string;
+  try {
+    blob = await runGit(["show", `${revision.commit}:${revision.relPath}`]);
+  } catch (err) {
+    throw new GitFetchError(`git show ${revision.commit}:${revision.relPath} failed in ${revision.repoDir}: ${String(err)}`);
+  }
+  const shards = await readOriginShardsAtRefAsync(revision.repoDir, dirname(revision.relPath), runGit, revision.commit);
+  return originPlanBlobs(revision.relPath, blob, shards);
+}
+
+export async function planAtRevisionAsync(store: PlanRevisionStore, revision: PlanRevision,
+  runGit: GitRunnerAsync = planSyncGitRunnerAsync(revision.repoDir)): Promise<RevisionLoad> {
+  return store.get(revision.key) ?? store.adopt(revision, await planBlobsAtRevision(revision, runGit));
+}
+
+export function shardListingArgs(ref: string, shardRelDir: string): string[] {
+  return ["ls-tree", "--name-only", ref, `${shardRelDir}/`];
+}
+
+export function shardPathsFromListing(listing: string): string[] {
+  return listing
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && (line.endsWith(".yaml") || line.endsWith(".yml")));
+}
+
+export function shardReadFailure(ref: string, shardRelDir: string, repoDir: string, err: unknown): GitFetchError {
+  return new GitFetchError(`git cat-file --batch over ${ref}:${shardRelDir}/ failed in ${repoDir}: ${String(err)}`);
+}
+
+/**
+ * {@link readOriginShardsAtRef} through an awaited runner: the same listing, the same one `cat-file --batch` and
+ * framing (`readBlobsAtRef` parses the bytes the awaited call returned). ONE DIFFERENCE, on purpose: a listing
+ * killed at its bound throws {@link GitFetchError} naming it, where the sync read's catch would call it no shards
+ * and silently drop every shard task from the dispatched plan.
+ */
+export async function readOriginShardsAtRefAsync(
+  repoDir: string,
+  planRelDir: string,
+  runGit: GitRunnerAsync = planSyncGitRunnerAsync(repoDir),
+  ref = "origin/main",
+): Promise<Array<{ relPath: string; text: string }>> {
+  const shardRelDir = join(planRelDir, "tasks.d");
+  let shardListing: string;
+  try {
+    shardListing = await runGit(shardListingArgs(ref, shardRelDir));
+  } catch (err) {
+    if (err instanceof PlanSyncGitTimeoutError) throw new GitFetchError(`git ls-tree ${ref}:${shardRelDir}/ failed in ${repoDir}: ${err.message}`);
+    // No tasks.d/ at the ref (or a ref-dir lookup miss) is the no-shards case, exactly as the sync read reads it.
+    shardListing = "";
+  }
+  const shardRelPaths = shardPathsFromListing(shardListing);
+  if (shardRelPaths.length === 0) return [];
+  let texts: string[];
+  try {
+    const request = shardRelPaths.map((p) => `${ref}:${p}`).join("\n") + "\n";
+    const raw = await runGit(["cat-file", "--batch"], request);
+    // readBlobsAtRef builds this same request; any drift hands it no bytes, and it fails loud naming the first path.
+    texts = readBlobsAtRef((_args, stdin) => (stdin === request ? raw : ""), ref, shardRelPaths);
+  } catch (err) {
+    throw shardReadFailure(ref, shardRelDir, repoDir, err);
+  }
+  return shardRelPaths.map((relPath, i) => ({ relPath, text: texts[i] }));
+}
+
+export type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
+export type TickReadInput = Parameters<ReturnType<typeof createTickReadProducer>>[0];
+export type TickReadRequest = TickReadInput | RevisionedRequest<TickReadInput, PlanRevision>;
+
+/** W1-T9763: a revision resolves through `plans`, this side's own store, and the facts carry no plan back. */
+export function tickReadProducer(options: TickReadOptions, io: Parameters<typeof createTickReadProducer>[1],
+  plans: PlanRevisionStore): (input: TickReadRequest) => Promise<TickReadFacts> {
+  return revisionedProducer(createTickReadProducer(options, io),
+    async (revision: PlanRevision) => (await planAtRevisionAsync(plans, revision)).plan);
+}
+
 const readWorkerOptions = readPlaneWorkerInput<TickReadOptions>();
 if (readWorkerOptions) {
-  runReadPlaneWorker(createTickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }));
+  runReadPlaneWorker(tickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }, createPlanRevisionStore({ retainLatest: true })));
   readPlaneWorkerLog("read_plane.worker_started", tickReadWorkerStartFacts());
 }
