@@ -1,0 +1,61 @@
+- id: W1-T10045
+  title: "A FIX WORKER THAT NEVER REACHED ITS PROVIDER IS NOT A COMMIT REFUSAL — every fix-lane COMMIT_MESSAGE refusal on 2026-10-17 (5 rounds: #12551 x3, #12575, #12570) was a cash round that ended in 0 ms with 'openweight provider requires RMD_OPENWEIGHT_API_KEY', no turns and an empty report, and the harness booked it as 'no anchored COMMIT_MESSAGE line in the report', hiding the provider error behind a contract failure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, how a fix round whose worker never ran is recorded; the commit path for a worker that left edits, the parser and the provider are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 5 (COMMIT_MESSAGE refusals on #12569, #12570, #12575), first of its two causes'
+  plan_refs: [W1-T10024, W1-T5999, W1-T8524, W1-T5325]
+  files:
+    - src/run-task.ts
+    - test/a-fix-worker-that-never-ran-is-not-a-commit-refusal.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-10-17, all 9 gz archives of the day plus the live file, deduped; newest row ~15:42Z):
+    - fix.commit_refused "no anchored COMMIT_MESSAGE line in the report" with implement.harness_commit_refused:
+      #12551 (W1-T9425) at 09:16, 09:27, 09:35Z; #12575 (W1-T9877) at 12:10:41Z; #12570 (W1-T9928) at 13:26:30Z.
+    - Each harness_commit_refused row has report_tail "". Each matching fix.done row has provider cash, verdict
+      openweight_error, stderr "openweight provider requires RMD_OPENWEIGHT_API_KEY in the daemon environment",
+      tokens 0, worker_duration_ms 0, num_turns 0; each worker.attempt row has success false. The two transcripts
+      (state/transcripts/W1-T9877/…fix-1-1792238370294.md, W1-T9928/…fix-1-1792242731527.md) are 300-byte headers.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/run-task.ts's fix rung exempts only `fixWorkerEndedBySignal` (W1-T5999) before the harness commit. A
+      provider error (src/lib/worker-provider.ts sets isError, subtype openweight_error, numTurns 0) falls through, and
+      `harnessCommitForShellLessWorker` refuses with `MISSING_COMMIT_MESSAGE_REASON`.
+    INFERRED: the refusal reason misnames a provider failure as a worker that broke the COMMIT_MESSAGE contract, so
+    the round's real cause never reaches the fix-refusal gardener or the person reading #12577.
+    WHY THIS IS NOT ANOTHER TASK: W1-T10024 (queued, P1) fixes the missing key itself and keeps "nothing else about the
+    refusal" unchanged; the next provider error would be misnamed the same way. W1-T5999 (merged) covers a signal-ended
+    worker only. W1-T8524 (queued) covers rounds that LEFT edits without a line. Swept origin/main plan/tasks.d and the
+    plan diffs of every open PR head for COMMIT_MESSAGE, commit_refused and openweight_error (2026-10-17 ~15:40Z).
+  design: |
+    1. In the fix rung, beside the W1-T5999 signal exemption: a worker result with isError, zero turns, no uncommitted
+       change in the worktree and no commit ahead of the round start is a worker that never ran. It logs fix.done with
+       `subtype: "worker_error"`, the worker's subtype and a bounded stderr excerpt, writes no fix.commit_refused and
+       no implement.harness_commit_refused, and stands down with a reason naming the provider error.
+    2. Whether such a round spends a strike follows the W1-T5999 precedent (it does not).
+    3. A provider error that DID leave edits still goes through the commit path unchanged.
+    4. TESTS in test/a-fix-worker-that-never-ran-is-not-a-commit-refusal.test.ts, `test(` titles verbatim as in the
+       proofs, modelled on test/a-signal-terminated-fix-worker-is-not-a-commit-refusal.test.ts.
+  acceptance:
+    - claim: "a fix worker that never reached its provider is recorded as a worker error, not a commit refusal"
+      proof: 'grep: test("W1-T10045: a fix worker that never reached its provider is not a commit refusal" in test/a-fix-worker-that-never-ran-is-not-a-commit-refusal.test.ts'
+    - claim: "a provider-error round that left edits still reaches the commit path"
+      proof: 'grep: test("W1-T10045: a provider-error round that left edits still reaches the commit path" in test/a-fix-worker-that-never-ran-is-not-a-commit-refusal.test.ts'
+    - claim: "the outcome is named on the fix.done row"
+      proof: 'grep: worker_error in src/run-task.ts'
+  falsifier: |
+    Drive the fix rung with a spawn returning isError, subtype openweight_error, numTurns 0, empty text and the
+    observed stderr, over a clean worktree. At origin/main the ledger gets fix.commit_refused "no anchored
+    COMMIT_MESSAGE line in the report", so the first test fails. Exempting every isError round fails the second.
+    Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: a worker-error round spends no strike (W1-T5999 precedent). EFFECT, measured after
+    merge from the core ledger: fix.commit_refused rows whose fix.done has num_turns 0 and an openweight or provider
+    error verdict. Healthy shape: none.
