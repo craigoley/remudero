@@ -1,0 +1,78 @@
+- id: W1-T10047
+  title: "A PLAN-SCOPED REPAIR ROUND KEEPS ITS EDITS WHEN ITS COMMIT LINE IS UNUSABLE, AND SAYS WHAT THE LINE WAS — #12569's plan rounds at 11:59:51Z and 12:18:28Z ran (5 turns each), saved plan edits, and were refused 'the plan round needs a valid COMMIT_MESSAGE' with no record of what the worker wrote; the plan-gate prompt asks for 'COMMIT_MESSAGE: type(plan): subject.', a placeholder that itself fails commitlint"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, the plan-scoped repair round's commit subject; its scope fence, preflight and push are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 5 (COMMIT_MESSAGE refusals on #12569, #12570, #12575), second of its two causes'
+  plan_refs: [W1-T5325, W1-T5565, W1-T8524, W1-T9289, W1-T10027, W1-T5999]
+  files:
+    - src/run-task.ts
+    - src/lib/prompt-render.ts
+    - test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts
+    - test/a-plan-round-commits-its-edits-under-a-derived-subject.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-10-17, all gz archives of the day plus the live file):
+    - #12569 (ci-learning-landing): fix.commit_refused mode plan-gate and sweep.plan_round.refused "the plan round
+      needs a valid COMMIT_MESSAGE" at 11:59:51Z and 12:18:28Z; the round at 11:19:20Z was refused "2 criterion/criteria
+      have no proof"; then disposed blocked-ambiguous.
+    - Both refused rounds' workers ran: cash, success true, 5 turns, 12,238/215 and 12,444/562 input/output tokens.
+    - No transcript exists for them (no transcripts/PR-12569); sweep.plan_round.worker carries cost, turns and subtype
+      only. What the worker wrote cannot be recovered.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/run-task.ts `runPlanScopedFixRound` reaches `refuse("the plan round needs a valid COMMIT_MESSAGE")` only
+      when the worker changed files, for both a missing line and one `checkCommitMessage` rejects. It has no derived
+      subject, unlike the fix lane's `derivedFixCommit` (W1-T5325/W1-T5565), and no report tail, unlike
+      `REFUSED_REPORT_TAIL_CHARS`.
+    - src/lib/prompt-render.ts `renderFixPrompt`, plan-gate branch: "Return COMMIT_MESSAGE: type(plan): subject." It
+      does not say "on its own line", lower case or 100 characters, and does not use
+      `commitMessageContractLines()` (src/lib/compaction.ts). `checkCommitMessage("type(plan): subject")` fails
+      type-enum, so a worker that copies the placeholder is refused.
+    - src/lib/worker.ts `anchoredCommitMessage` matches only `^[ \t]*COMMIT_MESSAGE:`; markdown-wrapped forms return
+      undefined. No row shows such a form occurred.
+    INFERRED: the plan lane throws away a worker's saved edits for a subject line the harness could supply, and the
+    contract it states is one its own linter refuses.
+    WHY THIS IS NOT ANOTHER TASK: W1-T8524 (queued) is the fix lane's rounds that left edits; it does not touch
+    runPlanScopedFixRound. W1-T5325/W1-T5565 (merged) are the fix lane's derived subject. W1-T9289 (queued) also edits
+    runPlanScopedFixRound (a conflict round), so expect a merge, not overlap. W1-T10027 only cites these refusals.
+    Swept origin/main plan/tasks.d and the plan diffs of every open PR head for COMMIT_MESSAGE, plan_round.refused and
+    commit_refused (2026-10-17 ~15:40Z).
+  design: |
+    1. When the plan round's worker line is missing or fails `checkCommitMessage`, the harness commits the saved edits
+       under a derived subject (`chore(plan): repair <first failing check> on #<n>`, built like `derivedFixCommit`)
+       instead of refusing. Preflight on the new commit still gates the push.
+    2. The round's row records `subject_source` (worker-authored or harness-derived) and `commit_message_form`
+       (absent, unanchored, over-length, or invalid:<rule ids>) with a report tail bounded by
+       `REFUSED_REPORT_TAIL_CHARS`, so the next occurrence is diagnosable.
+    3. The plan-gate prompt line becomes an anchored example that passes commitlint, built from
+       `commitMessageContractLines()`: "COMMIT_MESSAGE: chore(plan): <lower-case subject>", on its own line, at most 100
+       characters, no markdown.
+    4. The existing "missing" case in test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts, which pins the
+       refusal, is updated to the derived commit.
+    5. TESTS in test/a-plan-round-commits-its-edits-under-a-derived-subject.test.ts, `test(` titles verbatim as in
+       the proofs, using that file's round fixture.
+  acceptance:
+    - claim: "a plan round with an invalid or missing commit line commits its edits under a derived subject"
+      proof: 'grep: test("W1-T10047: a plan round with an unusable commit line commits under a derived subject" in test/a-plan-round-commits-its-edits-under-a-derived-subject.test.ts'
+    - claim: "the round records the form of the unusable line"
+      proof: 'grep: test("W1-T10047: a plan round records the form of an unusable commit line" in test/a-plan-round-commits-its-edits-under-a-derived-subject.test.ts'
+    - claim: "the form is a named row field"
+      proof: 'grep: commit_message_form in src/run-task.ts'
+    - claim: "the plan-gate prompt asks for a line commitlint accepts"
+      proof: 'grep: COMMIT_MESSAGE: chore(plan) in src/lib/prompt-render.ts'
+  falsifier: |
+    With the round fixture and report "COMMIT_MESSAGE: type(plan): supply rationale", and separately "no commit
+    subject": at origin/main both refuse "the plan round needs a valid COMMIT_MESSAGE" and push nothing, so the first
+    test fails; after the fix both commit and push with subject_source harness-derived and commit_message_form
+    invalid:type-enum and absent. Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: a plan-only PR may carry a harness-derived `chore(plan): …` subject (the fix lane
+    already may, W1-T5325). EFFECT, measured after merge from the core ledger: sweep.plan_round.refused "needs a valid
+    COMMIT_MESSAGE". Healthy shape: none; such rounds show subject_source harness-derived.

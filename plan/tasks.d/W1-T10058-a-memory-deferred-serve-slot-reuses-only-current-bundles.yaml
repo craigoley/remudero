@@ -1,0 +1,84 @@
+- id: W1-T10058
+  title: "A MEMORY-DEFERRED SERVE SLOT REUSES ONLY CURRENT BUNDLES — every retry recompiles the same standby before the swap guard refuses its fork, while the existing --check validates child entries but not worker bundles"
+  repo: remudero
+  depends_on: [W1-T9421]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # One concern: positively qualified reuse before the existing build; no admission or lifecycle change.
+  band_meaning: blast-radius
+  origin: '2026-10-17 operator-approved Azure memory-pressure and console follow-ups; native reservation refs/rmd-id/W1-T10058 on codex/serve-prepare-reuse-filing-20261017.'
+  plan_refs: [W1-T9421, W1-T8777, W1-T8873, W1-T9570]
+  files:
+    - src/lib/serve-slots.ts
+    - test/a-serve-slot-builds-its-worker-bundles.test.ts
+    - test/a-memory-deferred-serve-slot-reuses-only-current-bundles.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED in the complete retained serve ledger at 2026-10-17T17:42Z: four preparations
+    of standby 9525087920dd5105bb97ca4b1ddfb94543256b9d rebuild child entries in 3106,
+    3332, 3381 and 3571 ms, each followed by swap_in refusal before_shed, active preserved.
+    A separate passive sample saw an approximately 609-MiB transient esbuild child in the
+    serve cgroup. This supports avoidable preparation work, not a claim that it explains
+    all retained serve RSS, causes the HTTP timeouts, or proves a leak or memory recovery.
+    Source createSlotPreparer calls buildSlotChildEntries unconditionally after dependency
+    preparation. The supervisor prepares before judging handoff memory admission.
+
+    CONTROL on exact main 9525087 with the real build script and esbuild in a tiny private
+    fixture: all three child entries and five workers first validate current. Corrupting
+    one worker makes workerBundle reject it, but --check still exits zero: that CLI checks
+    child entries only. Do not use --check alone as a reuse certificate. Receipt:
+    serve-prepare-observation.BtGAwX/receipt.json in console-next-2026-10-11.vddqtI.
+
+    SUBJECT control at main 9525087 and all eight captured-open current remote heads:
+    seven matching plan shards per head, no changed subject shards or implementation
+    overlap. W1-T9421 requires building and truthful fallback, not repeated-input reuse;
+    W1-T8873 and W1-T9570 own shedding and settlement, not this compilation decision.
+    The negative does not cover unpublished other-owner work; refresh before building.
+  design: |
+    Only a complete current child AND worker build may be reused.
+    1. Before an existing slot's expensive build, positively qualify its artifacts through
+       the maintained build module's source/recipe/dependency and payload-integrity
+       validators. Validate every declared child and every declared worker. Reuse the
+       existing sourceHash, childEntryIsCurrent and workerBundle semantics; never trust a
+       SHA, manifest existence, an empty inventory, a partial check or --check alone.
+    2. Run source and payload hashing in a bounded child through the existing asynchronous
+       RunCommand. Never import or hash the large tree on serve's main event loop. An
+       unavailable/unsupported check, unreadable/malformed manifest, changed input,
+       missing/corrupt child or missing/corrupt worker is not current: run the existing
+       build. An absent build script or failed build retains its existing absent/failed
+       outcome and tsx fallback. No success-shaped catch may certify reuse.
+    3. Preserve the built/absent/failed outcome contract. An additive reused flag may
+       distinguish verified reuse from a fresh build in serve.slot_child_entries and
+       the existing cold-start result. Record bounded elapsed work honestly. Verify
+       standby retry and cold consumers; do not cache only by process or source SHA.
+    4. Real tiny default-path controls must validate all required artifacts, observe the
+       skipped second build, and prove missing/corrupt workers force rebuilding even
+       while child entries are still valid. Cover source/lock changes, malformed or
+       incomplete manifests, unavailable validation, failed checks and build failures.
+       Keep existing real child/error/exit/signal/fallback assertions and caller controls.
+    No admission, shedding, spacing, memory limit, reserve, lifecycle or service changes.
+    No provider, budget, permission, authentication, claim, guard or deployment changes.
+    Use strict TDD and source-only removal/restoration, exact committed-tree author,
+    source-instrumented same-SHA diff coverage, caller/census sweeps, stored acceptance,
+    governed review and full current-head CI. Measure the avoided build locally first;
+    production memory/latency benefit requires separate adoption and live measurement.
+  acceptance:
+    - claim: "repeating a fully qualified slot preparation avoids a second bundle build and reports reuse"
+      proof: 'unit test: W1-T10058: repeated preparation reuses a complete current build'
+    - claim: "every child and worker payload is required, even when the child-only CLI reports current"
+      proof: 'unit test: W1-T10058: corrupt or missing workers cannot authorize reuse'
+    - claim: "changed source or dependency inputs and unqualified artifacts require rebuilding"
+      proof: 'unit test: W1-T10058: changed or unqualified inputs rebuild instead of claiming reuse'
+    - claim: "the real default child and existing absent or failed-build fallback remain truthful"
+      proof: 'unit test: W1-T10058: default validation stays off-loop and preserves failed build fallback'
+  falsifier: |
+    With the new real tiny-fixture controls intact, remove only reuse: the second-build
+    count assertion must fail. Restore reuse, then replace its whole-build qualification
+    with the old child-only --check: corrupting a worker must fail the no-reuse assertion.
+    Restore whole-build qualification and require all controls to pass with actual file
+    and case inventories. A timing-only assertion or injected successful check cannot
+    prove production reuse. Do not start a live model or recycle a service for the test.
