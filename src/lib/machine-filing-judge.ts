@@ -1,3 +1,4 @@
+import { stampVerificationAsk } from "./inbox-retirement.js";
 /**
  * lib/machine-filing-judge.ts — the LLM judge in the middle of machine-filed work (operator ruling
  * 2026-09-29, DECISIONS.md).
@@ -665,7 +666,7 @@ export function gardenFamilyRecord(stateDir: string, family: string): { alpha: n
 
 export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "ruled" }>): Proposal {
   const { task, ruling, record } = ruled;
-  return {
+  return stampVerificationAsk({
     id: `machine-judge:${task.id}`,
     summary:
       `${task.id} ${task.author_class === "machine" ? `was filed by the ${record.family} gardener` : "is your verify: human record"} and the risk judge escalated it, so it ` +
@@ -673,7 +674,7 @@ export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "r
       `Family record: ${record.merged} merged, ${record.declined} declined. Release it with ` +
       `\`rmd approve ${task.id}\`, or edit the record and the judge will rule again.`,
     evidenceAnchors: [],
-  };
+  }, task.id, "machine-filing-judge-v1");
 }
 
 /** A parked escalation the judge answered with a proceed this pass, held until landing decides whether it flipped. */

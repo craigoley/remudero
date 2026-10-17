@@ -160,7 +160,8 @@ test("W1-T1015: absent evidence counts the head as foreign", () => {
 });
 
 test("W1-T1015: inverting the attribution fails the foreign-push control", async () => {
-  const runTaskUrl = new URL("../src/run-task.ts", import.meta.url);
+  // W1-T9722: reviewOrphansFor moved with the tick-read producer, so the mutant is of that module.
+  const runTaskUrl = new URL("../src/lib/tick-read-worker.ts", import.meta.url);
   const src = readFileSync(runTaskUrl, "utf8");
   const target = "    if (sweepUpdatedHeads.has(sha)) { sweepSuperseded = true; continue; } // the sweep itself superseded this reviewed head\n";
   assert.equal(src.split(target).length - 1, 1, "the substitution target must be unique");
@@ -172,10 +173,10 @@ test("W1-T1015: inverting the attribution fails the foreign-push control", async
   const mutatedSha = createHash("sha256").update(mutatedSrc).digest("hex");
   assert.notEqual(mutatedSha, originalSha, "the mutation must change the source");
 
-  // `run-task.ts` sits at `src/`, so its relative imports (`./lib/*`, `./cli/*`, `../scripts/*`,
-  // dynamic `import()`) resolve against that origin directory through the shared helper.
-  const mutantPath = writeMutantModule("run-task.ts", mutatedSrc, /* originDir */ join(process.cwd(), "src"));
-  const mutant = (await import(mutantPath)) as typeof import("../src/run-task.js");
+  // `tick-read-worker.ts` sits at `src/lib/`, so its relative imports resolve against that origin directory
+  // through the shared helper.
+  const mutantPath = writeMutantModule("tick-read-worker.ts", mutatedSrc, /* originDir */ join(process.cwd(), "src", "lib"));
+  const mutant = (await import(mutantPath)) as typeof import("../src/lib/tick-read-worker.js");
   const ledger = [
     ledgerLine("review.posted", "W1-A", PRIOR_A),
     ledgerLine("sweep.update_branch.updated", "W1-A", PRIOR_A),

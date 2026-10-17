@@ -65,7 +65,7 @@ function store(t: TestCtx): { dir: string; db: ReadModelDb; clock: Clock; append
     dir: ledgerDir, db, clock, append,
     board: (intern = true) => createBoardProjection({
       db, ledgerPath: join(ledgerDir, "ledger.ndjson"), clock, readPlan: () => PLAN, github: GATEWAY, githubGeneration: () => "g1",
-      readCreditStore: () => ({}), readCreditOverrideFile: () => "", ...(intern ? {} : { internStrings: false }),
+      readCreditStore: () => ({}), readCreditOverrideFile: () => "", oracleSlices: 1, ...(intern ? {} : { internStrings: false }),
     }),
   };
 }

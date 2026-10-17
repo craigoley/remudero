@@ -1,3 +1,4 @@
+import type { inboxGardenerSource } from "./inbox-retirement.js";
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -117,6 +118,8 @@ export function persistedInboxPath(stateDir: string): string {
 
 /** What one slow-lane pass classified. `identity` names the content; a re-stamp of the same content keeps it. */
 export interface PersistedInboxContent extends ClassificationEvidence {
+  gardenerSource?: ReturnType<typeof inboxGardenerSource>;
+  gardenerDependencyEvidence?: Array<{ id: string; merged: boolean | null }>;
   /** One completed classification, shared by the census, every section and every cursor. */
   snapshotKey?: string;
   attentionCensus?: AttentionCensus;

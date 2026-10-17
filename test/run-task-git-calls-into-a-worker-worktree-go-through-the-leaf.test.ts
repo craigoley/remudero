@@ -32,6 +32,8 @@ import * as runTask from "./helpers/run-task-test.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 
 const SOURCE = fileURLToPath(new URL("../src/run-task.ts", import.meta.url));
+/** W1-T9722: the tick-read producer's declarations moved here; HARNESS_SITES still records their sites. */
+const MOVED_SOURCE = fileURLToPath(new URL("../src/lib/tick-read-worker.ts", import.meta.url));
 
 /** A raw git spawn, or a `-C` argv element, wherever it sits. */
 const RAW_GIT = /"-C",|\b(?:execFileSync|execFile|execFilePromise|spawnSync|spawn|exec|baseReproductionExecFile)\(\s*"git"/g;
@@ -154,7 +156,7 @@ function sitesByDeclaration(text: string): { raw: Map<string, number>; leaf: Set
 }
 
 describe("W1-T6121: every raw git site left in run-task.ts is a reasoned HARNESS site", () => {
-  const text = readFileSync(SOURCE, "utf8");
+  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}`;
   const { raw, leaf, declared } = sitesByDeclaration(text);
   const proofSites = sitesByDeclaration(readFileSync(fileURLToPath(new URL("../src/lib/check-proof.ts", import.meta.url)), "utf8"));
 

@@ -95,8 +95,8 @@ const RECORDS: readonly CallerRecord[] = [
   },
   {
     file: "src/lib/status.ts", helper: "buildCommitTrailerIndex", via: ["buildCommitTrailerIndex", "buildGitLogSupersessionSearch"],
-    callers: ["src/run-task.ts"],
-    tree: "CHECKOUT: the process cwd, run-task.ts's repoRoot or <root>/repos/<repo>; buildGitLogSupersessionSearch is unwired",
+    callers: ["src/lib/tick-read-worker.ts", "src/run-task.ts"],
+    tree: "CHECKOUT: the process cwd, run-task.ts's repoRoot or <root>/repos/<repo>, or the tick read's checkoutRoot (the daemon's checkout); buildGitLogSupersessionSearch is unwired",
     decision: "CHECKOUT",
   },
 ];

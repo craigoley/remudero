@@ -9,6 +9,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { createService } from "../src/lib/service.js";
 import { planSourceLoaded, type PlanSourceHolder } from "../src/lib/serve-plan-reload.js";
+import { proposalFromJudgedShard } from "../src/lib/verify-human-judge.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 
 // W1-T5639: a plan that LOADS is trusted exactly as before, whatever it holds. The qualified outcome
@@ -44,7 +45,7 @@ const HUMAN = `
       proof: "unit test: single suite"
 `;
 
-async function serveFixture(planYaml: string) {
+async function serveFixture(planYaml: string, released = false) {
   const root = mkdtempSync(join(tmpdir(), "rmd-plan-source-population-"));
   mkdirSync(join(root, "plan"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
@@ -53,10 +54,14 @@ async function serveFixture(planYaml: string) {
   writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({
     proposals: [
       { id: "verify-human:W1-T216", summary: "A security drill requires a human decision.", evidenceAnchors: [] },
-      { id: "verify-human:W1-T1041", summary: "Choose a CI harness", evidenceAnchors: [] },
+      released ? proposalFromJudgedShard({ id: "W1-T1041", title: "Choose a CI harness", rationale: "operator release",
+        acceptance: ["single suite"], ageDays: 1, depsAllMerged: true, citedInSrc: false },
+      { decision: "needs_operator", reason: "The operator owns this release" })
+        : { id: "verify-human:W1-T1041", summary: "Choose a CI harness", evidenceAnchors: [] },
     ],
   }));
-  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  writeFileSync(join(root, "state", "ledger.ndjson"), released
+    ? JSON.stringify({ step: "ratify.approved", task_id: "W1-T1041", released: "verify-human", run_id: "RELEASE-1041" }) + "\n" : "");
   const board: PlanSourceHolder = { plan: loadPlan(planPath), planSource: planSourceLoaded(undefined, "plan-files") };
   const deps: PanelGraphDeps = {
     root, inboxRoot: root, planPath, ledgerPath: join(root, "state", "ledger.ndjson"),
@@ -95,7 +100,7 @@ test("a valid empty plan reads as a loaded source with exact zero counts, not as
   }
 });
 
-test("a nonempty plan keeps its counts, its retirement history and a genuine human task", async () => {
+test("a nonempty loaded plan preserves its counts and unanswered asks after task retirement", async () => {
   const fx = await serveFixture(HUMAN);
   try {
     const view = await fx.get("/v1/plan/view");
@@ -105,11 +110,13 @@ test("a nonempty plan keeps its counts, its retirement history and a genuine hum
     const census = await fx.get("/v1/inbox/attention-census");
     assert.equal(census.status, 200);
     assert.equal(census.body.sources.plan, "observed");
-    assert.equal(census.body.counts.decision, 1, "the genuine human task is still an operator decision");
-    assert.equal(census.body.counts.history, 1, "the retired task stays in history");
-    const items = census.body.items as Array<{ proposalId: string; attention: string }>;
+    assert.equal(census.body.counts.decision, 2, "plan closure does not answer either human ask");
+    assert.equal(census.body.counts.history, 0, "task retirement alone cannot retire an untyped ask");
+    const items = census.body.items as Array<{ proposalId: string; attention: string; sourceFacts: Array<{ source: string; detail: string }> }>;
     assert.equal(items.find((i) => i.proposalId === "verify-human:W1-T216")?.attention, "decision");
-    assert.equal(items.find((i) => i.proposalId === "verify-human:W1-T1041")?.attention, "history");
+    const closed = items.find((i) => i.proposalId === "verify-human:W1-T1041");
+    assert.equal(closed?.attention, "decision");
+    assert.ok(closed?.sourceFacts.some((fact) => fact.source === "plan-lifecycle" && fact.detail.includes("retirement closed")));
   } finally {
     fx.close();
   }
@@ -125,7 +132,33 @@ test("a board that carries no outcome is served exactly as before, with no planS
     const census = await fx.get("/v1/inbox/attention-census");
     assert.equal(census.status, 200);
     assert.equal("planSource" in census.body, false);
+    assert.equal(census.body.counts.decision, 2);
+    assert.equal(census.body.counts.history, 0);
+    assert.deepEqual(census.body.items.map((item: { proposalId: string; attention: string }) => [item.proposalId, item.attention]).sort(), [
+      ["verify-human:W1-T1041", "decision"], ["verify-human:W1-T216", "decision"],
+    ]);
+  } finally {
+    fx.close();
+  }
+});
+
+test("a loaded plan retains receipt-backed ask history beside an unanswered human task", async () => {
+  const fx = await serveFixture(HUMAN, true);
+  try {
+    const view = await fx.get("/v1/plan/view");
+    assert.equal(view.status, 200);
+    assert.equal(view.body.progress.total, 2);
+    const census = await fx.get("/v1/inbox/attention-census");
+    assert.equal(census.status, 200);
+    assert.equal(census.body.sources.plan, "observed");
+    assert.equal(census.body.planSource.state, "loaded");
     assert.equal(census.body.counts.decision, 1);
+    assert.equal(census.body.counts.history, 1);
+    const items = census.body.items as Array<{ proposalId: string; attention: string; sourceFacts: Array<{ source: string; detail: string }> }>;
+    assert.equal(items.find((i) => i.proposalId === "verify-human:W1-T216")?.attention, "decision");
+    const released = items.find((i) => i.proposalId === "verify-human:W1-T1041");
+    assert.equal(released?.attention, "history");
+    assert.ok(released?.sourceFacts.some((fact) => fact.source === "ledger" && fact.detail.includes("RELEASE-1041")));
   } finally {
     fx.close();
   }
