@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { defaultGateContainment, findOnPath, preopenGateEnv, preopenGateSandboxArgv, type GateContainInput } from "../src/lib/preopen-gate.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { defaultGateContainment, findOnPath, preopenGateEnv, preopenGateSandboxArgv, type GateContainInput } from "#src/lib/preopen-gate.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const dirs: string[] = [];
 after(() => {
