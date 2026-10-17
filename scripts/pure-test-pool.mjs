@@ -397,10 +397,14 @@ export function judgeRun(files, { status, pool, root = ".", tallyText = "", mark
   const exitSite = (firstMissing && exitByFile.get(firstMissing)) || lastExit;
   const tests = Number.isFinite(summary?.tests) ? summary.tests : null;
   const failed = Number.isFinite(summary?.failed) ? summary.failed : null;
+  // A timed-out test is counted `cancelled`, not `fail`, and --test-force-exit then exits 0: CI
+  // 38972373415's pool read "# fail 0" over seven tests that never finished.
+  const cancelled = Number.isFinite(summary?.cancelled) ? summary.cancelled : 0;
   const problems = [];
   if (!summary) problems.push("no end-of-run test summary (the process ended before its tests did)");
   else {
     if (failed !== 0) problems.push(`# fail ${failed}`);
+    if (cancelled > 0) problems.push(`# cancelled ${cancelled}: a test that timed out or was cut short never finished`);
     if (files.length === 0 && tests === 0) problems.push("# tests 0: the run tested nothing");
     else if (tests === null || tests < files.length) problems.push(`# tests ${tests} is fewer than the ${files.length} file(s) given`);
   }

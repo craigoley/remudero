@@ -17,8 +17,8 @@
 // around by using the swc parser instead of dependency-cruiser's own tsc-based extractor). Rather
 // than loosen peer-dep enforcement repo-wide for one generator, this is a small self-contained
 // renderer over a deliberately small OpenAPI subset (object/string/number/integer/boolean/array
-// schemas, $ref, enum, `["T","null"]` nullables, `oneOf` unions, `{}` as `unknown`, typed
-// `additionalProperties` maps, http-bearer security schemes, per-path/per-method response types)
+// schemas, refs, enums, nullables, unions/intersections, unknown values, typed maps,
+// bearer security schemes and per-path/per-method response types)
 // -- the same "plain Node script" convention every other scripts/generate-*.mjs here uses.
 //
 // Usage:
@@ -62,6 +62,10 @@ function renderType(schema, indent, knownSchemaNames) {
   if (schema.$ref) return refSchemaName(schema.$ref, knownSchemaNames);
   if (Array.isArray(schema.oneOf)) {
     return schema.oneOf.map((member) => `(${renderType(member, indent, knownSchemaNames)})`).join(" | ");
+  }
+  if (Array.isArray(schema.allOf)) {
+    return schema.allOf.map((member) => `(${renderType(member, indent, knownSchemaNames)})`)
+      .join(" & ") || "unknown";
   }
   if (schema.type === undefined && schema.enum === undefined && schema.properties === undefined && schema.items === undefined) {
     return "unknown";

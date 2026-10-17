@@ -1,0 +1,19 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -157,0 +158,15 @@
++- id: clock-sweep-report-refusal-needs-per-pr-cause
++  subsystem: ci
++  lifecycle: active
++  files: [".github/workflows/**", "package.json"]
++  fact: >-
++    When the clock-sweep-report (merge the shards, classify, deliver) gate refuses a pull request,
++    read that pull request's failed job step and its repair diff before choosing a remedy. A refusal
++    that was later repaired does not establish a shared cause. Record the observed failing step and
++    the change that cleared it so the next worker acts on the actual failure.
++  evidence: >-
++    The ci-learning finding for PR #11896 records the gate going red and being repaired. The failing
++    step and the repair's causal link were NOT read from the CI log, so the trigger is not verified.
++  src: "ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver)"
++  cited: "2026-10-16"

@@ -36,6 +36,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RMD_TMP_PREFIX } from "../../src/lib/tmp.js";
+import { ownedFixtureDir, type FixtureScope } from "./owned-fixture-dir.js";
 
 /**
  * The fixture's OWN committer — never one borrowed from the host or CI runner. Exported so a
@@ -56,6 +57,8 @@ const GIT_ENV: NodeJS.ProcessEnv = {
 };
 
 export interface GitRepoOpts {
+  /** Reclaim this fresh fixture at test/suite completion; exit cleanup remains a backstop. */
+  scope?: FixtureScope;
   /** Create a `--bare` repository instead of a normal working tree. Default false. */
   bare?: boolean;
   /** Initial branch name. Default "main". */
@@ -120,7 +123,8 @@ function wrap(dir: string): GitRepo {
  */
 export function gitRepo(opts: GitRepoOpts = {}): GitRepo {
   const { bare = false, branch = "main", seedCommit = !bare, kind = "git-repo", cloneFrom } = opts;
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}-`));
+  const dir = opts.scope ? ownedFixtureDir(opts.scope, kind).dir :
+    mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}-`));
   if (cloneFrom !== undefined) {
     execFileSync("git", ["clone", "--quiet", cloneFrom, dir], { encoding: "utf8", env: GIT_ENV });
   } else {

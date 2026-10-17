@@ -1,0 +1,64 @@
+- id: W1-T9926
+  title: "A CODEQL SUMMARY IN GITHUB'S REAL WORDING READS UNKNOWN AND HOLDS THE PR FOREVER — classifyCodeScanningMergePolicy's below-threshold grammar accepts only a singular level (' * 2 warning'), the heading 'Non-security Alerts:' and no note paragraph, but GitHub writes ' * 2 warnings', ' * 31 notes', 'Other Alerts:' and an optional 'code changes were too large' line, so security-merge-policy stays red on findings the policy already permits"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, a security gate's PARSER. The policy is unchanged: high/critical still blocks, an unrecognised shape still reads unknown, and only GitHub's own wording of an already-permitted finding set is recognised
+  band_meaning: span
+  origin: "operator session 2026-10-16 PR-queue drain (agent PRQ, 19:21Z): #12411 and #12390 held by security-merge-policy with no lane able to clear it"
+  plan_refs: [W1-T9626, W1-T9633, W1-T9731]
+  files:
+    - src/lib/code-scanning-merge-policy.mjs
+    - test/a-codeql-summary-in-githubs-real-wording-is-recognised.test.ts
+  status: queued
+  priority: 1  # every PR whose CodeQL run reports two or more quality findings of one level is held until a human intervenes; two open PRs today
+  attempts: 0
+  rationale: |
+    READ 2026-10-16 19:21Z (one gated GraphQL read of every open PR's CodeQL check-run title and summary):
+    - #12411 (head 6f8523ba): CodeQL conclusion SUCCESS, title '3 new alerts', summary
+      '### New alerts in code changed by this pull request\n\n * 2 warnings\n * 1 note\n\nSee annotations below for
+      details.\n\n[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A12411+tool%3ACodeQL+is%3Aopen).'
+      It has no security alert, but security-merge-policy is FAILURE.
+    - #12390 (head c2979503): CodeQL SUCCESS, title '37 new alerts including 5 medium severity security vulnerabilities',
+      summary '### New alerts in code changed by this pull request\n\nSecurity Alerts:\n * 5 medium\n\nOther Alerts:\n
+      * 1 warning\n * 31 notes\n\n_Alerts not introduced by this pull request might have been detected because the code
+      changes were too large._\n\nSee annotations below for details.\n\n[View all branch alerts](...pr%3A12390...).'
+      The core ledger row automerge.arm_failed at 19:14:15Z reads error "security merge unknown:
+      security-analysis-failed-or-unrecognized".
+    - #12409 (head afdcdb8b): title '1 new alert', summary ' * 1 note' (singular). It parses as safe, and its
+      security-merge-policy is not red. So the gap is the wording, not the policy.
+    - WHY: src/lib/code-scanning-merge-policy.mjs (quality-only grammar added by #11976 on 10-15) matches rows with
+      `/ \* ([1-9][0-9]*) (error|warning|note)\n/`, the section heading `Non-security Alerts:`, and no paragraph between
+      the sections and 'See annotations below'. GitHub pluralises the level for counts above 1, heads the non-security
+      section 'Other Alerts:', and may add the italic 'code changes were too large' note. The existing test
+      'a trusted quality-only CodeQL note does not strand an otherwise safe PR' feeds ' * 2 warning', a string GitHub
+      never writes, so the suite stayed green over the gap.
+    - NOT COVERED ELSEWHERE: W1-T9626 carries security-merge-policy lessons to the build lane, W1-T9633 renames the arm
+      refusal, and W1-T9731 dispatches a fix for real merge-ref alerts. None changes the summary grammar. No open PR head
+      touches src/lib/code-scanning-merge-policy.mjs (all 18 open heads diffed at 19:24Z).
+  design: |
+    Parser only, in src/lib/code-scanning-merge-policy.mjs. No new bound, no LLM.
+    1. A level row accepts the singular or plural word: `error(s)`, `warning(s)`, `note(s)`, and `low` / `medium` under
+       Security Alerts. A count of 1 with a plural word, or above 1 with a singular word, stays accepted (GitHub's
+       grammar is not a security signal). The row-sum-equals-title-total and no-duplicate-level checks still apply.
+    2. The non-security section heading is 'Other Alerts:' or 'Non-security Alerts:'.
+    3. One optional italic paragraph is allowed between the sections and 'See annotations below for details.' It must
+       match GitHub's exact sentence: '_Alerts not introduced by this pull request might have been detected because the
+       code changes were too large._'. Any other paragraph stays unknown.
+    4. UNCHANGED: any high or critical row blocks, wherever it appears; the PR-bound '[View all branch alerts]' link
+       must still equal this PR's; the title total must still equal the row sum; a check from another app, head or
+       generation, or one still pending or neutral, stays unknown.
+    The new test file uses the three summaries above verbatim, as fixtures.
+  acceptance:
+    - claim: "GitHub's plural quality-only summary (' * 2 warnings\\n * 1 note', #12411) classifies safe"
+      proof: 'grep: test("W1-T9926: a plural quality-only CodeQL summary is below the security threshold" in test/a-codeql-summary-in-githubs-real-wording-is-recognised.test.ts'
+    - claim: "an 'Other Alerts:' summary with medium security rows and the 'too large' note (#12390) classifies safe, and the same layout with a high row blocks"
+      proof: 'grep: test("W1-T9926: an Other Alerts summary with the too-large note is read, and a high row in it still blocks" in test/a-codeql-summary-in-githubs-real-wording-is-recognised.test.ts'
+    - claim: "a plural row whose sum misses the title total, a foreign PR link, or any other extra paragraph stays unknown"
+      proof: 'grep: test("W1-T9926: a real-wording summary with a wrong total, a foreign link or an unknown paragraph stays unknown" in test/a-codeql-summary-in-githubs-real-wording-is-recognised.test.ts'
+  falsifier: |
+    At origin/main, classifyCodeScanningMergePolicy returns {state:'unknown', reason:'security-analysis-failed-or-unrecognized'}
+    for the #12411 and #12390 summaries quoted above, so the new file's first two tests fail.

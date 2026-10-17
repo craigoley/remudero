@@ -4818,6 +4818,8 @@ export interface components {
       reason: string;
       decision?: "needs_operator" | "automate" | "backlog";
       at?: string | null;
+      /** Exact advisory correction receipts supplied to this judgment; no execution authority. */
+      whyMeReceiptIds?: (string)[];
     };
     /** Read-only retirement outcome audit. Missing scope, continuity, controls or outcomes remains unmeasurable; no proposal is changed. */
     InboxDismissalAudit: {
@@ -4883,6 +4885,7 @@ export interface components {
     };
     /** Read-only core-daemon census. Snapshot counts may overcount actionability when a release source is missing; verifiedCounts are conservative lower bounds. No proposal is changed. */
     InboxAttentionCensusResult: {
+      whyMeFeedback?: InboxWhyMeFeedback;
       dismissalAudit?: InboxDismissalAudit;
       planSource?: PlanSource;
       scope: "core";
@@ -4999,7 +5002,100 @@ export interface components {
         path: string;
       })[];
     };
-    InstanceInboxReframeRequest: unknown;
+    InboxWhyMeCorrectionRequest: {
+      repository: string;
+      instance: string;
+      threadId: string;
+      proposalId: string;
+      snapshotKey: string;
+      intentId: string;
+      correction: "fleet_can_handle" | "still_need_me";
+      note?: string;
+      supersedes?: string;
+    };
+    InboxWhyMeCorrection: {
+      repository: string;
+      instance: string;
+      threadId: string;
+      proposalId: string;
+      snapshotKey: string;
+      intentId: string;
+      correction: "fleet_can_handle" | "still_need_me";
+      note: string;
+      supersedes?: string;
+      receiptId: string;
+      /** Service-verified actor; never a client-supplied identity. */
+      operator: string;
+      recordedAt: string;
+      original: {
+        whyMe: string;
+        sourceFacts: (InboxAttentionCensusFact)[];
+        judgment?: InboxAttentionJudgment;
+      };
+    };
+    /** Fleet observation of advisory feedback against its maintained assessment; never execution or release authority. */
+    InboxWhyMeOutcome: {
+      observedAt: string;
+      /** As-of time of the maintained assessment */
+      assessmentAt: string;
+      snapshotKey: string;
+      state: "held" | "awaiting_assessment" | "assessment_observed" | "item_absent" | "superseded" | "snapshot_changed";
+      authority: "unchanged";
+      classification?: string;
+      /** Receipt-joined means the existing judge received this advisory input; it does not claim a causal benefit. */
+      assessmentRelation: "receipt_joined" | "unjoined";
+      judgment?: InboxAttentionJudgment;
+    };
+    /** Separate maintained advisory receipt projection. Its identity/generatedAt qualify its own history; classificationSnapshotKey names the unchanged frozen census. It never changes census items, authority or page keys. Missing outcomes are pending; partial history is not verified absence. Public items are bounded to 16KiB; every original settled receipt remains durable. */
+    InboxWhyMeFeedback: {
+      contract: "inbox-why-me-v1";
+      identity: string;
+      generatedAt: string;
+      scope: {
+        repository: string;
+        instance: string;
+      };
+      classificationSnapshotKey: string;
+      state: "observed" | "partial" | "unavailable";
+      reason?: string;
+      total: number;
+      truncated: boolean;
+      items: ((InboxWhyMeCorrection) & ({
+        mismatch: boolean;
+        active: boolean;
+        /** Latest non-superseded correction for this operator/ask; historical snapshot context remains explicit. */
+        latest: boolean;
+        /** Current non-judge source facts still match the original ask. */
+        sameAskFacts: boolean;
+        currentSnapshot: boolean;
+        outcome?: InboxWhyMeOutcome;
+      }))[];
+    };
+    InboxWhyMeCorrectionResult: {
+      repository: string;
+      instance: string;
+      ok: true;
+      delivery: "delivered";
+      authority: "feedback_only";
+      audit: "receipt_recorded";
+      correction: InboxWhyMeCorrection;
+      replayed?: boolean;
+      receipt: {
+        intentId: string;
+        key: string;
+        status: "settled";
+        action: "why-me-correction";
+        threadId: string;
+      };
+    };
+    InstanceInboxReframeRequest: (InboxReframeRequest) & ({
+      repository: string;
+      instance: string;
+      /** Must identify the same proposal as proposalId. */
+      threadId: string;
+      intentId: string;
+      snapshotKey: string;
+    });
     InstanceInboxReframeResult: {
       repository: string;
       instance: string;
@@ -7017,7 +7113,10 @@ export interface paths {
   "/v1/i/{instance}/inbox": {
     get: {
       responses: {
-          "200": unknown;
+          "200": (InboxResult) & ({
+            repository: string;
+            instance: string;
+          });
           "503": undefined;
         };
     };
@@ -7025,7 +7124,11 @@ export interface paths {
   "/v1/i/{instance}/inbox/attention-census": {
     get: {
       responses: {
-          "200": unknown;
+          "200": (InboxAttentionCensusResult) & ({
+            repository: string;
+            instance: string;
+            contract: "read-write" | "read-only";
+          });
           "503": undefined;
         };
     };
@@ -7034,6 +7137,18 @@ export interface paths {
     get: {
       responses: {
           "200": InstanceInboxProposal;
+          "404": undefined;
+          "409": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/why-me-correction": {
+    post: {
+      responses: {
+          "200": InboxWhyMeCorrectionResult;
+          "400": undefined;
+          "403": undefined;
           "404": undefined;
           "409": undefined;
           "503": undefined;
