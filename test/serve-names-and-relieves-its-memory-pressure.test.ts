@@ -105,7 +105,7 @@ function servedFixture(serveMemory: ServeDeps["serveMemory"]): { deps: ServeDeps
         const pending = pendingSample;
         pendingSample = undefined;
         if (step === SERVE_MEMORY_STEP) pending?.resolve();
-        else pending?.reject(new Error(String(extra.reason)));
+        else pending?.reject(new Error(String(extra?.reason ?? "memory sample failed")));
       }
     },
     serveMemory,
