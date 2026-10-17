@@ -12,7 +12,7 @@ function publication(repo: string, scope = "head") {
 }
 function mac(fx: Fixture, apply = true, extra: Record<string, string> = {}) {
   return spawnSync("bash", [MAC, apply ? "--apply" : "--dry-run"], { encoding: "utf8", env: {
-    ...process.env, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`,
+    ...process.env, HOME: fx.home, TMPDIR: fx.scratch, PATH: `${join(fx.root, "bin")}:${process.env.PATH}`,
     REMUDERO_JANITOR_ACCOUNT_HOME: fx.home, REMUDERO_JANITOR_SCAN_ROOTS: fx.scratch,
     REMUDERO_JANITOR_LOG: join(fx.root, "mac.log"), REMUDERO_JANITOR_LOCK_DIR: join(fx.root, "mac.lock"),
     ...extra,
@@ -122,6 +122,10 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
     const operator = join(fx.home, "Remudero/remudero");
     git(fx.root, "clone", join(fx.root, "origin.git"), operator);
     const roots = [join(fx.home, "Remudero"), join(fx.home, "Remudero/remudero/.session-scratch"), join(fx.home, "rmd-work")];
+    // The Mac-only allowlist must not silently become Linux deletion scope.
+    // Linux still exercises every Git/activity guard inside its real rmd-work root.
+    if (process.platform === "darwin") roots.push(join(fx.home, "Developer/remudero-operator-worktrees"));
+    const guardedRoot = roots.at(-1)!;
     const removed: string[] = [];
     for (const [i, root] of roots.entries()) {
       mkdirSync(root, { recursive: true });
@@ -135,18 +139,18 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
       mkdirSync(join(wt, "node_modules")); writeFileSync(join(wt, "node_modules/data"), "cache");
       age(wt, 7); removed.push(wt);
     }
-    const privateWt = join(roots[2], "unpushed");
+    const privateWt = join(guardedRoot, "unpushed");
     git(main, "worktree", "add", "-b", "private", privateWt, "main");
     git(privateWt, "commit", "--allow-empty", "-m", "unpublished"); age(privateWt, 7);
-    const dirty = join(roots[0], "dirty");
+    const dirty = join(guardedRoot, "dirty");
     git(main, "worktree", "add", "-b", "dirty", dirty, "main");
     writeFileSync(join(dirty, "work.txt"), "keep me"); age(dirty, 7);
-    const young = join(roots[2], "young");
+    const young = join(guardedRoot, "young");
     git(main, "worktree", "add", "-b", "young", young, "main"); age(young, 5);
-    const nestedRecent = join(roots[2], "old-root-young-child");
+    const nestedRecent = join(guardedRoot, "old-root-young-child");
     git(main, "worktree", "add", "-b", "child", nestedRecent, "main"); age(nestedRecent, 7);
     age(join(nestedRecent, "README"), 1);
-    const held = join(roots[2], "held");
+    const held = join(guardedRoot, "held");
     git(main, "worktree", "add", "-b", "held", held, "main"); age(held, 7);
     // An ordinary shell in the canonical operator checkout must not hold
     // every unrelated nested worktree. The specific held child still stays.
@@ -154,7 +158,7 @@ test("Mac janitor retires only published idle workspaces across Remudero, operat
     const tracked = join(operator, "tracked-gitlink");
     git(main, "worktree", "add", "-b", "tracked-child", tracked, "main");
     git(operator, "add", "tracked-gitlink"); git(operator, "commit", "-m", "tracked nested source"); age(tracked, 7);
-    const orphan = join(roots[2], "broken"); mkdirSync(orphan);
+    const orphan = join(guardedRoot, "broken"); mkdirSync(orphan);
     writeFileSync(join(orphan, ".git"), "gitdir: /missing/.git/worktrees/only-work\n"); age(orphan, 7);
     // Inactive unmarked scratch is now eligible; important unversioned data can opt out explicitly.
     const unknown = join(roots[2], "data"); mkdirSync(unknown); writeFileSync(join(unknown, "important"), "keep");
@@ -258,7 +262,7 @@ test("Mac installer installs both safety helpers and preserves the previous scri
     const dest = join(fx.root, "install"); mkdirSync(dest); writeFileSync(join(dest, "remudero-janitor.sh"), "old script");
     const r = spawnSync("bash", ["deploy/mac/install-janitor.sh"], { encoding: "utf8", env: { ...process.env, REMUDERO_JANITOR_INSTALL_DIR: dest } });
     assert.equal(r.status, 0, r.stderr + r.stdout);
-    for (const name of ["workspace-retirement-guard.sh", "dependency-seed-guard.sh", "remudero-janitor.sh", "tmp-reclaim.sh"]) assert.equal(existsSync(join(dest, name)), true);
+    for (const name of ["workspace-retirement-guard.sh", "dependency-seed-guard.sh", "remudero-janitor.sh", "tmp-reclaim.sh", "cache-reclaim.py", "retire-legacy-sweeper.py"]) assert.equal(existsSync(join(dest, name)), true);
     assert.equal(readFileSync(join(dest, "remudero-janitor.sh"), "utf8"), readFileSync(MAC, "utf8"));
     assert.equal(readFileSync(join(dest, "tmp-reclaim.sh"), "utf8"), readFileSync("deploy/mac/tmp-reclaim.sh", "utf8"));
     assert.match(r.stdout, /schedules unchanged/);
@@ -307,5 +311,6 @@ test("the scheduled Mac janitor invokes nested-cache cleanup from its installed 
     assert.equal(r.status, 0, r.stderr + r.stdout); assert.equal(existsSync(file), false, r.stdout);
     assert.ok(existsSync(join(job, "fixture", ".git")));
     assert.match(r.stdout, /generated-cache: pruned tsx cache files=1/);
+    assert.match(readFileSync(join(fx.root, "mac.log"), "utf8"), /cache-reclaim:.*"sourceOrGitRetired":false/);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
