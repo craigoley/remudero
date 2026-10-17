@@ -14657,7 +14657,7 @@ function detachedFixHolder(fixKey: string, nowMs: number) {
   if (!action) return undefined;
   const ageMs = Math.max(0, nowMs - (action.phase === "admission" ? action.admissionSinceMs ?? action.startedAtMs : action.startedAtMs));
   return {
-    reason: `fix-dispatch key (${fixKey}) is held by its own detached fix dispatch, ${action.phase} for ${Math.floor(ageMs / 1000)}s` +
+    reason: `duplicate fix-dispatch key (${fixKey}) is held by its own detached fix dispatch, ${action.phase} for ${Math.floor(ageMs / 1000)}s` +
       (action.phase === "admission" ? ` (${action.admissionAttempts ?? 0} admission attempts)` : ""),
     fields: { in_flight_action: "fix-dispatch", in_flight_phase: action.phase, in_flight_age_ms: ageMs },
   };

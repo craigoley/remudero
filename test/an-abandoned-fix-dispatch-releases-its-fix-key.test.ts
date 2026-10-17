@@ -71,7 +71,8 @@ test("W1-T9969: a duplicate fix claim names its own waiting dispatch and that wa
   f.advance(1_800_000);
   await f.pass();
   const row = f.rows().filter(r => r.step === "sweep.disposed").at(-1)!;
-  assert.match(String(row.stand_down_reason), /held by its own detached fix dispatch, admission for 1800s \(44 admission attempts\)/);
+  assert.equal(row.stand_down_reason,
+    `duplicate fix-dispatch key (${KEY}) is held by its own detached fix dispatch, admission for 1800s (44 admission attempts)`);
   assert.equal(row.in_flight_action, "fix-dispatch");
   assert.equal(row.in_flight_phase, "admission");
   assert.equal(row.in_flight_age_ms, 1_800_000);
