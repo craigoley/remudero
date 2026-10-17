@@ -7,7 +7,9 @@
  * The definitions are unchanged, byte for byte in behaviour; the census suite imports them from
  * here and keeps every falsifier that pins what each signature does and does not count.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 /** Every signature this census tracks, in the fixed order the baseline JSON's keys must match
@@ -52,10 +54,15 @@ function isGhPathShimFile(text) {
   return /["']gh["']/.test(text) && /(chmod|writeFileSync)/.test(text) && /PATH/.test(text);
 }
 
+/** The one top-level directory under `test/` whose `*.test.ts` files are DATA, never suites: a
+ *  fixture checkout's own tests (`test/fixtures/**`) are inputs to other tests, not tests. */
+export const FIXTURE_COPY_EXCLUDED_DIR = "fixtures";
+
 /**
- * The names of every direct `*.test.ts` file under `<root>/test` (NEVER a subdirectory — matching
- * the audit's own `test/*.test.ts` glob, so `test/helpers/*.ts` — this census's own fixtures
- * included — and `test/setup/*.ts` are never counted), minus the census suite's own file.
+ * The `test/`-relative POSIX path of every `*.test.ts` file under `<root>/test`, at any depth
+ * (`top.test.ts`, `helpers/git-repo.test.ts`), minus `test/fixtures/**` and the census suite's own
+ * file. A moved test (test restructure, letter D) stays counted: the walk never assumes the flat
+ * `test/*.test.ts` layout. Sorted, so two calls over one tree agree.
  *
  * THAT FILE'S OWN NAME is always excluded. Its falsifier tests necessarily embed literal example
  * text for every signature this census tracks (a fake `["init"` call site, a `function
@@ -65,14 +72,22 @@ function isGhPathShimFile(text) {
  * entirely, so this exclusion never hides one of ITS files — only ever the real suite.
  */
 export function listFixtureCopyFiles(root) {
+  const out = [];
+  const walk = (rel) => {
+    for (const e of readdirSync(join(root, "test", rel), { withFileTypes: true })) {
+      const path = rel === "" ? e.name : `${rel}/${e.name}`;
+      if (e.isDirectory()) {
+        if (rel === "" && e.name === FIXTURE_COPY_EXCLUDED_DIR) continue;
+        walk(path);
+      } else if (e.isFile() && e.name.endsWith(".test.ts") && e.name !== FIXTURE_COPY_CENSUS_FILENAME) out.push(path);
+    }
+  };
   try {
-    return readdirSync(join(root, "test"), { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name.endsWith(".test.ts"))
-      .filter((e) => e.name !== FIXTURE_COPY_CENSUS_FILENAME)
-      .map((e) => e.name);
+    walk("");
   } catch {
     return []; // no test/ dir at all (a minimal falsifier fixture) — every count is zero
   }
+  return out.sort();
 }
 
 /**
@@ -132,11 +147,21 @@ export function countFixtureCopiesInTexts(texts) {
   };
 }
 
-/** Scan `<root>/test` (see {@link listFixtureCopyFiles}) and return the seven signature counts.
- *  Reads files, computes, returns — no writes, no baseline comparison. */
+/** Scan `<root>/test` and return the seven signature counts. In a git checkout, require the
+ *  complete tracked suite population; synthetic directory-only fixtures need no git index. */
 export function countFixtureCopies(root) {
   const testDir = join(root, "test");
-  return countFixtureCopiesInTexts(listFixtureCopyFiles(root).map((name) => [name, readFileSync(join(testDir, name), "utf8")]));
+  const inspected = listFixtureCopyFiles(root);
+  if (existsSync(join(root, ".git"))) {
+    const tracked = execFileSync("git", ["ls-files", "-z", "--", ":(glob)test/**/*.test.ts"], { cwd: root, encoding: "utf8" })
+      .split("\0")
+      .filter((p) => p && !p.startsWith("test/fixtures/") && !p.endsWith(`/${FIXTURE_COPY_CENSUS_FILENAME}`))
+      .map((p) => p.slice("test/".length))
+      .sort();
+    assert.ok(inspected.length > 0, "the fixture-copy census must inspect at least one test suite");
+    assert.deepEqual(inspected, tracked, "the fixture-copy census must inspect the complete tracked test suite population");
+  }
+  return countFixtureCopiesInTexts(inspected.map((name) => [name, readFileSync(join(testDir, name), "utf8")]));
 }
 
 /** Every signature whose live count exceeds its baseline, rendered `"<signature>: N > baseline
