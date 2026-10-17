@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse } from "yaml";
 import { findTaskShard, requestScopeAmendment, restoreScopeAmendmentWork, saveScopeAmendmentWork,
-  type ProofAmendmentWritePorts } from "../src/lib/proof-amendment.js";
-import type { Config } from "../src/lib/config.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { hostWorktreeGitAsync } from "../src/lib/worktree-git.js";
-import { runFixRung } from "./helpers/run-task-test.js";
-import { gitRepo } from "./helpers/git-repo.js";
+  type ProofAmendmentWritePorts } from "#src/lib/proof-amendment.js";
+import type { Config } from "#src/lib/config.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const taskId = "W1-T9805";
 const prUrl = "https://github.com/acme/repo/pull/42";
