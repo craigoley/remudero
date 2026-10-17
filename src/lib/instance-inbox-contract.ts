@@ -23,7 +23,8 @@ import { systemClock } from "./clock.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { INBOX_RETIREMENT_RESTORE_ACTION, restoreInboxRetirement, type InboxRetirementRestoreInput } from "./inbox-retirement.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { proposalIdOfThread } from "./inbox-thread.js";
 import { bearerTokenId, sendJson } from "./panel-actions.js";
@@ -44,6 +45,7 @@ export const INSTANCE_INBOX_ROUTES = [
   { capability: "inbox/thread/reply", method: "POST", kind: "write", action: "reply", source: "/v1/inbox/thread/reply" },
   { capability: "inbox/thread/read", method: "POST", kind: "write", action: "read", source: "/v1/inbox/thread/read" },
   { capability: "inbox/why-me-correction", method: "POST", kind: "write", action: "why-me-correction", source: "/v1/inbox/why-me-correction" },
+  { capability: "inbox/retirement-restore", method: "POST", kind: "write", action: "retirement-restore", source: "/v1/inbox/retirement-restore" },
   { capability: "inbox/reframe", method: "POST", kind: "write", action: "reframe", source: "/v1/inbox/reframe" },
 ] as const;
 
@@ -261,6 +263,12 @@ function sameBinding(a: IntentBinding, b: IntentBinding): boolean {
 }
 
 function canonicalPayload(action: string, body: Body): { error: string } | { payload: unknown } {
+  if (action === INBOX_RETIREMENT_RESTORE_ACTION) {
+    if (body.proposalId !== proposalIdOfThread(String(body.threadId)) || ![body.retirementId, body.snapshotKey].every(x => typeof x === "string" && /^[a-f0-9]{64}$/.test(x)) ||
+      !(body.taskId === null || typeof body.taskId === "string" && body.taskId.length <= 160 && /^W\d+-T[A-Za-z0-9]+$/.test(body.taskId)) || typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 2000 ||
+      Object.keys(body).some(k => !["repository", "instance", "proposalId", "threadId", "intentId", "retirementId", "snapshotKey", "taskId", "reason"].includes(k))) return { error: "exact retirement scope, original snapshot, task and reason are required" };
+    return { payload: { proposalId: body.proposalId, retirementId: body.retirementId, snapshotKey: body.snapshotKey, taskId: body.taskId, reason: body.reason } };
+  }
   if (action === WHY_ME_ACTION) {
     const payload = whyMePayload(body);
     if ("error" in payload) return payload;
@@ -377,10 +385,27 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
         sendScoped(res, binding, 400, { error: "invalid_request", detail: payload.error });
         return;
       }
-      if (spec.action === WHY_ME_ACTION && !verifiedActor(req)) {
+      if ((spec.action === WHY_ME_ACTION || spec.action === INBOX_RETIREMENT_RESTORE_ACTION) && !verifiedActor(req)) {
         sendScoped(res, binding, 403, { error: "verified_operator_required", delivery: "not_delivered" }); return;
       }
       const operator = bearerTokenId(req);
+      if (spec.action === INBOX_RETIREMENT_RESTORE_ACTION) {
+        try {
+          const restored = await restoreInboxRetirement(binding.stateDir, { ...identity(binding), root: dirname(binding.stateDir) }, payload.payload as InboxRetirementRestoreInput, operator, body.intentId as string, systemClock.iso(), () => {
+            const qualification = source.cacheQualification?.(req), current = readPersistedInbox(binding.stateDir!);
+            const age = current ? systemClock.now() - Date.parse(current.generatedAt) : Number.NaN;
+            const target = current?.classifications.find(c => c.proposalId === body.proposalId);
+            return Boolean(qualification && !("status" in qualification) && current && Number.isFinite(age) && age >= 0 && age <= INBOX_STALE_AFTER_MS &&
+              qualification.key === current.snapshotKey && current.snapshotScope?.repository === binding.repository && current.snapshotScope.instance === binding.instance && target?.retirement && target.retirement.retirementId === body.retirementId &&
+              (target.state === "retired" || target.retirement.state === "restored_for_review"));
+          });
+          if ("state" in restored) sendScoped(res, binding, 503, { error: "inbox_retirement_busy", delivery: "not_delivered" });
+          else sendScoped(res, binding, restored.status, restored.body);
+        } catch (error) {
+          sendScoped(res, binding, 503, { error: "inbox_retirement_receipt_unavailable", delivery: "unknown", detail: String(error) });
+        }
+        return;
+      }
       const intent: IntentBinding = {
         operator, repository: binding.repository, instance: binding.instance, threadId: body.threadId, action: spec.action,
         payloadHash: createHash("sha256").update(JSON.stringify(payload.payload)).digest("hex"),
@@ -525,7 +550,7 @@ async function deliver(
 export function mountInstanceInboxRoutes(binding: InstanceInboxBinding): Route[] {
   const out: Route[] = [];
   for (const spec of INSTANCE_INBOX_ROUTES) {
-    const source = spec.kind === "write" && spec.action === WHY_ME_ACTION
+    const source = spec.kind === "write" && (spec.action === WHY_ME_ACTION || spec.action === INBOX_RETIREMENT_RESTORE_ACTION)
       ? binding.routes.find(r => r.method === "GET" && r.path === "/v1/inbox/attention-census")
       : binding.routes.find((r) => r.method === spec.method && r.path === spec.source);
     if (source === undefined) continue;

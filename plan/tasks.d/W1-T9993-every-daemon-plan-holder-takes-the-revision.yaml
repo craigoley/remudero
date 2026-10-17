@@ -1,0 +1,81 @@
+- id: W1-T9993
+  title: "EVERY DAEMON PLAN HOLDER TAKES THE REVISION, NOT A COPY — W1-T9763 gave the self plan one frozen instance per revision and a tick read that posts the revision, but (a) a plan loaded from disk, for a non-self target or an explicit --plan, has no revision, so revisionedRead still posts it whole to the tick-read worker on every tick; and (b) buildSweepHook and buildSweepLightHook take the boot plan by value beside their accessor, and daemonCommand's own `plan` binding feeds the plan copy book and runDaemon, so the boot revision stays alive after a reload"
+  repo: remudero
+  depends_on: [W1-T9763]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, that the daemon's plan holders keep the current revision and nothing else; which plan each reader sees is unchanged
+  band_meaning: blast-radius
+  origin: 'W1-T9763 build (PR #12499) follow-ups named in its report; coordinator brief batch1017 items 5 and 6, merged into one shard'
+  plan_refs: [W1-T9763, W1-T9647, W1-T7743, W1-T3972]
+  files:
+    - src/run-task.ts
+    - test/every-daemon-plan-holder-takes-the-revision.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    One shard for two follow-ups: both change only src/run-task.ts and both are about which Plan objects the daemon
+    keeps.
+    READ at origin/main 1f500495c, where W1-T9763 (PR #12499) has merged. Symbols, not lines.
+    (a) DISK PLANS POSTED WHOLE.
+    - daemonCommand has three plan arms. Self without --plan syncs through planReaders.boot, so the plan is a
+      PlanRevisionStore instance. A non-self target without --plan resets its clone to origin/main and calls
+      loadDaemonPlan(target.planPath). An explicit --plan calls loadDaemonPlan on the literal path.
+    - readTick is planReaders.tickRead(readPlane.read), that is revisionedRead(read, revisions.revisionOf). For a
+      plan the store did not make, revisionOf is undefined, so the request is structured-cloned to the worker with
+      the plan in it, as before W1-T9763. The worker's answer carries the plan back.
+    - A non-self reload goes through dedicatedTargetPlanReloader, which re-reads the reset working tree with
+      loadPlan. Self passes `{ load: planReaders.reload }`, and the dedicated arm passes nothing.
+    OBSERVED (console live ledger, 2026-10-17 ~03:12-03:15Z): daemon.target says self_host=false for
+    remudero-console. Its daemon.memory plan-copies holder has 2 pinned copies, 394 distinct tasks and 3,906,510
+    bytes by census, and its tick-read holder is 191,534 bytes. Site's plan-copies holder has 76 distinct tasks and
+    753,540 bytes. INFERRED: until this ships, those daemons clone their whole plan into the tick-read worker and
+    back every tick. The cost is small at these sizes and grows with the target's plan.
+    (b) THE BOOT PLAN STAYS ALIVE.
+    - buildSweepHook takes `bootPlan: Plan` and reads `tickRead?.plan ?? planAccessor?.() ?? bootPlan`.
+      buildSweepLightHook takes `plan: Plan` and reads `planAccessor?.() ?? plan`. daemonCommand passes `plan`
+      and `() => activePlanRef.current` to both, so each closure holds the boot instance for the daemon's life.
+    - In daemonCommand itself, createPlanCopyBook's `refs` closure reads the `plan` binding, and runDaemonFn gets
+      `plan` as its first argument. A reload moves activePlanRef.current, not `plan`.
+    OBSERVED (core live ledger, daemon.memory at 2026-10-17T03:16:11Z, boot sha 999d96d9a, before W1-T9763's
+    deploy): plan-copies has 2 pinned copies and 8,664 distinct tasks, 85,903,560 bytes by census. INFERRED: after
+    W1-T9763 deploys, a reload to a new revision still leaves the boot revision pinned through these references, so
+    the copy book reads 2 pinned plans where 1 is wanted. W1-T9763's own measurement was 41.9 MiB for one revision
+    at 4,321 tasks.
+    Near-duplicates: swept origin/main's plan (4,061 shards) and the plan diffs of all 442 remote heads
+    (logs-8864/batch1017-sweep-items5-6.txt). No shard names revisionedRead, PlanRevisionStore, planAccessor or
+    bootPlan. W1-T7743 (reload off the loop) and W1-T3972 (reload rebinds the sweep hooks) are about when a reload
+    is read, not which instances stay alive. One head hit, W1-T914, mentions buildSweepLightHook for review status.
+  design: |
+    1. Disk plans get a revision. A non-self target's clone is reset to origin/main before every load, so its boot
+       and its dedicated reload read the plan through the same PlanRevisionStore (readPlanRevisionAsync at
+       origin/main in the target clone, then planAtRevisionAsync), and the dedicated reloader takes
+       `{ load: ... }` the way the self arm does. An explicit --plan is read literally: its revision key is a
+       content digest of tasks.yaml and the tasks.d files read. The worker side re-reads the same path and checks
+       the digest; on a mismatch the read is posted whole, as today, and that fallback is counted.
+    2. The sweep hooks hold only the accessor. buildSweepHook and buildSweepLightHook read the plan through the
+       accessor they are given. The Plan positional stays only where a test or `rmd sweep` caller needs it, and the
+       daemon passes no Plan value. daemonCommand drops its own `plan` binding after boot: the copy book's refs and
+       runDaemonFn read activePlanRef (or the store's current revision), so after a reload nothing references the
+       boot instance.
+    3. Measure. The tick-read post records whether it carried a revision or the whole plan (for example
+       `tick_read_plan: "revision" | "posted" | "fallback"` on the existing read-plane telemetry row), so the fleet
+       sees the non-self daemons stop posting. The daemon.memory plan-copies holder already counts pinned plans;
+       after a reload it should read 1.
+    No new env var, threshold or constant.
+    Tests go in test/every-daemon-plan-holder-takes-the-revision.test.ts, titled verbatim as in the proofs. Use a
+    fixture git repo as the non-self target, a counting read-plane seam that records what each request carried,
+    and the plan copy book across a reload to a new revision.
+  acceptance:
+    - claim: "a non-self target's tick read posts its plan revision, not the plan, and an explicit --plan does the same while its files are unchanged"
+      proof: 'grep: test("W1-T9993: a disk-loaded plan is posted to the tick read as its revision" in test/every-daemon-plan-holder-takes-the-revision.test.ts'
+    - claim: "after a reload to a new revision, the sweep hooks and the copy book hold only the current revision"
+      proof: 'grep: test("W1-T9993: after a reload no daemon holder keeps the boot plan" in test/every-daemon-plan-holder-takes-the-revision.test.ts'
+  falsifier: |
+    On origin/main 1f500495c: (a) for a plan from loadDaemonPlan, revisions.revisionOf returns undefined, so the
+    counting seam sees a request carrying `plan` and no `planRevision`, and the first test fails. (b) After a
+    reload, the copy book's refs still return the boot plan through daemonCommand's `plan` binding (2 pinned), and
+    the sweep hooks keep it as bootPlan, so the second test fails.

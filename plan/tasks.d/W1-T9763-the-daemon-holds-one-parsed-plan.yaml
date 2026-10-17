@@ -15,7 +15,7 @@
     - src/lib/read-plane.ts
     - src/lib/daemon.ts
     - test/the-daemon-holds-one-parsed-plan.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

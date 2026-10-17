@@ -75,9 +75,9 @@ export const BOARD_INTERN_MAX_CHARS = 96;
 export const BOARD_INGEST_CHUNK_MS = 250;
 /** A drift found again this soon after a self-heal is a projection bug, not a blip: it escalates (as #8075's oracle). */
 export const BOARD_ORACLE_RECURRENCE_MS = 24 * 60 * 60_000;
-/** OPERATOR DECISION (W1-T9718), pending: the oracle's slices. A drift is found within N passes, not one, and a pass
- *  reads ~1/N of a full re-derive; 1 audits every task every pass, the behaviour before it. */
-export const BOARD_ORACLE_SLICES = 1;
+/** OPERATOR DECISION (W1-T9718), operator ruling 2026-10-17: six slices. At 10-minute passes every task is audited
+ *  hourly, a recently healed one every pass; a pass reads ~1/N of a full re-derive (N=1 1,170 MB, N=6 290 MB offline). */
+export const BOARD_ORACLE_SLICES = 6;
 const ORACLE_SLICE_META = "board.oracle_slice";
 /** Steps some task's derivation reads across the whole ledger, whatever task they name. */
 export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot"]);

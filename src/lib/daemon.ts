@@ -142,6 +142,8 @@ import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, sys
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
+import { defaultLaneGovernorPorts, LANE_TARGET_STEP, laneTarget, laneTargetPayload, type LaneGovernorPorts, type LaneMemoryReading, type LaneTarget } from "./lane-governor.js";
+import type { LaneGovernorMode } from "./policy.js";
 import {
   createDaemonMemoryGovernor, createHeapShadow, heapSamplePath, installedHeapShadow, installHeapShadow, reclaimLedgerFields, type DaemonMemoryGovernor, type HeapShadowOptions,
 } from "./daemon-memory-policy.js";
@@ -1635,6 +1637,9 @@ export interface DaemonDeps {
   recommendationBackfill?: RecommendationBackfill;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
   fleetLane?: FleetLaneDeps<number | Promise<number>>;
+  /** W1-T9097: the lane governor's mode, memory reading and CPU count (lib/lane-governor.ts). Absent, the real ports over
+   *  `fleetLane`'s state directory; neither, no governor. Consulted only at two or more lanes. */
+  laneGovernor?: LaneGovernorPorts;
   /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
    *  ledger ({@link stepSreGovernor}). Absent, it reads `fleetLane`'s state root — TRAP: the
    *  registry (W1-T4227) names no instance `state_dir` yet, and the SRE lane runs on this daemon's
@@ -4032,6 +4037,34 @@ export async function runDaemon(
   // never 0, so a misconfigured lane count can never silently mean "dispatch nothing"; the budget helper floors its
   // own input the same way, so a value below 1 clamps up here rather than producing two disagreeing floors (W1-T343).
   const laneCount = Math.max(1, opts.laneCount ?? 1);
+  // W1-T9097 (ADR 0007 C): the lane target, re-read at most once per poll interval and ledgered on each reading.
+  // Shadow changes nothing; enforce caps NEW admissions only, so a running lane is never stopped by a lower target.
+  const laneGovernorPorts = laneCount < 2 ? undefined
+    : deps.laneGovernor ?? (deps.fleetLane ? defaultLaneGovernorPorts(deps.fleetLane.stateDir) : undefined);
+  let laneGovernorMode: LaneGovernorMode = "shadow";
+  try { if (laneGovernorPorts) laneGovernorMode = laneGovernorPorts.mode(); }
+  catch (error) {
+    // An unreadable mode never enforces: the governor stays in shadow and the row names why.
+    log(LANE_TARGET_STEP, { mode: "shadow", mode_unread: error instanceof Error ? error.message : String(error) });
+  }
+  let laneTargetReading: { atMs: number; result: LaneTarget } | undefined;
+  /** The lanes new admissions may fill: the governor's target under enforce, otherwise unbounded. */
+  const enforcedLaneTarget = (inFlight: number, wipBound: number | undefined): number => {
+    if (!laneGovernorPorts) return Infinity;
+    const nowMs = daemonClock.now();
+    if (!laneTargetReading || nowMs - laneTargetReading.atMs >= pollIntervalMs) {
+      let memory: LaneMemoryReading | { unread: string };
+      try { memory = laneGovernorPorts.read(); }
+      catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        memory = { unread: reason };
+      }
+      const result = laneTarget({ previous: laneTargetReading?.result.next, inFlight, memory, wipBound, cpuCount: laneGovernorPorts.cpuCount() });
+      laneTargetReading = { atMs: nowMs, result };
+      log(LANE_TARGET_STEP, laneTargetPayload(result, { mode: laneGovernorMode, fixed: laneCount, inFlight }));
+    }
+    return laneGovernorMode === "enforce" ? laneTargetReading.result.target : Infinity;
+  };
 
   // W1-T4077: stopped by `summary`, which every exit path of this function returns through.
   const prActionPumpRef: { stop: () => void; isBusy: () => boolean } = { stop: () => {}, isBusy: () => false };
@@ -6287,6 +6320,8 @@ export async function runDaemon(
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       beginSelectionPass: deps.beginSelectionPass,
       isOpenPr: deps.isOpenPr,
+      // A run the harness yielded before its PR is walked ahead of fresh starts, so a yield never costs its queue place.
+      resumableTaskIds: new Set(resumableHandoffs.keys()),
       // A parked blocker is excluded before the open-PR check, so the existing idle census names it
       // as `continued-this-pass`. Its descendants remain excluded independently by `unmet-deps`.
       excludeIds: new Set([
@@ -6415,15 +6450,19 @@ export async function runDaemon(
     if (forcedNext) {
       dispatchSet = hasChildTask(forcedNext.id) || occupiedTasks.length >= laneCount ? [] : [forcedNext];
     } else {
-      const budget = Math.max(0, (
-        laneCount <= 1
-          ? laneCount
-          : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission })) - occupiedTasks.length);
+      const wipBudget = laneCount <= 1
+        ? laneCount
+        : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
+      const tickLaneTarget = enforcedLaneTarget(occupiedTasks.length, tickQueueAdmission?.wipLimit);
+      const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length);
       if (laneCount >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
-        log("dispatch.wip_deferred", {
+        // W1-T9097: a zero the enforced lane target produced (the WIP budget had room) is named as the target's.
+        const targetHeld = wipBudget > occupiedTasks.length;
+        log(targetHeld ? "dispatch.lane_target_held" : "dispatch.wip_deferred", {
           lane_count: laneCount,
+          ...(targetHeld ? { target: tickLaneTarget, in_flight: occupiedTasks.length } : {}),
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: deps.openPrCount?.() ?? null,
           ...wipDeferredAdmissionFields(tickQueueAdmission),
@@ -6901,7 +6940,8 @@ export async function runDaemon(
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
-        governorReason;
+        governorReason ??
+        (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick, so a lane it holds parks; one row per lane and reason, not per tick.
       if (governed && reason !== undefined && reason === governorReason && inFlightTasks.size > 0) {
@@ -6933,6 +6973,8 @@ export async function runDaemon(
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
+            resumableTaskIds: new Set(resumableHandoffs.keys()),
             excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds,
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
@@ -7146,6 +7188,7 @@ export async function runDaemon(
           (passIds.has(task.id) ? "already dispatched this phase" : undefined) ??
           (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
           (budget <= inFlightTasks.size ? "lane budget" : undefined) ??
+          (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined) ??
           (!partitionByFileOverlap([...inFlightTasks, task], deps.observedByTask ?? NO_OBSERVED_SCOPE).dispatch.includes(task)
             ? "file overlap at start" : undefined);
         if (reason !== undefined) {
@@ -7222,7 +7265,8 @@ export async function runDaemon(
       }
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts], ...latchAdmissions.get(task.id) } : {}) });
-      log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null });
+      log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null,
+        ...(resumableHandoffs.has(task.id) ? { resumes_handoff: resumableHandoffs.get(task.id)!.branch } : {}) });
       // The first wave is sampled once, by the tick (below): a refill is the lane change.
       if (isRefill) sampleLaneChange();
     };

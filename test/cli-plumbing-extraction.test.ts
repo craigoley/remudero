@@ -110,7 +110,18 @@ test("no other src/lib module imports src/lib/repo-location.ts — only run-task
     }
     if (importsModule(text, /(^|\/)repo-location\.js$/)) importers.push(file);
   }
-  assert.deepEqual(importers, [], `an unrelated src/lib module imports repo-location.ts and would pay the argv-at-import cost on import: ${importers.join(", ")}`);
+  // W1-T9722: the daemon's read-plane worker entry (src/lib/tick-read-worker.ts) is the ONE named
+  // exemption. It is itself a worker ENTRY -- the thing the isolate boots from instead of
+  // src/run-task.ts -- so it owns argv exactly as the CLI entrypoint does (a worker thread inherits
+  // the parent's argv and cwd, so `repoRoot` resolves to the same checkout). Importing
+  // repo-location.js directly is what lets that entry avoid loading all of run-task.ts.
+  const ENTRY_OWNERS = ["tick-read-worker.ts"];
+  const unrelated = importers.filter((file) => !ENTRY_OWNERS.includes(file));
+  assert.deepEqual(unrelated, [], `an unrelated src/lib module imports repo-location.ts and would pay the argv-at-import cost on import: ${unrelated.join(", ")}`);
+  // The exemption must not go stale: a named entry that no longer imports it is dropped from the list.
+  for (const owner of ENTRY_OWNERS) {
+    assert.ok(importers.includes(owner), `${owner} is exempted but no longer imports repo-location.ts -- remove it from ENTRY_OWNERS`);
+  }
 });
 
 test("repo-layout.ts does NOT import repo-location.ts — the split is what makes the guard above satisfiable", () => {

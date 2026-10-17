@@ -2,7 +2,7 @@
  * W1-T9718: the board oracle re-derived every plan task each BOARD_ORACLE_INTERVAL_MS, twice more on a mismatch: about
  * a full re-derive's read per pass (~1.2 GB on a production-sized store). A pass now audits one slice of the plan's
  * tasks (a stable hash of the id), the slices in turn, plus every task it healed within the recurrence window; the
- * other tasks are handed in as held. With one slice (the default until the operator rules) it audits every task.
+ * other tasks are handed in as held. The default is six slices (operator ruling 2026-10-17); one audits every task.
  * Each test counts what the fact store was asked for by task, beside what the oracle reports, so neither is taken on
  * the oracle's word.
  */
@@ -198,11 +198,46 @@ test("W1-T9718: a drift is healed within N passes and a recently healed task eve
   assert.ok(!pinned.includes(victim), "and the expired heal is removed from the store");
 });
 
-test("W1-T9718: with one slice the oracle compares every task as before", (t) => {
-  assert.equal(BOARD_ORACLE_SLICES, 1, "until the operator rules, the default is one slice: every task every pass");
+test("operator ruling 2026-10-17: by default six oracle passes audit every task, each about a sixth plus the healed", (t) => {
+  assert.equal(BOARD_ORACLE_SLICES, 6, "the operator ruled six slices: every task hourly at 10-minute passes");
   const r = rig(t);
   const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const board = r.board({ log: (step, extra) => void logged.push({ step, extra }) });
+  board.update();
+  r.askedTasks();
+  const seen: string[] = [];
+  for (let pass = 0; pass < 6; pass++) {
+    const result = board.oracle();
+    const want = sliceOf(pass, 6);
+    assert.equal(result.slice.of, 6, `pass ${pass} is one of six slices without any option`);
+    assert.ok(want.length > 0 && want.length <= Math.ceil(IDS.length / 3), `slice ${pass} is about a sixth of the plan (${want.length})`);
+    assert.deepEqual(result.slice.audited, want, `pass ${pass} audits only its slice`);
+    assert.deepEqual(r.askedTasks(), want, `pass ${pass} reads only its slice's tasks from the store`);
+    seen.push(...result.slice.audited);
+  }
+  assert.deepEqual([...seen].sort(), [...IDS].sort(), "six default passes audit every plan task exactly once");
+  // The ledger row production reads to verify the ruling names each slice of six and what it audited.
+  assert.deepEqual(oracleRows(logged).map((row) => row.slice), [0, 1, 2, 3, 4, 5].map((k) => ({ index: k, of: 6, audited: sliceOf(k, 6).length, always_audited: 0 })));
+  // A drift is healed on its slice's pass; from then on that task rides along with every other slice.
+  const victim = "W1-T7";
+  r.drift(victim);
+  const restarted = r.board();
+  let healed: BoardOracleResult | undefined;
+  for (let pass = 0; pass < 6 && !healed; pass++) {
+    const result = restarted.oracle();
+    if (result.outcome === "healed") healed = result;
+  }
+  assert.deepEqual(healed?.mismatches.map((m) => m.taskId), [victim], "the drift is found within six default passes");
+  const next = restarted.oracle();
+  assert.notEqual(next.slice.index, boardOracleSliceOf(victim, 6), "control: the next pass is another slice");
+  assert.deepEqual(next.slice.alwaysAudited, [victim], "the healed task is audited on the next pass too");
+  assert.deepEqual(next.slice.audited, [...sliceOf(next.slice.index, 6), victim].sort(), "beside that slice's own tasks");
+});
+
+test("W1-T9718: with one slice the oracle compares every task as before", (t) => {
+  const r = rig(t);
+  const logged: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const board = r.board({ oracleSlices: 1, log: (step, extra) => void logged.push({ step, extra }) });
   board.update();
   r.askedTasks();
   const result = board.oracle();
@@ -212,7 +247,7 @@ test("W1-T9718: with one slice the oracle compares every task as before", (t) =>
   assert.equal(r.db.meta("board.oracle_slice"), undefined, "one slice keeps no rotation");
   // A drift anywhere is found on the very next pass, healed, and the heal's three projections are counted.
   r.drift("W1-T33");
-  const restarted = r.board({ log: (step, extra) => void logged.push({ step, extra }) });
+  const restarted = r.board({ oracleSlices: 1, log: (step, extra) => void logged.push({ step, extra }) });
   const healed = restarted.oracle();
   assert.equal(healed.outcome, "healed");
   assert.deepEqual(healed.mismatches.map((m) => m.taskId), ["W1-T33"]);
@@ -220,6 +255,6 @@ test("W1-T9718: with one slice the oracle compares every task as before", (t) =>
   const row = oracleRows(logged).at(-1)!;
   assert.deepEqual(row.slice, { index: 0, of: 1, audited: IDS.length, always_audited: 0 });
   assert.equal((row.read as { projections: number }).projections, 3, "a heal projects three times, as before");
-  // An option that is not a count of slices is one slice.
-  assert.equal(r.board({ oracleSlices: 0 }).oracle().slice.of, 1);
+  // An option that is not a count of slices is the default.
+  assert.equal(r.board({ oracleSlices: 0 }).oracle().slice.of, BOARD_ORACLE_SLICES);
 });

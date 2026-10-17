@@ -1,3 +1,5 @@
+import { inboxGardenerSource, mechanicalAskPurpose, readInboxGardenerStore, inboxOperatorIntent } from "./inbox-retirement.js";
+import { readAllThreads, inboxThreadId } from "./inbox-thread.js";
 /**
  * The inbox's materialized side (arch Phase 4, design D5 row 3 and P4-T06): what used to happen on
  * `GET /v1/inbox` and now happens in serve's slow lane, on a cadence, whether or not anyone reads.
@@ -34,13 +36,14 @@ function dismissalAudit(classified: ClassifiedInbox, deps: PanelGraphDeps, now: 
     return (row.state === "retired" || row.state === "ratified") && taskId !== undefined && classified.projection.get(taskId)?.merged === true;
   });
   const scope = deps.inboxAuditScope ?? deps.inboxSourceIdentity;
+  const lifecycle = readInboxGardenerStore(join(deps.inboxRoot, "state"), scope && { ...scope, root: deps.inboxRoot });
   const input = { scope: scope && { instance: scope.instance, repository: scope.repository },
     coverage: { receipts: classified.attentionEvidence?.archiveLedger ?? "unavailable", outcomes: "partial", plan: "observed",
       registry: inboxClassificationEvidence(classified).complete ? "observed" : "partial" },
     controls: { heldSecurity: { taskId: "W1-T216", observed: Boolean(heldTask && heldAsk),
       passed: heldTask?.dispatch_hold === true && Boolean(heldAsk && heldAsk.state !== "retired" && heldAsk.state !== "ratified" && heldAsk.state !== "declined") },
       terminalMechanical: { observed: terminal, passed: terminal } },
-    receipts: inboxDismissalReceipts(classified.ledgerLines) } as const;
+    receipts: [...inboxDismissalReceipts(classified.ledgerLines), ...(scope && lifecycle.state === "observed" ? lifecycle.store.events.map(e => e.receipt) : [])] } as const;
   const stamps = [deps.planPath, deps.ledgerPath, join(deps.inboxRoot, "state", "inbox-proposals.json")].map(path => {
     const stat = statSync(path, { throwIfNoEntry: false });
     return [path, stat ? [stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs] : "absent"];
@@ -90,6 +93,10 @@ function persistedContent(classified: ClassifiedInbox, stores: InboxStores): Per
     ...inboxClassificationEvidence(classified), proposals: classified.proposals, classifications: classified.classifications, ledgerRows,
     mergedTaskIds: projection.filter(([, p]) => p.merged).map(([id]) => id), projectionIndeterminate: projection.some(([, p]) => p.indeterminate === true),
     ...(attentionEvidence ? { attentionEvidence } : {}),
+    gardenerDependencyEvidence: [...new Set(classified.proposals.flatMap(p => {
+      const id = mechanicalAskPurpose(p)?.taskId;
+      return id ? classified.plan.byId.get(id)?.depends_on ?? [] : [];
+    }))].sort().map(id => ({ id, merged: !classified.plan.byId.has(id) || !classified.projection.has(id) || classified.projection.get(id)?.indeterminate ? null : classified.projection.get(id)!.merged })),
     stores,
   };
 }
@@ -143,10 +150,17 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   if (!deps.inboxSourceIdentity && proposals.length > 0) pruneInboxTriage(stateDir, proposals.map((p) => p.id));
   // The pass's own instant judges every snooze, so the persisted stores say which are still ahead and the view reads no clock.
   const stores = readInboxStores(deps.inboxRoot, proposals, { plan: classified.plan, ledgerLines: classified.ledgerLines, nowMs: now });
+  const sourceThreads = readAllThreads({ threadStorePath: join(stateDir, "inbox-threads.jsonl") });
+  if (sourceThreads.status !== "ok") throw new Error("Inbox gardener operator intent source unavailable");
+  const operatorIntents = new Map(proposals.map(p => [p.id, inboxOperatorIntent(sourceThreads.threads.get(inboxThreadId(p.id)) ?? [])]));
+  const gardenerScope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
+  const lifecycleRead = readInboxGardenerStore(stateDir, gardenerScope && { ...gardenerScope, root: deps.inboxRoot });
   const inputs = { ...persistedContent(classified, stores), dismissalAudit: dismissalAudit(classified, deps, now),
+    retirementSource: lifecycleRead.state === "observed" && !gardenerScope ? "unavailable" as const : lifecycleRead.state,
+    ...(gardenerScope ? { gardenerSource: inboxGardenerSource(proposals, classified.plan.byId, { ...gardenerScope, root: deps.inboxRoot }, operatorIntents) } : {}),
     snapshotScope: deps.inboxSourceIdentity ?? deps.inboxAuditScope ?? { root: deps.inboxRoot },
     ...(deps.inboxSourceIdentity ? { sourceIdentity: deps.inboxSourceIdentity } : {}) };
-  const attentionCensus = materializeInboxAttentionCensus(deps, classified, stores, inputs);
+  const attentionCensus = materializeInboxAttentionCensus(deps, classified, stores, inputs, sourceThreads);
   const scope = deps.inboxSourceIdentity ?? deps.inboxAuditScope;
   // Separate advisory history: classification facts/pages retain W1-T9288's immutable key.
   let whyMeFeedback = scope ? projectWhyMeFeedback(stateDir, scope, attentionCensus, fixedClock(now).iso()) : undefined;

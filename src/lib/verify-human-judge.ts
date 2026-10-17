@@ -1,3 +1,4 @@
+import { stampVerificationAsk } from "./inbox-retirement.js";
 /**
  * lib/verify-human-judge.ts — W1-T3188: the `verify: human` backlog, judged.
  *
@@ -320,7 +321,7 @@ export function verifyHumanAutomationProposalId(shard: ShardUnderJudgement): str
  * and this proposal depends on nothing landing; its evidence is prose he reads.
  */
 export function proposalFromJudgedShard(shard: ShardUnderJudgement, verdict: VerifyHumanVerdict): Proposal {
-  return {
+  return stampVerificationAsk({
     id: verifyHumanProposalId(shard),
     summary:
       `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")} and a judge reads it as ` +
@@ -332,7 +333,7 @@ export function proposalFromJudgedShard(shard: ShardUnderJudgement, verdict: Ver
       `Judge provenance: decision=${verdict.decision}; observed_state=${observedStateKey(shard)}.\n\n` +
       `Nothing about the shard has been changed — this is a routing verdict, not a plan edit.`,
     evidenceAnchors: [],
-  };
+  }, shard.id);
 }
 
 /** An `automate` verdict enters the existing inbox/draft self-improvement flow. It is deliberately

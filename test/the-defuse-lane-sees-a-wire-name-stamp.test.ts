@@ -105,10 +105,11 @@ test("W1-T6036: a deadline row is dated at its own instant, not a staleness thre
 test("W1-T6036: the census pins both renames against their mapping sources", () => {
   const pins = Object.fromEntries(census.AGED_FIELDS.map((row) => [row.field, [row.source, ...row.evidence]]));
   assert.deepEqual(pins.updated_at, ["src/lib/open-prs-rest.ts", "updatedAt: row.updated_at"]);
-  assert.deepEqual(pins.updatedAt, ["src/run-task.ts", "lastActivityAt: pr.updatedAt"]);
+  // W1-T9722: buildOpenPrViews (the updatedAt -> lastActivityAt rename) moved to the read-plane worker entry.
+  assert.deepEqual(pins.updatedAt, ["src/lib/tick-read-worker.ts", "lastActivityAt: pr.updatedAt"]);
   const real = (path: string) => readFileSync(join(ROOT, path), "utf8");
   assert.doesNotThrow(() => census.assertFieldsStillAged(real));
-  for (const [source, needle] of [["src/lib/open-prs-rest.ts", "updatedAt: row.updated_at"], ["src/run-task.ts", "lastActivityAt: pr.updatedAt"]]) {
+  for (const [source, needle] of [["src/lib/open-prs-rest.ts", "updatedAt: row.updated_at"], ["src/lib/tick-read-worker.ts", "lastActivityAt: pr.updatedAt"]]) {
     const dropped = (path: string) => (path === source ? real(path).replaceAll(needle!, "") : real(path));
     assert.throws(() => census.assertFieldsStillAged(dropped), new RegExp(`STALE TABLE.*${source}`), `${source} without the rename`);
   }

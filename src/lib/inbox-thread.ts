@@ -59,7 +59,7 @@ export interface ThreadMessage {
  *  operator's (`from: "operator"`); the rest are the daemon's. */
 export type ThreadEventKind =
   | "reframed" | "declined" | "restored" | "approved" | "released"
-  | "redrafted" | "task_filed" | "released_to_fleet" | "refused";
+  | "redrafted" | "task_filed" | "released_to_fleet" | "refused" | "retired" | "retirement_outcome";
 
 export interface ThreadEvent {
   kind: ThreadEventKind;
@@ -265,6 +265,12 @@ export function readAllThreads(
   } catch (err) {
     return { status: "unresolved", reason: String((err as Error)?.message ?? err) };
   }
+  return parseAllThreads(raw, deps.threadStorePath);
+}
+
+
+export function parseAllThreads(raw: string, sourcePath: string): ReturnType<typeof readAllThreads> {
+  const threads = new Map<string, ThreadMessage[]>();
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -272,7 +278,7 @@ export function readAllThreads(
     try {
       parsed = JSON.parse(trimmed) as ThreadMessage;
     } catch {
-      return { status: "unresolved", reason: `unparseable line in ${deps.threadStorePath}` };
+      return { status: "unresolved", reason: `unparseable line in ${sourcePath}` };
     }
     const list = threads.get(parsed.threadId) ?? [];
     list.push(parsed);

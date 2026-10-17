@@ -31,9 +31,10 @@ function stoppedMaterialization() {
 }
 
 test("W1-T2846: reviewCommand and the board builder call the same higher-level task-id resolver", () => {
-  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  // W1-T9722: the board builder's resolver call moved with the tick-read producer; reviewCommand's stayed.
+  const [source, board] = ["run-task.ts", join("lib", "tick-read-worker.ts")].map((file) => readFileSync(join(REPO_ROOT, "src", file), "utf8"));
   assert.match(source, /const taskId = resolveReviewTaskId\(\s*body,\s*view\.headRefName,/);
-  assert.match(source, /return resolveReviewTaskId\(pr\.body \?\? "", pr\.headRefName,/);
+  assert.match(board, /return resolveReviewTaskId\(pr\.body \?\? "", pr\.headRefName,/);
 });
 
 test("W1-T2846: an untrailered fleet run branch is judged and ledgered under its W1 task with plan criteria", async () => {

@@ -16,15 +16,14 @@
  * a `tsc` error inside the file being emptied.
  *
  * WHY A DEDICATED MODULE, NOT A SHARED ONE. `repoRoot`'s initialiser reads `process.argv`/
- * `process.cwd()` AT IMPORT TIME — that evaluation is deliberately scoped to modules that
- * legitimately own argv. Folding it into a broader lib file would mean any importer pulling in
- * an unrelated symbol from that file also pays (and triggers) the argv read. Keeping this
- * cluster in its own module means the only thing that imports it is something that actually
- * wants repo-location plumbing.
+ * `process.cwd()` AT IMPORT TIME, so any importer of a broader lib file would pay (and trigger)
+ * that argv read. Only modules that own argv import this one: `src/run-task.ts` (the CLI
+ * entrypoint) and, since W1-T9722, `src/lib/tick-read-worker.ts` (the read-plane worker entry; a
+ * worker thread inherits the parent's argv/cwd). test/cli-plumbing-extraction.test.ts names that
+ * one exemption and refuses any other.
  *
- * This module imports nothing from `src/run-task.ts` or `src/spike.ts` — see
- * `.dependency-cruiser.cjs`'s `lib-no-spike-or-cli` rule (`severity: "error"`), which forbids
- * exactly that edge.
+ * This module imports nothing from `src/run-task.ts` or `src/spike.ts` — the dependency-cruiser
+ * `lib-no-spike-or-cli` rule (`severity: "error"`) forbids exactly that edge.
  */
 import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
