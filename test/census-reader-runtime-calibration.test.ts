@@ -80,6 +80,11 @@ test("source-reader calibration exercises real native context and children witho
   assert.throws(() => runCensusSuitesViaChild({ root: repo.dir, files: [FILE, FILE], readerRuntimePolicy: POLICY }), /one reader/);
 });
 
+test("source-reader calibration admits a healthy real nested proof beyond the unrelated four-second limit", (t) => {
+  const repo = fixture(t, 'import { spawnSync } from "node:child_process"; test("nested proof", () => { const r = spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 4200)"]); assert.equal(r.status, 0); });');
+  assert.deepEqual(runCensusSuitesViaChild({ root: repo.dir, files: [FILE], readerRuntimePolicy: POLICY }), []);
+});
+
 test("source-reader native timeout preserves its started runaway and closed capture rather than reporting a pass", (t) => {
   const marker = "OWN_READER_RUNAWAY_STARTED";
   const repo = fixture(t, `import { writeFileSync } from "node:fs"; process.on("SIGTERM", () => {}); writeFileSync("started-control", ${JSON.stringify(marker)}); test("owned runaway", async () => new Promise(() => { setInterval(() => {}, 100); }));`);

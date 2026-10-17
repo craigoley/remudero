@@ -644,29 +644,29 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
   if (pathOverride !== undefined) options.env.PATH = pathOverride;
   const once = () => {
-  const startedMs = now();
-  const res = run(child.file, child.args, options);
-  const finishedMs = now();
-  assertChildFinished(res, "census suite");
-  const stdout = String(res.stdout ?? "");
-  const totals = [...stdout.matchAll(/^# tests (\d+)$/gm)];
-  const total = totals.length === 1 ? totals[0] : null;
-  if (total === null) {
-    throw new Error(
-      `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,
-    );
-  }
-  if (Number(total[1]) === 0) throw new Error("the census suite child ran 0 tests, which is a failed run, not a clean one");
-  const failing = failingSuitesFromTap(stdout, files);
-  if (res.status !== 0 && failing.length === 0) {
-    throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
-  }
-  const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
-    const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
-    return [key, matches.length === 1 ? Number(matches[0][1]) : null];
-  }));
-  const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
-  return { failing, tests: Number(total[1]), passed, elapsedMs: finishedMs - startedMs, finishedMs };
+    const startedMs = now();
+    const res = run(child.file, child.args, options);
+    const finishedMs = now();
+    assertChildFinished(res, "census suite");
+    const stdout = String(res.stdout ?? "");
+    const totals = [...stdout.matchAll(/^# tests (\d+)$/gm)];
+    const total = totals.length === 1 ? totals[0] : null;
+    if (total === null) {
+      throw new Error(
+        `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,
+      );
+    }
+    if (Number(total[1]) === 0) throw new Error("the census suite child ran 0 tests, which is a failed run, not a clean one");
+    const failing = failingSuitesFromTap(stdout, files);
+    if (res.status !== 0 && failing.length === 0) {
+      throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
+    }
+    const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
+      const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
+      return [key, matches.length === 1 ? Number(matches[0][1]) : null];
+    }));
+    const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+    return { failing, tests: Number(total[1]), passed, elapsedMs: finishedMs - startedMs, finishedMs };
   };
   if (readerRuntimePolicy === undefined) return once().failing;
   if (files.length !== 1 || timeoutMs !== undefined) throw new Error("source-reader calibration requires one reader and no timeout override");
