@@ -8,6 +8,7 @@ import { gitRepo } from "./helpers/git-repo.js";
 // @ts-ignore executable module has no declaration file.
 import * as precheck from "../scripts/census-precheck.mjs";
 
+// @source-text-subject: the read-call strings are inputs to census discovery in private fixtures.
 // @census-reads: none — all source-text reads below belong to private fixture repositories.
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SUITE = "test/source-census.test.ts";
@@ -54,18 +55,26 @@ function capture(t: { mock: { method: (o: object, k: string, f: (...a: unknown[]
   return { err, out };
 }
 
+function realChildren(options: { root: string; files: string[]; timeoutMs?: number }) {
+  assert.equal(options.timeoutMs, censusRunawayThresholdMs([1000]));
+  // Exercise head/base behaviour with the runner's normal backstop. The fixture's synthetic
+  // measurement is for the timeout wiring tests, not a measurement of a loaded CI host.
+  return precheck.runCensusSuitesViaChild({ root: options.root, files: options.files });
+}
+
 test("W1-T9757: the precheck runs a source-text census the diff joins", (t) => {
   const repo = fixture(t);
   const io = capture(t);
   const members = precheck.listAdmittedCensusMembers(repo.dir);
   assert.deepEqual(members.map((m: { testFile: string }) => m.testFile).sort(), [ADMITTED.testFile, SUITE, "test/other-census.test.ts"].sort());
-  assert.equal(precheck.main(["--root", repo.dir, "--base", "main"]), 1, io.err.join("\n"));
+  assert.equal(precheck.main(["--root", repo.dir, "--base", "main"], { runSuites: realChildren }), 1, io.err.join("\n"));
   assert.ok(io.err.some((line) => line.includes(`census-suite: ${SUITE} fails — run node --test --import tsx ${SUITE}`)), io.err.join("\n"));
   assert.ok(!io.out.some((line) => line.includes("census-precheck: OK")));
   repo.put(SUBJECT, "declared at head");
-  assert.equal(precheck.main(["--root", repo.dir, "--base", "main"]), 0, io.err.join("\n"));
+  assert.equal(precheck.main(["--root", repo.dir, "--base", "main"], { runSuites: realChildren }), 0, io.err.join("\n"));
   const redBase = fixture(t, true, true);
-  assert.equal(precheck.main(["--root", redBase.dir, "--base", "main"]), 0, "a census already red at base does not refuse");
+  assert.equal(precheck.main(["--root", redBase.dir, "--base", "main"], { runSuites: realChildren }), 0,
+    `a census already red at base does not refuse: ${io.err.join("\n")}`);
   assert.deepEqual(precheck.PRECHECK_PARITY["test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts"], { modeled: precheck.evaluateAdmittedCensusSuites });
 });
 
