@@ -3126,6 +3126,7 @@ import {
   WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND,
   type RunLockInfo,
   type SpawnWorkerArgs,
+  buildInboxDraftWorkerArgs,
   type ForeignTreeStandDown, type RegisteredWorktree,
   type WorkerResult,
   type WorktreeReapSummary,
@@ -6751,7 +6752,7 @@ export function diffSinceMergeBase(cwd: string, head = "HEAD"): string | undefin
 /** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
 export type AddedTestsAtHead = { kind: "read"; files: readonly string[] } | { kind: "unreadable"; reason: string };
 
-/** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/*.test.ts` files added since the merge base with
+/** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/**\/*.test.ts` files added since the merge base with
  *  origin/main. */
 export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): AddedTestsAtHead {
   const mergeBase = () => hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
@@ -6767,7 +6768,7 @@ export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd(
     const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
       .split("\n")
       .map((p) => p.trim())
-      .filter((p) => /^test\/[^/]+\.test\.ts$/.test(p));
+      .filter((p) => /^test\/(?!fixtures\/)(?:[^/]+\/)*[^/]+\.test\.ts$/.test(p));
     return { kind: "read", files };
   } catch (err) {
     return { kind: "unreadable", reason: `the diff at ${headSha} could not be read: ${String((err as Error).message).split("\n")[0]}` };
@@ -48399,23 +48400,13 @@ export function buildInboxDraftSpawnArgs(args: {
   currentPlanText?: string;
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats;
+  avoidModels?: readonly string[];
 }): SpawnWorkerArgs {
   const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
   return {
-    cwd: args.cwd,
-    permissionMode: "bypassPermissions",
-    settingsFile: args.settingsFile,
-    model: args.mount.model,
-    mountProvider: args.mount.provider,
-    effort: args.mount.effort,
-    maxTurns: args.mount.maxTurns,
     // The one worktree below is shared by every draft lane, so enforce the read-only tool
     // surface at the spawn boundary rather than asking the worker to respect prose.
-    disallowedTools: args.disallowedTools,
-    maxBudgetUsd: DEFAULT_BUDGET_USD,
-    config: args.config,
-    prompt: args.prompt,
-    tools: INBOX_DRAFT_WORKER_TOOLS,
+    ...buildInboxDraftWorkerArgs({ ...args, maxBudgetUsd: DEFAULT_BUDGET_USD, tools: INBOX_DRAFT_WORKER_TOOLS }),
     onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
     ...(registryRecord && args.proposalId ? { draftRouting: {
       lane: "inbox-draft",
@@ -48562,7 +48553,7 @@ export async function draftProposalBatch(
       planText,
       {
         repoFacts: checkoutRepoFacts(worktreePath),
-        spawn: (proposal, prompt) =>
+        spawn: (proposal, prompt, ctx) =>
           benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
@@ -48574,6 +48565,7 @@ export async function draftProposalBatch(
             currentPlanText: planText,
             draftRoutingLog: routingStats.log,
             draftRoutingReadStats: routingStats.readStats,
+            avoidModels: ctx?.avoidModels,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
             // test reads this body so a later extraction cannot silently turn the guarantee into
             // a helper-level convention.

@@ -122,7 +122,7 @@ import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type Me
 import { resolveReleasedIds, closedUnmergedRunBranchTaskIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, type IndependentBlockRelease } from "./status.js";
-import type { DispatchValueContext } from "./dispatch-value.js";
+import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
 import type { LedgerRecord, RetroTriggerDecision } from "./retro.js";
@@ -2003,6 +2003,30 @@ export function runBranchDispatchOpts(
     // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
     // row, which has three emitters and no reader.
     onSkipRunBranch: (t: Task) => log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+  };
+}
+
+function captureDispatchFrontier(plan: Plan, opts: NextRunnableOpts) {
+  const eligible: Task[] = [];
+  return { eligible, opts: { ...opts, hasPushedRunBranch: (id: string) => {
+    // This is eligibility's final guard; retain its answer and observe without a second selection pass.
+    const blocked = opts.hasPushedRunBranch?.(id) ?? false;
+    if (!blocked) eligible.push(plan.byId.get(id)!);
+    return blocked;
+  } } };
+}
+
+function dispatchPickPayload(
+  task: Task, site: "tick" | "lane-refill", eligible: readonly Task[], context: DispatchValueContext | undefined,
+  started: readonly Task[], occupied: readonly Task[], observed: ObservedScopeByTask,
+): Record<string, unknown> {
+  const startedIds = new Set(started.map(t => t.id));
+  const runner = eligible.find(t => !startedIds.has(t.id));
+  const serialized = runner && !partitionByFileOverlap([...occupied, ...started, runner], observed).dispatch.includes(runner);
+  return {
+    task: task.id, site, rank: Math.max(1, eligible.findIndex(t => t.id === task.id) + 1),
+    ...explainDispatchScore(task, context),
+    runner_up: runner ? { task: runner.id, ...explainDispatchScore(runner, context), reason: serialized ? "serialized" : "order" } : null,
   };
 }
 
@@ -6442,6 +6466,7 @@ export async function runDaemon(
       return task;
     });
     let dispatchSet: Task[];
+    let tickEligible: Task[] = [];
     // Hoisted here because the partition is scoped to the else branch below while the rung now runs
     // outside the idle branch. Zero means nothing was deferred this tick; the forced path leaves it zero,
     // which is correct — an operator-forced dispatch is not evidence of a collision.
@@ -6452,6 +6477,7 @@ export async function runDaemon(
     bootFirstSelectionAtMs ??= daemonClock.now();
     if (forcedNext) {
       dispatchSet = hasChildTask(forcedNext.id) || occupiedTasks.length >= laneCount ? [] : [forcedNext];
+      tickEligible = [...dispatchSet];
     } else {
       const wipBudget = laneCount <= 1
         ? laneCount
@@ -6471,9 +6497,11 @@ export async function runDaemon(
           ...wipDeferredAdmissionFields(tickQueueAdmission),
         });
       }
-      const candidates = runnableCandidates(planForBatch, isMerged, budget, {
+      const selection = captureDispatchFrontier(planForBatch, {
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
       });
+      const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
+      tickEligible = selection.eligible;
       // Passed explicitly rather than relying on the partition's own default parameter — see
       // `DaemonDeps.observedByTask` (W1-T2286).
       const partition = partitionByFileOverlap([...occupiedTasks, ...candidates], deps.observedByTask ?? NO_OBSERVED_SCOPE);
@@ -6793,6 +6821,7 @@ export async function runDaemon(
     const inFlightTasks = new Set<Task>();
     const refillAdmissions = new WeakMap<Task, {
       snapshot: { plan: Plan; isMerged: MergedSet }; finishedTaskId: string;
+      eligible: Task[]; context: DispatchValueContext | undefined;
     }>();
     // A promised handoff owns only its proposal, never an attempt or active-worker slot.
     // Other freed lanes must not choose its ID/scope before the pool accepts it.
@@ -6964,6 +6993,8 @@ export async function runDaemon(
         let drainHeld: { task: string; taskClass: string; measuredMs: number; samples: number } | undefined;
         const refillDeferrals: PriorityDeferral[] = [];
         let nextSnapshot: { plan: Plan; isMerged: MergedSet } | undefined;
+        let refillEligible: Task[] = [];
+        let refillContext: DispatchValueContext | undefined;
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }): void => {
           const budget = laneDispatchBudget({
             laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: deps.readQueueAdmission?.(),
@@ -6972,7 +7003,7 @@ export async function runDaemon(
             runBranchListing, withRequeueReceipts(deps.readOrphanRunBranchEvidence?.(), deps.readLedgerLines), resumableHandoffs,
             lazyClosedUnmerged(deps.readClosedRunBranchPrs),
           );
-          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
+          const selection = captureDispatchFrontier(snapshot.plan, {
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
             dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
@@ -6984,6 +7015,9 @@ export async function runDaemon(
             inFlight: [...inFlightTasks, ...refillProposals],
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
+          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, selection.opts);
+          refillEligible = selection.eligible;
+          refillContext = selection.opts.dispatchValueContext;
           const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
           // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
           const poolIds = new Set(pool.map((t) => t.id));
@@ -7101,7 +7135,8 @@ export async function runDaemon(
           // A promised refill still crosses the pool's handoff before it actually starts. No
           // attempt/snapshot/overlap slot is committed here. Give concurrent decisions distinct keys.
           const candidate = { ...next };
-          refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished.id });
+          refillAdmissions.set(candidate, { snapshot: nextSnapshot!, finishedTaskId: finished.id,
+            eligible: refillEligible, context: refillContext });
           refillProposals.add(candidate);
           return candidate;
         };
@@ -7268,6 +7303,8 @@ export async function runDaemon(
       }
       if (isRefill) log("dispatch.lane_refilled", { lane, finished_task: refill!.finishedTaskId, next_task: task.id,
         ...(inFlightFreshness ? { restart_pending: true, waiting_on: [...restartHoldouts], ...latchAdmissions.get(task.id) } : {}) });
+      if (isRefill) log("dispatch.pick_scored", dispatchPickPayload(task, "lane-refill", refill!.eligible, refill!.context,
+        [task], [...inFlightTasks].filter(t => t !== task), deps.observedByTask ?? NO_OBSERVED_SCOPE));
       log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null,
         ...(resumableHandoffs.has(task.id) ? { resumes_handoff: resumableHandoffs.get(task.id)!.branch } : {}) });
       // The first wave is sampled once, by the tick (below): a refill is the lane change.
@@ -7374,6 +7411,9 @@ export async function runDaemon(
     try {
       let phase = "dispatch.concurrent_set";
       try {
+        const tickStarted = admitted.filter(t => !occupiedChildren.has(t));
+        for (const task of tickStarted) log("dispatch.pick_scored", dispatchPickPayload(task, "tick", tickEligible,
+          dispatchOpts.dispatchValueContext, tickStarted, occupiedTasks, deps.observedByTask ?? NO_OBSERVED_SCOPE));
         if (dispatchSet.length > 1 && admitted.length > 0) {
           log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
         }

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS, type DeployDeps, type ResourcePolicyDrift } from "../src/lib/deployer.js";
+import { IMAGE_RECYCLE_FAILURE_BACKOFF_MS, MEMORY_HIGH_ANNOTATION, type DeployDeps, type ResourcePolicyDrift } from "../src/lib/deployer.js";
 import type { Escalation, IssueGateway } from "../src/lib/escalate.js";
 import { loadHostMemoryBudgetPolicy } from "../src/lib/host-memory-shadow.js";
 import {
@@ -233,6 +233,52 @@ test("the shipped serve wiring reads the serve role against remudero-serve and r
 
     running = "false false";
     assert.equal(seams.serveHealthy!(), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the shipped serve drift reader honors learned memory high in its actual state root", () => {
+  const { root, env } = fixture();
+  const stateRoot = join(root, "runtime");
+  mkdirSync(join(stateRoot, "state"), { recursive: true });
+  writeFileSync(join(root, ".remudero", "daemon-instances.yaml"),
+    `instances:\n  core:\n    repo: remudero\n    primary: true\n    container_name: remudero-daemon\n    state_dir: ${stateRoot}\n`);
+  const meminfo = join(root, "meminfo");
+  writeFileSync(meminfo, "MemTotal: 16777216 kB\n");
+  const learned = join(stateRoot, "state", `memory-high-tuned-${SERVE_POLICY_CONTAINER}.json`);
+  let annotation = 6656;
+  let memory = ON_POLICY.Memory;
+  const policyCalls: string[][] = [];
+  const exec = (cmd: string, args: string[]): string => {
+    if (cmd === "bash") {
+      policyCalls.push(args);
+      return execFileSync(cmd, args, { encoding: "utf8", env: { ...env, RMD_MEMINFO_PATH: meminfo } });
+    }
+    assert.equal(cmd, "docker");
+    assert.deepEqual(args, ["inspect", SERVE_POLICY_CONTAINER, "--format", "{{json .HostConfig}}"]);
+    return JSON.stringify({ ...ON_POLICY, Memory: memory,
+      Annotations: { [MEMORY_HIGH_ANNOTATION]: `uint64 ${annotation * MIB}` } });
+  };
+  try {
+    const seams = realServePolicyDeps({ installPath: root, stateRoot }, exec);
+    // No learned owner: the unchanged policy remains authoritative.
+    assert.deepEqual(seams.servePolicyDrift!(), [{ field: "MemoryHigh", expected: 5632 * MIB, actual: 6656 * MIB }]);
+    writeFileSync(learned, `{"container":"${SERVE_POLICY_CONTAINER}","high_mib":6400,"policy_mib":5632}\n`);
+    // The install's state folder is not the live state root. Reading this one would be wrong.
+    writeFileSync(join(root, "state", `memory-high-tuned-${SERVE_POLICY_CONTAINER}.json`),
+      `{"container":"${SERVE_POLICY_CONTAINER}","high_mib":7168,"policy_mib":5632}\n`);
+    for (annotation of [5632, 6144, 6400, 6656]) {
+      assert.deepEqual(seams.servePolicyDrift!(), [], `learned owner permits startup annotation ${annotation} MiB`);
+    }
+    assert.ok(policyCalls.every(args => args.at(-1) === stateRoot), "every real policy read receives the live state root");
+    annotation = 5376;
+    assert.deepEqual(seams.servePolicyDrift!(), [{ field: "MemoryHigh", expected: 6400 * MIB, actual: 5376 * MIB }],
+      "learning never excuses an annotation below the unchanged policy floor");
+    annotation = 6656;
+    memory -= MIB;
+    assert.deepEqual(seams.servePolicyDrift!(), [{ field: "Memory", expected: ON_POLICY.Memory, actual: memory }],
+      "learning never excuses hard-limit drift");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

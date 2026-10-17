@@ -1,0 +1,106 @@
+- id: W1-T10028
+  title: "FAN-OUT SLOTS ARE DEALT OVER THE DISPATCHABLE SET, NOT OVER EVERY OPEN TASK — with W1-T9968, W1-T9874 (P2) takes the best P2 slot (pass0 3.24), which belongs to W1-T9378 (verify: human, never dispatchable), and the lift puts it above about 10 eligible P1s"
+  repo: remudero
+  depends_on: [W1-T9968]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which population the W1-T9968 slot assignment is dealt over. The score, the fan-out count, the urgency, compareDispatch, eligibility and the pack are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-17 ~01:00Z, \"downstream fan-out reorders within a tier, never across one\" (W1-T9968). Agent B41 built W1-T9968 as PR #12587 and measured that it halves the cross-tier inversions rather than removing them. This task completes the ruling. Standing rule: no hard fixed thresholds"
+  plan_refs: [W1-T9968, W1-T9967, W1-T9323, W1-T9325, W1-T9874, W1-T9378, W1-T4064]
+  files:
+    - src/lib/dispatch-value.ts
+    - src/lib/drain.ts
+    - src/lib/daemon.ts
+    - test/fan-out-slots-are-dealt-over-the-dispatchable-set.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-17: fan-out never jumps a tier; W1-T9968 alone leaves 1087 cross-tier inversions among eligible tasks
+  attempts: 0
+  rationale: |
+    MEASURED by agent B41 on the live queue (plan tree d09014a7), with Q-DISPATCH's in-process repro
+    (session scratchpad qdispatch-repro.ts), building W1-T9968 as PR #12587 (run-W1-T9968-1792244015262, open):
+    - Cross-tier inversions among ELIGIBLE tasks: 1945 at base, 1087 with W1-T9968. The ruling needs the cross-tier
+      order to be the no-fan-out order, and it is not.
+    - Live example: W1-T9874 (P2) inherits the best P2 slot (pass0 3.24). That slot belongs to W1-T9378, which has no
+      open dependency but is not dispatchable. The inherited slot lifts W1-T9874 above about 10 eligible P1s.
+    - 33 open tasks have no open dependency, are not eligible, and carry fan-out.
+    READ on PR #12587's head 06747ff5f: `fanoutWithinTier` (src/lib/dispatch-value.ts) groups passes by
+    `${tier}:${blocked}`, where blocked means an open dependency. Every other open task, eligible or not, joins its
+    tier's unblocked group and contributes its pass0 slot. That includes `verify: human`, retired, `blocked`-status and
+    operator-build tasks.
+    READ on origin/main d83fece77: the selectors order first and filter second. `nextRunnable` and
+    `dispatchEligibleCandidates` (src/lib/drain.ts) both run `dispatchOrder(plan.tasks, opts.dispatchValueContext, …)`
+    and then `isDispatchEligible` on each task. The daemon builds the context (`deps.buildDispatchValueContext?.(plan,
+    isMerged)`) before the selection pass. So the slots are dealt over every open task, and a slot an ineligible task
+    holds goes to an eligible task of the same tier.
+    WHY THE SECOND PROPOSED CRITERION IS NOT FILED. The lead also asked that an unblocked but ineligible task write a
+    named filter reason, because W1-T9378 showed none in the tally. CHECKED 2026-10-17 in-process on origin/main
+    d83fece77 with the real `runnableCandidateIds` and an uncapped `onFiltered` recorder:
+    - W1-T9378's reason is `verify-not-auto`.
+    - `tallyDispatchFilters().snapshot()` keeps only `IDLE_REASON_ID_CAP` (8) ids per bucket. That bucket held 356
+      tasks, 348 of them truncated, so an id lookup in the snapshot misses W1-T9378.
+    - Of 1554 open tasks, 0 are ineligible with no reason at all. The 489 with no open dependency that are not eligible
+      split as verify-not-auto 316, retired 129, operator-build 34 and blocked 10.
+    The missing reason was a measurement artifact of the capped snapshot, not a silent decline. There is nothing to
+    file.
+    NOT COVERED ELSEWHERE: on 2026-10-17 I swept plan/ on origin/main d83fece77 and the added lines of all 439 open
+    origin heads (plan/, src/lib/dispatch-value.ts, src/lib/drain.ts). The phrasings searched were dispatchable set,
+    eligible set, after the eligibility, over the eligible, a slot tied to eligible or dispatchable, ineligible filter
+    reason, IDLE_REASON_ID_CAP, stridePassByTaskId and fanoutWithinTier. The only hits were W1-T9968's own head (5
+    lines, the positive control). Seven run-W1-T8514-* heads edit src/lib/drain.ts, in the disjoint pack's reservation
+    path (`packDisjointFirst`), not in the order or the eligibility walk.
+  design: |
+    No fixed count, cap or weight (standing operator rule).
+    1. DEAL THE SLOTS OVER THE DISPATCHABLE SET. W1-T9968's slot assignment runs over the tasks the selector can
+       actually dispatch in this pass, not over every open task.
+       - Eligibility is per task, and its outcome does not depend on the order. So walk it once, then deal the slots
+         over the eligible set, then sort that set.
+       - The context therefore keeps each scored task's slot inputs (`pass0`, `passF`, tier). dispatch-value.ts
+         exports a function that redeals `fanoutWithinTier` over a given id set and returns a context whose
+         `stridePassByTaskId` covers that set.
+       - `dispatchEligibleCandidates` walks `isDispatchEligible` once, as today. It then orders the eligible tasks
+         with `dispatchOrder(eligible, <redealt context>, resumable)`.
+       - `nextRunnable` takes the head of that same list, through a shared helper, so the two selectors cannot drift.
+       - Do NOT run the eligibility walk twice. Its callbacks write ledger rows and tallies, and `readLiveState` is a
+         live read. Do NOT build the eligible set inside `buildDispatchValueContext` either. The context is built
+         before the pass, and eligibility needs the pass's own opts: in-flight, open PRs and exclusions.
+    2. THE PICK ROW TELLS THE TRUTH. W1-T9325's `dispatch.pick` row (`captureDispatchFrontier` and
+       `dispatchPickPayload`, src/lib/daemon.ts) records `rank`, `runner_up` and `explainDispatchScore`'s `stride_pass`.
+       After this change, all three must be read from the redealt order and context the selector used. They must never
+       come from the eligibility walk's order or the pre-pass context. Touch daemon.ts only as far as that needs.
+    3. Unchanged: `costOfDelayByTaskId` (the full product, fan-out included), `openDependentFanout`, the urgency,
+       `compareDispatch` and its tiebreak chain, the fallback and priority-first order, every eligibility arm, and
+       `packDisjointFirst`. A reader that orders the whole plan rather than selecting, such as the panel's
+       `dispatchOrder(plan.tasks)`, keeps W1-T9968's deal over every open task.
+    4. TESTS. A new file, test/fan-out-slots-are-dealt-over-the-dispatchable-set.test.ts, with `test(` titles verbatim
+       as in the proofs. It uses `buildDispatchValueContext` plus `runnableCandidates`/`nextRunnable` on injected plans
+       and rows with fixed timestamps, as the W1-T9968 file does.
+       - Falsifier: the W1-T9874 / W1-T9378 pair. W1-T9378 is a P2 with `verify: human`, no fan-out and the best P2
+         pass0. W1-T9874 is a P2 with open dependents. Some eligible P1s have pass0 values between the two. W1-T9874
+         must dispatch after those P1s.
+       - The property: on a mixed queue of at least three tiers, mixing eligible tasks with ineligible ones (verify:
+         human, retired, status blocked), the cross-tier order of every pair of ELIGIBLE tasks equals their order with
+         every dependent removed.
+       - The pick row: for the falsifier queue, the `dispatch.pick` payload's `rank` and `stride_pass` equal the
+         selector's order and the redealt pass.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/fan-out-slots-are-dealt-over-the-dispatchable-set.test.ts"
+    - claim: "an ineligible same-tier task lends no fan-out slot: W1-T9874 does not borrow W1-T9378's"
+      proof: 'grep: test("W1-T10028: an ineligible same-tier task lends no fan-out slot" in test/fan-out-slots-are-dealt-over-the-dispatchable-set.test.ts'
+    - claim: "every cross-tier pair of eligible tasks keeps its no-fan-out order"
+      proof: 'grep: test("W1-T10028: every cross-tier pair of eligible tasks keeps its no-fan-out order" in test/fan-out-slots-are-dealt-over-the-dispatchable-set.test.ts'
+    - claim: "the dispatch pick row reports the rank and stride pass the selector used"
+      proof: 'grep: test("W1-T10028: the dispatch pick row reports the rank and stride pass the selector used" in test/fan-out-slots-are-dealt-over-the-dispatchable-set.test.ts'
+  falsifier: |
+    On PR #12587's head (W1-T9968 alone), W1-T9378's best P2 pass0 is dealt to W1-T9874, because both are in the P2
+    unblocked group. W1-T9874 then sorts ahead of the P1s whose pass0 lies between the two P2 slots, and the first test
+    fails. With the fix, W1-T9378 is not in the dispatchable set, so W1-T9874 gets the only P2 slot the eligible set
+    holds, its own, which sits after those P1s.
+    Ways to break it, and the test that catches each:
+    - Filter after ordering, as today: the first test.
+    - Exclude only `verify: human` from the deal: the property test, whose queue also holds retired and status-blocked
+      tasks.
+    - Redeal for the selector but write the pick row from the pre-pass context or the walk order: the third test.

@@ -16,7 +16,7 @@
     - scripts/preflight-author.mjs
     - src/lib/test-gardener.ts
     - test/a-moved-test-keeps-its-tier-and-flake-history.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

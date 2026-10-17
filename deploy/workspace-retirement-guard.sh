@@ -107,33 +107,142 @@ rmd_remote_outside_retirement() {
 }
 
 # Tab-separated receipt, with escaped controls; preserve the full human
-# message instead of guessing where a path containing spaces ends.
+# message instead of guessing where a path containing spaces ends. The original
+# five columns stay positional; appended columns are observed bytes (or unknown)
+# and their scope. Measurements are observations, not a unique skipped total.
+rmd_decision_known_kib() {
+  RMD_DECISION_KNOWN_BYTES=unknown
+  [ "$2" = 0 ] || return 0
+  case "$1" in ''|*[!0-9]*) return 0 ;; esac
+  # Bound arithmetic and refuse malformed/overflowing probe output.
+  [ "${#1}" -le 12 ] || return 0
+  RMD_DECISION_KNOWN_BYTES=$((10#$1 * 1024))
+}
 rmd_decision_record() {
-  local file="$1" message="$2" code=other action=info encoded
-  case "$message" in
+  local file="$1" message="$2" code=other action=info encoded decision reason
+  local bytes="${5:-${RMD_DECISION_KNOWN_BYTES:-unknown}}" size_scope=unknown
+  decision=${message#generated-cache: }
+  case "$decision" in
     KEEP*|SKIP*) action=keep ;;
     WOULD-*|DRYRUN*) action=planned ;;
     REMOVE*|PRUNE*|ARCHIVE*) action=remove ;;
+    'pruned tsx cache files='*) action=remove; code=generated_cache_eligible ;;
+    'would prune tsx cache files='*) action=planned; code=generated_cache_eligible ;;
   esac
-  case "$message" in
-    *not-proven-published*|*unpublished*|*unsaved\ refs*) code=unpublished ;;
-    *publication-unverified*) code=publication_unknown ;;
-    *Git\ metadata*|*git-unverified*|*Git\ status\ failed*) code=git_unknown ;;
-    *live*|*held\ open*|*SKIP\ open*|*SKIP\ cwd*|*Docker\ mount*|*container\ mount*) code=active ;;
-    *young*|*recent*|*written\ within*) code=younger_than_guard ;;
-    *dirty*|*uncommitted*) code=dirty ;;
-    *ignored*) code=ignored_data ;;
-    *locked*) code=locked ;;
-    *lends*|*borrow*|*linked\ worktree*|*git-lender*) code=git_lender ;;
-    *protected*|*dependency\ seed*) code=protected ;;
-    *unknown-directory*) code=unknown_directory ;;
-    *scan*failed*|*unverified*|*unknown*) code=probe_unknown ;;
-    *owner=*) code=other_owner ;;
-  esac
+  # Only decisions have reasons. In particular, a completion message containing
+  # live-skip is informational and must not look like an active-path decision.
+  if [ "$action" = keep ]; then
+    reason=$decision
+    case "$decision" in
+      'KEEP RISKY ('*)
+        reason=${decision#KEEP RISKY (}; reason=${reason%%): *}
+        # These helper observations deliberately combine possibilities. Retain
+        # their uncertainty rather than claiming a positively observed live path.
+        case "$reason" in
+          *'prune incomplete'*) action=info; code=removal_unverified ;;
+          *'discovery incomplete'*) code=discovery_incomplete ;;
+          *unavailable*|*unverified*|*uncertain*|*unknown*) code=probe_unknown ;;
+          *'owned by'*) code=other_owner ;;
+          *'Git-owned'*|*'explicitly retained'*|*'dependency seed'*) code=protected ;;
+          *'unrecognized or special data'*) code=unrecognized_data ;;
+          *'process command'*|*'working directory'*) code=active ;;
+        esac
+        ;;
+    esac
+    if [ "$code" = other ]; then
+      case "$reason" in
+        *not-proven-published*|*unpublished*|*unsaved\ refs*) code=unpublished ;;
+        *publication-unverified*) code=publication_unknown ;;
+        *Git\ metadata*|*git-unverified*|*Git\ status\ failed*) code=git_unknown ;;
+        *live*|*held\ open*|*SKIP\ open*|*SKIP\ cwd*|*Docker\ mount*|*container\ mount*) code=active ;;
+        *young*|*recent*|*written\ within*) code=younger_than_guard ;;
+        *dirty*|*uncommitted*) code=dirty ;;
+        *ignored*) code=ignored_data ;;
+        *locked*) code=locked ;;
+        *lends*|*borrow*|*linked\ worktree*|*git-lender*) code=git_lender ;;
+        *protected*|*dependency\ seed*) code=protected ;;
+        *unknown-directory*) code=unknown_directory ;;
+        *scan*failed*|*unverified*|*unknown*) code=probe_unknown ;;
+        *owner=*) code=other_owner ;;
+      esac
+    fi
+  fi
+  action=${3:-$action}; code=${4:-$code}
+  case "$bytes" in ''|*[!0-9]*) bytes=unknown ;; *) size_scope=${6:-path_allocated} ;; esac
   encoded=${message//%/%25}; encoded=${encoded//$'\t'/%09}; encoded=${encoded//$'\n'/%0A}; encoded=${encoded//$'\r'/%0D}
-  printf '%s\t%s\t%s\t%s\t%s\n' "$RMD_DECISION_PASS_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$code" "$encoded" >> "$file"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$RMD_DECISION_PASS_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$code" "$encoded" "$bytes" "$size_scope" >> "$file"
+}
+
+# Translate the helper's existing bounded JSON receipt, without reading paths
+# or probing sizes. Unknown/free-form reasons stay in the escaped original row.
+rmd_decision_cache_json() {
+  python3 - "$1" "$RMD_DECISION_PASS_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 3<&0 <<'PY'
+import json
+import os
+import re
+import sys
+
+limit = 16 * 1024 * 1024
+with os.fdopen(3, "rb") as stream:
+    raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        # Drain existing helper output in fixed chunks so a reporting refusal
+        # never interrupts the cleaner. Only the bounded prefix is parsed.
+        while stream.read(65536):
+            pass
+try:
+    if len(raw) > limit:
+        raise ValueError("cache report exceeds reporting bound")
+    if not raw.startswith(b"cache-reclaim: "):
+        raise ValueError("missing cache receipt")
+    report = json.loads(raw[len(b"cache-reclaim: "):])
+    if report.get("version") != 1 or not isinstance(report.get("decisions"), list):
+        raise ValueError("unrecognized cache report")
+    rows = []
+    # A partial or unverified removal is not a completed remove decision.
+    actions = {"keep": "keep", "removed": "remove", "would-remove": "planned", "removed-unverified": "info"}
+    for row in report["decisions"]:
+        if not isinstance(row, dict) or row.get("action") not in actions:
+            raise ValueError("unrecognized cache decision")
+        reason = row.get("reason")
+        if row["action"] == "removed-unverified":
+            code = "cache_removal_unverified"
+        elif isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", reason):
+            code = "cache_" + reason.replace("-", "_")
+        elif row["action"] == "keep":
+            code = "cache_probe_unknown"
+        else:
+            code = "generated_cache_eligible"
+        size = row.get("pathAllocatedBytes")
+        known = type(size) is int and 0 <= size <= 2**53 - 1
+        rows.append((actions[row["action"]], code, "cache-reclaim: " + json.dumps(row, separators=(",", ":")),
+                     str(size) if known else "unknown", "path_allocated" if known else "unknown"))
+    inspection = report.get("inspection", {})
+    if not isinstance(inspection, dict):
+        raise ValueError("unrecognized inspection receipt")
+    if inspection.get("mode") == "artifacts" and not all(inspection.get(k) is True for k in
+            ("discoveryComplete", "candidateEvaluationComplete")):
+        rows.append(("info", "cache_inspection_incomplete", "cache-reclaim inspection: " + json.dumps(inspection, separators=(",", ":")), "unknown", "unknown"))
+except (ValueError, TypeError, AttributeError):
+    sys.exit(1)
+
+def escape(value):
+    return value.replace("%", "%25").replace("\t", "%09").replace("\n", "%0A").replace("\r", "%0D")
+
+with open(sys.argv[1], "a") as receipt:
+    for action, code, message, size, scope in rows:
+        receipt.write("\t".join((sys.argv[2], sys.argv[3], action, code, escape(message), size, scope)) + "\n")
+PY
 }
 rmd_decision_summary() {
-  awk -F '\t' -v pass="$RMD_DECISION_PASS_ID" '$1 == pass && $3 == "keep" { n[$4]++ } END { for (k in n) printf "retirement skips: %s=%d\n", k, n[k] }' "$1" 2>/dev/null | sort
+  awk -F '\t' -v pass="$RMD_DECISION_PASS_ID" '
+    $1 == pass && $3 == "keep" {
+      n[$4]++
+      if ($6 ~ /^[0-9]+$/ && $7 == "path_allocated") known[$4]+=$6
+      else unknown[$4]++
+    }
+    END { for (k in n) printf "retirement skips: %s=%d known-observed-bytes=%.0f unknown-size-decisions=%d total-bytes=unknown\n", k, n[k], known[k], unknown[k] }
+  ' "$1" 2>/dev/null | sort
+  printf '%s\n' 'retirement skipped bytes: unique-total=unknown (decision observations may overlap; discovery completeness not inferred)'
 }
 
