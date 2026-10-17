@@ -1123,6 +1123,8 @@ export interface SpawnWorkerArgs {
    * `bypassPermissions` (claude-code#20946), whereas a disallowed tool is never presented to the model at all. Default
    * UNRESTRICTED for the caller (W1-T2591); the claude.ai account-connector denies are merged in on every spawn (W1-T9489). */
   disallowedTools?: readonly string[];
+  /** Models whose drafts already failed this proposal's lint; context fit still applies first. */
+  avoidModels?: readonly string[];
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
@@ -2875,6 +2877,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
+    const remaining = [openWeight.model, ...openWeight.alternatives]
+      .filter((model) => !args.avoidModels?.includes(model));
+    const avoidExhausted = remaining.length === 0;
+    if (!avoidExhausted) openWeight = { ...openWeight, model: remaining[0]!, alternatives: remaining.slice(1) };
     let draftChoice: DraftChoice | undefined;
     let draftReadError: string | undefined;
     if (args.draftRouting) {
@@ -2919,7 +2925,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             openWeight.alternatives.slice(openWeight.alternatives.indexOf(selection.model) + 1));
           if (args.draftRouting) recordDraftRouting(args.draftRouting.log, "draft.routing.choice", {
             lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, deployment: selection.model,
-            reason: draftFallback?.reason ?? (draftReadError ? "stats-read-failed-row-order" : draftChoice?.reason),
+            reason: avoidExhausted ? "avoid-exhausted"
+              : draftFallback?.reason ?? (draftReadError ? "stats-read-failed-row-order" : draftChoice?.reason),
             ...(draftFallback ? { previous_deployment: draftFallback.model } : {}),
             posterior: draftChoice?.arms.find((arm) => arm.deployment === selection.model) ?? {
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
