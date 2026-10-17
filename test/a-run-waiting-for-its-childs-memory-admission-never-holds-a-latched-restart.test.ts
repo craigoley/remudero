@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -312,27 +312,15 @@ test("W1-T10000: an abandoned admission wait keeps its queue position across the
   assert.equal(released, 1);
 });
 
-test("W1-T10000: a carried wait that cannot be written or cleared never fails the spawn", {
-  skip: process.getuid?.() === 0 ? "root bypasses chmod write denial" : false,
-}, async () => {
+test("W1-T10000: a carried wait that cannot be written never fails the abandonment", async () => {
   const fx = spawnFixture("unwritable-wait");
-  const waits = join(fx.state, runChild.RUN_CHILD_ADMISSION_WAITS_DIR);
-  mkdirSync(waits, { recursive: true });
-  writeFileSync(join(waits, "T-1.json"), JSON.stringify({ sinceMs: epoch }));
-  chmodSync(waits, 0o500);
-  try {
-    const held = await runChild.spawnRunChild(fx.input, { ...fx.base, reserve: async () => fx.handle });
-    assert.ok(held.started, "a carried file that cannot be removed still lets the child start");
-    held.settled.catch(() => {});
-    held.detach?.();
-    assert.equal(runChild.readCarriedAdmissionWait(fx.state, "T-1"), epoch, "the file is left behind, unremoved");
-    rmSync(join(fx.state, "runs"), { recursive: true, force: true });
-    const other = { ...fx.input, taskId: "T-2", onPending: (pending: runChild.RunChildPending) => { void pending.abort(); } };
-    const abandoned = await runChild.spawnRunChild(other, { ...fx.base });
-    assert.equal("abandoned" in abandoned && abandoned.abandoned, true);
-    const row = fx.rows.find((r) => r.step === "run_child.spawn_abandoned" && r.task_id === "T-2");
-    assert.match(String(row?.carry_error), /EACCES|EPERM/, "the row names why the wait could not be carried");
-  } finally { chmodSync(waits, 0o700); }
+  // A FILE where the waits directory belongs: every write under it fails, for every uid.
+  writeFileSync(join(fx.state, runChild.RUN_CHILD_ADMISSION_WAITS_DIR), "not a directory");
+  assert.equal(runChild.readCarriedAdmissionWait(fx.state, "T-1"), undefined);
+  const abandoned = await runChild.spawnRunChild({ ...fx.input, onPending: (pending) => { void pending.abort(); } }, { ...fx.base });
+  assert.equal("abandoned" in abandoned && abandoned.abandoned, true, "the wait is still abandoned, never run in-process");
+  const row = fx.rows.find((r) => r.step === "run_child.spawn_abandoned");
+  assert.match(String(row?.carry_error), /ENOTDIR|EEXIST/, "the row names why the wait could not be carried");
 });
 
 test("W1-T10000: a child refill that falls back in-process is judged as in-process", async () => {

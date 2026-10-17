@@ -572,14 +572,6 @@ async function reserveWhilePending(
   const enteredMs = clock();
   const sinceMs = Math.min(enteredMs, carried ?? enteredMs);
   const carriedRow = carried === undefined ? {} : { carried_ms: enteredMs - sinceMs };
-  const clearCarried = (): void => {
-    if (carried === undefined) return;
-    try {
-      rmSync(waitPath, { force: true });
-    } catch (error) {
-      void error; // A file left behind only ranks this task's next wait from its older start.
-    }
-  };
   const abandon = (): RunChildAbandoned => {
     const waitedMs = Math.max(0, clock() - sinceMs);
     let carryError: string | undefined;
@@ -600,15 +592,11 @@ async function reserveWhilePending(
     const reservation = await (ports.reserve ?? ((kind, id, admission) => reserveRunChild(
       { lane: input.lane ?? "implement", root: input.root, runId: id, taskId: input.taskId, entryKind: kind, ...admission },
     )))(entryKind, runId, { signal, ...(carried === undefined ? {} : { sinceMs }) });
-    if (!signal.aborted) {
-      clearCarried();
-      return { held: reservation };
-    }
+    if (!signal.aborted) return { held: reservation };
     reservation.releaseOccupancy();
     return abandon();
   } catch (error) {
     if (signal.aborted) return abandon();
-    clearCarried();
     throw error;
   } finally {
     ended();
@@ -658,6 +646,8 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     const waited = await reserveWhilePending(input, ports, launch.kind, runId, clock, log);
     if (!("held" in waited)) return waited;
     reservation = waited.held;
+    // A held reservation spends any carried wait; a state root that refuses the removal fails the spawn like writeSpec would.
+    rmSync(admissionWaitPath(input.stateRoot, input.taskId), { force: true });
     // Only now, with the reservation held: a waiting run leaves no spec-less directory behind (W1-T10000).
     mkdirSync(dir, { recursive: true });
     // The snapshot and the spec are written back to back, so a prune between them cannot take a snapshot a spec is about to name.
