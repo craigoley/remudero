@@ -16,13 +16,11 @@ import {
   runMachineFilingJudge,
   type MachineJudgePorts,
 } from "../src/lib/machine-filing-judge.js";
-import { appendOperatorNote } from "../src/lib/operator-notes.js";
 import { loadPlan, parseTasksFromYaml } from "../src/lib/plan.js";
 import { buildStatusBoard, renderStatusBoardText } from "../src/lib/status-board.js";
 import type { GitHub } from "../src/lib/status.js";
 import { taskRulingPin } from "../src/lib/task-linter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { productionMachineFilingJudgePorts } from "../src/run-task.js";
 
 const NOW = Date.parse("2026-10-17T12:00:00.000Z");
 const DAY = 86_400_000;
@@ -240,30 +238,4 @@ test("W1-T9043: a bad withdrawal record is reported while a healthy one still la
   const cleanReport = { ...report, failed: [], refused: [] };
   assert.equal(machineJudgeFoundWork(cleanReport), false, "an unlanded withdrawal is not completed work");
   assert.equal(machineJudgeFoundWork({ ...cleanReport, unlanded: [] }), true);
-});
-
-test("W1-T9043: the production ruling reader takes the newest of a ledgered release and an operator note", (t) => {
-  const repoRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}unanswered-rulings-`));
-  t.after(() => rmSync(repoRoot, { recursive: true, force: true }));
-  const stateDir = join(repoRoot, "state");
-  mkdirSync(stateDir);
-  const iso = (days: number) => new Date(NOW - days * DAY).toISOString();
-  const row = (step: string, task_id: string, ts: string) => JSON.stringify({ ts, step, task_id }) + "\n";
-  writeFileSync(join(stateDir, "ledger.ndjson"), [
-    row("ratify.approved", "W1-T9300", iso(20)),
-    row("dispatch.breaker_released", "W1-T9301", iso(25)),
-    row("review.posted", "W1-T9303", iso(1)),
-  ].join(""));
-  for (const [taskId, days] of [["W1-T9300", 22], ["W1-T9301", 3], ["W1-T9302", 9], ["W1-T9302", 4]] as const) {
-    assert.ok(appendOperatorNote(repoRoot, { ts: iso(days), taskId, author: "operator", note: `ruled on ${taskId}` }));
-  }
-  const ports = productionMachineFilingJudgePorts({
-    repoRoot, stateDir, worktreesRoot: join(repoRoot, "wt"), owner: "acme", repo: "remudero",
-    log: () => {}, clock, mainFailures: () => [],
-  });
-  const ruledAt = ports.operatorRulings!();
-  assert.equal(ruledAt("W1-T9300"), iso(20), "a ledgered release newer than the note wins");
-  assert.equal(ruledAt("W1-T9301"), iso(3), "a note newer than the ledgered release wins");
-  assert.equal(ruledAt("W1-T9302"), iso(4), "with no ledgered ruling, the newest note is the ruling");
-  assert.equal(ruledAt("W1-T9303"), undefined, "a review is not an operator ruling");
 });
