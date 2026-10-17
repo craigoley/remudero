@@ -1995,9 +1995,9 @@ export function createIncrementalLedgerUnion(
       return readLedgerUnionRecordsSync(stateDir, readOpts, fsDeps);
     }
     const steps = typeof step === "string" ? [step] : [...step];
-    // W1-T9710: only a line naming an asked step (JSON-quoted, anywhere in the line) is parsed from the live file;
-    // `stepMatches` still decides, so a line naming the step only in another field is parsed and dropped.
-    const candidate = new RegExp(steps.map((name) => JSON.stringify(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+    // W1-T9710: the live file parses only a line naming an asked step (JSON-quoted, anywhere in the line), and
+    // `stepMatches` still decides. A line not framed as `{...}` is parsed too, so `torn` matches a whole read.
+    const candidate = new RegExp([...steps.map((name) => JSON.stringify(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "^[^{]", "[^}]$"].join("|"));
     const stateKey = JSON.stringify([stateDir, steps, refuseIncomplete === true, requireArchives === true]);
     const state: IncrementalUnionState = states.get(stateKey) ?? { rotations: new Map() };
     const pendingSizes: Array<() => void> = [];

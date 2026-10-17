@@ -6,7 +6,7 @@
 // that the quiet bound's row names both costs. Real rotations, real digests, a counting fs seam.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createIncrementalLedgerUnion, readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "../src/lib/ledger-union.js";
@@ -121,12 +121,25 @@ test("W1-T9710: the live pass parses only candidate lines and answers the same r
   const first = countParses(() => union(fixture.dir, { step: STEPS }));
   assert.ok(first.parses <= 11, `a live pass parsed ${first.parses} of 1,000 lines; only the 10 slice rows and the decoy name a step`);
   assert.deepEqual(first.value.rows, full.rows, "the pre-filtered pass answers exactly what a full parse answers");
+  assert.equal(union.size().entries, full.rows.length, "and keeps only the slice's rows: the decoy is parsed and dropped");
 
   // The tail written since: only its candidates are parsed, and the answer still equals a full parse.
   fixture.append([...noise("tail", 50, 2000), decoy(2001), state("R9", "quiet", 2002)]);
   const second = countParses(() => union(fixture.dir, { step: STEPS }));
   assert.ok(second.parses <= 2, `the tail pass parsed ${second.parses} lines`);
-  assert.deepEqual(second.value.rows, readLedgerUnionRecordsSync(fixture.dir, { step: STEPS }).rows);
+  const whole = readLedgerUnionRecordsSync(fixture.dir, { step: STEPS });
+  assert.deepEqual(second.value.rows, whole.rows);
+  assert.equal(union.size().entries, whole.rows.length, "the tail's decoy is not kept either");
+
+  // A half-written line names no step, yet it is still counted torn, exactly as a whole read counts it.
+  fixture.append([]);
+  writeFileSync(fixture.path, `${readFileSync(fixture.path, "utf8")}{"ts":"${at(3000)}","step":"heartbeat.ti\n`);
+  fixture.append([state("R10", "working", 3001)]);
+  const torn = union(fixture.dir, { step: STEPS });
+  const wholeTorn = readLedgerUnionRecordsSync(fixture.dir, { step: STEPS });
+  assert.equal(wholeTorn.torn, 1, "control: the whole read counts the half-written line");
+  assert.equal(torn.torn, wholeTorn.torn);
+  assert.deepEqual(torn.rows, wholeTorn.rows);
 });
 
 test("W1-T9710: the bound row names its loop parse and seeded rotations", async (t) => {
