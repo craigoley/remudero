@@ -43,6 +43,8 @@
     non-engine content coverage; no new exclusions, fallback success or archive deletion.
     Keep filesystem/JSON helpers separate from run-task/worker imports. Add tests to the existing suite.
   acceptance:
+    - claim: "the real state snapshot path consumes the engine-link preservation helper, not only its tests"
+      proof: "grep: preserveEngineDependencyLinks( in src/lib/ledger.ts"
     - claim: "real snapshot and restore preserve dangling engine dependency links and validated reconstruction evidence alongside ledger and proposals"
       proof: "unit test: a state backup restores engine dependency links without following their targets"
     - claim: "available external engine installs are not traversed or modified and critical non-engine missing state is still a failure"
