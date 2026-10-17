@@ -19,8 +19,9 @@ Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 The installer also installs `cache-reclaim.py` and `retire-legacy-sweeper.py` in
 both layouts. `--retire-legacy-sweeper` is an explicit additional installer option,
 composable with `--shared`. It disables future launch admission only for the
-known `com.craigoley.disk-sweep` job after verifying its exact plist arguments,
-ownership and historical script hash. The plist is retained with a disabled
+known `com.craigoley.disk-sweep` job after verifying its exact plist arguments
+and executable (an explicit `Program` must equal `/bin/zsh`), ownership and
+historical script hash. The plist is retained with a disabled
 suffix. It never stops a running process, changes cron entries, or retires an
 unknown/replaced job. Ordinary code-only installation does not change schedules.
 
@@ -133,8 +134,15 @@ all local refs and reflog-only commits must be published before clone removal.
 
 Each account writes human logs plus a tab-separated decision receipt at
 `~/.local/state/remudero/janitor-decisions.tsv`. Columns are timestamp/PID pass ID, UTC time,
-action, reason code and escaped complete message. Tabs/newlines/percent signs in
-messages are escaped. Each pass summarizes skip counts by reason. A Git-unknown
+action, reason code and escaped complete message. These first five columns keep
+their existing positions; appended columns contain observed allocated bytes (or
+`unknown`) and the measurement scope. Existing successful size probes are reused;
+reporting never walks a directory to obtain missing sizes. Tabs/newlines/percent
+signs in messages are escaped. Each pass summarizes skip counts, known observed
+bytes and unknown-size counts by reason. These observations can overlap and do
+not prove a unique skipped-byte total or complete discovery. Cache-helper
+decisions also enter the receipt; partial/unverified removals remain informational
+with an explicit uncertainty reason, not completed removals. A Git-unknown
 hold needs its original object store restored or an operator-reviewed recovery;
 an unpublished hold needs its work deliberately published, not forced cleanup.
 

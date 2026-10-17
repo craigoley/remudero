@@ -318,6 +318,8 @@ p.write_bytes(plistlib.dumps({'Label':ns['LABEL'],'ProgramArguments':ns['LEGACY_
 (home/'bin').mkdir();script=home/'bin/covtmp-sweep.zsh';script.write_bytes(b'known legacy fixture')
 ns['retire'].__globals__['LEGACY_SCRIPT_SHA256']=ns['hashlib'].sha256(script.read_bytes()).hexdigest()
 assert ns['retire'](home)['state']=='would-disable-identified-legacy-job'
+p.write_bytes(plistlib.dumps({'Label':ns['LABEL'],'ProgramArguments':ns['LEGACY_ARGS'],'Program':ns['LEGACY_ARGS'][0]}))
+assert ns['retire'](home)['state']=='would-disable-identified-legacy-job'
 calls=[]
 def run(argv,**kw):
  calls.append(argv)
@@ -331,6 +333,34 @@ assert ns['retire'](home,True)['state']=='absent'
 `;
     const r = spawnSync("python3", ["-c", program, retire, fx.home], { encoding: "utf8" }); assert.equal(r.status, 0, r.stderr + r.stdout);
     const real = spawnSync("python3", [retire], { encoding: "utf8", env: { ...process.env, HOME: fx.home } }); assert.equal(real.status, 0, real.stderr + real.stdout); assert.match(real.stdout, /absent/);
+  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+});
+
+test("legacy sweeper retirement refuses Program overrides without launchctl or plist changes", () => {
+  const fx = fixture();
+  try {
+    const program = String.raw`import runpy,pathlib,sys,plistlib
+ns=runpy.run_path(sys.argv[1]);home=pathlib.Path(sys.argv[2]);p=home/'Library/LaunchAgents/com.craigoley.disk-sweep.plist';p.parent.mkdir(parents=True)
+(home/'bin').mkdir();script=home/'bin/covtmp-sweep.zsh';script.write_bytes(b'known legacy fixture')
+ns['retire'].__globals__['LEGACY_SCRIPT_SHA256']=ns['hashlib'].sha256(script.read_bytes()).hexdigest()
+calls=[]
+def unexpected_launchctl(argv,**kw):
+ calls.append(argv)
+ raise AssertionError('a different executable must never reach launchctl')
+ns['subprocess'].run=unexpected_launchctl
+for value in ['/usr/bin/sleep','/bin/zsh ','',0,False,[],{}]:
+ raw=plistlib.dumps({'Label':ns['LABEL'],'ProgramArguments':ns['LEGACY_ARGS'],'Program':value})
+ p.write_bytes(raw);before=p.stat()
+ for apply in [False,True]:
+  result=ns['retire'](home,apply)
+  assert result=={'state':'held-different-job','changed':False},(value,result)
+  after=p.stat()
+  assert p.read_bytes()==raw and (before.st_ino,before.st_mtime_ns,before.st_ctime_ns)==(after.st_ino,after.st_mtime_ns,after.st_ctime_ns)
+ assert list(p.parent.iterdir())==[p],list(p.parent.iterdir())
+assert calls==[],calls
+`;
+    const r = spawnSync("python3", ["-c", program, retire, fx.home], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 });
 

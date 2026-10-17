@@ -450,6 +450,8 @@ refresh_process_snapshot() {
 
 clean_artifact() {
   local artifact="$1" min_age="${2:-$AGE_HOURS}" stamp age kb owner cwd_rc open_rc seed_reason parent found status scope activity_root="$1"
+  # Dynamically scoped to log(): only reuse this candidate's existing size probe.
+  local RMD_DECISION_KNOWN_BYTES=unknown
   [ -d "$artifact" ] && [ ! -L "$artifact" ] || return 0
   # Unique test results/materialization receipts are durable even inside a
   # generated dependency tree. The bounded duplicate helper preserves them.
@@ -502,7 +504,9 @@ clean_artifact() {
   if [ "$age" -lt "$min_age" ]; then
     skipped_young=$((skipped_young+1)); log "SKIP young ${age}h $artifact"; return 0
   fi
-  kb=$(du -sk "$artifact" 2>/dev/null | cut -f1); kb=${kb:-0}
+  kb=$(du -sk "$artifact" 2>/dev/null | cut -f1)
+  rmd_decision_known_kib "$kb" "$?"
+  kb=${kb:-0}
   if [ "$APPLY" = "1" ]; then
     refresh_process_snapshot || { log "SKIP unverified process snapshot $artifact"; return; }
     is_live "$artifact" && { skipped_live=$((skipped_live+1)); log "SKIP live      $artifact"; return 0; }
@@ -707,6 +711,7 @@ scratch_directory_identity() {
 
 clean_scratch_directory() {
   local path="$1" root="$2" reason stamp identity current kb cwd_rc open_rc check_phase metadata modified changed
+  local RMD_DECISION_KNOWN_BYTES=unknown
   [ -d "$path" ] && [ ! -L "$path" ] || return 0
   # A recently touched root already proves the whole tree is ineligible. Avoid
   # traversing today's large job directories merely to rediscover that fact.
@@ -729,6 +734,7 @@ clean_scratch_directory() {
   identity=$(scratch_directory_identity "$path") || { log "SKIP scratch $path (identity unavailable)"; return; }
   case "$identity" in ''|:*|*:|*:*:*|*[!0-9:]*) log "SKIP scratch $path (invalid identity)"; return ;; esac
   kb=$(du -sk "$path" 2>/dev/null | cut -f1)
+  rmd_decision_known_kib "$kb" "$?"
   case "$kb" in ''|*[!0-9]*) log "SKIP scratch $path (size unavailable)"; return ;; esac
   for check_phase in initial before-remove; do
     refresh_process_snapshot || { log "SKIP scratch $path (process visibility unavailable)"; return; }
@@ -774,6 +780,7 @@ for directory_root in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}"; do
 done
 
 for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
+    RMD_DECISION_KNOWN_BYTES=unknown
     marker="$repo/.git"
     [ -e "$marker" ] && [ ! -L "$marker" ] || continue
     case "$repo" in
@@ -875,7 +882,9 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP git-unverified $repo"; continue
       fi
       common_repo=$(dirname "$common_dir")
-      kb=$(du -sk "$repo" 2>/dev/null | cut -f1); kb=${kb:-0}
+      kb=$(du -sk "$repo" 2>/dev/null | cut -f1)
+      rmd_decision_known_kib "$kb" "$?"
+      kb=${kb:-0}
       if [ "$APPLY" = "1" ]; then
         refresh_process_snapshot || { log "SKIP unverified process snapshot $repo"; continue; }
         is_live "$repo" && { skipped_live=$((skipped_live+1)); log "SKIP live      $repo"; continue; }
@@ -971,6 +980,7 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
       continue
     fi
 done
+RMD_DECISION_KNOWN_BYTES=unknown
 
 # Clean explicitly-owned generated roots first. This catches the hidden
 # `.remudero-coverage` root that is not itself named rmd-/remudero-.
@@ -1206,16 +1216,24 @@ if [ -f "$tsx_helper" ]; then
 else
   log "SKIP generated-cache-sweep (maintained helper missing: $tsx_helper)"
 fi
-rmd_decision_summary "$DECISION_LOG"
-log "decision-report: $DECISION_LOG (six-hour guard; published Git workspaces only)"
-
 # This helper owns only exact ignored duplicate packages and Turbopack caches
 # below this account's artifact root. Source/Git/build outputs never retire.
 if [ -f "$SCRIPT_DIR/cache-reclaim.py" ] && command -v python3 >/dev/null 2>&1; then
   cache_mode=()
   [ "$APPLY" != 1 ] || cache_mode=(--apply)
-  python3 "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" >> "$LOG" 2>&1 || log "WARN generated-cache helper refused or could not verify a removal"
+  # Stream the existing receipt: the reporter bounds JSON parsing and does not
+  # inspect any filesystem targets. Retain the full original in the human log.
+  python3 "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" 2>&1 | \
+    tee -a "$LOG" | rmd_decision_cache_json "$DECISION_LOG"
+  cache_status=("${PIPESTATUS[@]}")
+  [ "${cache_status[1]}" = 0 ] || exit 2
+  if [ "${cache_status[2]}" != 0 ]; then
+    rmd_decision_record "$DECISION_LOG" 'generated-cache receipt unavailable or unrecognized; original output retained in human log' info cache_report_unknown || exit 2
+  fi
+  [ "${cache_status[0]}" = 0 ] || log "WARN generated-cache helper refused or could not verify a removal"
 fi
+rmd_decision_summary "$DECISION_LOG"
+log "decision-report: $DECISION_LOG (six-hour guard; workspace and generated-cache decisions)"
 AFTER=$(free_gib)
 log "=== done: removed=$removed reclaimed=$((reclaimed_kb/1024))M planned=$planned estimated=$((estimated_kb/1024))M worktrees-removed=$removed_worktrees worktrees-planned=$planned_worktrees worktrees-skipped=$skipped_worktrees live-skip=$skipped_live cwd-skip=$skipped_cwd owner-skip=$skipped_owner open-skip=$skipped_open young-skip=$skipped_young free=${BEFORE}->${AFTER}GiB ==="
 

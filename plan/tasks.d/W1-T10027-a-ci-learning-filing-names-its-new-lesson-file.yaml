@@ -1,0 +1,71 @@
+- id: W1-T10027
+  title: "A CI-LEARNING FILING THAT NAMES ITS OWN NEW LESSON FILE PASSES MACHINE-FILING ADMISSION — since W1-T7954 `ciLearningLessonsFile` gives every finding a NEW learnings/ci.d/<slug>.yaml ('a finding owns a new path'), but `machineFilingAdmissionViolations` exempts a missing declared path only for new tests and a few other shapes, so every lesson landing is refused '[machine-filing-admission] … declares file path(s) that exist in neither the checkout nor the base tree': #12569 (W1-T10016) red on lint-plan, ci and remudero-review since 2026-10-17T10:55Z, after #12290 hand-repointed W1-T9787 at learnings/ci.yaml on 10-16"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, whether machine-filing admission accepts the one new path a ci-learning parked proposal is built to create. The parked-shape rule, the other origins' exemptions and every other admission reason are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 PR-queue triage, agent D40's read of #12569 (ci-learning-landing) and the core ledger"
+  plan_refs: [W1-T7954, W1-T9450, W1-T8523, W1-T5995, W1-T3492, W1-T6000]
+  files:
+    - src/lib/plan.ts
+    - test/a-ci-learning-filing-names-its-new-lesson-file.test.ts
+  status: queued
+  priority: 1  # every ci-learning landing PR is born red on its own record and the plan-repair round cannot fix it (it refused "2 criterion/criteria have no proof" and twice "the plan round needs a valid COMMIT_MESSAGE"), so the lane's lessons never land without a hand edit
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 ~13:40Z. #12569 (head 15908fcd2, branch ci-learning-landing, remudero-fleet[bot]) adds one
+    shard, plan/tasks.d/W1-T10016-…yaml, `author_class: machine`, `verify: human`, origin
+    "ci-learning:12305:scan-pr / osv-scan", `files: [learnings/ci.d/ci-learning-12305-scan-pr-osv-scan.yaml]`.
+    - `npm run -s lint-plan:fast` on that head (local, operator Mac): "✗ W1-T10016: 1 violation(s) (0 pre-existing …)
+      [machine-filing-admission] task W1-T10016 declares file path(s) that exist in neither the checkout nor the base
+      tree: learnings/ci.d/ci-learning-12305-scan-pr-osv-scan.yaml". GitHub: lint-plan FAILURE, ci-shard (7/8) and ci
+      FAILURE (logs not read), remudero-review FAILURE "lint-plan: W1-T10016 [machine-filing-admission] …".
+    - Core ledger (11:00Z and 12:49Z archives plus live, read-only): the plan-scoped repair ran three times —
+      11:19:20Z `sweep.plan_round.refused` "2 criterion/criteria have no proof", 11:59:51Z and 12:18:28Z "the plan round
+      needs a valid COMMIT_MESSAGE" — then disposed blocked-ambiguous "plan-only PR is red on lint-plan, ci-shard (7/8),
+      remudero-review … no further"; from 13:21Z it is re-deferred to the full sweep.
+    - 2026-10-16 #12290 (684f7c768) "fix(plan): point W1-T9787 at existing learnings/ci.yaml so machine-filing-admission
+      passes" is the same refusal, repaired by hand.
+    READ at origin/main d83fece77 (symbols, not lines):
+    - src/lib/measurement-cadence.ts `ciLearningLessonsFile` returns `learnings/ci.d/<kebabSlug(findingId)>.yaml`
+      ("A finding owns a new path"); learnings/ci.d/ holds no file on main.
+    - src/lib/plan.ts `isParkedMachineProposal` admits a `ci-learning:` origin whose single file is learnings/ci.yaml
+      or matches `^learnings\/ci\.d\/[a-z0-9]+(?:-[a-z0-9]+)*\.yaml$`, so the shape is recognised.
+    - `machineFilingAdmissionViolations` then calls `missingDeclaredPaths` with an exemption only for
+      `newTestAllowed && created(path)` (new test files for ci-friction, flow-blocker, selector-shadow structural and
+      hot-file proposals, .gitattributes for hot-file) or a scout draft's last path. The ci-learning lesson path is
+      neither, so it is reported missing.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9450 (queued, P2, depends on W1-T7954) adds the golden-verdict and index
+    companions a lesson PR's gates need; it does not touch the missing-path exemption. W1-T8523 and W1-T5995 fixed the
+    same admission for gardener and flow-remedy drafts. W1-T6000 closes a machine gardener PR red on its own record.
+    Swept plan/tasks.d on origin/main for learnings/ci.d, missingDeclaredPaths, "exist in neither" and
+    machine-filing-admission (positive control: the sweep finds W1-T8523's scout-draft case), and the plan diffs of the
+    7 open PR heads at 13:44Z: none names this.
+    CONTENT NOTE, for the person who rules on W1-T10016 (not this task's concern): its lesson was mined from #12305,
+    whose OSV-scanner ignore the operator reverted (#12342). A lesson that a repair "touched
+    .github/semgrep/osv-scanner.toml" must not teach a lane to add advisory ignores.
+  design: |
+    1. In `machineFilingAdmissionViolations`, a ci-learning parked proposal's single declared path is exempt from
+       `missingDeclaredPaths` when it matches the exact learnings/ci.d/<slug>.yaml pattern `isParkedMachineProposal`
+       already uses (one shared predicate, not a second regex).
+    2. Every other admission reason still applies to it (selectable, verify:human parked, dependencies), and every other
+       origin's exemptions are unchanged. A ci-learning record naming any other missing path, or a second path, is
+       still refused.
+    3. TESTS in test/a-ci-learning-filing-names-its-new-lesson-file.test.ts, `test(` titles verbatim as in the proofs,
+       driving `machineFilingAdmissionViolations` with an in-memory plan and a fake tree; no git.
+  acceptance:
+    - claim: "a ci-learning parked filing naming its new learnings/ci.d lesson file passes machine-filing admission"
+      proof: 'grep: test("W1-T10027: a ci-learning filing naming its own new lesson file is admitted" in test/a-ci-learning-filing-names-its-new-lesson-file.test.ts'
+    - claim: "a ci-learning filing naming a missing path outside learnings/ci.d is still refused"
+      proof: 'grep: test("W1-T10027: a ci-learning filing naming a missing src path is still refused" in test/a-ci-learning-filing-names-its-new-lesson-file.test.ts'
+  falsifier: |
+    At origin/main the W1-T10016 record (origin ci-learning:…, files [learnings/ci.d/<slug>.yaml], verify human,
+    author_class machine) yields the "exist in neither the checkout nor the base tree" reason, so the first test fails.
+    Exempting every missing path for a ci-learning origin fails the second test.
+  note: |
+    EFFECT, measured after merge: ci-learning-landing PRs whose only lint-plan finding is machine-filing-admission on
+    a learnings/ci.d path. Healthy shape: none; #12569 goes green on a re-run of lint-plan without a hand edit.
