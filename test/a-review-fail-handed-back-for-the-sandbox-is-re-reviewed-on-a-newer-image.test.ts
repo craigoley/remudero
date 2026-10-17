@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
 import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { runReview } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import {
   REVIEW_REQUEUED_STEP, REVIEWER_IMAGE_CHANGED, readRuntimeImageSha, reviewerImageDecisionDigest, runSweep,
   type OpenPrView, type SweepDeps,
@@ -33,7 +33,8 @@ const needsDesign = (minutesAgo: number): Record<string, unknown> => ({
 
 const openPr = (): OpenPrView => ({
   prNumber: 12409, prUrl: PR_URL, headSha: HEAD, headRefName: "codex/semgrep-source-build-20261016",
-  checksState: "green", reviewState: "failure", unmetCriteria: ["the semgrep build runs"], priorStrikes: 1,
+  checksState: "green", reviewState: "failure", unmetCriteria: [{ claim: "the semgrep build runs", proof: "unit test: semgrep source build runs", met: false,
+    reason: "python3: ENOENT", proof_exec: "executed_fail" }], priorStrikes: 1,
   autoMergeArmed: false, lastActivityAt: at(200), ciFailures: [],
 });
 
@@ -143,22 +144,19 @@ test("W1-T9970: the requested re-review is its own decision, and the reviewer im
 test("W1-T9970: review.posted records the reviewer image, and a requested re-review computes instead of replaying", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-t9970-review-"));
   const oldPath = process.env.PATH;
+  let shimDir: string | undefined;
   try {
     const ledgerPath = join(root, "ledger.ndjson");
-    const binDir = join(root, "bin");
-    execFileSync("mkdir", ["-p", binDir]);
-    writeFileSync(join(binDir, "gh"), `#!/bin/sh
-case "$*" in
-  *comments*|*reviews*) echo '[]' ;;
-  *commits/*/status*) echo '{"statuses":[]}' ;;
-  *pulls/*) echo '{"number":12409,"html_url":"${PR_URL}","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
-  "pr view"*headRefOid*) echo '{"headRefOid":"${HEAD}"}' ;;
-  "pr view"*) echo '{"state":"OPEN"}' ;;
-  "pr diff"*) echo "" ;;
-  *) echo '{}' ;;
-esac
-`, { mode: 0o755 });
-    process.env.PATH = `${binDir}:${oldPath}`;
+    const github = ghShim([
+      { when: "comments", stdout: "[]" }, { when: "reviews", stdout: "[]" },
+      { when: "commits/", stdout: '{"statuses":[]}' },
+      { when: "pulls/", stdout: JSON.stringify({ number: 12409, html_url: PR_URL, updated_at: "t", body: "", head: { ref: "b", sha: HEAD } }) },
+      { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD }) },
+      { when: "pr view", stdout: '{"state":"OPEN"}' }, { when: "pr diff", stdout: "" },
+      { when: "api", stdout: "{}" },
+    ]);
+    shimDir = github.dir;
+    process.env.PATH = `${github.dir}:${oldPath}`;
     const review = (image: string | null, ledger = ledgerPath) => runReview({
       owner: "acme", repo: "remudero", prUrl: PR_URL,
       task: { id: "PR-12409", acceptance: [{ claim: "the semgrep build runs", proof: "unit test: semgrep source build runs" }] },
@@ -178,7 +176,7 @@ esac
     assert.equal((await review(NEW_IMAGE)).decisionDisposition, "replayed");
     assert.equal(posted().length, 1);
 
-    appendLedger(ledgerPath, { task_id: "PR-12409", step: REVIEW_REQUEUED_STEP, reason: REVIEWER_IMAGE_CHANGED,
+    appendLedger(ledgerPath, { run_id: "T9970-SWEEP", task_id: "PR-12409", step: REVIEW_REQUEUED_STEP, reason: REVIEWER_IMAGE_CHANGED,
       pr_number: 12409, head_sha: HEAD, old_image_sha: OLD_IMAGE, new_image_sha: NEW_IMAGE });
     const requested = await review(NEW_IMAGE);
     assert.equal(requested.decisionDisposition, "computed", "the re-review the sweep asked for runs");
@@ -188,7 +186,7 @@ esac
     assert.equal(readLedgerLines(ledgerPath).some((line) => line.step === "review.verdict_conflict"), false);
 
     // Off-container the row carries no image at all: absent, never a guessed value.
-    execFileSync("mkdir", ["-p", join(root, "off-container")]);
+    mkdirSync(join(root, "off-container"));
     const offContainer = join(root, "off-container", "ledger.ndjson");
     await review(null, offContainer);
     const [offRow] = readLedgerLines(offContainer).filter((line) => line.step === "review.posted");
@@ -197,5 +195,6 @@ esac
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
+    if (shimDir !== undefined) rmSync(shimDir, { recursive: true, force: true });
   }
 });
