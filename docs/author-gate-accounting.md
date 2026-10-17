@@ -58,3 +58,8 @@ invalid evidence exits 2. None of those exits is an author PASS. Every estimate
 keeps `dispatchAllowed`, `capacityGranted`, `authorPassReused` and
 `resourceFitQualified` false; a sample-calibrated full-corpus estimate is not a
 full-corpus measurement or a guarantee of runtime or resource availability.
+
+The phase reader also checks the physical suite denominator: every named suite
+must exist in the current corpus, and the complete judge's given/reported counts,
+empty unreported list and absence of a premature exit must agree. A positive TAP
+summary alone cannot certify a ghost or unfinished file list.

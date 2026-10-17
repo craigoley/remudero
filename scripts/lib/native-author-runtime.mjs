@@ -216,6 +216,13 @@ export function readWholeAuthorPhases(root, path, expected, now = Date.now()) {
       !['census-precheck', 'static-preflight', 'affected-tests'].every(name => names.includes(name))) {
     throw new Error('whole author phases: incomplete or unsuccessful whole-gate evidence');
   }
+  const physical = new Set(listTestFiles(root));
+  const tests = receipt.steps.find(step => step.name === 'affected-tests'), judge = tests.judge;
+  if (receipt.suites.some(file => !physical.has(file)) || judge?.complete !== true ||
+      judge.given !== receipt.suites.length || judge.reported !== receipt.suites.length ||
+      !Array.isArray(judge.unreported) || judge.unreported.length !== 0 || judge.exitSite !== null) {
+    throw new Error('whole author phases: unverified physical suite denominator');
+  }
   for (const step of receipt.steps) {
     const d = step.diagnostics;
     if (!d?.nativeResult || d.mayBeIncomplete !== false || !d.stdout || !d.stderr) {

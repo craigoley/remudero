@@ -82,7 +82,7 @@ function phaseEvidence(dir:string,sourceHead:string){
     const native={status:0,signal:null,error:null,outputComplete:true,durationMs:10+index,startedAt:now,finishedAt:now,observedBytes:Buffer.byteLength(stdout),storedBytes:Buffer.byteLength(stdout)};
     writeFileSync(join(dir,prefix+'.stdout'),stdout);writeFileSync(join(dir,prefix+'.stderr'),'');writeFileSync(join(dir,prefix+'.native.json'),JSON.stringify(native));
     return{name,ok:true,exitCode:0,durationMs:native.durationMs,startedAt:now,finishedAt:now,
-      ...(name==='affected-tests'?{testSummary}:{}),diagnostics:{nativeResult:prefix+'.native.json',stdout:prefix+'.stdout',stderr:prefix+'.stderr',stdoutBytes:Buffer.byteLength(stdout),stderrBytes:0,mayBeIncomplete:false}};
+      ...(name==='affected-tests'?{testSummary,judge:{complete:true,given:2,reported:2,unreported:[],exitSite:null}}:{}),diagnostics:{nativeResult:prefix+'.native.json',stdout:prefix+'.stdout',stderr:prefix+'.stderr',stdoutBytes:Buffer.byteLength(stdout),stderrBytes:0,mayBeIncomplete:false}};
   });
   const path='coverage/phase-control/author.json',receipt={version:1,node:process.version,headSha:sourceHead,verdict:'passed',durationMs:100,suites:['test/a.test.ts','test/b.test.ts'],steps};
   const save=()=>writeFileSync(join(dir,path),JSON.stringify(receipt));save();return{path,receipt,save};
@@ -126,6 +126,20 @@ test('whole author planning CLI uses validated native profile and complete phase
   const expired=runCLI(now);assert.equal(expired.status,3,expired.stderr);assert.equal(JSON.parse(expired.stdout).fits,false);
   e.receipt.verdict='over-capacity';e.save();
   assert.throws(()=>planAuthorRuntime({root:f.dir,profilePath:observed.path,authorReceipt:e.path,workers:1,deadline:now+1000000}),/incomplete or unsuccessful/);
+});
+
+test('whole author phase reader refuses ghost suites and unclosed physical file denominators',t=>{
+  const f=makeRuntimeFixture();t.after(()=>f.cleanup());const bindings=runtime.runtimeBindings(f.dir,f.git('rev-parse','HEAD')),e=phaseEvidence(f.dir,bindings.head);
+  assert.equal(runtime.readWholeAuthorPhases(f.dir,e.path,bindings).accounting.trainingEligible,true,'complete physical positive control');
+  const original=readFileSync(join(f.dir,e.path),'utf8'),valid=JSON.parse(original);
+  const ghost={...valid,suites:['test/a.test.ts','test/does-not-exist.test.ts']};
+  const variants=[ghost,...[undefined,{complete:false},{given:3},{reported:1},{unreported:['test/b.test.ts']},{exitSite:'premature-exit'}].map(change=>{
+    const copy=JSON.parse(original),step=copy.steps.find((s:{name:string})=>s.name==='affected-tests');
+    if(change===undefined)delete step.judge;else Object.assign(step.judge,change);return copy;
+  })];
+  for(const data of variants){writeFileSync(join(f.dir,e.path),JSON.stringify(data));assert.throws(()=>runtime.readWholeAuthorPhases(f.dir,e.path,bindings),/unverified physical suite denominator/);}
+  writeFileSync(join(f.dir,e.path),original);
+  assert.equal(runtime.readWholeAuthorPhases(f.dir,e.path,bindings).accounting.trainingEligible,true,'exact restored positive');
 });
 
 test('whole author planning real CLI help and missing evidence never launch validation',()=>{
