@@ -1,0 +1,69 @@
+- id: W1-T10076
+  title: "THE CONSOLE GOES READ-ONLY BECAUSE A VIEW BODY OLDER THAN 10 S READS STALE WHEN ANY NEWER LEDGER ROW EXISTS: builtLedgerSource (#10435) judges a body's BUILD age against the projector's TICK budget, and the views thread spends a quarter of its time on now@core (max 73 s), so the instances catalogue reads 26 to 59 s stale though its data moves only on a daemon heartbeat; a body is behind only by rows its own view reads"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, what makes a served body's ledger source stale; the projector's own tick budget and the wire shape are unchanged
+  band_meaning: span
+  origin: "operator console end-to-end test 2026-10-17 fault (b): banner 'Core's thread list is not current: The instance conversation capability contract is stale' and 'core's ledger:site source is stale: built from the ledger as of ... 59 s old (budget 10 s); the projector has newer rows'"
+  plan_refs: [W1-T5056, W1-T5885, W1-T9458, W1-T5066, W1-T10074]
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/instances-view.ts
+    - src/lib/view-freshness.ts
+    - test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts
+  status: queued
+  priority: 1  # operator 2026-10-17: the operator effectively cannot act from the console while the catalogue reads stale
+  attempts: 0
+  rationale: |
+    READ at origin/main a1343d257 (symbols):
+    - read-model-worker.ts READ_MODEL_LEDGER_STALE_MS = 10_000, documented "A projector whose last good tick is
+      older than this makes its ledger:<i> source stale"; view-freshness.ts LEDGER_BUDGET_MS = 10_000 says the
+      same. The projector ticks every READ_MODEL_TICK_MS = 250 ms.
+    - builtLedgerSource (added by #10435, 2026-10-09): once the projector's newestTs passes the body's built asOf,
+      lagMs = now - builtAsOf, and past READ_MODEL_LEDGER_STALE_MS the source reads stale with the reason the
+      console showed ("built from the ledger as of X, N s old (budget 10 s); the projector has newer rows").
+      Every new ledger row counts, whatever the view reads, and core appends rows every few seconds.
+    - instances-view.ts createInstancesView: the body's only ledger input is instance_heartbeat (k = 'daemon'),
+      judged against INSTANCE_LIVENESS_BOUND_MS (minutes). Its capability contract (servedCapabilities ->
+      instanceInboxCapabilities(stateDir)) reads state-dir files, not the ledger. Yet its sources are
+      registry:repo plus ledger:<i> for every projected instance, so any instance's unrelated row makes the whole
+      catalogue stale, and the console withholds conversation actions on stale.
+    OBSERVED 2026-10-17 17:04-18:59Z, core live ledger, read_model.slow_view rows: now@core 124 builds, 1,759 s in
+    total, max 73,423 ms; now@console 58, 205 s; workstreams 33, 124 s; repositories 24, 93 s. 660 rows;
+    read_model.materialize_deferred named now@core 171 times, workstreams 150, instances 5. So a cheap body waits
+    behind multi-second builds and is re-read tens of seconds apart, against a 10 s budget.
+    The console's second half of the banner ("the live instance catalogue could not be reached") is a read that
+    timed out while serve's loop was blocked; that is W1-T10074.
+  design: |
+    1. A read-model view may declare what it reads from the ledger: `ledgerReads(db)` returns the newest projected
+       instant among the rows that can change its body (the instances view: instance_heartbeat.last_ms for
+       k = 'daemon'). The worker stamps each body's ledger source with that instant as `asOf`.
+    2. builtLedgerSource judges a body by its view's declared reads when it has them: the body is behind only when
+       the projector holds a NEWER row of those reads than the body was built from, and then by that row's age
+       against the projector budget. A view with no declaration keeps today's judgement exactly.
+    3. The projector's own tick freshness (ledgerSource: failures, catching up, warming, tickedAt older than the
+       budget) still makes every body stale, so a stalled projector is never hidden.
+    4. The instances view declares its heartbeat read. Its capability contract keeps registry:repo as its own
+       source; no new source name, field or route is added, so the console needs no change to pin.
+    5. TESTS in test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts, test( titles verbatim as below.
+  acceptance:
+    - claim: "an instances body built before unrelated rows landed stays fresh"
+      proof: 'grep: W1-T10076: an instances body built before unrelated rows landed stays fresh in test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts'
+    - claim: "an instances body built before a newer daemon heartbeat goes stale past the budget"
+      proof: 'grep: W1-T10076: an instances body built before a newer daemon heartbeat goes stale past the budget in test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts'
+    - claim: "a stalled projector still makes the instances body stale"
+      proof: 'grep: W1-T10076: a stalled projector still makes the instances body stale in test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts'
+    - claim: "a view that declares no ledger reads is judged as before"
+      proof: 'grep: W1-T10076: a view that declares no ledger reads is judged as before in test/a-view-body-is-behind-only-by-the-rows-it-reads.test.ts'
+  falsifier: |
+    At origin/main an instances body built 30 s before a burst of unrelated core rows reads ledger:core stale
+    ("built from the ledger as of ... 30 s old (budget 10 s)"), so the first test fails; deleting the
+    declaration path reddens it again while the other three stay green.
+  note: |
+    EFFECT, measured after merge: GET /v1/views/instances answers stale:false while every daemon heartbeats and the
+    projector ticks, and the console's read-only banner for the capability contract appears only when a daemon is
+    down or the projector stalls. OPERATOR DECISION: none; the budget number is unchanged.

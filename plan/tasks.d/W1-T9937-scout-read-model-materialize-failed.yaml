@@ -6,7 +6,7 @@
   verify: human
   risk: high
   priority: 1
-  status: queued
+  status: merged
   attempts: 0
   author_class: operator
   origin: "scout:read_model.materialize_failed"

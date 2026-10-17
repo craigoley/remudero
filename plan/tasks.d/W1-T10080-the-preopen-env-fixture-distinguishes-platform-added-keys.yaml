@@ -1,0 +1,91 @@
+- id: W1-T10080
+  title: "THE PREOPEN ENV FIXTURE DISTINGUISHES PLATFORM-ADDED KEYS — a real Mac author run fails its credential test because a Node child given env:{} still receives __CF_USER_TEXT_ENCODING, while the application already removes that key"
+  repo: remudero
+  depends_on: [W1-T9619]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low  # Test-only platform parity; the product allowlist, containment and security decisions do not change.
+  band_meaning: blast-radius
+  origin: '2026-10-17 operator-approved console/Azure follow-ups and Mac fixture repairs; native reservation refs/rmd-id/W1-T10080 on codex/mac-preopen-fixture-filing-20261017.'
+  plan_refs: [W1-T9619, W1-T2234, W1-T9983, W1-T10058]
+  files:
+    - test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    OBSERVED on exact W9983 head 0e2a5f6633924080eaf450247f209bf4fcad61dc, base70b15edf:
+    the complete author affected phase reports all884 selected physical files, 10,865cases,
+    10,854pass,1fail,0cancel and10existing Linux-only conditional cases skipped. The one
+    real failure is W1-T9619:a gate run sees no credential environment variables, rejecting
+    __CF_USER_TEXT_ENCODING as outside PREOPEN_GATE_ENV_ALLOWLIST. The result remains FAILED,
+    not an author pass. Full receipt: W1-T9983-resumed-author.LZHpgA/receipt.json in the
+    console-next-2026-10-11.vddqtI operator evidence set.
+
+    POSITIVE CONTROL at19:14:42Z: a real Node24.21 child explicitly spawned with env:{}
+    exits0 and reports exactly one key, __CF_USER_TEXT_ENCODING, on darwin. Only key names
+    and platform were printed, never ambient values or credentials. This is runtime-added
+    metadata, not evidence that the application's allowlist forwarded it. preopenGateEnv
+    is already a strict builder; its behavior and both product allowlists must not change.
+    The sibling proof-spawner-env-isolation fixture already distinguishes this measured
+    Darwin key. The preopen fixture does not, including at current main80eac9dcb.
+
+    SUBJECT CONTROL at main80eac9dcb and all five captured-open current remote trees:
+    27matching main shards, per-head counts retained, no changed subject shard, no test-file
+    implementation overlap, no related W9619/W10025/W10044 dispatch/run claim. W2234 is the
+    known platform-fact positive control, not this later preopen fixture repair. W10025
+    owns engine-tree sandbox bindings; W10044 owns truncated errno text, neither this
+    assertion. Unpublished or later owner work remains outside that point-in-time audit.
+  design: |
+    Only the measured Darwin runtime key may be classified separately by the fixture.
+    1. Preserve the existing W9619 test titles and real default runner, credential canaries,
+       throwaway HOME, trusted launch, failing-summary, unavailable-containment and real
+       Linux bubblewrap controls. A fresh explicit-env child proves the exact platform
+       injection; Linux runs the same control and must not gain a Darwin exception.
+    2. Credential sentinels are checked before every platform or coverage exemption.
+       Check every observed value, including __CF_USER_TEXT_ENCODING and NODE_V8_COVERAGE,
+       for the synthetic credential sentinel before separately classifying known runtime
+       metadata. Unknown keys still fail. Exercise the fixture assertion with deliberate
+       sentinel-bearing platform/coverage keys, a credential key and an unknown key; none
+       may hide behind metadata handling. Do not broaden the exception to __CF_* or use
+       the current parent environment as an approved-key baseline.
+    3. Keep exact pure-builder assertions: caller-provided __CF_USER_TEXT_ENCODING and
+       unknown application keys are absent from preopenGateEnv, and the application's
+       allowlist remains exactly the proof allowlist plus the existing two test-slot keys.
+       The fixture's runtime metadata classification grants no forwarding permission.
+    4. No product allowlist or sandbox change. Commit only this existing test file; use
+       current subpath aliases for its imports. No new skip, scanner exclusion, suppression,
+       registry count increase, native-gate rule, timeout, concurrency, provider, billing,
+       permissions, service, resource, claim, lifecycle or credential change. Existing
+       conditional Linux controls remain explicit NOT_EXECUTED on Mac, never called passed;
+       normal required Linux CI must still run and gate merge.
+    First reproduce the unchanged credential-test failure and the real explicit-env control.
+    After the fixture repair, restore only its old runtime-key handling and require the
+    original credential test to fail again on Darwin. Restore the fix and require all
+    runnable controls and all deliberately leaked-key falsifiers to pass with an actual
+    TAP/file inventory. Native author, literal canonical/stored proofs, governed review
+    and full current-head CI remain required. Filing is not implementation credit, and
+    this fixture correction is not an Azure memory-saving or production-recovery claim.
+    Research: Apple's public CFRuntime initialization invokes default-encoding discovery
+    early; CFStringEncodings sets the encoding cache in the process environment:
+    https://raw.githubusercontent.com/apple-oss-distributions/CF/main/CFRuntime.c
+    https://raw.githubusercontent.com/apple-oss-distributions/CF/main/CFStringEncodings.c
+    The local explicit-empty-env control is the current-host evidence; historical vendor
+    source alone is not proof of every current OS build's exact behavior.
+  acceptance:
+    - claim: "an actual explicit-env child identifies only the exact platform-added key without changing forwarding permissions"
+      proof: 'grep: test("W1-T10080: only the measured Darwin key is platform-added" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+    - claim: "metadata classification cannot hide credential sentinel values or unknown application keys"
+      proof: 'grep: test("W1-T10080: metadata cannot hide a credential sentinel" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+    - claim: "the existing pure application boundary still strips caller-provided platform and unknown keys"
+      proof: 'grep: test("W1-T10080: the application still drops parent-only keys" in test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts'
+  falsifier: |
+    Run the unchanged W9619 credential test on Darwin: its real child reports the measured
+    CoreFoundation key and the old assertion fails. Keep the new positive/negative controls
+    intact, restore only the old runtime-key assertion, and require that same failure.
+    Deliberately leaking a sentinel in a platform key, coverage key, credential key or
+    unknown key must still fail the fixture's assertion. Restore the repair and require
+    actual runnable-case summaries. Do not fake Linux containment, add a platform skip,
+    change the product allowlists, discard the original failed receipt or run a provider.
