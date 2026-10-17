@@ -134,7 +134,7 @@ test("artifact cache streaming scan charges flat-directory children and reports 
     for (let n = 0; n < 40; n++) writeFileSync(join(fx.root, `entry-${n}`), "untouched");
     const report = receipt(fx.run("ns['main'].__globals__['MAX_ENTRIES']=12", true, false));
     assert.equal(report.entriesInspected, 12);
-    assert.equal(report.bytesRead, 0);
+    assert.equal(report.bytesRead, report.inspection.progress.metadataBytesRead, "only checkpoint metadata, never payload contents");
     assert.equal(report.inspection.discoveryComplete, false);
     assert.equal(report.inspection.exhausted.limit, "entries");
     assert.equal(report.inspection.exhausted.stage, "discovery");
@@ -210,7 +210,7 @@ g['references']=bounded;g['old_owned']=forbidden`));
     assert.equal(report.inspection.exhausted.root, join(fx.home, "Remudero"));
     assert.equal(report.inspection.deferredCandidateCount, 1);
     assert.equal(report.decisions.find((row: any) => row.path === cache).reason, "reference-corpus-incomplete");
-    assert.ok(existsSync(cache)); assert.equal(report.bytesRead, 0);
+    assert.ok(existsSync(cache)); assert.equal(report.bytesRead, report.inspection.progress.metadataBytesRead, "only checkpoint metadata, never payload contents");
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 });
 

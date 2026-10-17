@@ -155,6 +155,14 @@ const CHMOD_REMEDY =
  */
 const DECLARED: readonly Declared[] = [
   {
+    kind: "chmod", file: "mac-cache-scan-progress.test.ts", key: "0o644", count: 1,
+    reason: "Checkpoint admission rejects group/world-readable state by explicit stat mode, not an OS permission denial. The refusal holds for uid 0 as well as the ordinary account.",
+  },
+  {
+    kind: "platform-tool", file: "mac-janitor-dependency-health.test.ts", key: "/usr/bin/find", count: 1,
+    reason: "The private shell fixture delegates only inside its owned root to native find, available on both Darwin and Linux; all other roots fail closed. The health assertions do not depend on BSD/GNU enumeration order or output.",
+  },
+  {
     kind: "chmod", file: "test-slot-private-capacity.test.ts", key: "0o644", count: 1,
     reason: "Publication rejects group/world-readable ownership by descriptor stat mode, independent of OS read privileges. This tests the explicit private-mode contract, not EACCES, so uid 0 cannot turn refusal into success.",
   },
