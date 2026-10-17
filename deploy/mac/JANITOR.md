@@ -114,7 +114,11 @@ incomplete, oversized, changed or failed replies never clear a candidate.
 Permission errors while resolving a symlink's referent are not treated as an
 unresolved non-reference: the peer returns that link for strict resolution by
 the caller using its own access. If neither account can resolve it, cleanup
-still holds. This supplements the full census; it does not bypass process,
+still holds. Resolving a known link pins and revalidates each physical path
+edge (inode, type, permissions and ownership), without treating unrelated
+sibling creation in an ancestor as a changed link. Enumerating a reference
+namespace still seals its complete directory identity, and every symlink edge
+is revalidated. This supplements the full census; it does not bypass process,
 CWD/open-file, six-hour, Git, duplicate-payload or retained-evidence protections.
 Duplicate package removal requires equal complete byte/mode/symlink namespaces
 and an unchanged full payload anchor retained in place. Unique `.vite` results

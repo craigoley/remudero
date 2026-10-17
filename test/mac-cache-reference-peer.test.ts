@@ -218,3 +218,31 @@ finally:os.open,os.close=original_open,original_close
     assert.deepEqual(r.shared, [f.target]); assert.ok(existsSync(f.target));
   } finally { f.clean(); }
 });
+
+test("cache reference resolver tolerates unrelated sibling churn but refuses a changed directory edge", () => {
+  for (const fault of ["sibling", "mode"]) {
+    const f = fixture();
+    try {
+      const r = f.run(String.raw`fault=` + JSON.stringify(fault) + String.raw`
+original_stat=os.stat;changed=[False]
+def sibling_change(path,*args,**kwargs):
+ result=original_stat(path,*args,**kwargs)
+ if path=='borrowed-dependencies' and not changed[0]:
+  changed[0]=True
+  if fault=='sibling':(root/'unrelated-sibling').write_text('preserve')
+  else:root.chmod(0o700)
+ return result
+os.stat=sibling_change
+try:
+ try:resolved=g['resolved_reference'](root,str(root/'borrowed-dependencies'),budget)
+ except ns['Hold'] as error:
+  assert fault=='mode' and str(error)=='scan-directory-changed',(fault,error)
+ else:assert fault=='sibling' and resolved==target,(fault,resolved)
+ assert changed[0]
+finally:os.stat=original_stat
+`);
+      assert.deepEqual(r.shared, [f.target], JSON.stringify({ fault, r }));
+      assert.equal(readFileSync(join(f.root, "private-source.ts"), "utf8"), "preserve source\n");
+    } finally { f.clean(); }
+  }
+});

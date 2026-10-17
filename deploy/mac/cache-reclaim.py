@@ -123,6 +123,37 @@ def checked_directory(path, budget, parent_fd=None, name=None, expected=None):
         os.close(fd)
 
 
+@contextmanager
+def pinned_reference_directory(path, budget, parent_fd=None, name=None, expected=None):
+    """Pin one known path edge, not an enumerated directory namespace.
+
+    Sibling creation changes directory times/size/link-count but cannot change
+    which inode a pinned edge names. Still revalidate that edge and descriptor,
+    including type, permissions and ownership. Namespace scans continue using
+    checked_directory's full identity; symlink edges are sealed separately.
+    """
+    def edge(s):
+        return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+
+    budget.check(entries=1)
+    operand = path if parent_fd is None else name
+    before = os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode) or expected is not None and identity(before)[:4] != expected[:4]:
+        raise Hold("scan-directory-changed")
+    sealed = edge(before)
+    fd = os.open(operand, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        if edge(os.fstat(fd)) != sealed:
+            raise Hold("scan-directory-changed")
+        yield fd
+        budget.check()
+        if (edge(os.fstat(fd)) != sealed
+                or edge(os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)) != sealed):
+            raise Hold("scan-directory-changed")
+    finally:
+        os.close(fd)
+
+
 class NamespaceEntry:
     """A checkpointed name always gets current no-follow metadata, never cached stat."""
     def __init__(self, name, fd):
@@ -903,7 +934,7 @@ def resolved_reference(parent, raw, budget):
                     # A lexical continuation owns each descriptor in an
                     # ordinary with-block. Only the final Path escapes; raw
                     # descriptors remain borrowed by this call's descendants.
-                    with checked_directory(child, budget, fd, part, observed) as child_fd:
+                    with pinned_reference_directory(child, budget, fd, part, observed) as child_fd:
                         anchors[str(child)] = child_fd
                         try:
                             return visit(child, remaining)
@@ -934,7 +965,7 @@ def resolved_reference(parent, raw, budget):
                 raise Hold("reference-symlink-changed")
         return resolved
     try:
-        with checked_directory(Path("/"), budget) as root_fd:
+        with pinned_reference_directory(Path("/"), budget) as root_fd:
             anchors["/"] = root_fd
             return visit(Path("/"), remaining)
     except RecursionError as error:
