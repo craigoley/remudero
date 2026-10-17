@@ -20,3 +20,11 @@
     The ledger step sweep.fix.dispatch_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The supplied record reports three recurrence rows but provides no underlying row evidence or diagnosed cause; its finding cannot be verified from what is shown, meeting the explicit escalation condition.; on the change's description/files alone, no diff was read — The task requires fixing a cause that remains to be located, while declaring only a new test file. Its sole acceptance proof greps for a test declaration rather than executing a behavioral check, leaving the proposed remedy insufficiently bounded and verified."
+    judged_at: "2026-10-16T23:28:40.997Z"
+    pin: "d9d8e063c68bb2eae3d0e546459ca62802c7cf1492332b0c5d2f1f6895b28c16"
