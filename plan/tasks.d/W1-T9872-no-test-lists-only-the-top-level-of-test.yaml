@@ -20,7 +20,7 @@
     - test/orphan-sweep-names-the-third-party.test.ts
     - test/git-fixture-gc-hygiene.test.ts
     - test/no-test-lists-only-the-top-level-of-test.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

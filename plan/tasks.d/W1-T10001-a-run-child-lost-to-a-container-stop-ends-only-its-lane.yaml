@@ -1,7 +1,7 @@
 - id: W1-T10001
   title: "A RUN CHILD LOST TO A CONTAINER STOP ENDS ONLY ITS LANE, AND NO CHILD SPAWNS PAST A RECYCLE HOLD — on 2026-10-17 W1-T9757's resume child waited 29 min in memory admission, spawned at 02:31:02Z under a container-recycle PAUSE, died with the container at 02:32Z, and its loss closed refill for every lane until the pass ended in error at 03:16:29Z"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T10000]  # W1-T10000 (filed 2026-10-17, same run-child.ts/daemon.ts surface) creates the run dir only after the reservation; serialize, never parallel
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -55,18 +55,14 @@
        When it is held, release the reservation, remove the empty run directory, ledger `run_child.spawn_withheld`
        {task_id, run_id, hold}, and return `unavailable`. The caller then treats the task as not started: no run.start
        and no strike.
-    3. src/lib/run-child.ts: create the run directory only once the reservation has admitted, so that a waiting
-       reservation never reads `unreadable` to `classifyRunDir` and never defers `engine.prune` for the length of an
-       admission wait.
+    3. The empty pre-admission run directory (the two `engine.prune_deferred` rows above) is W1-T10000's design 1,
+       which this task depends on; it is not rebuilt here.
     There are no fixed numbers: every decision reads the classifier, the hold or the reservation that already exists.
   acceptance:
     - claim: "a child lost to a container stop ends only its lane: refill stays open, the pass does not end in error, and its task is offered again"
       proof: 'grep: test("W1-T10001: a child lost to a container stop ends only its lane" in test/a-run-child-lost-to-a-container-stop-ends-only-its-lane.test.ts'
     - claim: "a reservation that admits under a recycle hold spawns no child and releases its reservation"
       proof: 'grep: test("W1-T10001: no child spawns past a recycle hold" in test/a-run-child-lost-to-a-container-stop-ends-only-its-lane.test.ts'
-    - claim: "a waiting reservation leaves no run directory for the engine prune to defer on"
-      proof: 'grep: test("W1-T10001: a waiting reservation leaves no unreadable run directory" in test/a-run-child-lost-to-a-container-stop-ends-only-its-lane.test.ts'
   falsifier: |
     Keep the crashed-run path for a container_stop loss: the first test's second lane is held "a lane rejected" and
     the pass stops with "error". Drop the hold read after `reserve`: the second test sees `run_child.spawned`.
-    Create the directory before `reserve`: the third test's `classifyRunDir` reads `unreadable`.

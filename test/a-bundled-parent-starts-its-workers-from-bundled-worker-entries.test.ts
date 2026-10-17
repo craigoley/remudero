@@ -66,7 +66,8 @@ function makeTree(): string {
 
 test("W1-T8777: the build emits and lists a bundle per named worker entry", async (t) => {
   const mod = await loadBuild();
-  assert.deepEqual([...mod.WORKER_ENTRIES], ["src/lib/read-model-worker.ts", "src/lib/read-model-slow-lane.ts", "src/lib/status.ts", "src/lib/board-worker.ts"]);
+  assert.deepEqual([...mod.WORKER_ENTRIES], ["src/lib/read-model-worker.ts", "src/lib/read-model-slow-lane.ts", "src/lib/status.ts", "src/lib/board-worker.ts",
+    "src/lib/tick-read-worker.ts"]);
   assert.equal(mod.workerBundleName("src/lib/board-worker.ts"), "worker-lib-board-worker.mjs");
   for (const module of mod.WORKER_ENTRIES) assert.ok(existsSync(join(REPO_ROOT, module)), `the declared worker ${module} exists, so the real build bundles it`);
   const root = makeTree();

@@ -164,7 +164,7 @@
   "src/lib/onboard/recon.ts": 167,
   "src/lib/onboard/session.ts": 121,
   "src/lib/onboard/synthesize.ts": 144,
-  "src/lib/open-prs-rest.ts": 460,
+  "src/lib/open-prs-rest.ts": 461,
   "src/lib/operator-message.ts": 90,
   "src/lib/operator-notes.ts": 77,
   "src/lib/operator-sync.ts": 98,
@@ -224,6 +224,7 @@
   "src/lib/task-id-reservation.ts": 261,
   "src/lib/task-id.ts": 500,
   "src/lib/task-linter.ts": 1312,
+  "src/lib/tick-read-worker.ts": 1250,
   "src/lib/tier.ts": 67,
   "src/lib/trace.ts": 115,
   "src/lib/triage.ts": 169,
@@ -237,8 +238,8 @@
   "src/lib/worker-provider.ts": 1250,
   "src/lib/worker-scratch.ts": 96,
   "src/lib/worker.ts": 2000,
-  "src/lib/workflow-run.ts": 23,
+  "src/lib/workflow-run.ts": 24,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 18500,
+  "src/run-task.ts": 17250,
   "src/spike.ts": 18
 }

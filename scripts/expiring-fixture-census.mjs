@@ -94,7 +94,7 @@ export const AGED_FIELDS = [
     // buildOpenPrViews copies it to lastActivityAt, which deriveDisposition ages.
     field: "updatedAt",
     threshold: "sweep.staleDays (updatedAt -> lastActivityAt)",
-    source: "src/run-task.ts",
+    source: "src/lib/tick-read-worker.ts",
     evidence: ["lastActivityAt: pr.updatedAt"],
     offsetDays: STALE_DAYS_OFFSET,
   },

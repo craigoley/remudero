@@ -34,6 +34,8 @@ import type { WorkerResult } from "../src/lib/worker.js";
 
 const KNOWN = new Set(["remudero", "none"]);
 const PROPOSAL_ID = "followup:W1-T5060-1790000000000";
+/** W1-T9327: the drafts are sized under their title slug, so the test they name is their own falsifier, not another concern's. */
+const OWN_TEST = "test/name-the-actor-on-every-ledger-row-the-panel-renders.test.ts";
 
 // A fixture checkout: one existing src module (holding the symbol an already-true grep finds), a caller, and test/.
 const ROOT = mkdtempSync(join(tmpdir(), "rmd-w1-t9039-"));
@@ -41,7 +43,7 @@ mkdirSync(join(ROOT, "src", "lib"), { recursive: true });
 mkdirSync(join(ROOT, "test"), { recursive: true });
 writeFileSync(join(ROOT, "src", "lib", "ledger.ts"), "export function rowActorOf(row: unknown): string {\n  return String(row);\n}\n");
 writeFileSync(join(ROOT, "src", "lib", "panel.ts"), "import { rowActorOf } from './ledger.js';\nrowActorOf(1);\n");
-writeFileSync(join(ROOT, "test", "ledger.test.ts"), "// fixture\n");
+writeFileSync(join(ROOT, OWN_TEST), "// fixture\n");
 after(() => rmSync(ROOT, { recursive: true, force: true }));
 
 const facts: DraftRepoFacts = {
@@ -82,7 +84,7 @@ function draft(shape: DraftShape): string {
 /** The ledgerRowActor proposal's cached draft: a NEW module whose only call proof greps the new file itself. */
 const UNCALLED_MODULE = draft({
   extra: ["  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
-  files: ["src/lib/ledgerCaller.ts", "test/ledger.test.ts"],
+  files: ["src/lib/ledgerCaller.ts", OWN_TEST],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
     ["the caller is called", "grep: ledgerCaller( in src/lib/ledgerCaller.ts"],
@@ -91,7 +93,7 @@ const UNCALLED_MODULE = draft({
 const CALLED_MODULE = draft({
   risk: "high",
   extra: ["  band_meaning: span", "  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
-  files: ["src/lib/ledgerCaller.ts", "src/lib/panel.ts", "test/ledger.test.ts"],
+  files: ["src/lib/ledgerCaller.ts", "src/lib/panel.ts", OWN_TEST],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
     ["the caller is called", "grep: ledgerCaller( in src/lib/panel.ts"],
@@ -100,7 +102,7 @@ const CALLED_MODULE = draft({
 
 /** A grep proof whose pattern is already on the checkout, so proof-discrimination can never grade it green. */
 const ALREADY_TRUE = draft({
-  files: ["src/lib/ledger.ts", "test/ledger.test.ts"],
+  files: ["src/lib/ledger.ts", OWN_TEST],
   proofs: [
     ["the actor is named", "unit test: the actor is named on a ledger row"],
     ["the row names its actor", "grep: rowActorOf( in src/lib/ledger.ts"],
@@ -111,7 +113,7 @@ const NOT_YET_TRUE = ALREADY_TRUE.replace("grep: rowActorOf( in src/lib/ledger.t
 /** W1-T5060's shape: the drafter copied `status: blocked` from the plan index, and declared no retirement. */
 const BLOCKED = draft({
   status: "blocked",
-  files: ["src/lib/ledger.ts", "test/ledger.test.ts"],
+  files: ["src/lib/ledger.ts", OWN_TEST],
   proofs: [["the actor is named", "unit test: the actor is named on a ledger row"]],
 });
 
@@ -224,7 +226,7 @@ test("W1-T9039: a stored blocked draft becomes ready without a redraft", () => {
 test("W1-T9039: a draft the approve repair fixes is not held not ready", () => {
   const wide = draft({
     risk: "low",
-    files: ["src/lib/ledger.ts", "src/lib/panel.ts", "test/ledger.test.ts"],
+    files: ["src/lib/ledger.ts", "src/lib/panel.ts", OWN_TEST],
     proofs: [["the actor is named", "unit test: the actor is named on a ledger row"]],
   });
   assert.ok(lintDraftedFragment(wide, PROPOSAL_ID, undefined, KNOWN, facts.moduleExists, facts.readGrepProofFile)

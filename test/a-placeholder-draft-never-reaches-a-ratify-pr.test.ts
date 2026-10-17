@@ -104,6 +104,8 @@ test("each placeholder form independently blocks a draft while ordinary titles a
   }
   for (const proof of ["unit test: test/future.test.ts", "unit test: widget rejects ../bad.txt input"]) {
     assert.deepEqual(lintDraftedFragment(amended((t) => {
+      // This newly declared suite is the draft's own falsifier under its minted shard slug.
+      t.title = "Future";
       t.acceptance[0].proof = proof;
       t.files.push("test/future.test.ts");
       t.design = "CREATES: test/future.test.ts";
