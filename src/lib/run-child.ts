@@ -24,7 +24,7 @@ import {
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpecOptions, type RunChildStatus,
 } from "./run-child-contract.js";
 import { waitingStarts } from "./host-memory-admission.js";
-import { adoptRunChildReservation, reserveRunChild, RunChildAdmissionAbandoned } from "./run-child-reservation.js";
+import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { killProcessGroup } from "./worker-containment.js";
@@ -586,7 +586,7 @@ async function reserveWhilePending(
     try {
       writeAtomic(waitPath, JSON.stringify({ taskId: input.taskId, runId, sinceMs }));
     } catch (error) {
-      carryError = reasonOf(error);
+      carryError = reasonOf(error); // ledgered on the abandoned row: the next spawn then queues from its own start
     }
     log(RUN_CHILD_SPAWN_ABANDONED_STEP, { task_id: input.taskId, run_id: runId, waited_ms: waitedMs, ...carriedRow,
       ...(carryError === undefined ? {} : { carry_error: carryError }) });
@@ -607,7 +607,7 @@ async function reserveWhilePending(
     reservation.releaseOccupancy();
     return abandon();
   } catch (error) {
-    if (signal.aborted || error instanceof RunChildAdmissionAbandoned) return abandon();
+    if (signal.aborted) return abandon();
     clearCarried();
     throw error;
   } finally {

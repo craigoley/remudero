@@ -12,14 +12,6 @@ import {
   type RunChildEntryKind, type RunChildProbe, type RunChildSpec,
 } from "./run-child-contract.js";
 
-/** W1-T10000: the admission wait was aborted, so no reservation was opened. */
-export class RunChildAdmissionAbandoned extends Error {
-  constructor(readonly waitedMs: number) {
-    super(`the run child's memory admission was abandoned after ${waitedMs} ms`);
-    this.name = "RunChildAdmissionAbandoned";
-  }
-}
-
 /** Admission and reservation happen in the daemon, before it spawns and binds the run child's pid. */
 export async function reserveRunChild(
   input: { lane: string; root: string; runId?: string; taskId?: string; entryKind: RunChildEntryKind; signal?: AbortSignal; sinceMs?: number },
@@ -28,7 +20,8 @@ export async function reserveRunChild(
   const workerClass = workerClassOfLane(input.lane);
   const reserve = () => openLearnedReservation({ workerClass, root: input.root, entryKind: input.entryKind }, deps);
   const admission = await awaitMemoryAdmission({ ...input, workerClass, reserve }, deps.admission);
-  if (admission.kind === "abandoned") throw new RunChildAdmissionAbandoned(admission.waitedMs);
+  // W1-T10000: an aborted wait opens no reservation; the caller that aborted it reads the abandonment off its own signal.
+  if (admission.kind === "abandoned") throw new Error(`the run child's memory admission was abandoned after ${admission.waitedMs} ms`);
   return ("reservation" in admission ? admission.reservation : undefined) ?? reserve();
 }
 

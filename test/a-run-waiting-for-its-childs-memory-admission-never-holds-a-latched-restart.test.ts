@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as flush } from "node:timers/promises";
@@ -302,6 +302,37 @@ test("W1-T10000: an abandoned admission wait keeps its queue position across the
   // A torn carried file carries no position.
   writeFileSync(join(fx.state, runChild.RUN_CHILD_ADMISSION_WAITS_DIR, "T-1.json"), "{");
   assert.equal(runChild.readCarriedAdmissionWait(fx.state, "T-1"), undefined);
+
+  // A reservation granted in the same moment as the abort is released, and the run is still abandoned.
+  let released = 0;
+  const late = { ...fx.handle, releaseOccupancy: () => { released += 1; } } as LearnedReservation;
+  const racing = await runChild.spawnRunChild({ ...fx.input, onPending: (pending) => { void pending.abort(); } }, { ...fx.base,
+    reserve: async () => late });
+  assert.equal("abandoned" in racing && racing.abandoned, true);
+  assert.equal(released, 1);
+});
+
+test("W1-T10000: a carried wait that cannot be written or cleared never fails the spawn", {
+  skip: process.getuid?.() === 0 ? "root bypasses chmod write denial" : false,
+}, async () => {
+  const fx = spawnFixture("unwritable-wait");
+  const waits = join(fx.state, runChild.RUN_CHILD_ADMISSION_WAITS_DIR);
+  mkdirSync(waits, { recursive: true });
+  writeFileSync(join(waits, "T-1.json"), JSON.stringify({ sinceMs: epoch }));
+  chmodSync(waits, 0o500);
+  try {
+    const held = await runChild.spawnRunChild(fx.input, { ...fx.base, reserve: async () => fx.handle });
+    assert.ok(held.started, "a carried file that cannot be removed still lets the child start");
+    held.settled.catch(() => {});
+    held.detach?.();
+    assert.equal(runChild.readCarriedAdmissionWait(fx.state, "T-1"), epoch, "the file is left behind, unremoved");
+    rmSync(join(fx.state, "runs"), { recursive: true, force: true });
+    const other = { ...fx.input, taskId: "T-2", onPending: (pending: runChild.RunChildPending) => { void pending.abort(); } };
+    const abandoned = await runChild.spawnRunChild(other, { ...fx.base });
+    assert.equal("abandoned" in abandoned && abandoned.abandoned, true);
+    const row = fx.rows.find((r) => r.step === "run_child.spawn_abandoned" && r.task_id === "T-2");
+    assert.match(String(row?.carry_error), /EACCES|EPERM/, "the row names why the wait could not be carried");
+  } finally { chmodSync(waits, 0o700); }
 });
 
 test("W1-T10000: a child refill that falls back in-process is judged as in-process", async () => {
@@ -335,4 +366,32 @@ test("W1-T10000: a child refill that falls back in-process is judged as in-proce
       }
     } finally { await h.close(); }
   }
+
+  // runOne's child path asks before it stays in-process, and a refusal ends the lane as a lane-local admission error.
+  const { runInChildWhenOn } = await import("#src/run-task.js");
+  const root = tmp("fallback-wiring");
+  const asked: string[] = [];
+  const base = {
+    taskId: "C", config: { claudeBin: "/bin/true", root, installRoot: process.cwd() } as never, repoDir: root, allowStale: true,
+    options: { handOffAtPrOpen: true, pairedTrialHost: "daemon" as const }, planSync: async () => ({}) as never, log: () => {},
+  };
+  const noEngine = async () => ({ started: false as const, reason: "no current engine tree for main" });
+  const refuse = (reason: string) => { asked.push(reason); return false; };
+  await assert.rejects(runInChildWhenOn({ ...base, mayRunInProcess: refuse }, { readMode: () => "on", spawn: noEngine as never }),
+    (error: unknown) => error instanceof TaskAdmissionError && /restart latched/.test(String(error)));
+  await assert.rejects(runInChildWhenOn({ ...base, mayRunInProcess: refuse }, { readMode: () => "shadow" }), TaskAdmissionError);
+  assert.deepEqual(asked, ["no current engine tree for main", "sweep.runChild.mode is not on"]);
+  assert.equal(await runInChildWhenOn({ ...base, mayRunInProcess: () => true }, { readMode: () => "on", spawn: noEngine as never }), undefined);
+});
+
+test("W1-T10000: a pending run that falls back in-process under the latch is a holdout again", async () => {
+  const h = await rig({ laneCount: 2, holdSweep: true, behaviour: (id) => id === "B" ? "pending" : "in-process" });
+  try {
+    await h.latch();
+    const fallBack = h.runOptions.get("B")!.mayRunInProcess as (reason: string) => boolean;
+    assert.equal(fallBack("the run child could not be started: spawn failed"), true, "a run started before the latch may run in-process");
+    for (let i = 0; i < 5 && h.find("daemon.freshness_restart_waiting").length === 0; i++) await h.tick();
+    const lanes = h.find("daemon.freshness_restart_waiting")[0]?.fields.lanes as Array<{ task: string; holdout: boolean }>;
+    assert.deepEqual(lanes.map((lane) => [lane.task, lane.holdout]), [["A", true], ["B", true]], "B is in-process work again, held for");
+  } finally { await h.close(); }
 });
