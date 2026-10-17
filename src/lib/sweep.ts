@@ -17979,9 +17979,7 @@ export async function runSweep(
         const seedRead = dispatchedThisHead ? fixSeedRead(ledgerLines, pr, deps.runId) : undefined;
         alreadyDone = metadataRed || emptyDiffReviewFailure(pr)
           ? false
-          : dispatchedThisHead && (seedRead === undefined
-            ? !fixRungStalledWithoutNewHead(ledgerLines, fixLedgerTaskIdFor(pr))
-            : seedRead.kind === "live");
+          : dispatchedThisHead && (seedRead?.kind ?? "live") === "live"; // no read: a taskless PR's key (W1-T9955)
         if (seedRead?.kind === "orphaned" && !deps.dryRun) {
           appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: FIX_SEED_ORPHANED_STEP,
             pr_number: pr.prNumber, head_sha: pr.headSha, seed_ts: seedRead.seed.ts, seed_run_id: seedRead.seed.runId });
