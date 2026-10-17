@@ -249,13 +249,18 @@ ns['DirectoryProgress'].save=failed_save
       for (let n = 0; n < 3; n++) {
         const r = f.run(false, 500_000, `os.environ['SAVE_FAULT']=${JSON.stringify(fault)}\n` + inject);
         assert.ok(r.decisions.some((v: any) => v.action === "keep" && /owned-|stage-present/.test(v.reason ?? "")), JSON.stringify(r));
-        assert.deepEqual(readFileSync(join(f.stateDir, "inventory.json")), inventory);
+        if (fault !== "dir-fsync") assert.deepEqual(readFileSync(join(f.stateDir, "inventory.json")), inventory);
+        else assert.equal(r.inspection.progress.state, "resumed", "each following pass authenticates the prior publication");
         assert.deepEqual(readdirSync(f.stateDir).sort(), ["unlink", "race", "abandoned"].includes(fault) ? ["inventory.json", "inventory.tmp", "key"] : ["inventory.json", "key"]);
         if (fault === "unlink" && n === 0) assert.equal(r.inspection.progress.saveStageCleanupUnverified, true);
         if (fault === "dir-fsync") assert.equal(r.inspection.progress.saveStageAbsent, true);
       }
       if (fault === "race") assert.equal(readFileSync(join(f.stateDir, "inventory.tmp"), "utf8"), "preserve replaced stage");
       if (fault === "abandoned") assert.equal(readFileSync(join(f.stateDir, "inventory.tmp"), "utf8"), "retain unknown crash-left stage\n");
+      // Rename precedes directory sync: on its failure a new authenticated
+      // inventory can already be published. Do not falsely demand old bytes
+      // or roll back over them; verify its next real read succeeds instead.
+      if (fault === "dir-fsync") assert.equal(f.run().inspection.progress.state, "resumed");
       assert.ok(existsSync(f.cache));
     } finally { rmSync(f.home, { recursive: true, force: true }); }
   }
