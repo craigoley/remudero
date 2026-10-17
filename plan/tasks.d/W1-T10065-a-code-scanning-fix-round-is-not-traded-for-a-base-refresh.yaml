@@ -1,0 +1,72 @@
+- id: W1-T10065
+  title: "A CODE-SCANNING FIX ROUND IS NEVER TRADED FOR A BASE REFRESH WHEN MAIN DID NOT TOUCH THE ALERT'S FILE — on 2026-10-17 #12570's code_scanning.fix_dispatch for CodeQL alert #429 (js/file-system-race at src/lib/test-slot-mutation.ts:239) reached the fix rung twice (14:25Z, 14:59Z) and both times `decideRedBaseRefresh` read the alert as a fileless red, matched main's scripts/ changes as harness evidence, and merged main instead of dispatching the worker; the alert stayed until a hand fix at 17:44Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, what base evidence a code-scanning alert red takes in the fix rung's base-gap refresh; the code-scanning judge, its dispatch, the refresh for test and diff-coverage reds and W1-T8038's timeout rule are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 filing agent F17 item 2, from the hand fix of #12570 (X1, 16:40-17:48Z)"
+  plan_refs: [W1-T5633, W1-T9731, W1-T2671, W1-T8038, W1-T8396, W1-T7445, W1-T9928, W1-T10066]
+  files:
+    - src/lib/sweep.ts
+    - test/a-code-scanning-fix-round-is-not-traded-for-a-base-refresh.test.ts
+  status: queued
+  priority: 1  # a real high alert is the one red a base refresh cannot clear, and the swap spent no strike, so it repeated each pass
+  attempts: 0
+  rationale: |
+    OBSERVED on the core ledger (the 14:46Z and 17:04Z archives, read-only, niced, streamed to the Mac), #12570
+    (W1-T9928):
+    - 14:23:38Z code_scanning.judged_fix alert 429 js/file-system-race; 14:25:24Z code_scanning.fix_dispatch at head
+      5885a9b33; 14:25:47Z fix.base_refresh_checked failing_test_files [], failing_source_files [], matching_base_files
+      [scripts/census-precheck.mjs, scripts/fixture-copy-census.mjs], refresh true; refresh.clearance arm fix-rung
+      checks ["CodeQL alert #429 (js/file-system-race)"] evidence fileless; 14:25:49Z branch.update_requested
+      outcome updated; fix.base_refreshed. No worker ran.
+    - 14:58:45Z judged_fix again at e03c0f898; 14:59:42Z the same swap, matching_base_files
+      [scripts/test-location-codemod.mjs]; head 6fdf247dd. 16:40:45Z (head 98e672e07) main had moved nothing, refresh
+      false, and the round then waited in memory admission (see W1-T10069). X1 hand-fixed the race (6fbe37eba).
+    READ at origin/main 70b15edf7 (symbols, not lines), src/lib/sweep.ts:
+    - `codeScanningFixCiFailures` names each alert `CodeQL alert #<n> (<rule>)` and puts `location: <path>:<line>` in
+      its logTail.
+    - `decideRedBaseRefresh` takes its files from `failingTestFilesFromCiFailures` and the diff-coverage report only,
+      so an alert red has none. `redIsTimedOutOrFileless` is then true, and W1-T8038's rule counts every main change to
+      a harness path (`isCiHarnessPath`: workflows, scripts/*, test/setup/) as matching evidence.
+    - A scanner alert is not fileless: it names its file, and merging main can clear it only if main changed that file
+      (or the analysis is re-run on a tree where the flagged code differs).
+    WHY THIS IS NOT ANOTHER TASK: W1-T9731 (merged) made a security-alert-hold dispatch this fix; W1-T5633 (merged) is
+    the judge and fix path; W1-T8038 (merged) is the timeout/fileless harness rule this narrows; W1-T8396 and W1-T7445
+    (merged) refine test and diff-coverage reds. W1-T10066 gives an ordinary mixed-red round the alert's evidence. Swept
+    origin/main plan/tasks.d for decideRedBaseRefresh, redIsTimedOutOrFileless, isCiHarnessPath, harness match and
+    codeScanningFixCiFailures, and the 3 open PR heads (18:26Z): none.
+  design: |
+    1. `decideRedBaseRefresh` reads a code-scanning alert failure's location: a failure carrying the alert shape (one
+       exported predicate shared with `codeScanningFixCiFailures` and `codeqlBlockerCiFailure`, never a second regex
+       copy) contributes its `path` as a failing source file.
+    2. An alert path matches main's changed files exactly as a diff-coverage source path does, so a refresh happens
+       only when main changed the alert's own file.
+    3. A red whose only members are alerts is never fileless, so W1-T8038's harness rule does not apply to it. A
+       timed-out or cancelled job keeps that rule as today.
+    4. `fix.base_refresh_checked` names the alert paths in `failing_source_files`, so the ledger shows why no refresh
+       happened.
+    5. TESTS in test/a-code-scanning-fix-round-is-not-traded-for-a-base-refresh.test.ts, `test(` titles verbatim as in
+       the proofs, driving `decideRedBaseRefresh` with `codeScanningFixCiFailures` output: #12570's 14:25Z shape (behind
+       18, main changed only scripts/census-precheck.mjs and scripts/fixture-copy-census.mjs) returns refresh false; main
+       changing src/lib/test-slot-mutation.ts returns refresh true; a cancelled job with no file still matches a
+       harness path (control).
+  acceptance:
+    - claim: "a code-scanning alert red is not refreshed when main changed only harness paths"
+      proof: 'grep: test("W1-T10065: an alert red is not refreshed on a harness-only main change" in test/a-code-scanning-fix-round-is-not-traded-for-a-base-refresh.test.ts'
+    - claim: "a code-scanning alert red is refreshed when main changed the alert's own file"
+      proof: 'grep: test("W1-T10065: an alert red is refreshed when main changed its file" in test/a-code-scanning-fix-round-is-not-traded-for-a-base-refresh.test.ts'
+    - claim: "a timed-out or cancelled red with no file still takes the harness rule"
+      proof: 'grep: test("W1-T10065: a cancelled red with no file still matches a harness path" in test/a-code-scanning-fix-round-is-not-traded-for-a-base-refresh.test.ts'
+  falsifier: |
+    At origin/main `decideRedBaseRefresh(codeScanningFixCiFailures([alert429], "r"), { behindBy: 18, baseChangedFiles:
+    ["scripts/census-precheck.mjs", "scripts/fixture-copy-census.mjs"] })` returns refresh true with those two files
+    matched, so the first test fails. Dropping the harness rule entirely fails the third. Deleting the fix gives
+    `# fail N`, restoring it `# fail 0`.
+  note: |
+    EFFECT, measured after merge from the core ledger: fix.base_refreshed rows whose red_checks are all `CodeQL alert`
+    names and whose matching_base_files do not include the alert's path. Healthy shape: none.
