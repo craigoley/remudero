@@ -26,3 +26,35 @@ the complete source/toolchain/input closure and bounded drift policy.
 Cleanup must protect dependency donors referenced by live views even when no file
 is currently open. Six-hour age alone is insufficient. Source, history, dirty or
 unpushed work, active readers/writers and unknown provenance remain protected.
+
+## Read-only whole-author planning
+
+`scripts/plan-author-runtime.mjs` estimates the full physical test corpus using
+the existing native sample profile plus closed phase evidence from the current
+clean source tree. It does not start tests, take a lease, narrow selection, change
+worker policy or authorize a gate. It is an opt-in operator diagnostic; existing
+author admission and daemon cutoffs are unchanged.
+
+```sh
+node --import tsx scripts/plan-author-runtime.mjs \
+  --runtime-profile coverage/rmd-native-runtime-EXAMPLE/profile.json \
+  --author-receipt coverage/preflight-author.json \
+  --workers 1 --deadline 2026-10-17T23:00:00Z
+```
+
+The example paths and deadline are placeholders, not a reusable profile, worker
+reservation or grant. Supply the current owned profile, complete author capture
+and a fixed future deadline. The tool rechecks source/runtime bindings, native
+captures and final test summaries; partial, failed, over-capacity, skipped or
+foreign evidence remains `not-measured`, never zero-cost work. In particular, an
+otherwise successful Linux run with a platform skip is not whole-gate training
+evidence under this conservative contract.
+
+Census, static checks and selection/admission overhead are serial costs: they are
+not divided by test workers. Tests are repriced once by the existing estimator;
+prior test duration is not added twice. Elapsed time reduces the original fixed
+deadline once. A fit exits 0, an estimated non-fit exits 3, and unavailable or
+invalid evidence exits 2. None of those exits is an author PASS. Every estimate
+keeps `dispatchAllowed`, `capacityGranted`, `authorPassReused` and
+`resourceFitQualified` false; a sample-calibrated full-corpus estimate is not a
+full-corpus measurement or a guarantee of runtime or resource availability.
