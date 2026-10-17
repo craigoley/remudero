@@ -1,0 +1,55 @@
+- id: W1-T9984
+  title: "A PERSISTED FOOTPRINT DOES NOT HIDE A CALIBRATION ERROR — the real recorder returns persisted:true with a calibration failure reason, but the daemon memory reader emits a reason only for persisted:false"
+  repo: remudero
+  depends_on: [W1-T8879]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low
+  band_meaning: span
+  origin: "operator-approved memory follow-through, 2026-10-17"
+  plan_refs: [W1-T8879]
+  files:
+    - src/run-task.ts
+    - test/the-daemon-heartbeat-says-what-its-memory-is.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED on main cc5d933ee5795df91be440f1c9c8e8149277ee4c, rechecked on
+    185daa27cfc13ce4d5cce02a9997b6fe988596ec before the normal operator reservation:
+    createDaemonFootprint.record keeps a successful footprint write as persisted:true when the existing
+    calibration observer throws, and returns a calibration-prefixed reason. daemonMemoryTelemetryReader
+    includes footprint_persist only for !kept.persisted. Its healthy and calibration-failed memory rows
+    are therefore indistinguishable. A bounded exact-function diagnostic with the real recorder/catch
+    confirms the omission; this is not proof that a live calibration failure occurred or caused gaps.
+    W1-T8879 is implemented and owns calibration semantics. This successor changes error visibility only.
+    Fresh complete open-head file and added-subject checks found no implementation of this correction.
+    Do not infer a frozen collector from jointly old footprint and calibration timestamps, or qualify
+    the shadow budget from a successful persistence result. No memory-policy activation is authorized.
+  design: |
+    1. Preserve a named, payload-free calibration-error state on the existing memory row when the
+       existing recorder reports successful footprint persistence plus calibration collection failure.
+       Use bounded stable state labels, not exception text, file paths, ledger contents or credentials.
+       Keep that state distinct from footprint_persist errors and from a healthy collection.
+    2. Extend the existing production-reader test file, which already imports run-task. Exercise the
+       real daemonMemoryTelemetryReader plus real createDaemonFootprint.record/catch with a successful
+       footprint writer and a throwing observer. Do not test a copied reader or only a fake recorder.
+    3. Keep independent controls for healthy observation, footprint-persistence failure and absent
+       footprint. Assert heartbeat/memory fields are retained and the observer is invoked only once
+       through the existing sample. No new timer, kernel/heap request, collector, forecast, pending
+       consumption, qualification rule, resource limit or policy change.
+    4. Remove only the reporting correction to prove the new regression fails for the missing state;
+       restore it to pass. Run the census suites and normal exact-head author gate before first push.
+       Required hosted checks, normal review, merge and measured adoption remain separate evidence.
+  acceptance:
+    - claim: "a calibration collection failure remains visible after the real recorder successfully persists the footprint"
+      proof: 'grep: test("W1-T9984: calibration collection failure survives a persisted footprint" in test/the-daemon-heartbeat-says-what-its-memory-is.test.ts'
+    - claim: "healthy, absent-footprint and persistence-failure samples remain distinct, keep the heartbeat, and add no second observer call"
+      proof: 'grep: test("W1-T9984: calibration reporting keeps healthy and persistence states separate" in test/the-daemon-heartbeat-says-what-its-memory-is.test.ts'
+  falsifier: |
+    Restore only the old persisted:false reporting predicate, keeping the real recorder and throwing
+    calibration observer. The first test must fail because the calibration-error state disappears.
+    Remove the distinction from a footprint persistence error or add a second observer invocation:
+    the independent controls must fail. Never weaken the assertions or the calibration qualification.
