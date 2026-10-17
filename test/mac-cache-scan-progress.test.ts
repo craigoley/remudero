@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const script = resolve("deploy/mac/cache-reclaim.py");
 function fixture(noise = false) {
@@ -15,15 +16,11 @@ function fixture(noise = false) {
     const dir = join(root, `noise-${n}`); mkdirSync(dir);
     for (let k = 0; k < 100; k++) writeFileSync(join(dir, `report-${k}.json`), "retained diagnostic\n");
   }
-  const workspace = join(root, "candidate"); mkdirSync(workspace);
-  const git = (...args: string[]) => {
-    const r = spawnSync("git", ["-C", workspace, ...args], { encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } });
-    assert.equal(r.status, 0, r.stderr); return r.stdout;
-  };
-  git("init", "-q"); git("config", "user.name", "fixture"); git("config", "user.email", "fixture@example.invalid");
-  writeFileSync(join(workspace, "package.json"), '{"private":true}\n');
-  writeFileSync(join(workspace, ".gitignore"), ".next/\n");
-  git("add", "."); git("commit", "-qm", "fixture source");
+  const repo = gitRepo({ seedCommit: false, kind: "cache-progress-source" });
+  writeFileSync(join(repo.dir, "package.json"), '{"private":true}\n');
+  writeFileSync(join(repo.dir, ".gitignore"), ".next/\n");
+  repo.git("add", "."); repo.git("commit", "-qm", "fixture source");
+  const workspace = join(root, "candidate"); renameSync(repo.dir, workspace);
   writeFileSync(join(workspace, "private-unpublished.ts"), "preserve unpublished source\n");
   const cache = join(workspace, ".next/cache/turbopack"); mkdirSync(cache, { recursive: true });
   writeFileSync(join(cache, "0001.sst"), "owned generated compiler cache\n");

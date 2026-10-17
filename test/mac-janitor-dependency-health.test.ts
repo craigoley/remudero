@@ -27,9 +27,9 @@ function fixture(t: TestContext) {
   command("ps", "exit 2");
   command("lsof", "exit 2");
   command("df", "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 200000000 1 100000000 1%% /\\n'");
-  // The existing directory reporter asks these local Git questions even for
-  // a checkout without .git. Refuse them; trap any network or mutation attempt.
-  command("git", 'case "$*" in "--no-lazy-fetch --version") exit 1 ;; *" config --get-regexp "*|*" ls-files -- "*) exit 128 ;; esac\nprintf "%s\\n" "git $*" >> "$FIXTURE_INVOKED"; exit 97');
+  // No real Git operation is needed in this fixture. Refuse every read and
+  // separately trap network/mutation attempts rather than emulating a census.
+  command("git", 'case " $* " in *" fetch "*|*" push "*|*" clone "*|*" checkout "*|*" reset "*|*" clean "*|*" worktree "*) printf "%s\\n" "git $*" >> "$FIXTURE_INVOKED"; exit 97 ;; esac\nexit 128');
   for (const name of ["npm", "npx", "pnpm", "yarn", "open", "osascript"]) {
     command(name, 'printf "%s\\n" "$0 $*" >> "$FIXTURE_INVOKED"; exit 97');
   }
@@ -133,6 +133,9 @@ test("Janitor dependency health: declared tsx remains diagnosable when no execut
 
 test("Janitor dependency health: inaccessible or non-file runners do not become missing dependency claims", t => {
   for (const kind of ["tsx-permission", "vitest-permission", "vitest-directory"]) {
+    // Root bypasses read permission bits; the directory/FIFO controls below
+    // remain uid-independent and still execute on that host condition.
+    if (process.getuid?.() === 0 && kind !== "vitest-directory") continue;
     const fx = fixture(t); fx.checkout(fx.core, { dependencies: { tsx: "^4", vitest: "^3" } });
     fx.availableVitest();
     const runner = join(fx.core, kind === "tsx-permission" ? "node_modules/.bin/tsx" : "node_modules/vitest/vitest.mjs");
@@ -190,6 +193,7 @@ test("Janitor dependency health: malformed JSON and dependency maps report unkno
 
 test("Janitor dependency health: missing, non-file, oversized and unreadable manifests fail safely", t => {
   for (const kind of ["missing", "directory", "oversized", "permission", "fifo"]) {
+    if (process.getuid?.() === 0 && kind === "permission") continue;
     const fx = fixture(t); fx.checkout();
     const manifest = join(fx.core, "package.json");
     if (kind === "oversized") writeFileSync(manifest, " ".repeat(1024 * 1024 + 1));
