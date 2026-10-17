@@ -203,10 +203,17 @@ test('author static admission holds one real slot from static preflight through 
     import { test } from 'node:test';
     import assert from 'node:assert/strict';
     import { existsSync, readFileSync } from 'node:fs';
+    import { dirname } from 'node:path';
+    import { acquireTestSlot } from ${JSON.stringify(slotModule)};
     test('affected child retains the admitted owner',()=>{
       const claim=JSON.parse(readFileSync('coverage/slot-owner.json','utf8'));
       assert.ok(existsSync(claim.path),'the same owner remains held during affected execution');
-      assert.equal(process.env.RMD_TEST_SLOT_PARENT,undefined,'native fixtures do not inherit the production admission claim');
+      assert.equal(process.env.RMD_TEST_SLOT_PARENT, JSON.stringify(claim),
+        'the covered child carries the owner marker for quiescence checks');
+      const nested=acquireTestSlot('affected-test-child',{dir:dirname(claim.path),slots:1,waitBoundMs:0,
+        load:()=>({cores:8,load1:0}),log:()=>{}});
+      assert.equal(nested.outcome,'wait_bound_exceeded',
+        'a native test child may carry the marker but cannot borrow the author slot');
     });
   `);
   f.git('add', '.'); f.git('commit', '-m', 'test: real static and affected admission');

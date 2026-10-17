@@ -402,7 +402,8 @@ test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept"
   const failedRows: Record<string, unknown>[] = [];
   assert.equal(acquireSlotMutation(path, { ...recovery("closed", 10, failedRows), probe: () => { throw new Error("probe denied"); } }).state, "busy");
   assert.match(String(failedRows[0]?.reason), /probe denied/);
-  chmodSync(guard, 0o644);
+  // A readable group/other bit makes the guard non-private without a uid-dependent denial.
+  chmodSync(guard, 0o744);
   assert.equal(acquireSlotMutation(path, recovery("closed", 10, failedRows)).state, "busy");
   assert.equal(existsSync(guard), true);
   unlinkSync(guard);
