@@ -1060,6 +1060,35 @@ function* ensurePrOpen(
   return { prUrl };
 }
 
+function* closeRedundantLandingPr(
+  kind: LandingKind,
+  net: LandingNet,
+  build: LandingTreeBuild,
+): Generator<LandingAsk, void, AskReply> {
+  if (!build.branchTipSha || (yield* net.git(["rev-parse", `${build.branchTipSha}^{tree}`])).trim() !== build.treeSha) return;
+  const repoArgs = landingRepoArgs(kind);
+  const open = (JSON.parse(yield* net.gh([
+    "pr", "list", "--head", kind.prHead, "--base", "main", "--state", "open", "--json", "url,headRefOid", ...repoArgs,
+  ])) as Array<{ url: string; headRefOid: string }>)[0];
+  if (!open || open.headRefOid !== build.branchTipSha) return;
+  const existing = open.url;
+  const merged = JSON.parse(yield* net.gh([
+    "pr", "list", "--head", kind.prHead, "--base", "main", "--state", "merged",
+    "--json", "url,mergeCommit", "--limit", "100", ...repoArgs,
+  ])) as Array<{ url: string; mergeCommit?: { oid: string } }>;
+  for (const pr of merged) {
+    const sha = pr.mergeCommit?.oid;
+    if (!sha || (yield* net.git(["merge-base", sha, build.mainSha])).trim() !== sha) continue;
+    const paths = (yield* net.git(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--first-parent", "-m", sha, "--", kind.ownedDir]))
+      .trim().split("\n").filter(Boolean);
+    if (paths.length === 0 || (yield* net.git(["diff", "--name-only", sha, build.mainSha, "--", ...paths])).trim() !== "") continue;
+    assertLiveWriteAllowed("gh-transport", `closing the redundant landing PR ${existing}`);
+    yield* net.gh(["pr", "close", existing, "--comment", `Content already landed in ${pr.url}; nothing remains to land against main.`, ...repoArgs]);
+    return;
+  }
+  throw new Error(`cannot identify the merged PR carrying ${existing}'s content on main`);
+}
+
 /**
  * The commit/push/open-or-reuse-PR/arm tail every landing call shares, regardless of how its
  * tree was built ({@link landPending}'s disk scan or {@link landContent}'s in-memory content).
@@ -1088,6 +1117,19 @@ function* finishLanding(
     ...(b.refused.length > 0 ? { refused: b.refused } : {}),
     ...(b.carry ? { carry: b.carry } : {}),
   });
+  const nothingToLand = function* (b: LandingTreeBuild): Generator<LandingAsk, LandFeedbackResult | undefined, AskReply> {
+    if (b.treeSha !== (yield* net.git(["rev-parse", `${b.mainSha}^{tree}`])).trim()) return undefined;
+    opts.log?.("landing.nothing_to_land", { family: kind.family, branch: kind.branch, mainSha: b.mainSha });
+    const result: LandFeedbackResult = { landed: false, files: [], ...(b.refused.length > 0 ? { refused: b.refused } : {}) };
+    try {
+      yield* closeRedundantLandingPr(kind, net, b);
+      return result;
+    } catch (e) {
+      return { ...result, error: `redundant landing PR cleanup failed: ${String((e as Error)?.message ?? e)}` };
+    }
+  };
+  const initialNoop = yield* nothingToLand(build);
+  if (initialNoop) return initialNoop;
 
   // Push only when the tree differs from what's already on the branch: the tree is deterministic
   // for unchanged content but `commit-tree` stamps the time, so comparing commits instead
@@ -1097,7 +1139,9 @@ function* finishLanding(
   const bodyOf = function* (b: LandingTreeBuild): Generator<LandingAsk, string, AskReply> {
     const known = bodies.get(b);
     if (known !== undefined) return known;
-    const body = kind.prBody(b.unlanded, yield* landingTreeContent(net, b, b.unlanded));
+    const paths = b.unlanded.length > 0 ? b.unlanded :
+      (yield* net.git(["diff", "--name-only", b.mainSha, b.treeSha, "--", kind.ownedDir])).trim().split("\n").filter(Boolean);
+    const body = kind.prBody(paths, yield* landingTreeContent(net, b, paths));
     bodies.set(b, body);
     return body;
   };
@@ -1181,6 +1225,8 @@ function* finishLanding(
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
     leaseMoved = { expected: build.branchTipSha, observed: retried.branchTipSha, by: yield* tipAuthor(net, retried.branchTipSha) };
+    const retryNoop = yield* nothingToLand(retried);
+    if (retryNoop) return moved(retryNoop);
     yield* observePublication(retried);
     if ((yield* remoteBranchTree(net, kind.branch)) === retried.treeSha) {
       const { prUrl, error } = yield* ensurePrOpen(kind, net, yield* bodyOf(retried), requestReview);
@@ -1348,15 +1394,6 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
       }
       return { files, sources, contents, refused };
     };
-    const initialScan = yield* scanLocalUnlanded();
-    if (initialScan.files.length === 0) {
-      return withAcknowledgement(
-        initialScan.refused.length > 0
-          ? { landed: false, files: [], refused: initialScan.refused }
-          : { landed: false, files: [] },
-      );
-    }
-
     // Commit built against a SCRATCH index, never the caller's real one — the acknowledgement
     // above is the sole narrow working-tree mutation; this stays under W1-T60's isolation.
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
@@ -1657,11 +1694,6 @@ function* landContentSteps(
 
     yield* net.git(["fetch", "origin", "--quiet"]);
     const initialBuild = yield* buildTree((yield* net.git(["rev-parse", "origin/main"])).trim());
-    if (initialBuild.unlanded.length === 0) {
-      return initialBuild.refused.length > 0
-        ? { landed: false, files: [], refused: initialBuild.refused }
-        : { landed: false, files: [] };
-    }
 
     const rebuild = function* (): Generator<LandingAsk, LandingTreeBuild, AskReply> {
       yield* net.git(["fetch", "origin", "--quiet"]);
