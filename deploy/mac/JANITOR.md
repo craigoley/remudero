@@ -81,6 +81,36 @@ any incomplete/unreadable reference root never clears a candidate for removal.
 All original reference roots and depth limits remain in scope. A cheap root
 observation can only KEEP a recent, foreign or flagged target; only when every
 candidate is already kept can the reference phase be unnecessary.
+Completed directory namespaces are authenticated in a private checkpoint capped
+at 16 MiB. Prefix-coded paths and implicit LRU order avoid repeating long absolute
+paths. Loading bounds expanded path text as well as encoded bytes; eviction
+rebases the first remaining record. Old writer/format scopes cold-reset. Only
+namespace observations are reused: current directories/symlinks, age, activity,
+payload identity and deletion guards are checked again. No scan limit increases.
+
+An inaccessible physical reference subtree can be inspected by an explicitly
+configured, read-only peer account. The optional file
+`~/.local/state/remudero/cache-reference-peers.json` must be an owner-private
+0600 regular file below physical, same-owner, non-writable-by-others parents.
+It is a JSON array of `{ "uid": <subtree owner UID>, "argv": [<absolute program>, ...] }`.
+An operator may use an existing authorized SSH connection whose fixed remote
+command is `python3 '<installed helper path>/cache-reclaim.py' --reference-probe`.
+Arguments are executed without a local shell; requests go over stdin, never into
+the remote command string. Installation does not create credentials, authorize
+SSH keys, configure sudo, widen filesystem permissions or assume reciprocal
+account access. Missing configuration/authentication remains a typed hold.
+
+The peer endpoint accepts only owned physical subtrees in its existing reference
+roots and bounded request limits. It reads metadata and symlinks, not source or
+package contents, and creates no locks, checkpoints or cleanup stages. A nonce,
+request digest, exact writer generation, UID and sealed root identity bind its
+reply; entry/read/time costs consume the caller's remaining budget. Unknown,
+incomplete, oversized, changed or failed replies never clear a candidate.
+Permission errors while resolving a symlink's referent are not treated as an
+unresolved non-reference: the peer returns that link for strict resolution by
+the caller using its own access. If neither account can resolve it, cleanup
+still holds. This supplements the full census; it does not bypass process,
+CWD/open-file, six-hour, Git, duplicate-payload or retained-evidence protections.
 Duplicate package removal requires equal complete byte/mode/symlink namespaces
 and an unchanged full payload anchor retained in place. Unique `.vite` results
 and `.rmd-dependency-seed.json` receipts remain at their original paths. Source,
