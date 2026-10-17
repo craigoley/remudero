@@ -2557,7 +2557,6 @@ export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessC
   try {
     const status = hostWorktreeGit(cwd, ["status", "--porcelain", "-z", "--untracked-files=all"]);
     if (status.trim() === "") return { outcome: "nothing-to-commit" };
-    // W1-T10084: the W1-T10064 rewrite of an added test's relative imports, on this commit path too.
     const changed = status.split("\0").filter((entry) => entry.length > 3).map((entry) => entry.slice(3));
     const aliasRewrite = rewriteAddedTestImports(cwd, status, changed, (args) => hostWorktreeGit(cwd, args));
     hostWorktreeGit(cwd, ["add", "-A"]);
