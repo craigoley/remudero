@@ -86,6 +86,11 @@ unrecognized contents stay protected. Each file needs six hours of both mtime
 and ctime inactivity, with fresh process/CWD/open-file checks before removal.
 Cache roots and sibling fixtures/source/state stay in place. Delegated cache
 counts are logged separately from workspace-removal counts.
+Owned numeric `<pid>.pipe` Unix sockets are recognized as TSX IPC endpoints and
+retained, not deleted or treated as cache files. Their mere presence does not
+hide otherwise eligible old regular cache entries. The existing whole-cache
+live/open checks still hold a cache with a live endpoint. Foreign, linked,
+non-socket `.pipe` entries and all other unknown data retain the whole cache.
 
 The regular janitor additionally inspects this account's `.codex/work-artifacts`
 for exact ignored package duplicates and `.next/cache/turbopack` compiler data.

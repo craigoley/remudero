@@ -570,7 +570,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       receipt.affectedTestsNotRunReason = error.message;
     }
     receipt.error = error.message;
-    console.error(`author preflight REFUSED: ${error.message}`);
+    console.error(`author preflight ${error instanceof MacAuthorCapacityRefusal ? 'NOT_RUN' : 'REFUSED'}: ${error.message}`);
   }
   receipt.durationMs = Date.now() - startedAt;
   receipt.phaseAccounting = accountAuthorPhases(receipt);
