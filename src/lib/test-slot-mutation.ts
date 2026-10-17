@@ -17,6 +17,14 @@ export type SlotMutation =
   | { state: "acquired"; release(): void }
   | { state: "busy"; reason: "contended" | "unavailable" };
 
+/** Exclusive creation is the capacity decision on every attempt, including after recovery. */
+function createMutationGuard(path: string): { state: "created"; fd: number } | Extract<SlotMutation, { state: "busy" }> {
+  try { return { state: "created", fd: openSync(path, "wx", 0o600) }; }
+  catch (error) {
+    return { state: "busy", reason: (error as NodeJS.ErrnoException).code === "EEXIST" ? "contended" : "unavailable" };
+  }
+}
+
 /** Whether any process holds a guard open: only `closed` is positive evidence of an orphan. */
 export interface GuardHolderEvidence {
   state: "open" | "closed" | "unknown";
@@ -228,19 +236,14 @@ export function acquireSlotMutation(path: string, recovery?: OrphanGuardRecovery
   const uid = process.getuid?.();
   if (uid === undefined) return { state: "busy", reason: "unavailable" };
   const guard = mutationPath(path);
-  let fd: number;
-  try { fd = openSync(guard, "wx", 0o600); }
-  catch (error) {
-    const contended = (error as NodeJS.ErrnoException).code === "EEXIST";
-    // One retry, only after a proven orphan was removed (or vanished); a live writer always wins.
-    if (!contended || recovery === undefined || reclaimOrphanedSlotMutation(path, recovery) === "kept") {
-      return { state: "busy", reason: contended ? "contended" : "unavailable" };
-    }
-    try { fd = openSync(guard, "wx", 0o600); }
-    catch (retryError) {
-      return { state: "busy", reason: (retryError as NodeJS.ErrnoException).code === "EEXIST" ? "contended" : "unavailable" };
-    }
+  let attempt = createMutationGuard(guard);
+  if (attempt.state === "busy") {
+    if (attempt.reason !== "contended" || recovery === undefined || reclaimOrphanedSlotMutation(path, recovery) === "kept") return attempt;
+    // Recovery only permits another attempt. O_EXCL decides whether capacity is still free.
+    attempt = createMutationGuard(guard);
+    if (attempt.state === "busy") return attempt;
   }
+  const fd = attempt.fd;
   let owner: Stats;
   const privateEmpty = (st: Stats): boolean => st.isFile() && st.uid === uid && st.size === 0 && (st.mode & 0o077) === 0;
   const same = (st: Stats): boolean => privateEmpty(st) && st.dev === owner.dev && st.ino === owner.ino;

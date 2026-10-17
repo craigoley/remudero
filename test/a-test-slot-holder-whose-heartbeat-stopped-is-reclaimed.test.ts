@@ -538,6 +538,26 @@ test("W1-T9928: a changed or vanished orphan guard is re-observed before reclaim
   assert.equal(existsSync(guard), false);
 });
 
+test("W1-T9928: a replacement guard wins the exclusive retry after orphan recovery", t => {
+  const dir = slotDir(t, "guard-retry"), path = join(dir, "slot-1.json"), guard = join(dir, ".slot-1.json.mutation");
+  writeFileSync(guard, "", { mode: 0o600 });
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(guard, old, old);
+  let replacement: Stats | undefined;
+  const result = acquireSlotMutation(path, {
+    boundMs: () => 1, now: () => Date.now(),
+    probe: () => ({ state: "closed", probe: "fixture", reason: "no holder" }),
+    log: row => {
+      if (row.step === "test_slot.mutation_guard_reclaimed") {
+        writeFileSync(guard, "", { flag: "wx", mode: 0o600 });
+        replacement = lstatSync(guard);
+      }
+    },
+  });
+  assert.deepEqual(result, { state: "busy", reason: "contended" });
+  assert.equal(lstatSync(guard).ino, replacement?.ino, "the new writer's guard remains occupied");
+});
+
 test("W1-T9928: guard probe filesystem failures retain the guard", t => {
   const dir = slotDir(t, "guard-faults"), path = join(dir, "slot-1.json"), guard = join(dir, ".slot-1.json.mutation");
   const moduleUrl = new URL("../src/lib/test-slot-mutation.ts", import.meta.url).href;
