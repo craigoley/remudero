@@ -182,15 +182,21 @@ test("src/lib/ci-parity.ts marks CENSUS_POPULATION as the single census-populati
   // slogan describes: CENSUS_POPULATION is exported exactly once (no rival derivation minted
   // beside it), and every `discoverSrcFilteredLsFilesCallers`-shaped export in this file funnels
   // through that single array (no second `readonly CensusPopulationMember[]`-typed export exists).
-  const source = readFileSync(join(REPO_ROOT, "src", "lib", "ci-parity.ts"), "utf8");
-  const definitions = source.match(/^export const CENSUS_POPULATION: readonly CensusPopulationMember\[\] = \[/gm) ?? [];
-  assert.equal(definitions.length, 1, "CENSUS_POPULATION must be defined exactly once, not re-derived elsewhere");
-  const rivalPopulationTypedExports = source.match(/^export const \w+: readonly CensusPopulationMember\[\]/gm) ?? [];
-  assert.equal(
-    rivalPopulationTypedExports.length,
-    1,
-    "no second CensusPopulationMember[]-typed export may exist beside CENSUS_POPULATION",
-  );
+  // W1-T9877 moved the definition into the dependency-free src/lib/rule-suites.ts; ci-parity.ts re-exports it.
+  const definedIn = (file: string) => {
+    const source = readFileSync(join(REPO_ROOT, "src", "lib", file), "utf8");
+    return {
+      source,
+      definitions: (source.match(/^export const CENSUS_POPULATION: readonly CensusPopulationMember\[\] = \[/gm) ?? []).length,
+      typedExports: (source.match(/^export const \w+: readonly CensusPopulationMember\[\]/gm) ?? []).length,
+    };
+  };
+  const leaf = definedIn("rule-suites.ts");
+  const parity = definedIn("ci-parity.ts");
+  assert.equal(leaf.definitions, 1, "CENSUS_POPULATION must be defined exactly once, not re-derived elsewhere");
+  assert.equal(leaf.typedExports, 1, "no second CensusPopulationMember[]-typed export may exist beside CENSUS_POPULATION");
+  assert.equal(parity.definitions + parity.typedExports, 0, "ci-parity.ts must re-export the population, never define a rival");
+  assert.match(parity.source, /^export \{ CENSUS_POPULATION\b[^}]*\} from "\.\/rule-suites\.js";$/m);
 });
 
 // ═══ acceptance: "removing the derivation makes the denominator assertion fail — the falsifier ═══
