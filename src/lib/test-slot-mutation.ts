@@ -224,9 +224,9 @@ export function reclaimOrphanedSlotMutation(path: string, recovery: OrphanGuardR
 }
 
 /** O_EXCL decides ownership atomically, so the result is the descriptor itself, never a prior lookup. */
-function createGuard(guard: string): number | string {
-  try { return openSync(guard, "wx", 0o600); }
-  catch (error) { return String((error as NodeJS.ErrnoException).code ?? "unknown"); }
+function createGuard(guard: string): { ok: true; fd: number } | { ok: false; code: string | undefined } {
+  try { return { ok: true, fd: openSync(guard, "wx", 0o600) }; }
+  catch (error) { return { ok: false, code: (error as NodeJS.ErrnoException).code }; }
 }
 
 /** path is the canonical slot JSON pathname. A busy result never establishes free capacity. */
@@ -236,9 +236,11 @@ export function acquireSlotMutation(path: string, recovery?: OrphanGuardRecovery
   const guard = mutationPath(path);
   let created = createGuard(guard);
   // One retry, only after a proven orphan was removed (or vanished); a live writer always wins.
-  if (created === "EEXIST" && recovery !== undefined && reclaimOrphanedSlotMutation(path, recovery) !== "kept") created = createGuard(guard);
-  if (typeof created !== "number") return { state: "busy", reason: created === "EEXIST" ? "contended" : "unavailable" };
-  const fd = created;
+  if (!created.ok && created.code === "EEXIST" && recovery !== undefined && reclaimOrphanedSlotMutation(path, recovery) !== "kept") {
+    created = createGuard(guard);
+  }
+  if (!created.ok) return { state: "busy", reason: created.code === "EEXIST" ? "contended" : "unavailable" };
+  const fd = created.fd;
   let owner: Stats;
   const privateEmpty = (st: Stats): boolean => st.isFile() && st.uid === uid && st.size === 0 && (st.mode & 0o077) === 0;
   const same = (st: Stats): boolean => privateEmpty(st) && st.dev === owner.dev && st.ino === owner.ino;
