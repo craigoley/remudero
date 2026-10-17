@@ -45,6 +45,10 @@
        malformed/unreadable evidence stays unknown. Tests remove their own expected
        diagnostic fixtures after checking them; unexpected failures retain useful evidence.
        Bound and reap only their own disposable child groups, never a peer worker.
+       Register an-incomplete-census-capture-survives-its-producer-exit.test.ts in
+       PRECHECK_PARITY in the already-declared scripts/census-precheck.mjs, with its
+       actual reader/retention sources as triggers. Run the real semantic suite; no dummy
+       registration, rule-suite naming exemption or census baseline change.
     4. Delete actual production retention forwarding to make the post-exit semantic test
        fail, then restore it to pass. A map unit test or an in-process existence assertion
        alone does not prove custody. Test default IO and each new catch; source-map every
