@@ -370,7 +370,7 @@ test("janitor reporting translates bounded cache JSON including deferred and unv
     assert.deepEqual(rows.map(row => row.slice(2, 4)), [
       ["keep", "cache_reference_corpus_incomplete"], ["keep", "cache_recent_foreign_or_flagged"],
       ["planned", "generated_cache_eligible"], ["remove", "generated_cache_eligible"],
-      ["remove", "cache_removal_unverified"], ["keep", "cache_probe_unknown"], ["info", "cache_inspection_incomplete"],
+      ["info", "cache_removal_unverified"], ["keep", "cache_probe_unknown"], ["info", "cache_inspection_incomplete"],
     ]);
     assert.deepEqual(rows.map(row => row[5]), ["unknown", "4096", "8192", "0", "unknown", "unknown", "unknown"]);
     assert.match(r.stdout, /cache_reference_corpus_incomplete=1 known-observed-bytes=0 unknown-size-decisions=1 total-bytes=unknown/);

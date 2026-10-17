@@ -199,7 +199,8 @@ try:
     if report.get("version") != 1 or not isinstance(report.get("decisions"), list):
         raise ValueError("unrecognized cache report")
     rows = []
-    actions = {"keep": "keep", "removed": "remove", "would-remove": "planned", "removed-unverified": "remove"}
+    # A partial or unverified removal is not a completed remove decision.
+    actions = {"keep": "keep", "removed": "remove", "would-remove": "planned", "removed-unverified": "info"}
     for row in report["decisions"]:
         if not isinstance(row, dict) or row.get("action") not in actions:
             raise ValueError("unrecognized cache decision")
