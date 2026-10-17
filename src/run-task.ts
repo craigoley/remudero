@@ -1709,6 +1709,7 @@ import {
   readMergeCreditedTaskIds,
   isMergeCreditLine,
   readRequiredStatusCheckContexts,
+  readRequiredStatusCheckContextsAsync,
   persistVerifiedCredit,
   type ThrownRunVerdictStage,
   type RefusedRunVerdictStage,} from "./lib/status.js";
