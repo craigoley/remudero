@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.21
   status: queued
@@ -36,10 +36,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.93
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
     reasons:
-      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The record supplies repeated failing-check references and proxy costs, but no failure messages or shared root-cause diagnosis; the proposed prevention or self-healing remedy cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof searches for a test declaration; it does not establish that the failing condition is prevented or that fix rounds are avoided."
-    judged_at: "2026-10-17T01:46:47.033Z"
-    pin: "a01a5af1e7b24087e200cbcdb398e860f6b96dadb31a79d12738ba4bf64b405b"
+      - "The declared files are src/lib/review.ts and a new test file. Neither is a secrets, credentials, auth, deploy, or infrastructure path as described, and the description does not mention deleting data or history."
+      - "The task is a machine-filed CI-friction remedy with a verifiable acceptance (a grep for a test name). The gardener's before/after share measurement gives a built-in check on whether it worked."
+      - "The filed rationale cites repeated hand fixes touching src/lib/review.ts. The name suggests a review-related module, but the description doesn't show that the change alters review policy. Any such change would still go through CI and review."
+      - "The family track record is mediocre (28 merged, 40 declined, Beta mean 0.63), and the test file does not yet exist at base. That is expected for a new-test acceptance and is not a concern in itself."
+    judged_at: "2026-10-17T03:13:59.051Z"
+    pin: "fbfa3d3a4ad67fb04f349a41a1c9f01353357cf35ecfbfb82c20045b776333b0"

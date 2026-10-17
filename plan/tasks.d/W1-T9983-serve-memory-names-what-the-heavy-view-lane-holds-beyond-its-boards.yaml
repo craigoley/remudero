@@ -1,0 +1,92 @@
+- id: W1-T9983
+  title: "SERVE.MEMORY NAMES WHAT THE HEAVY VIEW LANE HOLDS BEYOND ITS BOARD PROJECTIONS — serve sits at a steady ~4.0-4.2 GB RSS (p50 in every generation for three days, not growing) and its largest part is the heavy view lane, 1,140 MiB used at 02:56Z; after W1-T9436 its held boards name 53 MiB of it, so ~0.8-0.9 GB of the host's largest resident thread is named by nothing and no reduction can be aimed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a reading of what the views lanes keep between builds; no bound, relief or refusal
+  band_meaning: span
+  origin: "operator brief 2026-10-17 ~02:55Z (agent F13): remudero-serve at 4.6 GB was the top RSS on the host after the 02:33Z collapse; find what holds it and whether it grows; standing rulings: never raise core memory.max, reduce usage; no hard fixed thresholds"
+  plan_refs: [W1-T9403, W1-T9436, W1-T9357, W1-T6369, W1-T5355, W1-T5480, W1-T9404, W1-T9647]
+  files:
+    - src/lib/read-model-worker.ts
+    - src/lib/now-view.ts
+    - src/lib/workstreams-view.ts
+    - src/lib/repositories-view.ts
+    - src/lib/host-view.ts
+    - test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-17: serve is the largest single resident in the host budget
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 on the core ledger (state2), read-only. Source: 1,926 serve.memory rows from 2026-10-13 to
+    10-17T02:56Z (archives 10-13 to 10-17 plus the live ledger), and read_model.view_builds rows 02:20-02:59Z.
+    - SERVE IS A STEADY STATE, NOT A LEAK. Over 50+ generations from 10-15 to 10-17 (each lives 0.3-3.3 h), RSS p50 is
+      3.6-4.4 GB per generation, and max is 4.1-5.1 GB. It is reached within the first hour; hourly p50 moves less than
+      +0.5 GB inside a generation. Half-day p50s: 10-15 3,970 / 3,913 MiB, 10-16 4,055 / 4,016, 10-17 4,196. The
+      heavy lane's used heap drifts slowly across releases: 819, 841, 913, 875, 979 MiB.
+    - WHERE IT LIVES (row 02:56:03Z, SERVE-1792196703229, ~2.5 h old). RSS 4,475 MiB. Main heap 742 MiB committed.
+      Worker threads, committed / used, in MiB:
+        - read-model-worker:spawnHeavyViews 1,237 / 1,140;
+        - board-worker 639 / 513;
+        - read-model-slow-lane 549 / 461;
+        - read-model-worker 259 / 171;
+        - spawnViews (fast) 195 / 85;
+        - status prewarm 194 / 94;
+        - console-projection 189 / 104;
+        - oracle 35;
+        - ledger-union 18.
+      Unattributed: 401 MiB. The worker heaps are ~3.3 GB of the 4.5.
+    - THE HEAVY LANE IS NAMED ONLY BY ITS BOARDS. Its holds (W1-T9403) are board:core 89,430 entries / 48.7 MiB,
+      board:console 4.1 MiB and board:site 0.7 MiB. W1-T9436 (a41de5374, merged 10-14 18:12Z) took board:core's kept
+      bytes from p50 356 MiB (10-14 pm) to 41 MiB (10-15 am), and the lane's used heap from 1,078 to 819 MiB. What
+      remains, ~770-930 MiB used, has no holder.
+    - WHAT RUNS THERE. read_model.view_builds, 02:20-02:59Z, lane=heavy:
+        - now: 120 builds, 485 s, max 61 s;
+        - workstreams: 1,446 builds, 242 s;
+        - repositories: 2,436 builds, 74 s;
+        - host: 2,711 builds, 42 s.
+      now runs per instance (core, console, site).
+    READ at origin/main 35839d2ca (symbols): the views lane's reportHolds (src/lib/read-model-worker.ts) asks each
+    owned unit's made view for heldSizes(). Only createNowView (src/lib/now-view.ts) implements it, and only for its
+    `held` board projections. Whatever else the now, workstreams, repositories and host views keep between builds, and
+    the lane's own unit state, is never sized. answerThreadHeaps attaches the lane's holds to its worker-heap part.
+    NOT COVERED ELSEWHERE: swept plan/ on origin/main and 49 shards on open heads for heavy view, spawnHeavyViews,
+    view_holds and serve.memory. W1-T9403 (merged) added used_bytes and the board holds. W1-T9436 and W1-T9357 (merged)
+    reduced the board. W1-T9404 (queued) tests the malloc-arena idea for RSS outside the heaps. W1-T9508/W1-T9570
+    (merged) shed worker threads under memory pressure. None names the rest of the heavy lane. The slow lane
+    (461 MiB used) and the board worker (513 MiB used) are separate threads with separate code, and not this task.
+  design: |
+    A reading only: no bound, relief, refusal or threshold.
+    1. EVERY HEAVY-LANE VIEW NAMES WHAT IT KEEPS. Each of the now, workstreams, repositories and host views gains or
+       extends heldSizes(), returning { "<view>:<holder>[@instance]": { entries, bytes } } for every structure it keeps
+       across builds: memos, previous bodies, derived indexes and per-instance caches. Bytes are accounted when the
+       structure is filled (the sized-memo pattern), never by walking it on each report. A view that keeps nothing
+       returns {}. A structure it cannot size is named with `unsized: <reason>`, never zero.
+    2. THE LANE NAMES ITS OWN STATE. reportHolds adds the lane's unit bookkeeping as "lane:<name>". It posts after
+       every build of a unit it owns, not only after a now build, so a lane that builds only workstreams still
+       reports.
+    3. THE PART SAYS HOW MUCH IS STILL UNNAMED. answerThreadHeaps carries, on each views-lane part,
+       `unattributed_used_bytes` = used_bytes - the sum of its holds' bytes, with the holds' age. When used_bytes is
+       absent, the field is omitted with a reason.
+    4. THE SAVING IS READ LIVE. The serve.memory row is unchanged apart from the new holds. A later reduction cites the
+       holder name, and its bytes p50 over one generation either side.
+    Tests go in the new file, with titles verbatim as in the proofs. Drive a views lane in-process with fixture units.
+    One test builds the real now view over a small fixture corpus, so the default heldSizes is covered.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts"
+    - claim: "each heavy-lane view reports what it keeps across builds, sized when filled, and an unsized structure is named, never zero"
+      proof: 'grep: test("W1-T9983: each heavy-lane view names what it keeps across builds" in test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts'
+    - claim: "a lane that never builds a now view still reports its holds"
+      proof: 'grep: test("W1-T9983: a lane that never builds now still reports its holds" in test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts'
+    - claim: "each views-lane part carries its used bytes not covered by a named hold"
+      proof: 'grep: test("W1-T9983: a views-lane part carries its unattributed used bytes" in test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts'
+    - claim: "the real now view reports its non-board state beside its boards"
+      proof: 'grep: test("W1-T9983: the real now view names its state beside its boards" in test/serve-memory-names-what-the-heavy-view-lane-holds-beyond-its-boards.test.ts'
+  falsifier: |
+    On origin/main a heavy lane holding only workstreams posts no view_holds, so the "never builds now" test goes red.
+    Size a holder by walking it on every report instead of at fill: the injected clock charges the walk to the report
+    and the "names what it keeps" test goes red. Write an unsized structure as 0 bytes: the same test goes red.
