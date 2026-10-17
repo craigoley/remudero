@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 3.00
-  risk: low
+  risk: high  # Rule 19: production run-task reader plus an existing broad regression suite; no own-falsifier discount
   band_meaning: span
   origin: "operator-approved memory follow-through, 2026-10-17"
   plan_refs: [W1-T8879]
