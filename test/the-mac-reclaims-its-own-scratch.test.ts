@@ -17,6 +17,20 @@ import { fileURLToPath } from "node:url";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "deploy", "mac", "tmp-reclaim.sh");
+
+test("the temporary cleaner preserves caller precedence and finds system safety tools under cron", () => {
+  // Execute only the maintained setup, before any discovery, locks or removal can run.
+  const setup = readFileSync(SCRIPT, "utf8").split("APPLY=0")[0];
+  assert.ok(setup.includes("set -u"));
+  const command = setup + '\nprintf "PATH=%s\\n" "$PATH"\n' +
+    (process.platform === "darwin" ? 'command -v lsof\n' : 'command -v id\n');
+  for (const path of ["/usr/bin:/bin", "/fixture-first:/usr/bin:/bin"]) {
+    const r = spawnSync("/bin/bash", ["-c", command], { encoding: "utf8", env: { PATH: path } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`PATH=${path}:/usr/sbin:/sbin\n`));
+    if (process.platform === "darwin") assert.ok(r.stdout.includes("/usr/sbin/lsof\n"));
+  }
+});
 // The script judges age with `find -mmin`, against the OS clock a child reads — one
 // scripts/clock-shift.mjs cannot move — so the stamps `age()` touches are dated from that same
 // clock, a real `date`, never from this process's `Date.now()`.

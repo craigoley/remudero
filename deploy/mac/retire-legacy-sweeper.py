@@ -6,12 +6,20 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 import subprocess
 
 LABEL = "com.craigoley.disk-sweep"
 LEGACY_ARGS = ["/bin/zsh", "-lc", "DRY=0 $HOME/bin/covtmp-sweep.zsh"]
 LEGACY_SCRIPT_SHA256 = "eede2663c9d03b607fa8cffe13a6dec3fa30ff140e5f05285bac702d5d4b33ae"
+
+
+def confirmed_disabled(output):
+    # macOS 27 prints 'disabled'; older launchctl versions print 'true'.
+    # Match one exact job and token, never a prefix, another label or ambiguous duplicates.
+    values = re.findall(r'^\s*"' + re.escape(LABEL) + r'"\s*=>\s*(\S+)\s*$', output, re.MULTILINE)
+    return values in (["true"], ["disabled"])
 
 
 def retire(home, apply=False):
@@ -47,8 +55,7 @@ def retire(home, apply=False):
         return {"state": "held-disable-refused", "changed": False}
     disabled = subprocess.run(["launchctl", "print-disabled", f"gui/{os.getuid()}"],
                               capture_output=True, text=True, timeout=10)
-    import re
-    if disabled.returncode or not re.search(r'"' + re.escape(LABEL) + r'"\s*=>\s*true', disabled.stdout):
+    if disabled.returncode or not confirmed_disabled(disabled.stdout):
         return {"state": "disable-unverified", "changed": True}
     after = path.lstat()
     if ((before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)

@@ -1252,75 +1252,67 @@ for candidate in "$USER_HOME/Remudero/remudero" "$USER_HOME/Remudero/repos/remud
   fi
 done
 if [ -n "$CORE_INSTALL_ROOT" ]; then
-  if ! command -v node >/dev/null 2>&1; then
-    log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (node unavailable)"
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (python3 unavailable)"
   else
-    dependency_health=$(NODE_OPTIONS='' NODE_PATH='' node --input-type=commonjs - "$CORE_INSTALL_ROOT" 2>/dev/null <<'NODE'
-const fs = require('node:fs');
-const path = require('node:path');
-const root = process.argv[2];
-const manifestPath = path.join(root, 'package.json');
-const warn = message => console.log(`WARN dependency-health: ${message}`);
-function checkRunners() {
-  let fd;
-  let text;
-  try {
-    fd = fs.openSync(manifestPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-    if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error(), { code: 'not-regular-file' });
-    const buffer = Buffer.alloc(1024 * 1024 + 1);
-    let size = 0, count;
-    while (size < buffer.length && (count = fs.readSync(fd, buffer, size, buffer.length - size, null)) > 0) size += count;
-    if (size === buffer.length) throw Object.assign(new Error(), { code: 'size-limit' });
-    text = buffer.toString('utf8', 0, size);
-  } catch (error) {
-    warn(`manifest unreadable at ${manifestPath} (${error.code || 'read-error'}); runner health unknown`);
-    process.exitCode = 1;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-  if (text === undefined) return;
-  let manifest;
-  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-  try {
-    manifest = JSON.parse(text);
-    if (!object(manifest)) throw new Error();
-    for (const section of ['dependencies', 'devDependencies']) {
-      if (Object.hasOwn(manifest, section) && (!object(manifest[section]) ||
-          Object.values(manifest[section]).some(value => typeof value !== 'string' || value.trim() === ''))) throw new Error();
-    }
-  } catch {
-    warn(`manifest malformed at ${manifestPath}; runner health unknown`);
-    return;
-  }
-  for (const [name, relative, mode] of [
-    ['tsx', 'node_modules/.bin/tsx', fs.constants.R_OK | fs.constants.X_OK],
-    ['vitest', 'node_modules/vitest/vitest.mjs', fs.constants.R_OK],
-  ]) {
-    if (!['dependencies', 'devDependencies'].some(section => Object.hasOwn(manifest[section] || {}, name))) continue;
-    const runner = path.join(root, relative);
-    try {
-      if (!fs.statSync(runner).isFile()) {
-        warn(`declared ${name} runner unavailable at ${runner} (not a regular file)`);
-        continue;
-      }
-      fs.accessSync(runner, mode);
-    } catch (error) {
-      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-        warn(`declared ${name} runner missing at ${runner}; linked proofs may fail because shared dependencies are not reinstalled`);
-      } else {
-        warn(`declared ${name} runner unreadable at ${runner} (${error.code || 'read-error'}); runner health unknown`);
-      }
-    }
-  }
-}
-checkRunners();
-NODE
+    # Cron has Python's existing cache-helper dependency but need not have Node on PATH.
+    # Read metadata with the standard library; never load runner/package code or widen PATH.
+    dependency_health=$(python3 - "$CORE_INSTALL_ROOT" 2>/dev/null <<'PYTHON'
+import errno, json, os, stat, sys
+root = sys.argv[1]
+manifest_path = os.path.join(root, 'package.json')
+def warn(message):
+    print('WARN dependency-health: ' + message)
+def check_runners():
+    fd = None
+    try:
+        fd = os.open(manifest_path, os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError('not-regular-file')
+        data = bytearray()
+        while len(data) < 1024 * 1024 + 1:
+            part = os.read(fd, 1024 * 1024 + 1 - len(data))
+            if not part: break
+            data.extend(part)
+        if len(data) > 1024 * 1024: raise ValueError('size-limit')
+    except (OSError, ValueError) as error:
+        detail = errno.errorcode.get(error.errno, 'read-error') if isinstance(error, OSError) else str(error)
+        warn(f'manifest unreadable at {manifest_path} ({detail}); runner health unknown')
+        return
+    finally:
+        if fd is not None: os.close(fd)
+    try:
+        manifest = json.loads(data)
+        if not isinstance(manifest, dict): raise ValueError()
+        for section in ('dependencies', 'devDependencies'):
+            if section in manifest and (not isinstance(manifest[section], dict) or
+                    any(not isinstance(v, str) or not v.strip() for v in manifest[section].values())):
+                raise ValueError()
+    except (ValueError, UnicodeError):
+        warn(f'manifest malformed at {manifest_path}; runner health unknown')
+        return
+    for name, relative, mode in (('tsx', 'node_modules/.bin/tsx', os.R_OK | os.X_OK),
+                                  ('vitest', 'node_modules/vitest/vitest.mjs', os.R_OK)):
+        if not any(name in manifest.get(section, {}) for section in ('dependencies', 'devDependencies')): continue
+        runner = os.path.join(root, relative)
+        try:
+            if not stat.S_ISREG(os.stat(runner).st_mode):
+                warn(f'declared {name} runner unavailable at {runner} (not a regular file)')
+                continue
+            if not os.access(runner, mode): raise PermissionError(errno.EACCES, 'access refused')
+        except OSError as error:
+            if error.errno in (errno.ENOENT, errno.ENOTDIR):
+                warn(f'declared {name} runner missing at {runner}; linked proofs may fail because shared dependencies are not reinstalled')
+            else:
+                warn(f'declared {name} runner unreadable at {runner} ({errno.errorcode.get(error.errno, "read-error")}); runner health unknown')
+check_runners()
+PYTHON
     )
     dependency_health_status=$?
     if [ -n "$dependency_health" ]; then
       while IFS= read -r health_line; do log "$health_line"; done <<< "$dependency_health"
     elif [ "$dependency_health_status" != 0 ]; then
-      log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (node probe failed)"
+      log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (python3 probe failed)"
     fi
   fi
 fi

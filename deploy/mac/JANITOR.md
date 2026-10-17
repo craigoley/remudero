@@ -16,6 +16,12 @@ the identical layout under an alternate absolute root for testing.
 
 Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 
+The temporary cleaner appends `/usr/sbin:/sbin` to the caller's PATH so cron can
+find macOS `lsof`; it never changes caller precedence or adds user package bins.
+Dependency-health diagnostics use Python's standard library, already required by
+the generated-cache helper, rather than requiring Node on cron's PATH. Unknown
+probe results still retain data and never trigger dependency installation.
+
 ## Preventing new validation growth
 
 The `scripts/preflight-author.mjs` CLI checks Mac workspace and TMPDIR capacity
@@ -46,6 +52,9 @@ and executable (an explicit `Program` must equal `/bin/zsh`), ownership and
 historical script hash. The plist is retained with a disabled
 suffix. It never stops a running process, changes cron entries, or retires an
 unknown/replaced job. Ordinary code-only installation does not change schedules.
+Retirement verification accepts the exact `disabled` token printed by macOS 27
+and the older `true` spelling. Unknown, enabled or duplicate job rows remain
+unverified, with the original plist retained.
 
 The scan includes `~/Remudero`, nested disposable checkouts below the protected
 operator checkout `~/Remudero/remudero`, `~/rmd-work`, and temporary roots.

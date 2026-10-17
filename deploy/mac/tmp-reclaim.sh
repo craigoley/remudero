@@ -18,6 +18,9 @@
 # regular log files are eligible too, except when the current crontab schedules that path or any
 # safety check is uncertain.
 set -u
+# Cron supplies /usr/bin:/bin, while macOS installs lsof under /usr/sbin.
+# Append system tools without changing caller precedence or trusting user package bins.
+export PATH="${PATH:-/usr/bin:/bin}:/usr/sbin:/sbin"
 shopt -s nullglob
 SEED_GUARD_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [ -f "$SEED_GUARD_DIR/dependency-seed-guard.sh" ]; then
