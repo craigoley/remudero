@@ -127,9 +127,11 @@
     ]
   },
   {
-    "canonicalId": "a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a-new-s",
+    "canonicalId": "a-retitle-alone-re-runs-the-title-lint-pr-title-lint-yml-fires-o",
     "aliasIds": [
-      "doctrine/ci-and-merging/a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a.md"
+      "a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a-new-s",
+      "doctrine/ci-and-merging/a-corrected-pr-title-is-observed-by-a-re-run-not-only-by-a.md",
+      "doctrine/ci-and-merging/title-needs-a-re-run.md"
     ]
   },
   {

@@ -21,6 +21,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -119,13 +120,15 @@ export interface InstanceRoot { instance: string; stateDir: string }
 /** Every live instance in the fleet registry: core's state is this process's own, every other root is mounted under
  *  `stateBase`. An unreadable registry is a named gap, never a silent fall back to one root. */
 export function registryInstanceRoots(localStateDir: string, readRegistry = () => readFileSync(DEFAULT_HOST_INSTANCE_REGISTRY_PATH, "utf8"),
-  stateBase = DEFAULT_INSTANCE_STATE_BASE): { roots: InstanceRoot[] } | { reason: string } {
+  stateBase = DEFAULT_INSTANCE_STATE_BASE, observer?: SelectedRegistryObserver): { roots: InstanceRoot[] } | { reason: string } {
+  return observeSelectedRegistrySync(observer, "benchmark-discovery", { instanceName: undefined }, () => {
   try {
     return { roots: parseInstanceRegistry(readRegistry()).instances.filter((instance) => instance.live).map((instance) => ({
       instance: instance.name, stateDir: instance.name === CORE_INSTANCE ? localStateDir : join(stateBase, instance.name, "state") })) };
   } catch (error) {
     return { reason: `instance-registry-unreadable:${(error as Error).message.slice(0, 80)}` };
   }
+  });
 }
 
 export interface SourceWindow { instance: string; state: "read" | "unreadable"; reason: string | null; registrations: string[] }

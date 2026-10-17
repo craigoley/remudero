@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -409,7 +409,12 @@ test("daemonCommand forwards a real spawned child's handle and settles from that
     repo.git("push", "-qu", "origin", "main");
     const engine = join(f.root, "engine-build");
     mkdirSync(join(engine, "src"), { recursive: true });
-    symlinkSync(fileURLToPath(new URL("../node_modules", import.meta.url)), join(engine, "node_modules"), "dir");
+    // A checkout may borrow its install. Exercise that shape even on a host with a real
+    // node_modules directory, then give the engine the one-hop canonical link its real
+    // trust guard requires. Never relax that guard or copy the shared dependency tree.
+    const borrowedModules = join(f.root, "borrowed-node-modules");
+    symlinkSync(fileURLToPath(new URL("../node_modules", import.meta.url)), borrowedModules, "dir");
+    symlinkSync(realpathSync(borrowedModules), join(engine, "node_modules"), "dir");
     // Build a bounded entry with the real contract writer, not a worker/provider. The production
     // engine-currency check, spawn, status watcher and CLI runOne wiring remain unmocked.
     const contract = fileURLToPath(new URL("../src/lib/run-child-contract.ts", import.meta.url));

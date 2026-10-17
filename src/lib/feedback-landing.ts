@@ -849,7 +849,7 @@ export interface LandingCarry {
   inheritedSkipped: number;
 }
 
-function lsTreeBlobs(out: string): Map<string, string> {
+export function lsTreeBlobs(out: string): Map<string, string> {
   const blobs = new Map<string, string>();
   for (const entry of out.split("\0")) {
     const tab = entry.indexOf("\t");
@@ -859,7 +859,7 @@ function lsTreeBlobs(out: string): Map<string, string> {
   return blobs;
 }
 
-function rawDiffBases(out: string): Map<string, string | null> {
+export function rawDiffBases(out: string): Map<string, string | null> {
   const fields = out.split("\0");
   const bases = new Map<string, string | null>();
   for (let i = 0; i + 1 < fields.length; i += 2) {

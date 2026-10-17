@@ -1,0 +1,80 @@
+- id: W1-T9930
+  title: "A RED DECIDED BELOW MAIN'S HEAD IS RE-JUDGED AT THE HEAD BY ITS OWN FAILING TESTS — when main's head has no completed run, the walk-back lets the newest COMPLETED run decide, so after a repair merges main still reads red, and every base-red PR stays held, until a later push run completes (about 30 minutes on 2026-10-16, 19:16Z to 19:45Z); at one merge every 5 minutes against a 25-minute run, that is most of the time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what a red decided by an older main commit says about the head; how the head-red, walk-back and repair paths judge evidence is otherwise unchanged
+  band_meaning: blast-radius
+  origin: "operator directive 2026-10-16 ('stuck PRs like this should never happen ... fix all root causes'); coordinator item 4 to the root-cause agent for the red main of 6841dac49 (#12389)"
+  plan_refs: [W1-T5490, W1-T6023, W1-T7757, W1-T4351, W1-T6024, W1-T7848, W1-T9375, W1-T9927, W1-T100, W1-T9748]
+  files:
+    - src/lib/main-health-rung.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-red-decided-below-mains-head-is-re-judged-at-the-head.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ at origin/main fc1d8a70b (symbols, not lines):
+    - .github/workflows/ci.yml groups main pushes under one concurrency key and keeps one pending run, so most main
+      commits never get a run of their own. On 2026-10-16 there were 34 merges between 17:00Z and 19:45Z, about one every
+      5 minutes, against a CI run of about 25 minutes.
+    - src/lib/main-health-rung.ts: when the head is undetermined (`mainHealthHeadInconclusive`, "required checks are
+      configured but none have registered yet on main's head"), the walk-back (W1-T5490, W1-T6023) lets the NEWEST
+      COMPLETED main run decide. A green there with a newer commit still running reads undetermined (W1-T7757). A RED
+      there stands as main's state, however many merges have landed above it.
+    - src/lib/sweep.ts `decideBaseRed` (W1-T4351) then holds every PR whose red is one of main's failing checks, or is
+      a check absent from the deciding run's `observed_checks`, as "not this diff's". The census is the deciding run's
+      job names. Gates the light-gates job posts as statuses (rule-checks among them) reach it only through
+      W1-T7848's probe rows at the head.
+    OBSERVED in the core ledger (~/rmd-state2/state), `main.health.observed` on 2026-10-16:
+    - 19:33Z to 19:42Z: red at heads c75418448, 274e52578, d417a694b and a7362ff53, every row "main's head carries no
+      genuine evidence (...); the latest completed main run (671da492c) decides, ... 4 to 8 first-parent commit(s)
+      behind the head: required check(s) concluded failing on main: ci".
+    - The repair had already landed as 9f60450d6 (#12403) and 32dc6614f (#12405, 19:16Z), both above 671da492c.
+    - 19:45:47Z: green, decided by c75418448. So main read red for about 30 minutes after it was repaired.
+    - Meanwhile PRs were held: #12398 "NOT DISPATCHED: base red: rule-checks is absent from main's latest run".
+    NOT the defect: an undetermined head is NOT read as red by itself. The walk-back and the cancelled-is-pending
+    reading (W1-T5490) work as designed. The defect is that a completed red older than the head is never re-judged
+    at the head, although the red's own failing test files are known (`baseReproductionFiles` over the ci-shard log)
+    and the sweep already owns a local runner for them at any commit (`buildBaseReproductionProbe`, W1-T5528).
+    OVERLAP, swept 2026-10-16 over plan/ on origin/main and the open PR heads: W1-T9375 (a held rule red is probed at
+    a NEW GREEN tip before a refresh) and W1-T9927 (local attribution BELOW the first red) are neighbours. Neither
+    re-judges a red decided below the head, at the head. W1-T100 (blocked_ci routed to the ci-log fix path) and
+    W1-T9748 (tracing how declared files reach staging) share only the wide files src/lib/sweep.ts and src/run-task.ts.
+    This task touches neither concern there, only `decideBaseRed` and the head-reproduction wiring.
+  design: |
+    No new constant, no new policy key, no fixed retry or age cap: every bound is a reading.
+    1. When the walk-back decides RED from a run below the head, and that red's failing test files are known, the rung
+       runs those files LOCALLY at the head through the base-reproduction runner. That run is never awaited on the rung,
+       cached per (head, file), and recorded as `main.health.head_reproduction` {head_sha, decided_by_sha, files,
+       outcomes}.
+    2. Reading it:
+       - Every file `passes` (or is `absent`) at the head: main reads `undetermined`, with the reason "red at <decided>
+         cleared at the head by its own failing tests; awaiting a completed run". It is never `green`, since only a
+         completed run says green.
+       - Any file `fails` at the head: the red stands, now proven at the head.
+       - Unrunnable: the red stands as today, and the row says why.
+    3. `decideBaseRed` holds a PR only on a red that holds at the head: a completed red at the head itself, or a red
+       below it that its head reproduction did not clear. A red cleared at the head releases every base-red hold it
+       caused, through the existing refresh-admission path.
+    4. The absent-check arm stops inheriting a check the deciding run could never observe. A check absent from a run
+       decided BELOW the head is held only when W1-T7848's probe rows reproduce it at the head.
+    5. The main repair lane is unchanged. A red cleared at the head resolves only when a completed run says green.
+    Tests go in test/a-red-decided-below-mains-head-is-re-judged-at-the-head.test.ts, titled verbatim as in the proofs.
+    They drive the real rung and `decideBaseRed` with a run history whose newest completed run is red, four merges
+    below an undetermined head, and a fake reproduction runner.
+  acceptance:
+    - claim: "a red decided below an undetermined head whose failing tests pass at the head reads undetermined, never red and never green, and says so"
+      proof: 'grep: test("a red decided below the head is cleared at the head by its own failing tests" in test/a-red-decided-below-mains-head-is-re-judged-at-the-head.test.ts'
+    - claim: "a red decided below the head whose failing tests still fail at the head stands, proven at the head"
+      proof: 'grep: test("a red decided below the head that still fails at the head stands" in test/a-red-decided-below-mains-head-is-re-judged-at-the-head.test.ts'
+    - claim: "decideBaseRed releases a PR held on a red cleared at the head, and never inherits a check absent from a run below the head unless a probe reproduced it at the head"
+      proof: 'grep: test("a base-red hold lifts when its red is cleared at the head" in test/a-red-decided-below-mains-head-is-re-judged-at-the-head.test.ts'
+  falsifier: |
+    At origin/main the rung has no head reproduction. With a completed red four merges below an undetermined head, it
+    reads `red` and `decideBaseRed` returns `wait` for a PR red on rule-checks, so the first and third tests fail.
