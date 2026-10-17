@@ -9,7 +9,8 @@ import { buildPanelGraphRoutes, classifyAllProposalsSliced, type PanelGraphDeps 
 import { refreshInboxClassification } from "../src/lib/inbox-view.js";
 import { registryThreadItems } from "../src/lib/inbox-responder.js";
 import { createService } from "../src/lib/service.js";
-import { inboxVerdictReceiptsPath, mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, writeVerdictReceipts } from "../src/lib/inbox-verdict-receipts.js";
+// Imported per test, so this file still loads where the store does not exist and each test reports its own failure.
+const receipts = () => import("../src/lib/inbox-verdict-receipts.js");
 import { fakeGitHub } from "./helpers/fake-github.js";
 
 const DECLINED = "verify-human:W1-T216";
@@ -73,6 +74,7 @@ test("an operator decline that only an archived rotation holds keeps its proposa
 });
 
 test("the slow lane stores the archived decline, so rmd restore's route can reverse it", async (t) => {
+  const { readVerdictReceipts } = await receipts();
   const { stateDir, deps } = rotatedFixture(t);
   await refreshInboxClassification(deps, {});
   const stored = readVerdictReceipts(stateDir);
@@ -86,7 +88,8 @@ test("the slow lane stores the archived decline, so rmd restore's route can reve
   assert.notEqual(after.classifications.find((c) => c.proposalId === DECLINED)?.state, "declined");
 });
 
-test("the inbox responder reads a stored decline, so it never re-asks a declined item", (t) => {
+test("the inbox responder reads a stored decline, so it never re-asks a declined item", async (t) => {
+  const { writeVerdictReceipts } = await receipts();
   const { stateDir, ledgerPath, declinedAt } = rotatedFixture(t);
   writeVerdictReceipts(stateDir, [{ step: "panel.proposal_declined", task_id: DECLINED, ts: declinedAt, run_id: "PANEL-1", reason: "cleared" }], [DECLINED, OPEN]);
   const items = new Map(registryThreadItems(stateDir, ledgerPath).map((i) => [i.proposalId, i.state]));
@@ -94,7 +97,8 @@ test("the inbox responder reads a stored decline, so it never re-asks a declined
   assert.equal(items.get(OPEN), "ready");
 });
 
-test("the newest receipt by time wins, whichever source carries it", () => {
+test("the newest receipt by time wins, whichever source carries it", async () => {
+  const { mergeVerdictReceipts, proposalVerdictsWithReceipts } = await receipts();
   const at = (h: number) => new Date(Date.UTC(2026, 9, 13, h)).toISOString();
   const restore = { step: "panel.proposal_restored", task_id: DECLINED, ts: at(1), run_id: "PANEL-R", reason: "restore" };
   const decline = { step: "panel.proposal_declined", task_id: DECLINED, ts: at(2), run_id: "PANEL-D", reason: "decline" };
@@ -105,7 +109,8 @@ test("the newest receipt by time wins, whichever source carries it", () => {
   assert.equal(mergeVerdictReceipts([decline], [decline]).length, 1);
 });
 
-test("the stored receipts are bounded by the registry and rewritten only on a change", (t) => {
+test("the stored receipts are bounded by the registry and rewritten only on a change", async (t) => {
+  const { inboxVerdictReceiptsPath, readVerdictReceipts, writeVerdictReceipts } = await receipts();
   const root = mkdtempSync(join(tmpdir(), "rmd-verdict-store-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const r = (id: string) => ({ step: "panel.proposal_declined", task_id: id, ts: "2026-10-13T02:56:30.145Z", run_id: `PANEL-${id}` });
