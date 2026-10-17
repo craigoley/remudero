@@ -345,6 +345,44 @@ export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined,
   return undefined;
 }
 
+/** W1-T9763: what a revisioned read posts: the request, with its plan replaced by that plan's revision. */
+export type RevisionedRequest<I, R> = Omit<I, "plan"> & { planRevision: R };
+
+/**
+ * W1-T9763 — A TICK READ NEVER POSTS ITS PLAN. {@link startReadPlane} structured-clones every request and posts it,
+ * and the worker's answer is cloned back: with the plan in both, one read carried two whole copies (a clone is
+ * 37.7 MiB at 4,112 tasks, W1-T9647's census), and the answer's copy stayed published until the next tick. A plan that
+ * `revisionOf` names is posted as its revision, and the answer gets the caller's own instance back. Any other plan is
+ * posted as before.
+ */
+export function revisionedRead<P extends object, R, I extends { plan: P }, T extends { plan?: P }>(
+  read: (input: I | RevisionedRequest<I, R>) => Promise<ReadGeneration<T>>,
+  revisionOf: (plan: P) => R | undefined,
+): (input: I) => Promise<ReadGeneration<T>> {
+  return async (input) => {
+    const planRevision = revisionOf(input.plan);
+    if (planRevision === undefined) return read(input);
+    const { plan, ...rest } = input;
+    const answered = await read({ ...rest, planRevision });
+    return Object.freeze({ ...answered, facts: Object.freeze({ ...answered.facts, plan }) });
+  };
+}
+
+/** The worker's half of {@link revisionedRead}: a revision resolves to this side's own plan, and the answer never
+ *  carries a plan back. A request that carries its plan is produced as it always was. */
+export function revisionedProducer<P, R, I extends { plan: P }, O extends { plan?: P }>(
+  produce: (input: I) => O | Promise<O>,
+  resolve: (revision: R) => P | Promise<P>,
+): (input: I | RevisionedRequest<I, R>) => Promise<O> {
+  return async (input) => {
+    if (!("planRevision" in input)) return produce(input);
+    const { planRevision, ...rest } = input;
+    const answer = { ...await produce({ ...rest, plan: await resolve(planRevision) } as unknown as I) };
+    delete answer.plan;
+    return answer;
+  };
+}
+
 /** A published generation answers ONE consumer pass. The daemon publishes one only at the top of
  * a tick, and a dispatch phase can hold the loop for an hour while the full sweep is retriggered;
  * reusing it there disposed merged PRs and dead heads (DAEMON-1791151532775, 2026-10-04). A later
