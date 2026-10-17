@@ -62,7 +62,7 @@ if pid==0:
  (home/'grandchild-ready').write_text(str(os.getpid()))
  while True:time.sleep(1)
 while not (home/'grandchild-ready').exists():time.sleep(0.005)
-(home/'leader-ready').write_text(str(os.getpid()))
+marker=home/'leader-ready-stage';marker.write_text(str(os.getpid()));marker.replace(home/'leader-ready')
 if sys.argv[1]=='exited':raise SystemExit(0)
 while True:time.sleep(1)
 """
