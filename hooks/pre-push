@@ -234,8 +234,9 @@ if has census-precheck.mjs; then
         let runSuites = () => { throw new Error("they are the branch\x27s own test files and the host gate runs no worktree code (CI runs them)"); };
         try {
           const p = await at("/src/lib/git-push.ts");
-          runSuites = ({ root, files }) => {
+          runSuites = ({ root, files, readerRuntimePolicy }) => {
             try {
+              if (readerRuntimePolicy !== undefined) throw new Error("source-reader runtime calibration is unavailable in the managed-worktree proof sandbox");
               const run = p.createPrePushSandboxRunner(root);
               return m.runCensusSuitesViaChild({ root, files, run: (_file, _args, options) => run(process.execPath,
                 ["--test", "--test-reporter=tap", "--test-concurrency=1", "--import", "tsx", "--import", pathToFileURL(root + "/test/setup/tmp-hygiene.ts").href, ...files], options) });
