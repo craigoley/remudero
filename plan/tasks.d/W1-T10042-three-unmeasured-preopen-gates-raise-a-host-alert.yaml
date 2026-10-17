@@ -1,0 +1,84 @@
+- id: W1-T10042
+  title: "THREE UNMEASURED PRE-OPEN GATES IN A ROW RAISE A HOST ALERT — on 2026-10-17 22 consecutive implement.preopen_gate rows ended `unmeasured` (bwrap could not start) from 03:43:07Z to 13:18:04Z, about 9.5 h in which no build PR had its fast gate run, and nothing flagged it; the operator ruled the alert fires at N = 3 consecutive gates"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, a streak of unmeasured pre-open gates becomes one host alert that clears on the next measured gate; the gate, its containment and the build path are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 6; OPERATOR RULING 2026-10-17 (coordinating session): N = 3 consecutive gates'
+  plan_refs: [W1-T9619, W1-T9860, W1-T10025, W1-T9625]
+  files:
+    - src/lib/preopen-gate.ts
+    - src/lib/ledger.ts
+    - src/run-task.ts
+    - test/three-unmeasured-preopen-gates-raise-a-host-alert.test.ts
+  status: queued
+  priority: 1  # while the streak lasted every build PR opened with no local gate; #12575 opened importing a file its tree lacked
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 (core ledger, all 390 gz archives plus the live file, read-only, newest row 15:40:41Z):
+    - 306 implement.preopen_gate rows since 2026-10-10: pass 170, fail 106, unmeasured 30.
+    - 22 consecutive rows with result and containment `unmeasured`, 03:43:07.891Z to 13:18:04.563Z, across 20 tasks and
+      3 container ids, all actor run_child. The row before was pass/sandboxed at 03:14:35Z. Every row carries
+      reason "the gate could not be contained: bwrap cannot start here (bwrap: Can't bind mount …".
+    - That is the only streak of 3 or more in the corpus; a rule at 3 would have fired once, at 05:33:43Z, about
+      7 h 45 m before the streak ended. The other 8 unmeasured rows ("fast gate exceeded its backstop") never ran 3 in
+      a row.
+    - Six ledger rotations fell inside the streak (05:06, 06:53, 08:17, 09:45, 11:00, 12:49Z), and
+      implement.preopen_gate is not in DECISION_RELEVANT_LEDGER_STEPS, so the live file alone never held more than 4 of
+      the streak's rows.
+    - Root cause (logs-8864/gatebind-*): W1-T9860's engine node_modules bind meets the gate's harness bind and bwrap
+      fails ENOENT; hand-fix PR 12595, and W1-T10025 (queued) files the same repair.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/run-task.ts `runTaskBody` writes `log(PREOPEN_GATE_STEP, { result: gate.kind, …, reason, …preopenGateLedgerFields(gate) })`;
+      after an `unmeasured` gate the run goes on and opens its PR.
+    - src/lib/preopen-gate.ts: `defaultRunGate` turns a non-sandboxed containment into an `unmeasured` result;
+      `classifyGateRun` maps errors and unreadable summaries to `unmeasured` too.
+    - THE EXISTING HOST-ALERT PATH: src/lib/host-escalation-spool.ts `spoolEscalation` (one entry per stable title,
+      re-raises counted, never a queue of copies; the daemon drains it through `escalate`'s title dedup) and
+      `withdrawSpooledEscalation` (clear on recovery), as launcher-host-alerts.ts `raiseLauncherAlert` and
+      `clearLauncherAlert` use them. The consecutive-count-then-escalate shape is sweep.ts `detectPostReviewStall`.
+    INFERRED: an alert at the third row would have named the fault about 7.5 h earlier, before #12575 opened bare.
+    WHY THIS IS NOT ANOTHER TASK: W1-T10025 (queued) repairs this cause, not the next one; W1-T9619 (merged) built
+    the gate and its `unmeasured` result; W1-T9625 (merged) delivers a down-daemon alert. No shard counts unmeasured
+    gates (swept origin/main plan/tasks.d and the plan diffs of every open PR head for preopen_gate, unmeasured,
+    host alert and host_alert, 2026-10-17 ~15:40Z).
+  design: |
+    1. A pure `detectUnmeasuredPreopenStreak(rows, threshold)` in src/lib/preopen-gate.ts over implement.preopen_gate
+       rows, oldest first: `unmeasured` extends the streak, `pass` or `fail` (a measured gate) ends it. It returns
+       the count, the streak's first ts and run id, the newest ts and the newest reason. The threshold is
+       `PREOPEN_UNMEASURED_ALERT_AT = 3` (OPERATOR RULING 2026-10-17). The streak is fleet-wide, not per host.
+    2. In runTaskBody, straight after the gate row is written: an `unmeasured` gate reads the retained gate rows and,
+       at or past the threshold, raises the alert through `spoolEscalation` with a stable title that carries no count
+       or time (so a continuing streak is one entry and one issue); the detail names the count, the first and newest
+       ts and the reason. A measured gate withdraws a pending alert through `withdrawSpooledEscalation` (or spools
+       the close it owes an open issue), as the launcher alerts do. Each raise and clear writes one row under the
+       existing step (`implement.preopen_gate`) family: `implement.preopen_gate.alert` with
+       { consecutive, streak_first_ts, action: raised|cleared }. A failure to raise is logged and never changes the
+       build path.
+    3. Add implement.preopen_gate and its .alert row to DECISION_RELEVANT_LEDGER_STEPS, so a rotation inside a
+       streak does not restart the count.
+    4. No other constant is added. Counting `result === "unmeasured"` (any reason) rather than only
+       `containment: unmeasured` is the default; the two were identical on this corpus for streaks of 3 or more.
+    5. TESTS in test/three-unmeasured-preopen-gates-raise-a-host-alert.test.ts, `test(` titles verbatim as in the
+       proofs, with a temp ledger and state dir, no network.
+  acceptance:
+    - claim: "three consecutive unmeasured pre-open gates spool one host alert"
+      proof: 'grep: test("W1-T10042: three consecutive unmeasured pre-open gates spool one host alert" in test/three-unmeasured-preopen-gates-raise-a-host-alert.test.ts'
+    - claim: "two unmeasured gates do not alert, and a measured gate resets the streak and clears the alert"
+      proof: 'grep: test("W1-T10042: a measured pre-open gate resets the streak and clears the alert" in test/three-unmeasured-preopen-gates-raise-a-host-alert.test.ts'
+    - claim: "the 2026-10-17 shape, 22 unmeasured rows across a ledger rotation, is one alert raised at the third row"
+      proof: 'grep: test("W1-T10042: a streak across a rotation is one alert raised at the third row" in test/three-unmeasured-preopen-gates-raise-a-host-alert.test.ts'
+    - claim: "the threshold is the operator's N = 3"
+      proof: 'grep: PREOPEN_UNMEASURED_ALERT_AT = 3 in src/lib/preopen-gate.ts'
+  falsifier: |
+    At origin/main nothing reads implement.preopen_gate rows after writing them: three unmeasured gates leave the spool
+    empty, so the first test fails. Dropping the reset fails the second; dropping the retention entry fails the third
+    (the rotation restarts the count at 2). Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    EFFECT, measured after merge from the core ledger: the gap between the third consecutive unmeasured
+    implement.preopen_gate row and its implement.preopen_gate.alert raised row. Healthy shape: the alert row follows
+    within the same run.

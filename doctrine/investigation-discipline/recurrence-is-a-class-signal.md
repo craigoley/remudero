@@ -1,4 +1,4 @@
-- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair (#3030/#3039/#3043).**
+- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair.**
   Three PRs reached the blocked-ambiguous repair surface within seven days, but the recorded evidence
   does not establish one shared mechanism:
 

@@ -259,7 +259,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
     if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment },
+    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
       ...logs, resultPath, runtimeMs: runtimeLimitMs });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };

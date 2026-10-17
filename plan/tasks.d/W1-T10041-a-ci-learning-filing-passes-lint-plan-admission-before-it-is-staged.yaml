@@ -1,0 +1,68 @@
+- id: W1-T10041
+  title: "A CI-LEARNING FILING PASSES LINT-PLAN'S MACHINE-FILING ADMISSION BEFORE IT IS STAGED — the filer checks a record with lintTask alone, so a record lint-plan --base refuses is still written and lands as a red PR (#12290 on 2026-10-16, #12569 on 2026-10-17); with W1-T10027 making admission accept the lesson's own new file, the filer must run the same admission so the next mismatch is refused before any PR exists"
+  repo: remudero
+  depends_on: [W1-T10027]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern, the ci-learning filer's record verdict runs the shared admission guard; the landing bridge, the shard text and admission itself are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 2, design (a): the filer runs machineShardFilingRefusal before writing'
+  plan_refs: [W1-T10027, W1-T7954, W1-T9450, W1-T8523, W1-T5995]
+  files:
+    - src/lib/measurement-cadence.ts
+    - test/a-ci-learning-filing-passes-lint-plan-admission-before-it-is-staged.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED:
+    - 2026-10-17 #12569 (ci-learning-landing, W1-T10016): lint-plan:fast "[machine-filing-admission] task W1-T10016
+      declares file path(s) that exist in neither the checkout nor the base tree:
+      learnings/ci.d/ci-learning-12305-scan-pr-osv-scan.yaml" (logs-8864/redtriage-12569-cishard7.log); lint-plan, ci and
+      remudero-review red; three plan rounds refused.
+    - 2026-10-16 #12290: the same refusal, repaired by hand in 684f7c768 (W1-T9787 repointed at learnings/ci.yaml).
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/lib/measurement-cadence.ts `ciLearningLessonsFile` gives each finding a new learnings/ci.d/<slug>.yaml
+      (since #11759, W1-T7954); `ciLearningShardYaml` writes it as the single `files:` entry.
+    - `ciLearningRecordVerdict(contents, label)` is `loadPlanFromYaml` plus `lintTask` only. `fileCiLearningShards`
+      calls it and writes nothing for a refused record. The production landing (src/lib/feedback-landing.ts
+      `landCiLearningShardsAsync`) gets it injected from src/run-task.ts; it has no admission step, unlike the
+      ci-friction, flow-remedy, gate, hot-file, backlog and host-resource gardeners.
+    - src/lib/machine-filing.ts `machineShardFilingRefusal(text, source, paths)` runs lintTask plus
+      `machineFilingAdmissionViolations`, the same check lint-plan runs (src/lib/task-linter.ts).
+    INFERRED: had the filer run admission, #12569 and #12290 would have been refused at filing with a reason, never
+    opened red. Run before W1-T10027, it would refuse every ci-learning filing, so this task depends on W1-T10027.
+    WHY THIS IS NOT ANOTHER TASK: W1-T10027 (queued, P1) makes admission accept the lesson's own new path; it does not
+    make the filer check. W1-T9450 (queued) adds lesson companions and does not touch admission (its companions under
+    test/fixtures/golden-verdicts/ would themselves need admission, which this task then catches at filing).
+    W1-T8523/W1-T5995 (merged) fixed other filers' admission shapes. Swept origin/main plan/tasks.d and the plan diffs
+    of every open PR head for ciLearningLessonsFile, fileCiLearningShards, machineShardFilingRefusal,
+    machine-filing-admission and learnings/ci.d (2026-10-17 ~15:40Z).
+  design: |
+    1. `ciLearningRecordVerdict` also runs `machineShardFilingRefusal(contents, label, …)` with a tree-free
+       `pathExists` (always false): a ci-learning record's only file is one it creates, so its verdict must not depend on
+       which tree the daemon holds. measurement-cadence.ts already imports ./machine-filing.js.
+    2. The `(contents, label)` signature stays, so the injected seam in feedback-landing.ts and both run-task.ts call
+       sites need no change. A refused record goes into `CiLearningFilingResult.refused` with the admission reason and
+       is never written or staged, as a lintTask refusal is today.
+    3. TESTS in test/a-ci-learning-filing-passes-lint-plan-admission-before-it-is-staged.test.ts, `test(` titles
+       verbatim as in the proofs: the rendered `ciLearningShardYaml` record passes (with W1-T10027 merged); the same
+       record with its lesson path replaced by a missing path outside learnings/ci.d is refused with a
+       machine-filing-admission reason.
+  acceptance:
+    - claim: "a rendered ci-learning shard passes lint-plan's machine-filing admission with no tree"
+      proof: 'grep: test("W1-T10041: a rendered ci-learning shard passes lint-plan machine-filing admission" in test/a-ci-learning-filing-passes-lint-plan-admission-before-it-is-staged.test.ts'
+    - claim: "a ci-learning record lint-plan would refuse is refused before it is staged"
+      proof: 'grep: test("W1-T10041: a ci-learning record lint-plan would refuse is refused before it is staged" in test/a-ci-learning-filing-passes-lint-plan-admission-before-it-is-staged.test.ts'
+    - claim: "the filer verdict runs the shared admission guard"
+      proof: 'grep: machineShardFilingRefusal in src/lib/measurement-cadence.ts'
+  falsifier: |
+    Render `ciLearningShardYaml` and replace its lesson path with learnings/elsewhere/x.yaml. At origin/main
+    `ciLearningRecordVerdict` returns ok (lintTask alone passes), so the second test fails; after the fix it returns a
+    machine-filing-admission refusal. Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: the tree-free `pathExists` default. EFFECT, measured after merge: ci-learning-landing
+    PRs red on lint-plan machine-filing-admission. Healthy shape: none; a refused record shows in the filer's refused
+    count with its reason.

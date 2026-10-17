@@ -343,7 +343,13 @@ test("package.json: the seven pre-existing FAST_GATE_STEPS commands are byte-ide
 
 test("src/lib/ci-parity.ts documents the bound as a PRIMARY CONTROL and never labels it a backstop", () => {
   const source = readFileSync(join(REPO_ROOT, "src", "lib", "ci-parity.ts"), "utf8");
-  assert.match(source, /PRIMARY CONTROL/);
+  // The bound-kind convention: the tag sits in the doc block directly above the bound's declaration.
+  const lines = source.split("\n");
+  const decl = lines.findIndex((line) => line.startsWith("export const FAST_GATE_CENSUS_BOUND_MS "));
+  assert.ok(decl > 0, "sanity: FAST_GATE_CENSUS_BOUND_MS must still be declared");
+  let start = decl;
+  while (start > 0 && /^\s*(?:\/\*\*|\*|\/\/)/.test(lines[start - 1]!)) start--;
+  assert.match(lines.slice(start, decl).join("\n"), /PRIMARY CONTROL/, "the bound's own doc block must tag its kind");
   assert.doesNotMatch(source, /is a backstop|as a backstop\b/i, "the bound must never itself be documented as a backstop");
 });
 

@@ -1,0 +1,129 @@
+- id: W1-T10040
+  title: "CASH FALLBACK IS ROUTED PAST AN EXHAUSTED DAILY ALLOWANCE, AND THE CAP REFUSAL IS RETRIED AS TRANSIENT UNDER THE WRONG REASON: `cashFallbackRefusal` checks the switch, the cap's presence and the tool surface but never the remaining allowance, so after the $25.00 cap first refused at 2026-10-17T09:50:29Z the blocked-auction fallback kept choosing cash; the adapter's $0, 4 ms refusal comes back as `apiError: true`, the retry driver spends MAX_TRANSIENT_RETRIES at 1/2/4 s against a cap that resets at 00:00Z, and the run ends blocked_transient 'absent or unparseable fix progress verdict', a reason that never names the cap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: two acceptance concerns on one value, the cash allowance's remaining room: (a) the route reads it before choosing cash, (b) a refusal by it is named and not retried. The cap, its amount, the reservation and settlement, the overflow arm's switch and every subscription read are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17, agent P44's core-ledger and code read; filed by F16"
+  plan_refs: [W1-T3575, W1-T3692, W1-T7B, W1-T4785, W1-T2515, W1-T3666, W1-T63, W1-T7837, W1-T10024, W1-T10037]
+  files:
+    - src/lib/worker.ts
+    - src/lib/worker-provider.ts
+    - src/lib/classify.ts
+    - src/run-task.ts
+    - test/cash-fallback-reads-the-remaining-allowance.test.ts
+  status: queued
+  priority: 1  # while claude sits below reserve and codex reads unreadable, cash is the only arm; every lane on it pays full setup and then four refused attempts per run until 00:00Z, and a review loses its model reviewer
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 by agent P44 on the core ledger (read-only on the Azure host):
+    - The first cap refusal was 09:50:29Z: "committed $24.95 + $0.51 would exceed the $25.00 dailyCapUsd". It is
+      refused before any request ($0, 4 ms), classified `transient`, strikes 0. The run then retries 3 more times
+      at 1/2/4 s.
+    - Each run pays its full setup first (claim, worktree, store build, containment probe). Recon degrades to an EMPTY
+      context. The run ends `blocked_transient` with reason "absent or unparseable fix progress verdict", which does
+      not name the cap.
+    - Since 11:01Z: 6 run-task runs x 4 refused attempts, plus 15 inbox drafts, 6 review.reviewer and 6 recon refused.
+    - #12581 (W1-T9325, bd256974e) merged with no model review: the reviewer's cash fallback was refused.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/lib/worker.ts `cashFallbackRefusal(config, tools)` returns a refusal only for the
+      `cashFallbackWhenBlocked` switch, cash not enabled, `dailyCapUsd` unset, or a tool surface cash cannot serve.
+      Both blocked-auction branches of `spawnWorker` (the subscription-only cash-opus arm and the
+      cash-sonnet / cash-fallback arm) take it as the whole answer, so cash is chosen with no room left.
+    - src/lib/worker-provider.ts `reserveOpenWeightBudget` is the one place the allowance is read: it computes
+      `min(effectiveCashCapUsd(dailyCapUsd, {squeezed}), state.fleetCapUsd)` (plus `FOUNDRY_CLAUDE_DAILY_CAP_USD`
+      for a Foundry Claude deployment) and throws `OpenWeightAllowanceExhaustedError` before transport. No
+      read-only accessor exists, so a router cannot ask without reserving.
+    - src/lib/worker-provider.ts `openWeightResult` sets `apiError: error !== undefined` and `subtype:
+      "openweight_error"` for EVERY error, including `budgetRefused`. That is the transient classification:
+      src/lib/classify.ts `classifyFailure` returns "transient" on `apiError` first.
+    - src/lib/classify.ts `runDiagnoseThenRetry` stops early only for `detectUsageLimitRefusal` text (W1-T2515), which
+      the cap message does not match. After MAX_TRANSIENT_RETRIES it consults the fix progress judge; that spawn is
+      cap-refused too, `judgeFixProgress` returns "unavailable", and the driver returns `held` with the JUDGE's
+      reason. src/run-task.ts logs `verdict: blocked_transient` with that reason. This breaks the doctrine "a ledger
+      line must carry the reason from the decision that produced its outcome".
+    - src/lib/review.ts `reviewerOutcome` reports the reviewer's `subtype`, so a cap-refused reviewer reads
+      "openweight_error", indistinguishable from a transport failure.
+    REVIEW POLICY, CHECKED: arming on proofs alone when the model reviewer is lost is INTENDED. run-task's review
+    block says "Advisory only — the deterministic floor still binds", and `reviewerOutcome`'s doc says the binding
+    verdict "is unaffected either way (Standing rules 2/4/12); this is purely a LEGIBILITY signal (W1-T63/P10-a)".
+    W1-T7837 concerns proofs that never ran (host gaps), not the advisory reviewer. So no second task is filed. This
+    task only makes the loss legible.
+    WHY THIS IS NOT ANOTHER TASK: W1-T7B (merged, #2178) wired `runDiagnoseThenRetry` into the implement dispatch and
+    shares classify.ts and run-task.ts with this task. It gave the driver its call site; this adds one stop condition
+    to it. W1-T3575 built the cap and W1-T3666 settles failed reservations; neither routes.
+    W1-T3692 and W1-T4785 decide WHEN cash is the fallback, not whether it can still pay. W1-T2515 stops retries for
+    a subscription usage window, whose text the cash cap does not match. W1-T10024 is the cash API key in the
+    adapter's env (related: same lanes, different defect). W1-T10037, queued on open head plan-file-1792251237106,
+    stops unreadable Codex reads turning into cash spend. It is the upstream reason the cap ran out, and it does not
+    touch what happens once it has. Swept plan/tasks.d on origin/main for cashFallbackRefusal, budgetRefused,
+    OpenWeightAllowanceExhausted, "allowance exhausted" and "cap refusal" (hits: W1-T10024, W1-T2452 and W1-T3726,
+    none on this defect). Also swept the plan/ and src diffs of all 435 readable open heads (heartbeat-azure
+    unreadable) against origin/main. The broader terms dailyCapUsd and cash-fallback were the positive control: they
+    matched only plan-file-1792251237106 (W1-T10037), and the specific terms matched no head.
+  design: |
+    1. A READ-ONLY ALLOWANCE ACCESSOR in src/lib/worker-provider.ts returns the room left today: committed, cap and
+       next reset. It shares its cap computation with `reserveOpenWeightBudget`: `effectiveCashCapUsd` with
+       `squeezed`, `fleetCapUsd`, and the Foundry Claude sub-cap for a Foundry Claude deployment. The router and
+       the adapter therefore cannot disagree on the cap. The reset is the next 00:00Z after `openWeightUtcDay` of
+       the clock's ISO reading. It never writes the allowance file.
+    2. THE ROUTE READS IT BEFORE CHOOSING CASH. At each blocked-auction site in `spawnWorker` (cash-opus, cash-sonnet,
+       cash-fallback), after `cashFallbackRefusal` passes, the arm is refused when the remaining room cannot fit a
+       LOWER BOUND on this spawn's first reservation. That bound is `openWeightReservationUsd` for the prompt's
+       UTF-8 bytes on the cheapest deployment that arm could select. Using a lower bound means the route refuses
+       only when the adapter would certainly refuse, so no fixed margin is invented and the adapter's reservation
+       stays the binding cap. The refusal reads "cash daily allowance exhausted until <reset ISO>: committed $X of
+       $Y, this spawn needs at least $Z". It is logged on the existing `worker.provider.cash_fallback_refused` /
+       `subscription_only_hold` events.
+    3. NO SPEND CHANGE: an allowance refusal does NOT newly reach the API-billed overflow arm. Today that arm is never
+       reached here, because cash is chosen and fails at $0. Opening it on cap exhaustion would turn a $0 refusal
+       into API spend, which is the operator's call. The spawn takes the existing hold path (`ProviderCapacityBlockedError`
+       rethrown), and the rethrown hold carries the allowance reason so the run's terminal line can name it.
+    4. A CAP REFUSAL IS NOT AN API ERROR. `openWeightResult` with `budgetRefused` sets `apiError: false` and
+       `subtype: "cash_allowance_exhausted"`, and carries the reset instant. Every other cash error keeps
+       `openweight_error`. No consumer matches the literal "openweight_error" today; only `openWeightResult`
+       produces it.
+    5. THE RETRY DRIVER STOPS ON IT, BEFORE CLASSIFICATION. In `runDiagnoseThenRetry`, beside the W1-T2515
+       usage-limit stop, an attempt whose evidence is `cash_allowance_exhausted` returns `gave_up` at once. There is
+       no sleep, no further attempt and no fix progress judge call, and the reason names the allowance and its
+       reset. src/run-task.ts records the run as `blocked_transient` (the class it already gets, so re-queue
+       behaviour is unchanged) with THAT reason, never `failed` from `workerErrorVerdict`.
+    6. THE REVIEW RECORDS IT. With point 4, `reviewerOutcome` reports `cash_allowance_exhausted` for a cap-refused
+       reviewer, and `review.posted`'s reviewer_outcome says the model review was lost to the cap. Arming policy is
+       unchanged (see rationale).
+    NON-GOALS, STATED: a caller that pins `mountProvider: "cash"` directly (the inbox-draft and recon routes that do)
+    gets the named refusal of point 4 but is not re-routed here. A run still pays its setup before its first spawn
+    is refused. Moving the allowance check ahead of claim and worktree is a separate decision.
+    TESTS in test/cash-fallback-reads-the-remaining-allowance.test.ts, `test(` titles verbatim as in the proofs.
+    Use a temp config root whose allowance file holds the 09:50Z shape (committed $24.95 against a $25.00 cap), a
+    fixed clock at 2026-10-17T09:50:29Z and fake fetch / spawn seams. No network, no real sleep: the driver's `sleep`
+    is a recorder.
+  acceptance:
+    - claim: "the blocked-auction fallback refuses cash when the remaining allowance cannot fit the spawn, names the reset, and spawns no cash worker"
+      proof: 'grep: test("W1-T10040: an exhausted allowance refuses the cash fallback and names its reset" in test/cash-fallback-reads-the-remaining-allowance.test.ts'
+    - claim: "an allowance with room still takes the cash fallback, so the check refuses only a certain refusal"
+      proof: 'grep: test("W1-T10040: an allowance with room still takes the cash fallback" in test/cash-fallback-reads-the-remaining-allowance.test.ts'
+    - claim: "a cap refusal is a cash_allowance_exhausted result, never an api error"
+      proof: 'grep: test("W1-T10040: a cap refusal is cash_allowance_exhausted not an api error" in test/cash-fallback-reads-the-remaining-allowance.test.ts'
+    - claim: "the retry driver stops on the first cap refusal with no backoff and no progress judge, and the run's blocked_transient reason names the allowance and its reset"
+      proof: 'grep: test("W1-T10040: the retry driver stops on a cap refusal and names it" in test/cash-fallback-reads-the-remaining-allowance.test.ts'
+    - claim: "a review whose model reviewer was cap-refused records reviewer_outcome cash_allowance_exhausted"
+      proof: 'grep: test("W1-T10040: a cap-refused reviewer is recorded as cash_allowance_exhausted" in test/cash-fallback-reads-the-remaining-allowance.test.ts'
+  falsifier: |
+    THE 09:50Z SHAPE: allowance committed $24.95, cap $25.00, a cash-fallback spawn whose reservation is about $0.51.
+    At origin/main the first test's fake cash spawn IS called. The third test reads `apiError: true` /
+    `openweight_error`. The fourth test records 4 attempts, sleeps of 1000/2000/4000 ms and one judge call, and its
+    reason is "absent or unparseable fix progress verdict; re-ask next pass". With the fix: no cash spawn, one
+    attempt, no sleep, no judge call, and the reason contains "cash daily allowance exhausted until
+    2026-10-18T00:00:00.000Z". Dropping the accessor's `fleetCapUsd` or squeezed-cap term makes the first two tests
+    disagree with `reserveOpenWeightBudget` on a fixture where those caps bind.
+  note: |
+    EFFECT, measured after merge from the core ledger on a day the cap is reached: after the first
+    `OpenWeightAllowanceExhaustedError`, `worker.provider.cash_fallback_refused` rows name "cash daily allowance
+    exhausted until". No later run-task run shows more than one cap-refused attempt, and no `verdict` row carries
+    "absent or unparseable fix progress verdict" for a cap-refused run. Healthy shape: the refused-attempt count per
+    run after the first refusal is at most 1.
