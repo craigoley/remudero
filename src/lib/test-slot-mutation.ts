@@ -78,6 +78,7 @@ function procFdProbe(guardPath: string, guard: Stats, procRoot = "/proc"): Guard
     return { state: "unknown", probe: "proc-fd", reason: `process table unreadable: ${String(error)}` };
   }
   let scanned = 0;
+  const unreadable: string[] = [];
   for (const pid of pids) {
     let fds: string[];
     try {
@@ -85,8 +86,8 @@ function procFdProbe(guardPath: string, guard: Stats, procRoot = "/proc"): Guard
       fds = readdirSync(join(procRoot, pid, "fd"));
     } catch (error) {
       // A process that exited mid-scan holds nothing; any other failure leaves the scan incomplete.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH") continue;
-      return { state: "unknown", probe: "proc-fd", reason: `pid ${pid} descriptors unreadable: ${String(error)}` };
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ESRCH") unreadable.push(pid);
+      continue;
     }
     for (const fd of fds) {
       try {
@@ -96,11 +97,13 @@ function procFdProbe(guardPath: string, guard: Stats, procRoot = "/proc"): Guard
         if (open.dev === guard.dev && open.ino === guard.ino) return { state: "open", probe: "proc-fd", reason: `held open by pid ${pid}` };
       } catch (error) {
         // A descriptor closed between listing and reading is not a holder; anything else is unknown.
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        return { state: "unknown", probe: "proc-fd", reason: `pid ${pid} fd ${fd} unreadable: ${String(error)}` };
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadable.push(`${pid}/fd/${fd}`);
       }
     }
     scanned += 1;
+  }
+  if (unreadable.length > 0) {
+    return { state: "unknown", probe: "proc-fd", reason: `incomplete: descriptors unreadable for same-uid ${unreadable.slice(0, 5).join(",")}` };
   }
   return { state: "closed", probe: "proc-fd", reason: `no descriptor among ${scanned} same-uid process(es) names the guard` };
 }
