@@ -46,6 +46,11 @@
  * within {@link SWAP_STALL_WINDOW_MS} more often than all verdicts, by over twice the sampling noise; too few of them,
  * the rate alone. Over the same rows that ratio was 0.95-1.02 (PSI some10 median 0.9 at ~1,245 pages/s): churn.
  *
+ * THE PSI START BOUND IS LEARNED LIKE SWAP-IN (W1-T10085). Host PSI full avg10 names "psi" past a bound learned from
+ * the instance's own admitted starts over the same windows, minimum and noise: the prior `psiFullAvg10Max` rises only
+ * to a level whose admitted starts were followed by harm (an oom_kill rise, or full avg60 past the PRIOR) no more often
+ * than every verdict in their band, and by no OOM kill. Unread or thin: the prior.
+ *
  * NEVER WAITS. No lock is taken; a ledger reader that reports a held lock (EWOULDBLOCK/EAGAIN/EBUSY), an errno, or a
  * missing/unreadable/reset store yields a verdict naming that state as an uncertainty that WIDENS the margin. It is
  * never read as zero reservations. File reads are bounded (a ledger tail, a capped process count).
@@ -309,6 +314,10 @@ export interface ShadowInputs {
   swapStall?: SwapStallRelation;
   /** Whether projection flags predict this container's own pressure. Absent: the projection alone decides. */
   containerLift?: ContainerLift;
+  /** W1-T10085: the learned PSI full avg10 bound. Absent: the prior. */
+  psiBound?: PsiFullAvg10Bound;
+  /** W1-T10085: this verdict's stamp in the PSI record, so an admission can mark its start admitted. */
+  psiRecordAt?: number;
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
   reviewEstimateMib?: number;
 }
@@ -326,6 +335,21 @@ export type SwapStallRelation =
     noise: number;
   }
   | { unlearned: string };
+
+/** W1-T10085: the level host PSI full avg10 must pass before a verdict names "psi", with the record behind it. */
+export interface PsiFullAvg10Bound {
+  bound: number;
+  prior: number;
+  basis: string;
+  /** Admitted starts above the prior with a closed window. */
+  samples: number;
+  /** At the bound's band: the share of its admitted starts followed by harm, of all its verdicts, and twice the noise. */
+  afterAdmitted: number | null;
+  afterBand: number | null;
+  noise: number | null;
+  /** Admitted starts above the prior followed by an oom_kill rise; null when oom_kill was unread on every one. */
+  ooms: number | null;
+}
 
 /** Projection flags followed by own pressure, compared with all closed verdicts. */
 export type ContainerLift =
@@ -418,6 +442,7 @@ export interface ShadowVerdict {
     swapInPagesPerSec: number | null;
     /** Whether swap-in past the threshold counts: its learned relation to stall, or the rate alone while unlearned. */
     swapInBasis: string | null;
+    psiFullAvg10Bound: PsiFullAvg10Bound;
     psi: { someAvg10: number; someAvg60: number; fullAvg10?: number; fullAvg60?: number } | null;
     containerCurrentMib: number | null;
     containerMaxMib: number | null;
@@ -599,8 +624,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     if (swapIn > policy.swapInPagesPerSecMax && relation.counts) reasons.add("swap-in");
   }
   const psi = "unread" in inputs.psi ? null : inputs.psi;
+  const psiBound = psiBoundFor(inputs.psiBound, policy);
   if (psi === null) widen("psi-unread", margin, (inputs.psi as { unread: string }).unread);
-  else if (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > policy.psiFullAvg10Max) reasons.add("psi");
+  else if (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > psiBound.bound) reasons.add("psi");
 
   let containerCurrent: number | null = null;
   let containerMax: number | null = null;
@@ -679,6 +705,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       hostReserveMib: policy.hostReserveMib,
       swapInPagesPerSec: swapIn,
       swapInBasis,
+      psiFullAvg10Bound: psiBound,
       psi,
       containerCurrentMib: containerCurrent,
       containerMaxMib: containerMax,
@@ -837,6 +864,114 @@ function swapInPredictsStall(relation: SwapStallRelation | undefined): { counts:
     basis: `swap-in ${counts ? "predicts" : "does not predict"} stall: ${pct(relation.afterSwapIn)} of ${relation.samples} ` +
       `swap-in verdicts were followed by one, against ${pct(relation.afterAny)} of all (noise ${pct(relation.noise)})`,
   };
+}
+
+/** One verdict in the PSI record: host full avg10 and avg60 (null: unread), whether its start was admitted, and the
+ *  cumulative /proc/vmstat oom_kill (null: unread). */
+export interface PsiStartSample {
+  at: number;
+  fullAvg10: number | null;
+  fullAvg60: number | null;
+  admitted: boolean;
+  oomKill: number | null;
+}
+
+/** The bound a verdict applies: the record's, never below the prior; no record read, the prior. */
+function psiBoundFor(learned: PsiFullAvg10Bound | undefined, policy: HostMemoryBudgetPolicy): PsiFullAvg10Bound {
+  const prior = policy.psiFullAvg10Max;
+  if (learned === undefined) return priorBound(prior, "no PSI record read", 0);
+  return { ...learned, prior, bound: Math.max(prior, learned.bound) };
+}
+
+function priorBound(prior: number, why: string, samples: number, at?: Partial<PsiFullAvg10Bound>): PsiFullAvg10Bound {
+  return { bound: prior, prior, basis: `the prior ${prior}: ${why}`, samples, afterAdmitted: null, afterBand: null,
+    noise: null, ooms: null, ...at };
+}
+
+/**
+ * W1-T10085: the PSI full avg10 bound learned from the record. A verdict is HARMED when, within SWAP_STALL_WINDOW_MS,
+ * oom_kill changed from its last reading or a later verdict read full avg60 past the PRIOR: the outcome never reads the
+ * learned bound. For each admitted level v above the prior, the admitted starts with closed windows in (prior, v] are
+ * compared with every verdict in that band; the bound is the largest v with SWAP_STALL_MIN_SAMPLES such starts, a lift
+ * within twice the noise, no OOM kill after one, and oom_kill read in the band. Otherwise the prior, and why.
+ */
+export function psiStartBoundOf(history: PsiStartSample[], now: number, policy: HostMemoryBudgetPolicy, unread?: string): PsiFullAvg10Bound {
+  const prior = policy.psiFullAvg10Max;
+  if (unread !== undefined) return priorBound(prior, unread, 0);
+  const sorted = history.filter((s) => s.at <= now).sort((x, y) => x.at - y.at);
+  const outcome = (i: number): { harmed: boolean; oom: boolean } => {
+    const s = sorted[i]!;
+    let read = s.oomKill;
+    for (let j = i - 1; read === null && j >= 0; j--) read = sorted[j]!.oomKill;
+    let stall = false;
+    let oom = false;
+    for (let j = i + 1; j < sorted.length && sorted[j]!.at <= s.at + SWAP_STALL_WINDOW_MS; j++) {
+      const later = sorted[j]!;
+      if (later.at === s.at) continue;
+      if ((later.fullAvg60 ?? 0) > prior) stall = true;
+      // A count that went down is a reboot: harm too.
+      if (later.oomKill !== null && read !== null && later.oomKill !== read) oom = true;
+    }
+    return { harmed: stall || oom, oom };
+  };
+  const band = sorted.map((s, i) => ({ s, i })).filter(({ s }) => s.fullAvg10 !== null && s.fullAvg10 > prior &&
+    now - s.at >= SWAP_STALL_WINDOW_MS && now - s.at <= SWAP_STALL_HISTORY_MS)
+    .map(({ s, i }) => ({ ...s, level: s.fullAvg10!, ...outcome(i) })).sort((x, y) => x.level - y.level);
+  const admitted = band.filter((s) => s.admitted);
+  const allOomUnread = admitted.every((s) => s.oomKill === null);
+  const ooms = allOomUnread ? null : admitted.filter((s) => s.oom).length;
+  if (admitted.length < SWAP_STALL_MIN_SAMPLES) {
+    return priorBound(prior, `${admitted.length} of ${SWAP_STALL_MIN_SAMPLES} admitted starts above it with a closed window`,
+      admitted.length, { ooms });
+  }
+  const pct = (v: number): string => `${Math.round(v * 100)}%`;
+  let learned: PsiFullAvg10Bound | undefined;
+  let refused = "";
+  let judged: Partial<PsiFullAvg10Bound> = {};
+  let inBand = 0;
+  let harmedInBand = 0;
+  let inAdmitted = 0;
+  let harmedAdmitted = 0;
+  let oomsAdmitted = 0;
+  let oomRead = false;
+  let levelAdmitted = false;
+  for (let k = 0; k < band.length; k++) {
+    const s = band[k]!;
+    inBand += 1;
+    if (s.harmed) harmedInBand += 1;
+    if (s.oomKill !== null) oomRead = true;
+    if (s.admitted) {
+      levelAdmitted = true;
+      inAdmitted += 1;
+      if (s.harmed) harmedAdmitted += 1;
+      if (s.oom) oomsAdmitted += 1;
+    }
+    // Judged once per admitted level, with every verdict at that level in the band.
+    if (k + 1 < band.length && band[k + 1]!.level === s.level) continue;
+    if (!levelAdmitted) continue;
+    levelAdmitted = false;
+    if (oomsAdmitted > 0) {
+      refused = `${oomsAdmitted} admitted start(s) at full avg10 ${prior}-${s.level} followed by an OOM kill`;
+      break;
+    }
+    if (inAdmitted < SWAP_STALL_MIN_SAMPLES) continue;
+    if (!oomRead) {
+      refused = `oom_kill unread on every verdict at full avg10 ${prior}-${s.level}`;
+      continue;
+    }
+    const afterAdmitted = harmedAdmitted / inAdmitted;
+    const afterBand = harmedInBand / inBand;
+    const noise = 2 * Math.sqrt(afterBand * (1 - afterBand) / inAdmitted);
+    const line = `${pct(afterAdmitted)} of ${inAdmitted} admitted starts at full avg10 ${prior}-${s.level} were followed by ` +
+      `stall or an OOM kill, against ${pct(afterBand)} of all ${inBand} verdicts in that band (noise ${pct(noise)})`;
+    if (afterAdmitted - afterBand > noise) {
+      refused = line;
+      judged = { afterAdmitted, afterBand, noise };
+      continue;
+    }
+    learned = { bound: s.level, prior, basis: `learned ${s.level}: ${line}`, samples: inAdmitted, afterAdmitted, afterBand, noise, ooms };
+  }
+  return learned ?? priorBound(prior, refused, admitted.length, { ooms, ...judged });
 }
 
 // ── the counterfactual review (pure, W1-T7095) ──────────────────────────────────────────────────────────────────
@@ -1112,15 +1247,21 @@ interface PressureStore {
   swap: Array<[number, number | null, 0 | 1]>;
   /** [at, 1 when projection exceeds onset, 1 when under own pressure]. */
   container: Array<[number, 0 | 1, 0 | 1]>;
+  /** W1-T10085: [at, host full avg10, 1 when its start was admitted, cumulative oom_kill, host full avg60]. */
+  psi: PsiEntry[];
+  /** Why the store could not be read; the PSI bound then keeps the prior. */
+  unread?: string;
 }
+
+type PsiEntry = [number, number | null, 0 | 1, number | null, number | null];
 
 function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): PressureStore {
   let parsed: Partial<PressureStore>;
   try {
     parsed = JSON.parse(read(path)) as Partial<PressureStore>;
   } catch (error) {
-    void error; // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
-    return { swap: [], container: [] };
+    // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
+    return { swap: [], container: [], psi: [], unread: error instanceof SyntaxError ? "unparseable" : reasonOf(error) };
   }
   const finite = (...n: unknown[]): boolean => n.every((v) => typeof v === "number" && Number.isFinite(v));
   const prior = parsed.prior && finite(parsed.prior.at) ? parsed.prior : undefined;
@@ -1130,7 +1271,38 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
   const container = Array.isArray(parsed.container)
     ? parsed.container.filter((s) => Array.isArray(s) && finite(s[0]) && (s[1] === 0 || s[1] === 1) && (s[2] === 0 || s[2] === 1))
     : [];
-  return { ...(prior ? { prior } : {}), swap, container };
+  const nullable = (v: unknown): boolean => v === null || finite(v);
+  const psi = Array.isArray(parsed.psi)
+    ? parsed.psi.filter((s) => Array.isArray(s) && finite(s[0]) && nullable(s[1]) && (s[2] === 0 || s[2] === 1) &&
+      nullable(s[3]) && nullable(s[4]))
+    : [];
+  return { ...(prior ? { prior } : {}), swap, container, psi };
+}
+
+function readOomKill(read: ShadowMemoryPorts["readFile"]): number | null {
+  try {
+    const raw = /^oom_kill (\d+)$/m.exec(read("/proc/vmstat"))?.[1];
+    return raw === undefined ? null : Number(raw);
+  } catch (error) {
+    void error; // Unread: this verdict carries no OOM reading, and a band with none keeps the prior.
+    return null;
+  }
+}
+
+/** W1-T10085: mark the start of the verdict stamped `at` admitted in the PSI record. Never throws; false when unmarked. */
+export function markPsiStartAdmitted(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number): boolean {
+  try {
+    const path = join(root, "state", CONTAINER_PRESSURE_FILE);
+    const { unread, ...store } = readPressureStore(ports.readFile, path);
+    const entry = unread === undefined ? store.psi.find(([stamp]) => stamp === at) : undefined;
+    if (entry === undefined) return false;
+    entry[2] = 1;
+    ports.writeFile(path, `${JSON.stringify(store)}\n`);
+    return true;
+  } catch (error) {
+    void error; // Unwritable: the record holds one admitted start fewer, so the bound learns more slowly.
+    return false;
+  }
 }
 
 /**
@@ -1140,8 +1312,8 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
  */
 function readContainerPressure(
   ports: ShadowMemoryPorts, root: string, now: number, policy: HostMemoryBudgetPolicy,
-  snapshot: ShadowInputs,
-): { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
+  snapshot: ShadowInputs, admitted: boolean,
+): Pick<ShadowInputs, "psiBound" | "psiRecordAt"> & { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
   const path = join(root, "state", CONTAINER_PRESSURE_FILE);
   const store = readPressureStore(ports.readFile, path);
   const psi = readPsi(ports.readFile, "/sys/fs/cgroup/memory.pressure");
@@ -1188,19 +1360,25 @@ function readContainerPressure(
   const rate = "pagesPerSec" in snapshot.swapIn ? Math.round(snapshot.swapIn.pagesPerSec) : null;
   const swap = [...store.swap, [now, rate, stalled ? 1 : 0] as [number, number | null, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
+  const psiBound = psiStartBoundOf(store.psi.map(([at, fullAvg10, admit, oomKill, fullAvg60]) => ({
+    at, fullAvg10, fullAvg60, admitted: admit === 1, oomKill,
+  })), now, policy, store.unread === undefined ? undefined : `pressure store unread (${store.unread})`);
+  const psiSeries = [...store.psi, [now, hostPsi?.fullAvg10 ?? null, admitted ? 1 : 0, readOomKill(ports.readFile),
+    hostPsi?.fullAvg60 ?? null] as PsiEntry].filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
   // Evaluate the same pure projection as the caller, before storing this outcome; this row cannot train its own lift.
   const numbers = evaluateShadowMemory({ ...snapshot, containerPressure, swapStall, containerLift }, policy).numbers;
   const flagged = numbers.containerProjectedMib !== null && numbers.containerOnsetMib !== null &&
     numbers.containerProjectedMib > numbers.containerOnsetMib;
   const container = [...store.container, [now, flagged ? 1 : 0, numbers.containerPressed ? 1 : 0] as [number, 0 | 1, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
-  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container };
+  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container,
+    psi: psiSeries };
   try {
     ports.writeFile(path, `${JSON.stringify(next)}\n`);
   } catch (error) {
     void error; // Unwritable: this verdict still judges from its reading; the next one measures no rate and learns less.
   }
-  return { containerPressure, swapStall, containerLift };
+  return { containerPressure, swapStall, containerLift, psiBound, psiRecordAt: now };
 }
 
 function readContainer(read: ShadowMemoryPorts["readFile"]): ShadowInputs["container"] {
@@ -1492,8 +1670,9 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
   return { scenario: "serve-stopped", basis: `serve silent ${Math.round(age / 1000)}s` };
 }
 
-/** One bounded snapshot for one start. */
-export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy): ShadowInputs {
+/** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
+export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy,
+  options: { admitted?: boolean } = {}): ShadowInputs {
   const now = ports.clock.now();
   const ledger = readLedgerState(ports, start.root);
   const recorded = ledger.reading?.entries ?? [];
@@ -1539,7 +1718,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
   };
-  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
+  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;
   if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce") {
     if (policy.jointQualification === undefined) throw new Error("joint enforce unavailable: qualification evidence is missing");
@@ -1850,7 +2029,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
     const policy = ports.policy();
     const mode = hostMemoryBudgetModeFor(policy, start.workerClass);
     if (mode === "off") return { kind: "off" };
-    const inputs = gatherShadowInputs(start, ports, policy);
+    const inputs = gatherShadowInputs(start, ports, policy, { admitted: mode === "shadow" });
     const instance = instanceOf(ports, start.root);
     const now = ports.clock.now();
     const waitKey = `${instance}\u0000${start.workerClass}`;
