@@ -5,8 +5,8 @@ import { readLedgerUnionRawLinesSync } from "./ledger-union.js";
 import { TASK_STATUSES, type Plan } from "./plan.js";
 import {
   buildBatchedGithub, buildLedgerIndex, dispatchesWithoutNewOwnedPr, infrastructureRefusal,
-  orphanedRunIds, projectPlan, readLedgerUnionBounded, STATUS_BOARD_MIN_ROTATIONS, STATUS_BOARD_WINDOW_MS,
-  type GitHub,
+  orphanedRunIds, PROJECTION_STEP_READS, projectPlan, readLedgerUnionBounded, STATUS_BOARD_MIN_ROTATIONS,
+  STATUS_BOARD_WINDOW_MS, type GitHub,
 } from "./status.js";
 
 type Row = Record<string, unknown>;
@@ -31,6 +31,10 @@ export interface ReaderAgreementOptions {
   boardReader?: () => ReaderFigures | Promise<ReaderFigures>;
   independentReader?: () => ReaderFigures | Promise<ReaderFigures>;
   appendLine?: (path: string, row: Row & { run_id: string; task_id: string; step: string }) => void;
+  /** W1-T9981: the board figures' corpus reader; omitted, {@link readLedgerUnionBounded}. */
+  boardCorpus?: typeof readLedgerUnionBounded;
+  /** W1-T9981: the independent figures' corpus reader; omitted, {@link readLedgerUnionRawLinesSync}. */
+  independentCorpus?: typeof readLedgerUnionRawLinesSync;
 }
 
 export interface ReaderDisagreement {
@@ -49,14 +53,96 @@ function deployInstance(row: Row): string {
   return typeof row.instance === "string" ? row.instance : "local";
 }
 
-function boardFigures(options: ReaderAgreementOptions): ReaderFigures {
-  const rows = readLedgerUnionBounded(options.ledgerPath);
-  if (!rows.present || rows.torn) throw new Error("board ledger is missing or contains malformed rows");
-  const index = buildLedgerIndex(rows);
-  const dispatchStreaks = Object.fromEntries(haltedTasks(rows)
-    .map(id => [id, dispatchesWithoutNewOwnedPr(rows, id, index)]));
+/** W1-T9981: what one reader's pre-parse filter was offered and kept, as the `reader.agreement` row reports it. */
+interface ReaderStats { scanned: number; kept: number }
+
+/** W1-T9981: one reader's walk of its window. A figure reads only a few steps and the halted tasks' rows, but the
+ *  orphan rule and the plan projection take "now" from the newest `ts` anywhere, so that line is kept as well. */
+interface WindowScan {
+  scanned: number;
+  newestMs?: number;
+  newestLine?: string;
+  /** The first line the unfiltered parse would have refused. */
+  malformed?: unknown;
+}
+
+const TS_PREFIX = '{"ts":"';
+const token = (value: string): string => JSON.stringify(value);
+const FIGURE_STEP_TOKENS = ["dispatch.circuit_broken", "deploy.ok"].map(token);
+
+/** Notes `line`'s `ts` without parsing a line that leads with it, as every ledger writer's line does. */
+function noteLine(scan: WindowScan, line: string): void {
+  scan.scanned++;
+  const end = line.startsWith(TS_PREFIX) && line.endsWith("}") ? line.indexOf('"', TS_PREFIX.length) : -1;
+  let ts: unknown = end > TS_PREFIX.length ? line.slice(TS_PREFIX.length, end) : undefined;
+  if (typeof ts !== "string" || ts.includes("\\")) {
+    try {
+      const row: unknown = JSON.parse(line);
+      if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("independent ledger row is not an object");
+      ts = (row as Row).ts;
+    } catch (error) {
+      // deliberate: the reader throws this once its pass ends, as the unfiltered parse threw on this line.
+      scan.malformed ??= error;
+      return;
+    }
+  }
+  if (typeof ts !== "string") return;
+  const ms = Date.parse(ts);
+  if (Number.isFinite(ms) && (scan.newestMs === undefined || ms > scan.newestMs)) {
+    scan.newestMs = ms;
+    scan.newestLine = line;
+  }
+}
+
+/** The first pass: every line is noted, and only the halted set's and the deploys' steps are kept. */
+function keepFigureSteps(scan: WindowScan): (line: string) => boolean {
+  return line => {
+    noteLine(scan, line);
+    return FIGURE_STEP_TOKENS.some(step => line.includes(step));
+  };
+}
+
+/** A later pass: the lines naming one of `tokens`, `names` (when given) or the window's newest-`ts` line. */
+function keepNamed(scan: WindowScan, tokens: string[], names?: (line: string) => boolean): (line: string) => boolean {
+  return line => {
+    scan.scanned++;
+    return line === scan.newestLine || tokens.some(name => line.includes(name)) || names?.(line) === true;
+  };
+}
+
+const TASK_ID_SHAPE = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
+const TASK_ID_TOKEN = /"([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)"/g;
+
+/** True for a line naming a plan task as a whole JSON string, as its `task_id` or `task` does. */
+function namesPlanTask(plan: Plan): (line: string) => boolean {
+  const ids = new Set(plan.tasks.map(task => task.id).filter(id => TASK_ID_SHAPE.test(id)));
+  const others = plan.tasks.map(task => task.id).filter(id => !TASK_ID_SHAPE.test(id)).map(token);
+  return line => {
+    for (const match of line.matchAll(TASK_ID_TOKEN)) if (ids.has(match[1]!)) return true;
+    return others.some(id => line.includes(id));
+  };
+}
+
+function boardFigures(options: ReaderAgreementOptions, stats: ReaderStats): ReaderFigures {
+  const read = options.boardCorpus ?? readLedgerUnionBounded;
+  const scan: WindowScan = { scanned: 0 };
+  const steps = read(options.ledgerPath, { keep: keepFigureSteps(scan) });
+  stats.kept += steps.length;
+  if (!steps.present || steps.torn || scan.malformed !== undefined) {
+    throw new Error("board ledger is missing or contains malformed rows");
+  }
+  const halted = haltedTasks(steps);
+  let dispatchStreaks: Record<string, number> = {};
+  if (halted.length > 0) {
+    const rows = read(options.ledgerPath, { keep: keepNamed(scan, halted.map(token)) });
+    stats.kept += rows.length;
+    if (!rows.present || rows.torn) throw new Error("board ledger is missing or contains malformed rows");
+    const index = buildLedgerIndex(rows);
+    dispatchStreaks = Object.fromEntries(halted.map(id => [id, dispatchesWithoutNewOwnedPr(rows, id, index)]));
+  }
+  stats.scanned = scan.scanned;
   const healthyDeploys: Record<string, string> = {};
-  for (const row of rows) {
+  for (const row of steps) {
     if (row.step !== "deploy.ok" || typeof row.ts !== "string") continue;
     const instance = deployInstance(row);
     if (healthyDeploys[instance] === undefined || row.ts > healthyDeploys[instance]) healthyDeploys[instance] = row.ts;
@@ -122,20 +208,31 @@ export function independentQueueGateway(owner: string, repo: string): GitHub {
   return gateway;
 }
 
-async function independentFigures(options: ReaderAgreementOptions): Promise<ReaderFigures> {
-  const union = readLedgerUnionRawLinesSync(dirname(options.ledgerPath), {
-    liveFirst: true, order: "newest-first", rotationWindowMs: STATUS_BOARD_WINDOW_MS,
-    minRotations: STATUS_BOARD_MIN_ROTATIONS, refuseIncomplete: true,
-  });
-  if (!union.ok || !union.liveFileRead || union.unclassified.length) throw new Error("independent ledger corpus is incomplete");
-  const rows: Row[] = union.rawLines.map(raw => {
-    const row: unknown = JSON.parse(raw);
-    if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("independent ledger row is not an object");
-    return row as Row;
-  });
-  const dispatchStreaks = Object.fromEntries(haltedTasks(rows).map(id => [id, independentStreak(rows, id)]));
+async function independentFigures(options: ReaderAgreementOptions, stats: ReaderStats): Promise<ReaderFigures> {
+  const read = options.independentCorpus ?? readLedgerUnionRawLinesSync;
+  const scan: WindowScan = { scanned: 0 };
+  // Each pass parses only the lines it kept, and its raw lines are dropped once parsed.
+  const readRows = (keep: (line: string) => boolean): Row[] => {
+    const union = read(dirname(options.ledgerPath), {
+      liveFirst: true, order: "newest-first", rotationWindowMs: STATUS_BOARD_WINDOW_MS,
+      minRotations: STATUS_BOARD_MIN_ROTATIONS, refuseIncomplete: true, keep,
+    });
+    stats.scanned = scan.scanned;
+    if (!union.ok || !union.liveFileRead || union.unclassified.length) throw new Error("independent ledger corpus is incomplete");
+    if (scan.malformed !== undefined) throw scan.malformed;
+    stats.kept += union.rawLines.length;
+    return union.rawLines.map(raw => {
+      const row: unknown = JSON.parse(raw);
+      if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("independent ledger row is not an object");
+      return row as Row;
+    });
+  };
+  const steps = readRows(keepFigureSteps(scan));
+  const halted = haltedTasks(steps);
+  const rows = halted.length > 0 ? readRows(keepNamed(scan, halted.map(token))) : [];
+  const dispatchStreaks = Object.fromEntries(halted.map(id => [id, independentStreak(rows, id)]));
   const healthyDeploys: Record<string, string> = {};
-  const deploys = rows.filter(row => row.step === "deploy.ok" && typeof row.ts === "string")
+  const deploys = steps.filter(row => row.step === "deploy.ok" && typeof row.ts === "string")
     .sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
   for (const row of deploys) healthyDeploys[deployInstance(row)] ??= row.ts as string;
   let openPrCount: number | undefined;
@@ -155,8 +252,10 @@ async function independentFigures(options: ReaderAgreementOptions): Promise<Read
     github.warm?.();
     // W1-T6246: a cross-check never waits on GitHub. Until the off-loop walk has fresh facts the figure is absent.
     if (github.factsStale?.() !== false) return { dispatchStreaks, healthyDeploys, openPrCount, queuedTaskCount };
+    // W1-T9981: the projection reads the plan tasks' own rows and the steps it reads by step, never the whole window.
+    const projected = readRows(keepNamed(scan, [...PROJECTION_STEP_READS].map(token), namesPlanTask(options.plan)));
     const projections = projectPlan(options.plan, {
-      ledgerPath: options.ledgerPath, readLedger: () => rows,
+      ledgerPath: options.ledgerPath, readLedger: () => projected,
       github, writeCreditStore: () => {},
     });
     if (github.readFailed?.()) throw new Error("independent queue projection is unavailable");
@@ -166,8 +265,13 @@ async function independentFigures(options: ReaderAgreementOptions): Promise<Read
 }
 
 export async function checkReaderAgreement(options: ReaderAgreementOptions): Promise<ReaderDisagreement[]> {
-  const board = await (options.boardReader ?? (() => boardFigures(options)))();
-  const independent = await (options.independentReader ?? (() => independentFigures(options)))();
+  const heapUsedBefore = process.memoryUsage().heapUsed;
+  const started = performance.now();
+  const boardStats: ReaderStats | undefined = options.boardReader ? undefined : { scanned: 0, kept: 0 };
+  const independentStats: ReaderStats | undefined = options.independentReader ? undefined : { scanned: 0, kept: 0 };
+  const board = await (options.boardReader ?? (() => boardFigures(options, boardStats!)))();
+  const independent = await (options.independentReader ?? (() => independentFigures(options, independentStats!)))();
+  const heapUsedAfter = process.memoryUsage().heapUsed;
   const findings: ReaderDisagreement[] = [];
   const compare = (figure: string, subject: string, a: FigureValue, b: FigureValue): void => {
     if (a !== b) findings.push({ figure, subject, board_value: a, independent_value: b });
@@ -188,5 +292,17 @@ export async function checkReaderAgreement(options: ReaderAgreementOptions): Pro
     run_id: options.runId, task_id: finding.figure === "dispatch_streak" ? finding.subject : "SWEEP",
     step: "reader.disagreement", reason: "independent readers returned different values", ...finding,
   });
+  // W1-T9981: the saving, read live. A check whose readers were both injected read no corpus to report.
+  if (boardStats || independentStats) {
+    const per = (pick: (stats: ReaderStats) => number) => ({
+      ...(boardStats ? { board: pick(boardStats) } : {}), ...(independentStats ? { independent: pick(independentStats) } : {}),
+    });
+    (options.appendLine ?? appendLedger)(options.ledgerPath, {
+      run_id: options.runId, task_id: "SWEEP", step: "reader.agreement",
+      lines_scanned: per(stats => stats.scanned), rows_kept: per(stats => stats.kept),
+      heap_used_before_bytes: heapUsedBefore, heap_used_after_bytes: heapUsedAfter,
+      duration_ms: Math.round(performance.now() - started), disagreements: findings.length,
+    });
+  }
   return findings;
 }

@@ -68,7 +68,8 @@ test("W1-T4841: default readers agree across plain and gzip replays and out-of-o
   const rows: Record<string, unknown>[] = [];
   assert.deepEqual(await checkReaderAgreement({ ledgerPath: path, runId: "SWEEP-test",
     appendLine: (_path, row) => rows.push(row) }), []);
-  assert.deepEqual(rows, []);
+  // W1-T9981: every default check also writes its reader.agreement counts row.
+  assert.deepEqual(rows.filter(row => row.step === "reader.disagreement"), []);
 });
 
 test("W1-T4841: the independent default detects the historical inflated board streak", async () => {
@@ -79,7 +80,7 @@ test("W1-T4841: the independent default detects the historical inflated board st
       healthyDeploys: { W1: "2026-09-29T08:00:00.000Z" } }),
     appendLine: (_path, row) => rows.push(row) });
   assert.deepEqual(result, [{ figure: "dispatch_streak", subject: "W1-T2982", board_value: 1584, independent_value: 2 }]);
-  assert.equal(rows.length, 1);
+  assert.equal(rows.filter(row => row.step === "reader.disagreement").length, 1);
 });
 
 test("W1-T4841: independent defaults exclude infrastructure refusals and stale orphan starts", async () => {
