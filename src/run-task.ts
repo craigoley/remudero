@@ -2563,6 +2563,7 @@ export function buildSweepEffects(
   | "close"
   | "dispatchFix"
   | "escalate"
+  | "fixOwnerReclaimableAtHold"
   | "readLiveState"
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
