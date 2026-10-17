@@ -1,0 +1,103 @@
+- id: W1-T9975
+  title: "A DEFERRED GARDEN AGES AGAINST ITS OWN DUE INTERVAL, CARRIED ACROSS RESTARTS, NOT THE 60 S LOOP TICK — on 2026-10-16/17 every garden enforce row on core since W1-T9761 booted named cadence_basis scheduled, and 12 of 19 gardens' scheduled cadence is the 60,000 ms timer tick, so evidence-coverage (natural gap ~57 min) aged after 1 min"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — which interval a deferred garden must wait through before the aged rung admits it; verdict arithmetic, policy modes, limits and the one-aged-at-a-time rule are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 audit of W1-T9761 live on core (brief: 'use each garden's real interval as the fallback cadence'; standing rulings: no hard fixed thresholds, garden children ENFORCE the memory budget (10-14), never raise core memory.max)"
+  plan_refs: [W1-T9761, W1-T9762, W1-T9711, W1-T9706]
+  files:
+    - src/lib/garden-registry.ts
+    - src/lib/gardener-runtime.ts
+    - src/run-task.ts
+    - test/a-deferred-garden-ages-against-its-own-due-interval.test.ts
+  status: queued
+  priority: 1  # operator-2026-10-17: the aged rung's 60 s fallback turns garden enforcement into a one-minute delay
+  attempts: 0
+  rationale: |
+    MEASURED on core, read-only, by ledger reads streamed to the Mac. Evidence is in
+    ~/Remudero-notes/t9761-audit/ (enforce-garden.ndjson, pass-boot.ndjson, pass-1013.ndjson).
+    - W1-T9761 (#12435, merged 20:45Z 10-16) booted at 22:27:09Z (DAEMON-1792189585096) and again at 00:25:18Z 10-17
+      (DAEMON-1792196664607). Every memory_budget.enforce_admit and enforce_defer row for worker_class garden since
+      then names cadence_basis "scheduled": 19 rows (5 aged admits, 14 defers) from 23:00:18 to 01:32:56Z, 0 "measured".
+    - The cadence is "scheduled" because gardenCadence (src/lib/garden-registry.ts) needs at least two gaps, so three
+      completed passes in ONE process. Under memory deferral a garden rarely completes three passes before the daemon
+      restarts (two boots in two hours here).
+    - The scheduled fallback is max(gardenSchedule(name).intervalFor(intervalMs), minIntervalMs) in startGardenOffLoop's
+      deferral(). For plan, gate, test, config, export, ci-friction, selector-shadow, evidence-coverage,
+      machine-judge, hot-file, backlog and knowledge, gardenSchedule returns intervalFor sameInterval and minIntervalMs 0.
+      That makes the fallback the daemon poll interval, 60,000 ms. It is the timer TICK: the pass itself runs only when
+      the garden's due probe (registeredGardenDueProbe, gardenPassDue's cheap fingerprint, or pacing) says so.
+    - The others are host-resource and flow-remedy at 30 min, and overseer, scout, flow, fix-lane and
+      issue-revalidation at 1 h. Flow and fix-lane's 1 h is FLOW_DUE_PROBE_INTERVAL_MS, the probe of a
+      once-per-UTC-day report.
+    - The natural intervals differ. Core ledger garden.pass exit 0 rows, 2026-10-13 06:00-19:59Z (before garden
+      enforcement), median gap between completed passes:
+      - near the tick: gate 1.1 min, test 1.2, plan 1.2, machine-judge 1.2, backlog 1.6;
+      - well above it: ci-friction 3.1, selector-shadow 3.8, hot-file 18.8, knowledge 25.1, config 29.0,
+        export 57.3, evidence-coverage 57.5.
+      So for 7 of the 12, 60 s is 3x to 57x shorter than the garden's real interval.
+    - LIVE consequence: evidence-coverage was admitted on the aged rung at 01:32:56Z 10-17 with cadence_ms 60000,
+      overriding unrealized-reservations. A deferred 60 s garden is aged at its second ask, one tick later. Under
+      sustained pressure, garden enforcement (operator ruling 10-14) then amounts to a one-minute delay plus the
+      one-aged-child-at-a-time rule.
+    - SECOND DEFECT in the measured path, from reading the code (it has not fired live): the median gap between
+      COMPLETED passes includes the admission and pass-pool wait. Under sustained starvation each aged pass completes
+      at least one cadence after it became due. Each gap therefore lengthens the next cadence, a ratchet that delays a
+      starved garden longer the longer it starves.
+    - THIRD, the restart seed is fragile. At the 22:27Z boot no garden carried a seed: gate's aged row reads 22.9 min,
+      equal to its in-process wait since 22:37:24, although the previous generation (DAEMON-1792175089551) completed
+      gate at 21:05:08Z. Why that boot read no seed is not yet explained. An aborted start at 22:25:13Z
+      (DAEMON-1792189471603) wrote no garden.lifecycle rows. The build confirms the cause first. A new generation's
+      writer starts every entry at lastCompletedAt null, so once it records any event, the file the next boot seeds
+      from holds no completions until a pass completes.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main for cadence, aged, gardenCadence, deferral streak and
+    gardener-runtime.
+    - W1-T9761 (merged) defined this fallback.
+    - W1-T9762 (merged) lowers the unrealized-reservations charge.
+    - W1-T9711 (queued) records what a garden child cost, not when it may start. It also edits garden-registry.ts.
+    - W1-T9706 (queued) ages BUILD starts.
+    - The 2026-10-17 hand fix #12502 ("a restart seed joins a garden's deferral streak only after a deferral")
+      covers the seed's first-ask admission and the waited_ms/seeded_ms split. It does not change the cadence.
+  design: |
+    No new constant, interval, count or byte threshold (operator ruling). Enforcement stays on.
+    1. DUE INTERVAL, NOT COMPLETION GAP. A garden's real interval is how long it naturally goes between passes: from a
+       completed pass to the FIRST ask of its next pass (the tick at which its due probe next said yes). Admission and
+       pass-pool wait are excluded, so starvation cannot lengthen it. startGardenOffLoop records one interval per
+       completed pass: the first-ask time of that pass's due period less the previous completion. Deferred re-asks of
+       the same due period do not open a new one. gardenCadence takes the median of these intervals in place of the
+       completion gaps.
+    2. CARRIED ACROSS RESTARTS. gardener-runtime.json's entry gains the garden's measured due-interval median and its
+       sample count. parseGardenerRuntime validates both and forwards them, and the snapshot keeps its existing
+       GARDENER_RUNTIME_MAX_BYTES bound.
+       - createGardenerRuntimeWriter seeds each entry's lastCompletedAt and the carried median from the previous
+         generation's readable file, so one short-lived boot no longer erases them.
+       - Once this process has two intervals of its own, its median stands, combined with the carried one weighted by
+         sample count. Below that, the carried median stands with basis "carried".
+       - Only with neither does the scheduled interval stand in, with basis "scheduled", as today.
+    3. ROWS. enforce_defer and the aged enforce_admit rows keep cadence_ms and cadence_basis. The basis gains "carried",
+       and the rows name the sample count.
+    4. BOUNDARIES. No change to evaluateShadowMemory, plan/policy.yaml hostMemoryBudget modes or limits, the wait callers,
+       the garden timers or their pacing, or the aged rung's other conditions.
+    Tests go in the new file, with `test(` titles verbatim as in the proofs below. Fixture: an injected clock, a garden
+    whose due probe says yes every fourth tick, and a pass spawn that defers twice before admitting.
+  acceptance:
+    - claim: "a garden's cadence is its due interval, which admission wait does not lengthen"
+      proof: 'grep: test("W1-T9975: a garden ages against its due interval, not its gap between completions" in test/a-deferred-garden-ages-against-its-own-due-interval.test.ts'
+    - claim: "a restarted daemon ages a garden against the due interval the previous generation measured"
+      proof: 'grep: test("W1-T9975: a restart carries the measured due interval forward" in test/a-deferred-garden-ages-against-its-own-due-interval.test.ts'
+    - claim: "a short-lived generation does not erase the last completion and interval the next boot seeds from"
+      proof: 'grep: test("W1-T9975: a short-lived generation keeps the carried completion and interval" in test/a-deferred-garden-ages-against-its-own-due-interval.test.ts'
+    - claim: "with nothing measured or carried, the scheduled interval stands in and the row says so"
+      proof: 'grep: test("W1-T9975: with nothing measured or carried the scheduled interval stands in" in test/a-deferred-garden-ages-against-its-own-due-interval.test.ts'
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-deferred-garden-ages-against-its-own-due-interval.test.ts"
+  falsifier: |
+    At origin/main a fresh process asks with completedMs empty and gets cadenceBasis "scheduled" and cadenceMs 60,000,
+    even when the previous generation's gardener-runtime.json shows evidence-coverage passing about every 57 minutes,
+    so the restart test fails. A garden whose passes each defer for one cadence gets a measured cadence that grows by
+    that wait every round, so the due-interval test fails.

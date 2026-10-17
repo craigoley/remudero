@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-latched-restart-admits-no-work-its-drain-would-abandon.test.ts
-  status: queued
+  status: merged
   priority: 1  # amended 2026-10-16 from 2: V1 measured the 16:30Z drain at 40.5 min latched with 55 idle lane-min, and 5 reviews admitted after the latch were redone by the next boot (see AMENDED in rationale)
   attempts: 0
   rationale: |
