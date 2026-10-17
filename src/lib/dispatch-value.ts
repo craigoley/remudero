@@ -34,6 +34,18 @@ export interface DispatchValueContext {
   readonly costOfDelayUnscored?: readonly string[];
   /** W1-T9323: open tasks the filing history cannot date — scored at age 0, never left unscored. */
   readonly costOfDelayImputed?: readonly string[];
+  /** W1-T9967: each tier's measured wait, highest tier first; the ready row reports it as `tier_waits`. */
+  readonly costOfDelayTierWaits?: readonly TierWait[];
+}
+
+/** W1-T9967: one tier's censoring-aware wait. `priority` is null for the absent-priority tier. */
+export interface TierWait {
+  readonly priority: number | null;
+  readonly wait_ms: number;
+  readonly events: number;
+  readonly censored: number;
+  readonly source: "own" | "pooled" | "pooled-lower-bound";
+  readonly bound?: "lower";
 }
 
 export interface CostOfDelaySnapshot {
@@ -103,18 +115,47 @@ export function filingDatesFromPlanHistory(history: string): Map<string, number>
 }
 
 /** W1-T7534: the `dispatch.cost_of_delay.ready` row. Its dedup key is per plan tree while any open task is
- * unscored, so the undatable ids are ledgered once per tree without disabling the ordering. */
+ * unscored or imputed, or (W1-T9967) any tier wait is reported, so each is ledgered once per tree. */
 export function costOfDelayReadyRow(
-  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored" | "costOfDelayImputed">,
-): { key: string; plan_tree_sha: string; unscored?: readonly string[]; imputed?: readonly string[] } {
+  planTreeSha: string, context: Pick<DispatchValueContext, "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits">,
+): { key: string; plan_tree_sha: string; unscored?: readonly string[]; imputed?: readonly string[]; tier_waits?: readonly TierWait[] } {
   const unscored = context.costOfDelayUnscored ?? [];
   const imputed = context.costOfDelayImputed ?? [];
-  if (unscored.length === 0 && imputed.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
+  const tierWaits = context.costOfDelayTierWaits ?? [];
+  if (unscored.length === 0 && imputed.length === 0 && tierWaits.length === 0) return { key: "ready", plan_tree_sha: planTreeSha };
   return {
     key: `ready:${planTreeSha}`, plan_tree_sha: planTreeSha,
     ...(unscored.length === 0 ? {} : { unscored }), ...(imputed.length === 0 ? {} : { imputed }),
+    ...(tierWaits.length === 0 ? {} : { tier_waits: tierWaits }),
   };
 }
+
+/** Float rounding only: a survival product such as 5/6 * 4/5 * 3/4 lands a hair above one half. */
+const SURVIVAL_ROUNDING = 1e-12;
+
+/**
+ * W1-T9967: the Kaplan-Meier median wait, the smallest event time at which survival falls to one half or
+ * below. A censored wait (a task still waiting) stays at risk through its own time, so the tail that never
+ * started holds the curve up where a survivor-only median drops it. Undefined when the curve never crosses.
+ */
+export function censoredMedianWaitMs(events: readonly number[], censored: readonly number[]): number | undefined {
+  const observations = [...events.map(at => [at, 1] as const), ...censored.map(at => [at, 0] as const)].sort(([a], [b]) => a - b);
+  let atRisk = observations.length;
+  let survival = 1;
+  for (let i = 0; i < observations.length;) {
+    const at = observations[i][0];
+    let ended = 0, left = 0;
+    for (; i < observations.length && observations[i][0] === at; i++, left++) ended += observations[i][1];
+    survival *= 1 - ended / atRisk;
+    if (ended > 0 && survival <= 0.5 + SURVIVAL_ROUNDING) return at;
+    atRisk -= left;
+  }
+  return undefined;
+}
+
+/** A tier's sort key: its declared priority, or +Infinity for the absent-priority tier below every declared one. */
+const tierKey = (task: Pick<DispatchValueTask, "priority">): number =>
+  typeof task.priority === "number" && Number.isFinite(task.priority) ? task.priority : Number.POSITIVE_INFINITY;
 
 /** A plan task's id (`W1-T123`, `CONSOLE-T7`); synthetic lane runs (RETRO, TRIAGE-…) are not build attempts. */
 const PLAN_TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
@@ -335,10 +376,11 @@ export function buildDispatchValueContext(
 }
 
 /**
- * A task's urgency: `2^-tierGap * (1 + log2(1 + waits))`, `waits` being its age in measured median waits and
- * `tierGap` how far its priority sits below the queue head. Each tier halves the weight and each doubling of the
- * wait adds one unit, so against a fresh task a 1-tier gap closes after 1 median wait, 2 tiers after 7, 3 after
- * 127: intent holds, and any finite gap still closes. MEASURED 2026-10-14 (median wait 9.5 h): the additive
+ * A task's urgency: `2^-tierGap * (1 + log2(1 + waits))`, `waits` being its age in its tier's own unit (W1-T9967:
+ * the largest censoring-aware tier wait at or above its tier) and `tierGap` how far its priority sits below the
+ * queue head. Each tier halves the weight and each doubling of the wait adds one unit, so against a fresh task a
+ * 1-tier gap closes after 1 tier unit, 2 tiers after 7, 3 after 127: intent holds, and any finite gap still
+ * closes. MEASURED 2026-10-14 (median wait 9.5 h): the additive
  * `1 + waits + headStart` scored 36-day-old priority-4 W1-T3083 at 14.7x day-old priority-0.92 W1-T8950.
  */
 export function dispatchUrgency(tierGap: number, waits: number): number {
@@ -396,14 +438,16 @@ function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
-): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed"> }
+): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
   const starts = new Map<string, { id: string; at: number }>();
   const outcomes = new Map<string, { at: number; stale: boolean }>();
   const lastVerdicts = new Map<string, { at: number; row: Record<string, unknown> }>();
+  let windowStart = Number.POSITIVE_INFINITY;
   for (const row of rows) {
     const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (Number.isFinite(at) && at <= nowMs && at < windowStart) windowStart = at;
     if (!Number.isFinite(at) || at > nowMs || typeof row.run_id !== "string" || typeof row.task_id !== "string") continue;
     if ((row.step === "run.start" || row.step === "dispatch.refused_already_merged") && PLAN_TASK_ID.test(row.task_id)) {
       const previous = starts.get(row.run_id);
@@ -436,22 +480,58 @@ function costOfDelayContext(
     if (!outcome.stale) tally.valid++;
     ages.set(age, tally);
   }
-  // W1-T9323: the measured median wait — each task's first start minus its filing time — is the unit that
-  // turns a task's age into urgency. Nothing is fixed: with no wait sample the schedule is refused.
+  // W1-T9323: the measured wait — each task's first start minus its filing time — is the unit that turns age
+  // into urgency. W1-T9967: measured per tier, counting a still-waiting open task as censored. Nothing is
+  // fixed: with no wait sample the schedule is refused.
   const firstStartByTask = new Map<string, number>();
+  const lastStartByTask = new Map<string, number>();
   for (const start of starts.values()) {
     const previous = firstStartByTask.get(start.id);
     if (previous === undefined || start.at < previous) firstStartByTask.set(start.id, start.at);
+    if (start.at > (lastStartByTask.get(start.id) ?? -Infinity)) lastStartByTask.set(start.id, start.at);
   }
-  const waits: number[] = [];
+  const keyById = new Map(tasks.map(task => [task.id, tierKey(task)]));
+  const pooled = { events: [] as number[], censored: [] as number[] };
+  const byTier = new Map<number, { events: number[]; censored: number[] }>();
+  const sampleOf = (key: number) => byTier.get(key) ?? byTier.set(key, { events: [], censored: [] }).get(key)!;
   for (const [id, at] of firstStartByTask) {
     const filedAt = snapshot.filedAtByTaskId.get(id);
-    if (filedAt !== undefined && Number.isFinite(filedAt) && filedAt <= at) waits.push(at - filedAt);
+    if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > at) continue;
+    pooled.events.push(at - filedAt);
+    // A task outside the plan has no tier; it informs only the pooled curve.
+    const key = keyById.get(id);
+    if (key !== undefined) sampleOf(key).events.push(at - filedAt);
   }
-  waits.sort((a, b) => a - b);
-  const medianWaitMs = waits.length === 0 ? 0
-    : waits.length % 2 === 1 ? waits[(waits.length - 1) / 2] : (waits[waits.length / 2 - 1] + waits[waits.length / 2]) / 2;
-  if (!(medianWaitMs > 0)) return { kind: "refused", reasons: ["no-wait-evidence"] };
+  for (const task of tasks) {
+    if (!openIds.has(task.id)) continue;
+    const sample = sampleOf(tierKey(task));
+    const filedAt = snapshot.filedAtByTaskId.get(task.id);
+    // Censored only when no start follows its filing. Filed before the window's earliest row, a task may have
+    // started unseen: never read that as still waiting.
+    if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > nowMs || filedAt < windowStart ||
+      (lastStartByTask.get(task.id) ?? -Infinity) >= filedAt) continue;
+    sample.censored.push(nowMs - filedAt);
+    pooled.censored.push(nowMs - filedAt);
+  }
+  const pooledMedian = censoredMedianWaitMs(pooled.events, pooled.censored);
+  // A pooled curve that never crosses one half still bounds the wait from below by its longest event.
+  const pooledWaitMs = pooledMedian ?? pooled.events.reduce((hi, wait) => Math.max(hi, wait), 0);
+  if (!(pooledWaitMs > 0)) return { kind: "refused", reasons: ["no-wait-evidence"] };
+  const costOfDelayTierWaits: TierWait[] = [];
+  const unitByTier = new Map<number, number>();
+  let envelope = 0;
+  for (const [key, sample] of [...byTier].sort(([a], [b]) => a - b)) {
+    const own = censoredMedianWaitMs(sample.events, sample.censored);
+    const source = own !== undefined && own > 0 ? "own" : pooledMedian !== undefined ? "pooled" : "pooled-lower-bound";
+    const waitMs = source === "own" ? own as number : pooledWaitMs;
+    costOfDelayTierWaits.push({
+      priority: Number.isFinite(key) ? key : null, wait_ms: waitMs, events: sample.events.length, censored: sample.censored.length,
+      source, ...(source === "pooled-lower-bound" ? { bound: "lower" as const } : {}),
+    });
+    // A lower tier ages in the largest wait at or above it, so it never closes a gap faster than a higher tier waits.
+    envelope = Math.max(envelope, waitMs);
+    unitByTier.set(key, envelope);
+  }
   // Priority weights the urgency (it is not a one-rank head start); an absent priority is the lowest tier.
   const tierOf = priorityTiers(tasks.filter(task => openIds.has(task.id)));
   const samples = [...ages].sort(([a], [b]) => a - b);
@@ -478,7 +558,7 @@ function costOfDelayContext(
     // One unit is the task's own impact; open dependents add units. Posterior/cost-per-merge
     // gives every class a share even when its raw merge count is zero.
     const mergeProbability = estimate.alpha / (estimate.alpha + estimate.beta);
-    const urgency = dispatchUrgency(tierOf(task), age / medianWaitMs);
+    const urgency = dispatchUrgency(tierOf(task), age / (unitByTier.get(tierKey(task)) as number));
     const score = probability * (1 + (context.openDependentFanoutByTaskId.get(task.id) ?? 0)) * (classScore ?? NaN) * mergeProbability * urgency;
     // Each unique dispatch consumes one stride. Rebuilding from all starts survives restarts
     // and keeps a frequently selected high-score task from monopolizing a fixed frontier.
@@ -489,7 +569,7 @@ function costOfDelayContext(
   }
   return {
     kind: "ready",
-    context: { costOfDelayByTaskId, stridePassByTaskId, ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
+    context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayTierWaits, ...(costOfDelayImputed.length === 0 ? {} : { costOfDelayImputed }) },
   };
 }
 
