@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import { defaultInboxGardenerPorts, runInboxGardener } from "../src/lib/inbox-gardener.js";
-import { inboxGardenerMode, mechanicalAskPurpose, proofDebtPopulationPermit, readInboxGardenerStore } from "../src/lib/inbox-retirement.js";
-import { parseProposalRegistry } from "../src/lib/inbox.js";
-import { appendThreadMessage, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
-import { mintProofDebtProposals } from "../src/lib/measurement-cadence.js";
-import { loadPlan } from "../src/lib/plan.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
-import { world } from "./helpers/why-me-world.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { defaultInboxGardenerPorts, runInboxGardener } from "#src/lib/inbox-gardener.js";
+import { inboxGardenerMode, mechanicalAskPurpose, proofDebtPopulationPermit, readInboxGardenerStore } from "#src/lib/inbox-retirement.js";
+import { parseProposalRegistry } from "#src/lib/inbox.js";
+import { appendThreadMessage, inboxThreadIdentity } from "#src/lib/inbox-thread.js";
+import { mintProofDebtProposals } from "#src/lib/measurement-cadence.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { world } from "#test/helpers/why-me-world.js";
 
 const TASK = "W1-T1200", ID = `proof-debt:${TASK}`;
 async function fixture(t: TestContext, count = 1400, summaryBytes = 850) {
