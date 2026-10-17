@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isMainModule, parseArgv } from "./lib/argv.mjs";
 
-const VERSION = "1.180.0";
+const VERSION = "1.181.0";
 const RULE_ID = "rmd-native-qualification-sentinel";
 const PARSER_RULE_ID = "rmd-original-typescript-parser-marker";
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -81,6 +81,7 @@ export function summarizeReports(report, sarif, exitCode) {
     errorInventory, errorInventoryTruncated: report.errors.length > errorInventory.length,
     errorInventorySha256: digest(JSON.stringify(report.errors)),
     skippedTargetCount: Array.isArray(report.paths.skipped) ? report.paths.skipped.length : null,
+    skippedTargetInventory: Array.isArray(report.paths.skipped) ? "REPORTED" : "UNKNOWN",
     skippedRuleCount: Array.isArray(report.skipped_rules) ? report.skipped_rules.length : null,
     ruleCount: ids.length, ruleIdsSha256: digest(JSON.stringify([...ids].sort())),
     // Hash the rendered inventory, not a claim to possess the registry's source-rule bytes.
@@ -88,6 +89,8 @@ export function summarizeReports(report, sarif, exitCode) {
     targetInventorySha256: digest(JSON.stringify([...report.paths.scanned].sort())),
     successfulInvocation: successful, notificationErrorCount: notificationErrors,
     ruleSourceBytes: "NOT_CAPTURED", uploadProcessing: "NOT_VERIFIED",
+    // COMPLETE describes the reports' execution contract, not every Git path or parser subtree.
+    wholeCorpusCoverage: "NOT_ESTABLISHED", wholeAstCoverage: "NOT_ESTABLISHED",
   };
 }
 
