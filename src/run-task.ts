@@ -28,7 +28,7 @@ import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-reti
 import { registeredGardenEnabled } from "./lib/garden-registry.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
-import { judgeFixProgress,
+import { firstFixRoundVerdict, judgeFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./lib/branch-update.js";
 import { inspectCapabilityDecision, replayCapabilityDecisions, compareCapabilityReplays,
@@ -76,6 +76,8 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 // Import the root list without census-precheck's async scheduler initialization (CJS probes load this CLI).
 // @ts-expect-error executable comment-load module has no declaration file.
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
+// @ts-expect-error W1-T10064: the daemon's own copy of the W1-T9864 codemod, which has no declaration file.
+import { rewriteSource as codemodRewriteSource } from "../scripts/test-location-codemod.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -12706,10 +12708,10 @@ export async function runFixRung(opts: {
         operatorAnswer: opts.constraint, formerCeiling: retriggers >= retriggerCap ? retriggerCap : opts.strikeCap,
         parkedReason: consecutiveMergeRefusalReasons.length > 0
           ? `Consecutive merge refusals:\n${consecutiveMergeRefusalReasons.join("\n")}` : progressRoundReason });
-      const decision = await judgeFixProgress(input, progressJudge);
+      const decision = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
       deps.log("fix.progress_judged", { pr_number: prNumber, head_sha: review.headSha,
         site: retriggers >= retriggerCap ? "fix-retrigger" : "fix-strike",
-        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling,
+        parked_reason: input.parkedReason, former_ceiling: input.formerCeiling, red_class: input.redClass,
         round_count: input.rounds.length, signals: input.signals, ...decision });
       if (decision.verdict === "unavailable") return { outcome: "handed_off", review, strikes, retriggers, reason: decision.reason };
       if (decision.verdict === "escalate") {
@@ -43175,6 +43177,62 @@ export interface WorkerEditCommit {
   /** W1-T5227: the declared paths still holding a conflict marker; nothing staged, MERGE_HEAD left live. */
   readonly conflictMarkerFiles?: readonly string[];
   readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
+  readonly aliasRewrite?: AddedTestAliasRewrite;
+}
+
+/** W1-T10064: the W1-T9864 codemod's `rewriteSource` contract. */
+export type TestAliasRewriter = (text: string, file: string) => { text: string; rewritten: number; unresolved: string[] };
+
+/** W1-T10064: what the alias rewrite did to the new tests a harness commit stages. */
+export interface AddedTestAliasRewrite {
+  readonly rewritten: string[];
+  readonly unresolved: { path: string; specifier: string }[];
+  readonly failed: { path: string; error: string }[];
+}
+
+/**
+ * W1-T10064: REWRITE THE RELATIVE IMPORTS OF THE TESTS THE WORKER ADDED to `#src/`/`#scripts/`/`#test/`, the
+ * mechanical edit the W1-T9864 census asks of every new test. Only `??`/`A` test files absent from a merge's
+ * MERGE_HEAD are touched; an existing file is never rewritten. A throw leaves the file as written and is named.
+ */
+export function rewriteAddedTestImports(
+  repoDir: string,
+  status: string,
+  staged: readonly string[],
+  runGit: GitRunner,
+  rewrite: TestAliasRewriter = codemodRewriteSource,
+): AddedTestAliasRewrite {
+  const result: AddedTestAliasRewrite = { rewritten: [], unresolved: [], failed: [] };
+  let candidates = status.split("\0").filter((entry) => ["?? ", "A  ", "AM "].includes(entry.slice(0, 3)))
+    .map((entry) => entry.slice(3)).filter((path) => staged.includes(path) && /^test\/.+\.test\.m?ts$/.test(path) &&
+      !path.split("/").includes("..") && existsSync(join(repoDir, path)) && lstatSync(join(repoDir, path)).isFile());
+  if (candidates.length > 0 && mergeHeadPresent(runGit)) {
+    const fromMain = new Set(runGit(["ls-tree", "-r", "--name-only", "MERGE_HEAD", "--", ...candidates]).split("\n"));
+    candidates = candidates.filter((path) => !fromMain.has(path));
+  }
+  for (const path of candidates) {
+    try {
+      const out = rewrite(readFileSync(join(repoDir, path), "utf8"), path);
+      result.unresolved.push(...out.unresolved.map((specifier) => ({ path, specifier })));
+      if (out.rewritten > 0) {
+        writeFileSync(join(repoDir, path), out.text);
+        result.rewritten.push(path);
+      }
+    } catch (error) {
+      result.failed.push({ path, error: String((error as Error)?.message ?? error) });
+    }
+  }
+  return result;
+}
+
+/** W1-T10064: the `implement.harness_commit` fields of an alias rewrite, each present only when non-empty. */
+export function aliasRewriteFields(rewrite: AddedTestAliasRewrite | undefined): Record<string, unknown> {
+  if (rewrite === undefined) return {};
+  return {
+    ...(rewrite.rewritten.length > 0 ? { alias_rewritten: rewrite.rewritten } : {}),
+    ...(rewrite.unresolved.length > 0 ? { alias_unresolved: rewrite.unresolved } : {}),
+    ...(rewrite.failed.length > 0 ? { alias_rewrite_failed: rewrite.failed } : {}),
+  };
 }
 
 /** Read worker edits against HEAD, or committed registrations against their merge base. */
@@ -43309,7 +43367,7 @@ export function commitWorkerEdits(
   acceptance: readonly AcceptanceCriterion[] = [],
   // `checkpoint` (W1-T8008): a restart checkpoint keeps EVERY worker change, declared or not -- the undeclared paths are
   // staged too and returned in `undeclared` (named, never dropped); scope is judged later, on the ordinary push path.
-  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean } = {},
+  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string; checkpoint?: boolean; aliasRewriter?: TestAliasRewriter } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => hostWorktreeGit(
     repoDir,
@@ -43397,6 +43455,8 @@ export function commitWorkerEdits(
       reason: `${CONFLICT_MARKER_REFUSAL_PREFIX} ${markerFiles.join(", ")}; nothing was staged` };
   }
 
+  const aliasRewrite = rewriteAddedTestImports(repoDir, status, staged, runGit, options.aliasRewriter);
+
   // W1-T6639: an index deletion a merge already staged (`D `, absent on disk) matches nothing, so
   // `git add -A -- <it>` dies "pathspec did not match" and takes the whole commit with it. It stays
   // in the index and is committed as the deletion it already is; a worktree-only ` D` is still added.
@@ -43441,6 +43501,7 @@ export function commitWorkerEdits(
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
     ...(admittedTests.length > 0 ? { admittedTests } : {}),
     ...(admittedRegistrations.length > 0 ? { admittedRegistrations } : {}),
+    ...(aliasRewrite.rewritten.length + aliasRewrite.unresolved.length + aliasRewrite.failed.length > 0 ? { aliasRewrite } : {}),
   };
 }
 
@@ -43784,6 +43845,7 @@ export function harnessCommitForShellLessWorker(
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
     ...(committed.conflictMarkerFiles?.length ? { conflict_marker_files: committed.conflictMarkerFiles } : {}),
+    ...aliasRewriteFields(committed.aliasRewrite),
   });
   if (!committed.committed) {
     input.onRefusal?.(refusalReason, committed.undeclared, committed.conflictMarkerFiles);

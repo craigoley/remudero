@@ -47,7 +47,7 @@ import type { AdoptedRunChild, RunChildHandle, RunChildPending } from "./run-chi
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DAEMON_SELF_COMMIT_SCOPE, DAEMON_SELF_PATH_PREFIXES, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, INSTALL_INPUTS_RELEASE, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DAEMON_SELF_COMMIT_SCOPE, DAEMON_SELF_PATH_PREFIXES, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -121,7 +121,7 @@ import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload,
 import { assertRunnable, releasedTaskIds, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { resolveReleasedIds, closedUnmergedRunBranchTaskIds } from "./drain.js";
 import type { StatusProjection } from "./status.js";
-import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, type IndependentBlockRelease } from "./status.js";
+import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, type DispatchValueContext } from "./dispatch-value.js";
 import { GhJsonUnreadableResponseError } from "./github-transport.js";
 // Type-only: retro.ts owns this shape, so the two hooks below never re-declare it (W1-T160).
@@ -541,7 +541,8 @@ export const HANDOFF_RECEIPT_STEP = "run.freshness_handoff";
  *  restore, which consumed nothing (W1-T7806). A matching checkpoint drop consumes the receipt;
  *  a `run.freshness_handoff` row is a receipt too (W1-T7747). W1-T8676: an `implement.checkpoint_kept` row,
  *  which run-task writes right after a worker-error verdict of the run that restored the checkpoint, re-pends
- *  the exact receipt that verdict consumed. */
+ *  the exact receipt that verdict consumed. A run refused before it could restore (a stale engine's lockfile,
+ *  2026-10-17 W1-T9089) consumed nothing either; its verdict left the P1 run-branch-already-pushed for 5 h. */
 export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<string, { branch: string; headSha: string }> {
   const pending = new Map<string, { branch: string; headSha: string }>();
   const resumable = (taskId: string, branch: unknown, headSha: unknown): branch is string =>
@@ -564,6 +565,7 @@ export function pendingWorkerBoundaryHandoffs(rawLines: readonly string[]): Map<
       : row.step === "verdict" && row.verdict === "handed_off" && row.reason === "freshness_yield" && !row.pr_url;
     if (row.step !== "verdict" && !receipt) continue;
     if (row.verdict === "no_pr" && row.reason === "restart_checkpoint_restore_failed") continue;
+    if (row.step === "verdict" && typeof row.stage === "string" && PRE_RESTORE_RUN_VERDICT_STAGES.has(row.stage)) continue;
     pending.delete(row.task_id);
     if (receipt && resumable(row.task_id, row.branch, row.head_sha)) {
       pending.set(row.task_id, { branch: row.branch, headSha: String(row.head_sha) });
@@ -1191,6 +1193,9 @@ export interface DaemonOpts {
   sweepRetriggerIntervalMs?: number;
   /** W1-T5720: the boot gate's bound in real ms (default {@link BOOT_CADENCE_GATE_BOUND_MS}). */
   bootCadenceGateBoundMs?: number;
+  /** How long a lifetime runs before a freshness restart may take it (default {@link FRESHNESS_MIN_LIFETIME_MS}, the
+   *  operator ruling of 2026-10-17). A test of a different restart mechanic passes 0 to reach it at once. */
+  freshnessMinLifetimeMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -3592,6 +3597,7 @@ export async function runDaemon(
   // W1-T1044: see DaemonOpts.sweepWallClockBoundMs's own doc — POLICY DATA (rule 2), threaded
   // by the real `rmd daemon` entry, defaulted here for a direct/test caller that omits it.
   const sweepWallClockBoundMs = opts.sweepWallClockBoundMs ?? DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS;
+  const freshnessMinLifetimeMs = opts.freshnessMinLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS;
   const sweepBound: SweepBoundLearner = { fallbackMs: sweepWallClockBoundMs, settledMs: [] }; // W1-T9563, seeded at boot
   // One mutable ref for when a full pass last actually ran, shared by every call site below — see {@link
   // SweepRetrigger} for why a shared reference, not a fresh object per site, is load-bearing. It starts undefined so
@@ -4368,10 +4374,17 @@ export async function runDaemon(
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
     const staleAtMs = staleSinceMs!;
     const { decision, busy, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, siblingInFlight);
+    // OPERATOR RULING 2026-10-17: this lifetime began when the loop did (the boot gate's start); every release but the
+    // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: FRESHNESS_COALESCE_WINDOW_MS, installInputsChanged: changesInstallInputs(freshness.changes),
+      lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
     });
+    const lifetimeEvidence = {
+      lifetime_ms: Math.max(0, nowMs - bootGateStartedAtMs), min_lifetime_ms: freshnessMinLifetimeMs,
+      ...(coalesced.reason === MIN_LIFETIME_HOLD ? { held_by: MIN_LIFETIME_HOLD } : {}),
+    };
     const action = coalesced.action === "hold" ? "defer" : coalesced.action;
     const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE].includes(coalesced.reason);
     if (coalesced.action === "hold" || freshnessHeld || released) {
@@ -4384,6 +4397,7 @@ export async function runDaemon(
         window_reason: FRESHNESS_COALESCE_WINDOW_MS.reason,
         window_ends_at_ms: coalesced.windowEndsAtMs,
         reason: coalesced.reason,
+        ...lifetimeEvidence,
       });
     }
     freshnessHeld = coalesced.action === "hold";
@@ -4397,6 +4411,7 @@ export async function runDaemon(
       old_sha: freshness.oldSha,
       new_sha: freshness.newSha,
       ...withheldEvidence,
+      ...lifetimeEvidence,
     });
     return action;
   };

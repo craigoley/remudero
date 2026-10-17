@@ -292,7 +292,7 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
     },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
     ...extraDeps,
-  } as DaemonDeps, { laneCount: 3, max: 10, ...opts });
+  } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 3, max: 10, ...opts });
   return {
     run, started, rows,
     /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */

@@ -1675,8 +1675,12 @@ export function readLedgerUnionRecordsSync(
   // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
   // W1-T4820: a replayed archive line is skipped BEFORE its parse, so dedupe makes the union cheaper, not dearer.
   const skipSeen = opts.dedupe === false ? undefined : (line: string): boolean => seen.has(line);
-  const scanBuffer = (buf: Buffer, onRow: (row: Record<string, unknown>, line: string) => void, onBad = opts.onTorn): number =>
-    scanLedgerBuffer(buf, opts.pattern, onRow, 0, Number.POSITIVE_INFINITY, onBad, skipSeen).bad;
+  // W1-T9981: `keep` was typed but never applied here. It filters the lines this reader scans; a memo's rows,
+  // already parsed and shared, pass unfiltered.
+  const keep = opts.keep;
+  const skipUnkept = keep === undefined ? skipSeen : (line: string): boolean => !keep(line) || (skipSeen?.(line) ?? false);
+  const scanBuffer = (buf: Buffer, onRow: (row: Record<string, unknown>, line: string) => void, onBad = opts.onTorn, skip = skipUnkept): number =>
+    scanLedgerBuffer(buf, opts.pattern, onRow, 0, Number.POSITIVE_INFINITY, onBad, skip).bad;
   const addBuffer = (buf: Buffer): void => {
     torn += scanBuffer(buf, addRecord);
   };
@@ -1711,7 +1715,7 @@ export function readLedgerUnionRecordsSync(
     const buf = fsDeps.readFileSync(entry.path);
     const rows: Array<Record<string, unknown>> = [];
     const tornLines: string[] = [];
-    const bad = scanBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, (row) => rows.push(row), (line) => tornLines.push(line));
+    const bad = scanBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, (row) => rows.push(row), (line) => tornLines.push(line), skipSeen);
     return { rows, torn: bad, tornLines };
   };
 

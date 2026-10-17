@@ -1,7 +1,7 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
+import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -5618,6 +5618,23 @@ export function isCiHarnessPath(path: string): boolean {
   return /^(?:\.github\/workflows\/[^/]+|scripts\/[^/]+|test\/setup\/.+)$/.test(path.replaceAll("\\", "/"));
 }
 
+/** W1-T10065: the one alert shape both code-scanning fix builders write and the refresh decision reads. */
+const CODE_SCANNING_LOCATION = "location: ";
+function codeScanningAlertName(alert: Pick<ScannerAlertIdentity, "alertNumber" | "ruleId">): string {
+  return `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`;
+}
+function codeScanningLocationLine(alert: Pick<ScannerAlertIdentity, "path" | "line">): string {
+  return `${CODE_SCANNING_LOCATION}${alert.path}:${alert.line}`;
+}
+
+/** W1-T10065: the repository path a code-scanning alert failure names; undefined for any other red. */
+export function codeScanningAlertPath(failure: CiFailure): string | undefined {
+  if (!/^CodeQL alert #\d+ \(.+\)$/.test(failure.name)) return undefined;
+  const location = (failure.logTail ?? "").split("\n").find((line) => line.startsWith(CODE_SCANNING_LOCATION));
+  const path = location?.slice(CODE_SCANNING_LOCATION.length).replace(/:\d+$/, "").replaceAll("\\", "/");
+  return path ? path : undefined;
+}
+
 function redIsTimedOutOrFileless(
   failures: readonly CiFailure[],
   failingTestFiles: readonly string[],
@@ -5636,12 +5653,14 @@ export function decideRedBaseRefresh(
   facts: RedBaseRefreshFacts,
 ): RedBaseRefreshDecision {
   const failingTestFiles = failingTestFilesFromCiFailures(failures);
-  const failingSourceFiles = failingSourceFilesFromCiFailures(failures);
+  // W1-T10065: an alert names its file, so it is never fileless and refreshes only on main touching it.
+  const alertSourceFiles = failures.flatMap((failure) => codeScanningAlertPath(failure) ?? []);
+  const failingSourceFiles = [...new Set([...failingSourceFilesFromCiFailures(failures), ...alertSourceFiles])];
   // W1-T7445: a refresh merges the BASE's lines, never the PR's, so an uncovered line the PR's own
   // diff added stays uncovered whatever main does. A source path supports a refresh only while at
   // least one of its uncovered lines is NOT proven PR-added; unreadable added lines prove nothing.
   const prAddedUncovered = new Set<string>();
-  const refreshableSourceFiles = new Set<string>();
+  const refreshableSourceFiles = new Set<string>(alertSourceFiles);
   for (const pathLine of diffCoverageReport(failures)?.uncovered ?? []) {
     const match = /^(.*):(\d+)$/.exec(pathLine.replaceAll("\\", "/"));
     if (!match) continue;
@@ -11305,12 +11324,12 @@ export function scannerBlockerAmbiguity(pr: OpenPrView, policy: Pick<SweepPolicy
  *  untrusted; the instruction is a code change on this branch, never a thread or alert action. */
 export function codeqlBlockerCiFailure(alert: ScannerAlertIdentity): CiFailure {
   return {
-    name: `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`,
+    name: codeScanningAlertName(alert),
     logTail: [
       "UNTRUSTED SCANNER EVIDENCE: one unresolved CodeQL review thread is the only merge blocker on",
       "this armed, green, reviewed pull request.",
       `rule: ${alert.ruleId}`,
-      `location: ${alert.path}:${alert.line}`,
+      codeScanningLocationLine(alert),
       `message: ${alert.message}`,
       "Change this branch's code so the finding no longer applies, within the task's existing file",
       "scope. Do not resolve review threads, dismiss alerts, or add suppression comments.",
@@ -13914,12 +13933,12 @@ export function codeScanningHeadSettled(
 /** W1-T5633 — the fix worker's evidence: the alerts and the judge's reason, labelled untrusted. */
 export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], reason: string): CiFailure[] {
   return alerts.map((alert) => ({
-    name: `CodeQL alert #${alert.alertNumber} (${alert.ruleId})`,
+    name: codeScanningAlertName(alert),
     logTail: [
       "UNTRUSTED SCANNER EVIDENCE: CodeQL reported a NEW high-severity alert on this pull request's head,",
       `and the code-scanning judge ruled it must be fixed (${reason.slice(0, 400)}).`,
       `rule: ${alert.ruleId} (severity ${alert.severity})`,
-      `location: ${alert.path}:${alert.line}`,
+      codeScanningLocationLine(alert),
       `message: ${alert.message}`,
       "Change this branch's code so the finding no longer applies, within the task's existing file",
       "scope. Do not dismiss alerts or add suppression comments.",
@@ -16100,7 +16119,7 @@ export async function runSweep(
         currentRed: [...redCheckNames(pr).filter(r => !r.startsWith("review:")), ...pr.unmetCriteria.map(c => `review:${c.claim}`)],
         ledger: ledgerLines, operatorAnswer: pr.pendingAnswer?.constraint,
         formerCeiling: pr.repeatedFixRefusal !== undefined ? 2 : fixCeilingInForce(pr, policy.strikeCap, policy.clarify), parkedReason });
-      const result = await judgeFixProgress(input, progressJudge);
+      const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
       appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
         step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
         site: pr.repeatedFixRefusal !== undefined ? "refused-twice" : "fix-strike",
@@ -18640,7 +18659,7 @@ export async function runSweep(
                   if (amended !== undefined) standDownReason = amended;
                   return false;
                 }
-                const result = await judgeFixProgress(input, progressJudge);
+                const result = firstFixRoundVerdict(input) ?? await judgeFixProgress(input, progressJudge);
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr),
                   step: "fix.progress_judged", pr_number: pr.prNumber, head_sha: pr.headSha,
                   site: progressParkedReason?.split(":")[0] ?? "fix-strike",
@@ -19411,7 +19430,7 @@ export async function runSweep(
                 break;
               }
               // The plan-shard correction is not another code-fix round. Every ordinary body-fix
-              // dispatch, including one beyond its former strike ceiling, remains judge-gated.
+              // dispatch after the first (W1-T10039), including one past its former ceiling, is judge-gated.
               const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
               if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
               fixEvidence.progressDecision = progressDecision;

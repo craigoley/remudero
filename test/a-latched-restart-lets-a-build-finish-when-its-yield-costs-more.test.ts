@@ -60,7 +60,7 @@ async function rig(options: { rows?: string[]; unreadable?: boolean; self?: "pat
     runOne: (_id, opts) => { boundary = opts!.restartAtWorkerBoundary; return new Promise((resolve) => { finish = resolve; }); },
     log: (step, fields) => rows.push({ step, fields: fields ?? {} }),
     sleep: () => new Promise<void>((resolve) => sleeps.push(resolve)),
-  } as DaemonDeps, { laneCount: 1, max: 1 });
+  } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1 });
   await flush();
   latched = true;
   now += 5 * minute;

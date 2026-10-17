@@ -11,6 +11,7 @@ never accumulated or adopted. A single directory too wide to enumerate within on
 pass remains held; it is never skipped using an unverified directory offset.
 """
 import argparse
+import errno
 from contextlib import contextmanager, ExitStack
 import hashlib
 import hmac
@@ -19,9 +20,12 @@ import os
 from pathlib import Path
 import pwd
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -119,6 +123,38 @@ def checked_directory(path, budget, parent_fd=None, name=None, expected=None):
         os.close(fd)
 
 
+def reference_directory_identity(s):
+    return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+
+
+@contextmanager
+def pinned_reference_directory(path, budget, parent_fd=None, name=None, expected=None):
+    """Pin one known path edge, not an enumerated directory namespace.
+
+    Sibling creation changes directory times/size/link-count but cannot change
+    which inode a pinned edge names. Still revalidate that edge and descriptor,
+    including type, permissions and ownership. Namespace scans continue using
+    checked_directory's full identity; symlink edges are sealed separately.
+    """
+    budget.check(entries=1)
+    operand = path if parent_fd is None else name
+    before = os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode) or expected is not None and identity(before)[:4] != expected[:4]:
+        raise Hold("scan-directory-changed")
+    sealed = reference_directory_identity(before)
+    fd = os.open(operand, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        if reference_directory_identity(os.fstat(fd)) != sealed:
+            raise Hold("scan-directory-changed")
+        yield fd
+        budget.check()
+        if (reference_directory_identity(os.fstat(fd)) != sealed
+                or reference_directory_identity(os.stat(operand, dir_fd=parent_fd, follow_symlinks=False)) != sealed):
+            raise Hold("scan-directory-changed")
+    finally:
+        os.close(fd)
+
+
 class NamespaceEntry:
     """A checkpointed name always gets current no-follow metadata, never cached stat."""
     def __init__(self, name, fd):
@@ -181,16 +217,19 @@ class DirectoryProgress:
     dev/inode/mode/owner/size/mtime/ctime/nlink through a no-follow parent FD;
     every descendant directory and symlink is visited again. A changed tree is
     rescanned. A forged/corrupt checkpoint holds the entire artifact pass.
+    Records are prefix-coded in LRU order; expanded path text is also bounded
+    to four times the state ceiling so compact input cannot amplify unboundedly.
     The private key protects against accidental/unauthenticated state edits,
     not a malicious account owner who can also replace this executable.
     """
     def __init__(self, home, budget):
         self.budget, self.records, self.fd = budget, {}, None
+        self.candidate_cursor = None  # scheduling hint, never cached eligibility
         self.stats = {"state": "cold", "loadedDirectories": 0, "reusedDirectories": 0,
                       "completedDirectories": 0, "invalidatedDirectories": 0,
                       "savedDirectories": 0, "evictedDirectories": 0, "metadataBytesRead": 0}
         self.path = home / ".local/state/remudero/cache-reclaim-progress"
-        self.scope = {"version": 2, "home": str(home), "uid": os.getuid(),
+        self.scope = {"version": 4, "home": str(home), "uid": os.getuid(),
                       "roots": [str(p) for p in reference_roots(home)],
                       "writer": regular_digest(Path(__file__), budget)}
         self.stats["metadataBytesRead"] = budget.read_bytes
@@ -245,31 +284,47 @@ class DirectoryProgress:
                 if payload["scope"] != self.scope:
                     self.stats["state"] = "reset-scope"
                     return
-                records = payload["directories"]
-                if not isinstance(records, dict):
-                    raise ValueError("directories")
-                for path, record in records.items():
+                cursor = payload["candidateCursor"]
+                if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 4096 or "\0" in cursor
+                        or not Path(cursor).is_absolute() or str(Path(cursor)) != cursor or ".." in Path(cursor).parts
+                        or not Path(cursor).is_relative_to(home / ".codex/work-artifacts")):
+                    raise ValueError("candidate-cursor")
+                records = payload["records"]
+                if not isinstance(records, list):
+                    raise ValueError("records")
+                loaded, previous, expanded = {}, "", 0
+                for record in records:
                     # Parsing authenticated, byte-bounded metadata is not a
                     # second filesystem inspection. Keep its time/read costs,
                     # but charge current names only when physically revisited.
                     budget.check()
-                    if (not Path(path).is_absolute() or not isinstance(record, dict)
-                            or len(record["identity"]) != 8
-                            or not all(type(v) is int for v in record["identity"])
-                            or not isinstance(record["names"], list)):
+                    if not isinstance(record, list) or len(record) != 4:
                         raise ValueError("record")
-                    names = record["names"]
+                    prefix, suffix, observed, names = record
+                    if (type(prefix) is not int or not 0 <= prefix <= len(previous)
+                            or not isinstance(suffix, str)
+                            or not isinstance(observed, list) or len(observed) != 8
+                            or not all(type(v) is int for v in observed)
+                            or not isinstance(names, list)):
+                        raise ValueError("record")
+                    expanded += prefix + len(suffix)
+                    if expanded > 4 * MAX_PROGRESS_BYTES:
+                        raise ValueError("expanded-paths")
+                    path = previous[:prefix] + suffix
+                    physical = Path(path)
+                    if (not physical.is_absolute() or str(physical) != path
+                            or ".." in physical.parts or "\0" in path or path in loaded):
+                        raise ValueError("path")
                     for name in names:
                         budget.check()
                         if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\0" in name:
                             raise ValueError("name")
                     if len(set(names)) != len(names):
                         raise ValueError("duplicate-name")
-                recency = payload["recency"]
-                if (not isinstance(recency, list) or not all(isinstance(p, str) for p in recency)
-                        or len(recency) != len(records) or set(recency) != set(records)):
-                    raise ValueError("recency")
-                self.records = {path: records[path] for path in recency}
+                    loaded[path] = {"identity": observed, "names": names}
+                    previous = path
+                self.records = loaded
+                self.candidate_cursor = cursor
                 self.stats.update(state="resumed", loadedDirectories=len(records))
             except (ValueError, TypeError, KeyError, RecursionError) as error:
                 raise Hold("progress-state-invalid") from error
@@ -324,26 +379,43 @@ class DirectoryProgress:
         self.records[str(path)] = {"identity": list(identity(observed)), "names": names}
         self.stats["completedDirectories"] += 1
 
+    @staticmethod
+    def pack_record(previous, path, record):
+        prefix = len(os.path.commonprefix((previous, path)))
+        return [prefix, path[prefix:], record["identity"], record["names"]]
+
     def save(self):
         # Eviction discards observations, never files or safety checks. Bound
         # state even during incomplete scans and ordinary deleted-tree churn.
         # Account for exact canonical encoding once; avoid repeated full dumps.
-        sizes = [(path, 2 * len(self.encode(path)) + len(self.encode(record)) + 3)
-                 for path, record in self.records.items()]
-        overhead = len(self.encode({"scope": self.scope, "directories": {}, "recency": []})) + 85
-        size = overhead + sum(value for _, value in sizes) - (2 if sizes else 0)
-        for path, value in sizes:
-            if size <= MAX_PROGRESS_BYTES:
+        sizes, previous, expanded = [], "", 0
+        for path, record in self.records.items():
+            packed = self.pack_record(previous, path, record)
+            compact_size = len(self.encode(packed))
+            full_size = len(self.encode([0, path, record["identity"], record["names"]]))
+            sizes.append((path, compact_size, full_size))
+            previous = path
+            expanded += len(path)
+        overhead = len(self.encode({"scope": self.scope, "records": [], "candidateCursor": self.candidate_cursor})) + 85
+        size = overhead + sum(value for _, value, _ in sizes) + max(0, len(sizes) - 1)
+        for index, (path, _compact_size, full_size) in enumerate(sizes):
+            if size <= MAX_PROGRESS_BYTES and expanded <= 4 * MAX_PROGRESS_BYTES:
                 break
             del self.records[path]
             self.stats["evictedDirectories"] += 1
-            size -= value
-            if not self.records:
-                size += 2
-        # Canonical encoding sorts keys, so persist recency separately instead
-        # of accidentally turning eviction into lexical-order starvation.
-        payload = {"scope": self.scope, "directories": self.records,
-                   "recency": list(self.records)}
+            expanded -= len(path)
+            size -= full_size
+            if index + 1 < len(sizes):
+                # The new first record has no predecessor: include its full
+                # path before deciding whether the retained suffix fits.
+                _, next_compact, next_full = sizes[index + 1]
+                size += next_full - next_compact - 1
+        records, previous = [], ""
+        for path, record in self.records.items():
+            records.append(self.pack_record(previous, path, record))
+            previous = path
+        # Array order is recency; canonical object-key sorting cannot reorder it.
+        payload = {"scope": self.scope, "records": records, "candidateCursor": self.candidate_cursor}
         encoded = self.encode(payload)
         data = b'{"mac":' + json.dumps(hmac.new(self.key, encoded, hashlib.sha256).hexdigest()).encode() + b',"payload":' + encoded + b'}'
         if len(data) > MAX_PROGRESS_BYTES:
@@ -658,32 +730,360 @@ def discovery(root, budget, candidates=None):
     return candidates
 
 
-def references(home, candidates, budget):
-    roots = reference_roots(home)
-    shared = set()
-    def visit(path, depth, parent_fd=None, name=None, expected=None):
+def reference_peers(home, budget):
+    """Explicit owner-private argv, never an automatic SSH/key/permission change."""
+    path = home / ".local/state/remudero/cache-reference-peers.json"
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return {}
+    for parent in [path.parent, *path.parent.parents]:
+        if parent == home.parent:
+            break
+        s = parent.lstat()
+        if not stat.S_ISDIR(s.st_mode) or s.st_uid != os.getuid() or s.st_mode & 0o022:
+            raise Hold("reference-peer-config-parent-untrusted")
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or before.st_size > 65536):
+        raise Hold("reference-peer-config-untrusted")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        raw = os.read(fd, 65537)
+        budget.check(read_bytes=len(raw))
+        if (len(raw) != before.st_size or identity(os.fstat(fd)) != identity(before)
+                or identity(path.lstat()) != identity(before)):
+            raise Hold("reference-peer-config-changed")
+    finally:
+        os.close(fd)
+    try:
+        value = json.loads(raw)
+        if not isinstance(value, list) or len(value) > 8:
+            raise ValueError()
+        peers = {}
+        for row in value:
+            uid, argv = row["uid"], row["argv"]
+            if (type(uid) is not int or uid <= 0 or uid in peers or not isinstance(argv, list)
+                    or not 1 <= len(argv) <= 32 or not all(isinstance(a, str) and a and "\0" not in a for a in argv)
+                    or not Path(argv[0]).is_absolute()):
+                raise ValueError()
+            peers[uid] = argv
+        return peers
+    except (ValueError, KeyError, TypeError) as error:
+        raise Hold("reference-peer-config-invalid") from error
+
+
+def peer_exchange(argv, request, budget):
+    """Bound both pipe directions, output bytes, elapsed time and our own child."""
+    packet = DirectoryProgress.encode(request)
+    if len(packet) > 65536:
+        raise Hold("reference-peer-request-size")
+    budget.check()
+    # Keep a supervisor alive until cleanup: even after the probe leader exits,
+    # its process-group ID cannot be recycled into an unrelated worker's group.
+    # The approved argv is executed unchanged, without a shell or extra rights.
+    supervisor = """import os,select,signal,subprocess,sys
+signal.signal(signal.SIGTERM,lambda *_:None)
+probe=subprocess.Popen(sys.argv[3:])
+for fd in (0,1,2):os.close(fd)
+reported=False
+try:
+ while True:
+  status=probe.poll()
+  if status is not None and not reported:
+   os.write(int(sys.argv[1]),str(status).encode()+b'\\n')
+   os.close(int(sys.argv[1]));reported=True
+  if select.select([int(sys.argv[2])],[],[],0.05)[0]:break
+finally:os.killpg(os.getpgrp(),signal.SIGKILL)
+"""
+    with ExitStack() as handles:
+        status_read, status_write = os.pipe()
+        status_reader = handles.enter_context(os.fdopen(status_read, "rb", buffering=0))
+        status_writer = handles.enter_context(os.fdopen(status_write, "wb", buffering=0))
+        life_read, life_write = os.pipe()
+        life_reader = handles.enter_context(os.fdopen(life_read, "rb", buffering=0))
+        life_writer = handles.enter_context(os.fdopen(life_write, "wb", buffering=0))
+        child = subprocess.Popen([sys.executable, "-c", supervisor, str(status_write), str(life_read), *argv],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 pass_fds=(status_write, life_read), start_new_session=True)
+        status_writer.close()
+        life_reader.close()
+        out, err, status, offset = bytearray(), bytearray(), bytearray(), 0
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream, event in [(child.stdin, selectors.EVENT_WRITE),
+                                      (child.stdout, selectors.EVENT_READ), (child.stderr, selectors.EVENT_READ),
+                                      (status_reader, selectors.EVENT_READ)]:
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, event)
+                while selector.get_map():
+                    budget.check()
+                    for key, _event in selector.select(timeout=0.1):
+                        stream = key.fileobj
+                        if stream is child.stdin:
+                            try:
+                                offset += os.write(stream.fileno(), packet[offset:])
+                            except BlockingIOError:
+                                continue
+                            except BrokenPipeError:
+                                offset = len(packet)
+                            if offset == len(packet):
+                                selector.unregister(stream)
+                                stream.close()
+                        else:
+                            try:
+                                block = os.read(stream.fileno(), 16384)
+                            except BlockingIOError:
+                                continue
+                            budget.check(read_bytes=len(block))
+                            if not block:
+                                selector.unregister(stream)
+                                continue
+                            data = status if stream is status_reader else out if stream is child.stdout else err
+                            data.extend(block)
+                            if len(data) > (32 if data is status else 1024 * 1024 if data is out else 4096):
+                                raise Hold("reference-peer-output-size")
+                budget.check()
+            if not re.fullmatch(rb"-?[0-9]+\n", status) or int(status) != 0 or err:
+                raise Hold("reference-peer-unavailable")
+            try:
+                return json.loads(out)
+            except (ValueError, UnicodeError, RecursionError) as error:
+                raise Hold("reference-peer-response-invalid") from error
+        finally:
+            closure_error = None
+            try:
+                # Never poll/wait/reap the supervisor before the last signal.
+                # Its reserved PID pins this group even if it died unexpectedly.
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(child.pid, sig)
+                    except ProcessLookupError:
+                        # An absent owned group needs no grace period. Keep
+                        # the supervisor unreaped until signalling is over.
+                        continue
+                    except OSError as error:
+                        closure_error = error
+                    if sig == signal.SIGTERM:
+                        time.sleep(0.05)
+                life_writer.close()  # EOF also kills the owned group if this parent disappears.
+                deadline = time.monotonic() + 2
+                try:
+                    child.wait(timeout=2)
+                    while True:
+                        try:
+                            os.killpg(child.pid, 0)  # Observation only after the supervisor is reaped.
+                        except ProcessLookupError:
+                            break
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("owned probe group still present")
+                        time.sleep(0.01)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    closure_error = error
+            finally:
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    stream.close()
+            if closure_error is not None:
+                raise Hold("reference-peer-closure-unverified") from closure_error
+
+
+def resolved_reference(parent, raw, budget):
+    """Resolve from a certified physical parent; never hide EACCES as a path.
+
+    Path.resolve(strict=False) can return an unresolved suffix on an access
+    error. That is not negative evidence about references across accounts.
+    Missing/dangling suffixes are allowed; inaccessible ones are not.
+    """
+    operand = Path(raw)
+    absolute = operand.is_absolute()
+    # POSIX permits a distinct // anchor. This Mac/Linux cleanup protocol does
+    # not: aliases must compare against the same single-root candidate paths.
+    remaining = [(part, True) for part in parent.parts[1:]] if not absolute else []
+    remaining += [(part, False) for part in (operand.parts[1:] if absolute else operand.parts)]
+    links, seals, directory_seals = 0, {}, {}
+    anchors = {}
+
+    def recheck_reference_edges(fd):
+        for name, expected in directory_seals.get(fd, []):
+            budget.check()
+            try:
+                after = reference_directory_identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            except FileNotFoundError:
+                after = None
+            if after != expected:
+                raise Hold("scan-directory-changed")
+        for name, expected in seals.get(fd, []):
+            budget.check()
+            try:
+                after = identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            except FileNotFoundError:
+                after = None
+            if after != expected:
+                raise Hold("reference-symlink-changed")
+
+    def visit(resolved, remaining):
+        nonlocal links
+        while remaining:
+            budget.check(entries=1)
+            part, physical_start = remaining.pop(0)
+            if part == ".":
+                continue
+            if part == "..":
+                resolved = resolved.parent
+                continue
+            child = resolved / part
+            fd = anchors.get(str(resolved))
+            if fd is None:
+                # A genuinely missing/non-directory prefix cannot contain a
+                # symlink. Its last existing physical parent remains sealed.
+                resolved = child
+                continue
+            try:
+                before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ENOTDIR):
+                    raise
+                seals.setdefault(fd, []).append((part, None))
+                resolved = child
+                continue
+            observed = identity(before)
+            if physical_start and not stat.S_ISDIR(before.st_mode):
+                raise Hold("reference-start-not-physical")
+            if stat.S_ISDIR(before.st_mode):
+                # Keep each child binding under its parent descriptor until
+                # that parent's teardown, including after the child closes.
+                directory_seals.setdefault(fd, []).append((part, reference_directory_identity(before)))
+                if str(child) not in anchors:
+                    # A lexical continuation owns each descriptor in an
+                    # ordinary with-block. Only the final Path escapes; raw
+                    # descriptors remain borrowed by this call's descendants.
+                    with pinned_reference_directory(child, budget, fd, part, observed) as child_fd:
+                        anchors[str(child)] = child_fd
+                        try:
+                            result = visit(child, remaining)
+                            # Descendant teardown can overlap a retarget of an
+                            # earlier alias. Recheck edges while their own
+                            # parent descriptor is still pinned, after deeper
+                            # contexts have finished closing.
+                            recheck_reference_edges(child_fd)
+                            return result
+                        finally:
+                            del anchors[str(child)]
+                resolved = child
+            elif stat.S_ISLNK(before.st_mode):
+                links += 1
+                if links > 40:
+                    raise Hold("reference-symlink-unresolvable")
+                referent = Path(os.readlink(part, dir_fd=fd))
+                seals.setdefault(fd, []).append((part, observed))
+                if referent.is_absolute():
+                    resolved = Path("/")
+                    remaining = [(p, False) for p in referent.parts[1:]] + remaining
+                else:
+                    remaining = [(p, False) for p in referent.parts] + remaining
+            else:
+                seals.setdefault(fd, []).append((part, observed))
+                resolved = child
+        for fd in dict.fromkeys([*directory_seals, *seals]):
+            recheck_reference_edges(fd)
+        return resolved
+    try:
+        with pinned_reference_directory(Path("/"), budget) as root_fd:
+            anchors["/"] = root_fd
+            result = visit(Path("/"), remaining)
+            recheck_reference_edges(root_fd)
+            return result
+    except RecursionError as error:
+        raise Hold("reference-chain-too-deep") from error
+
+
+def matching_reference(referent, candidates, budget, shared):
+    for workspace, target, _kind in candidates:
+        budget.check()
+        if (referent == target or referent.is_relative_to(target)
+                or referent.is_relative_to(workspace) and target.is_relative_to(referent)
+                or referent == workspace):
+            shared.add(target)
+
+
+def delegated_references(home, path, depth, expected, candidates, budget):
+    peers = reference_peers(home, budget)
+    argv = peers.get(expected[3])
+    if argv is None:
+        raise Hold("reference-peer-unconfigured:uid=" + str(expected[3]) + ":" + str(path))
+    budget.check()
+    request = {"version": 1, "nonce": os.urandom(24).hex(), "root": str(path), "identity": list(expected),
+               "depth": depth, "candidates": [[str(w), str(t), k] for w, t, k in candidates],
+               "limits": {"entries": MAX_ENTRIES-budget.entries,
+                          "seconds": max(0.01, MAX_SECONDS-(time.monotonic()-budget.started)-0.2)}}
+    response = peer_exchange(argv, request, budget)
+    writer = regular_digest(Path(__file__), budget)
+    targets = {str(t): t for _w, t, _k in candidates}
+    try:
+        if (response["version"] != 1 or response["nonce"] != request["nonce"]
+                or response["requestSha256"] != hashlib.sha256(DirectoryProgress.encode(request)).hexdigest()
+                or response["uid"] != expected[3] or response["writer"] != writer
+                or response["rootIdentity"] != list(expected) or response["complete"] is not True
+                or not isinstance(response["shared"], list) or not all(isinstance(p, str) and p in targets for p in response["shared"])
+                or not isinstance(response["unresolved"], list)
+                or any(type(response[n]) is not int or response[n] < 0 for n in ["entriesInspected", "bytesRead"])
+                or not 1 <= response["entriesInspected"] <= request["limits"]["entries"]):
+            raise ValueError()
+        budget.check(entries=response["entriesInspected"], read_bytes=response["bytesRead"])
+        shared = {targets[p] for p in response["shared"]}
+        for parent, raw in response["unresolved"]:
+            if (not isinstance(parent, str) or not isinstance(raw, str) or not raw or "\0" in raw
+                    or not Path(parent).is_absolute() or not Path(parent).is_relative_to(path) or ".." in Path(parent).parts):
+                raise ValueError()
+            matching_reference(resolved_reference(Path(parent), raw, budget), candidates, budget, shared)
+        if identity(path.lstat()) != expected:
+            raise Hold("reference-peer-root-changed")
+        budget.peer_probes = getattr(budget, "peer_probes", 0) + 1
+        return shared
+    except (KeyError, TypeError, ValueError) as error:
+        raise Hold("reference-peer-response-invalid") from error
+
+
+def scan_reference_tree(home, path, depth, candidates, budget, shared, parent_fd=None,
+                        name=None, expected=None, allow_peer=True):
+    try:
         for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected, progress=budget.progress):
             if entry.is_symlink():
                 budget.count("symlinksSeen")
                 before = identity(entry.stat(follow_symlinks=False))
-                referent = Path(os.readlink(entry.name, dir_fd=fd))
-                if not referent.is_absolute():
-                    referent = path / referent
+                raw = os.readlink(entry.name, dir_fd=fd)
                 try:
-                    referent = referent.resolve(strict=False)
-                except RuntimeError as error:
-                    raise Hold("reference-symlink-unresolvable") from error
+                    referent = resolved_reference(path, raw, budget)
+                except PermissionError:
+                    if allow_peer:
+                        raise
+                    referral = [str(path), raw]
+                    size = (getattr(budget, "unresolved_reference_bytes", 2)
+                            + len(DirectoryProgress.encode(referral))
+                            + bool(budget.unresolved_references))
+                    if size > 1024 * 1024:
+                        raise Hold("reference-peer-output-size")
+                    budget.unresolved_reference_bytes = size
+                    budget.unresolved_references.append(referral)
+                    referent = None
                 budget.check()
                 if identity(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) != before:
                     raise Hold("reference-symlink-changed")
-                for workspace, target, _kind in candidates:
-                    budget.check()
-                    if (referent == target or referent.is_relative_to(target)
-                            or referent.is_relative_to(workspace) and target.is_relative_to(referent)
-                            or referent == workspace):
-                        shared.add(target)
+                if referent is not None:
+                    matching_reference(referent, candidates, budget, shared)
             elif entry.is_dir(follow_symlinks=False) and depth < 8 and entry.name not in PRUNE and not entry.name.endswith(".git"):
-                visit(child, depth + 1, fd, entry.name, identity(entry.stat(follow_symlinks=False)))
+                scan_reference_tree(home, child, depth + 1, candidates, budget, shared,
+                                    fd, entry.name, identity(entry.stat(follow_symlinks=False)), allow_peer)
+    except PermissionError:
+        # A sealed peer census replaces only this unreadable physical subtree,
+        # never the rest of the local census, liveness or deletion guards.
+        if not allow_peer or expected is None or identity(path.lstat()) != expected:
+            raise Hold("reference-peer-unavailable")
+        shared.update(delegated_references(home, path, depth, expected, candidates, budget))
+
+
+def references(home, candidates, budget):
+    roots = reference_roots(home)
+    shared = set()
     for root in dict.fromkeys(roots):
         budget.phase("references", root)
         budget.check(entries=1)
@@ -694,9 +1094,68 @@ def references(home, candidates, budget):
             continue
         if not stat.S_ISDIR(observed.st_mode):
             raise Hold("reference-root-not-physical-directory")
-        visit(root, 0, expected=identity(observed))
+        scan_reference_tree(home, root, 0, candidates, budget, shared, expected=identity(observed))
         budget.current["complete"] = True
     return shared
+
+
+def reference_probe():
+    """Peer account entrypoint: metadata-only, no locks/checkpoints/deletion."""
+    budget = Budget()
+    raw = bytearray()
+    with selectors.DefaultSelector() as selector:
+        os.set_blocking(sys.stdin.fileno(), False)
+        selector.register(sys.stdin, selectors.EVENT_READ)
+        while True:
+            budget.check()
+            if not selector.select(timeout=0.1):
+                continue
+            block = os.read(sys.stdin.fileno(), 16384)
+            budget.check(read_bytes=len(block))
+            if not block:
+                break
+            raw.extend(block)
+            if len(raw) > 65536:
+                raise Hold("reference-peer-request-size")
+    request = json.loads(raw)
+    root, home = Path(request["root"]), Path.home().resolve()
+    expected = request["identity"]
+    limits = request["limits"]
+    if (request["version"] != 1 or not re.fullmatch("[0-9a-f]{48}", request["nonce"])
+            or type(request["depth"]) is not int or not 0 <= request["depth"] <= 8
+            or not isinstance(expected, list) or len(expected) != 8 or not all(type(v) is int for v in expected)
+            or not root.is_absolute() or root.resolve() != root
+            or not any(root.is_relative_to(p) for p in reference_roots(home))
+            or expected[3] != os.getuid() or identity(root.lstat()) != tuple(expected)
+            or type(limits["entries"]) is not int or not 0 < limits["entries"] <= MAX_ENTRIES
+            or type(limits["seconds"]) not in (int, float) or not 0 < limits["seconds"] <= MAX_SECONDS
+            or not isinstance(request["candidates"], list) or len(request["candidates"]) > 256):
+        raise Hold("reference-peer-request-invalid")
+    candidates = []
+    for w, t, k in request["candidates"]:
+        workspace, target = Path(w), Path(t)
+        if not workspace.is_absolute() or not target.is_absolute() or not target.is_relative_to(workspace) or k not in ("packages", "turbopack"):
+            raise Hold("reference-peer-request-invalid")
+        candidates.append((workspace, target, k))
+    # Remaining global limits are passed down, never multiplied per peer.
+    # Reduce the original deadline; input/startup/validation time is not refunded.
+    budget.started -= MAX_SECONDS-limits["seconds"]
+    budget.check()
+    budget.entries = MAX_ENTRIES-limits["entries"]
+    initial_entries = budget.entries
+    shared = set()
+    budget.unresolved_references = []
+    scan_reference_tree(home, root, request["depth"], candidates, budget, shared,
+                        expected=tuple(expected), allow_peer=False)
+    writer = regular_digest(Path(__file__), budget)
+    response = {"version": 1, "nonce": request["nonce"], "requestSha256": hashlib.sha256(DirectoryProgress.encode(request)).hexdigest(),
+                "uid": os.getuid(), "writer": writer, "complete": True, "rootIdentity": expected,
+                "shared": sorted(str(p) for p in shared), "entriesInspected": budget.entries-initial_entries,
+                "unresolved": budget.unresolved_references, "bytesRead": budget.read_bytes}
+    if len(DirectoryProgress.encode(response)) > 1024 * 1024:
+        raise Hold("reference-peer-output-size")
+    print(json.dumps(response, separators=(",", ":")))
+    return 0
 
 
 def remove_target(workspace, target, kind, metadata, budget, anchor=None):
@@ -867,7 +1326,16 @@ def reclaim_artifacts(home, root, budget, apply, decisions, inspection):
         if pending:
             shared = references(home, pending, budget)
             inspection["referencesComplete"] = True
-        for workspace, target, kind in pending:
+        progress = budget.progress
+        cursor = getattr(progress, "candidate_cursor", None)
+        offset = next((index for index, (_w, target, _k) in enumerate(pending) if str(target) == cursor), 0)
+        pending = pending[offset:] + pending[:offset]
+        inspection["candidateStart"] = str(pending[0][1]) if pending else None
+        for index, (workspace, target, kind) in enumerate(pending):
+            if progress is not None:
+                # If this attempt exhausts its budget, begin HERE next pass.
+                # No prior KEEP/eligibility result or anchor is reused.
+                progress.candidate_cursor = str(target)
             row = rows[target]
             budget.phase("candidate-inspection", target)
             try:
@@ -892,10 +1360,19 @@ def reclaim_artifacts(home, root, budget, apply, decisions, inspection):
                 return
             except (Hold, OSError) as error:
                 if str(error) == "inspection-budget":
+                    # Give an interrupted tail the next fresh pass, but an
+                    # indivisible first target must not starve every sibling.
+                    if index == 0 and progress is not None:
+                        progress.candidate_cursor = str(pending[(index + 1) % len(pending)][1])
+                        inspection["candidateRotationAfterExhaustion"] = True
                     raise
                 row["reason"] = str(error)
             row["deferred"] = False
+            if progress is not None:
+                progress.candidate_cursor = str(pending[(index + 1) % len(pending)][1])
         inspection["candidateEvaluationComplete"] = True
+        if progress is not None:
+            progress.candidate_cursor = None
     except (Hold, OSError) as error:
         if budget.current is not None:
             budget.current["error"] = str(error)
@@ -919,7 +1396,8 @@ def reclaim_artifacts(home, root, budget, apply, decisions, inspection):
         inspection.update(discoveredCandidateCount=len(candidates),
                           undiscoveredCandidateCount=0 if inspection["discoveryComplete"] else None,
                           deferredCandidateCount=sum(row["deferred"] for row in rows.values()),
-                          prefilterKeepCount=sum(row.get("prefilterKeep", False) for row in rows.values()))
+                          prefilterKeepCount=sum(row.get("prefilterKeep", False) for row in rows.values()),
+                          candidateCursor=getattr(budget.progress, "candidate_cursor", None))
 
 
 def main(argv=None):
@@ -927,7 +1405,16 @@ def main(argv=None):
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--node-compile-cache", type=Path)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--reference-probe", action="store_true", help="read-only peer metadata protocol on stdin")
     args = parser.parse_args(argv)
+    if args.reference_probe:
+        if args.apply or args.node_compile_cache:
+            parser.error("reference probes cannot apply cleanup")
+        try:
+            return reference_probe()
+        except (Hold, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            print("reference probe refused: " + str(error), file=sys.stderr)
+            return 2
     home = args.home.resolve()
     root = home / ".codex/work-artifacts"
     budget, decisions = Budget(), []
@@ -965,7 +1452,7 @@ def main(argv=None):
     for scan in budget.scans:
         scan["elapsedMs"] = round(scan["elapsedMs"], 3)
     inspection.update(stage=budget.stage, root=budget.root, scans=budget.scans,
-                      exhausted=budget.exhausted)
+                      exhausted=budget.exhausted, peerReferenceProbes=getattr(budget, "peer_probes", 0))
     result = {"version": 1, "ageHours": 6, "apply": args.apply,
               "durationMs": int((time.monotonic() - budget.started) * 1000),
               "entriesInspected": budget.entries, "bytesRead": budget.read_bytes,
