@@ -23,6 +23,7 @@ import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, runDir, writeSpec,
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpecOptions, type RunChildStatus,
 } from "./run-child-contract.js";
+import { waitingStarts } from "./host-memory-admission.js";
 import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -408,6 +409,10 @@ export const RUN_CHILD_SPAWNED_STEP = "run_child.spawned";
 export const RUN_CHILD_FALLBACK_STEP = "run_child.fallback";
 export const RUN_CHILD_LOST_STEP = "run_child.lost";
 export const RUN_CHILD_ABORT_STEP = "run_child.abort";
+export const RUN_CHILD_ADMISSION_WAITING_STEP = "run_child.admission_waiting";
+export const RUN_CHILD_SPAWN_ABANDONED_STEP = "run_child.spawn_abandoned";
+/** W1-T10000: one file per task whose admission wait a restart abandoned, carrying when that wait began. */
+export const RUN_CHILD_ADMISSION_WAITS_DIR = "run-child-admission-waits";
 export const RUN_CHILD_STDERR_FILE = "stderr.log";
 /** BACKSTOP on a child's stderr.log: past it the daemon truncates the file, and the child's descriptor (O_APPEND) goes on writing. */
 export const RUN_CHILD_STDERR_MAX_BYTES = 1024 * 1024;
@@ -483,6 +488,14 @@ export interface SpawnRunChildInput {
   log: Log;
   /** Aborting it aborts the child (as {@link abortRunChild}). */
   signal?: AbortSignal;
+  /** W1-T10000: told once the engine is chosen and the run waits for its reservation, before any child exists. */
+  onPending?: (pending: RunChildPending) => void;
+}
+
+/** A run waiting for its child's memory admission. `abort` abandons the wait; it resolves once the wait has ended. */
+export interface RunChildPending {
+  runId: string;
+  abort: () => Promise<void>;
 }
 
 export interface SpawnRunChildPorts {
@@ -491,7 +504,7 @@ export interface SpawnRunChildPorts {
   launch?: (engine: EngineRef, args: readonly string[], log: Log) => EngineChildLaunch;
   spawn?: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; stderrFd: number }) => ChildProcess;
   /** Admission and the reservation, in the daemon, before the spawn. The default is {@link reserveRunChild}. */
-  reserve?: (entryKind: RunChildEntryKind, runId: string) => Promise<LearnedReservation>;
+  reserve?: (entryKind: RunChildEntryKind, runId: string, admission: { signal: AbortSignal; sinceMs?: number }) => Promise<LearnedReservation>;
   probe?: RunChildProbe;
   env?: NodeJS.ProcessEnv;
   clock?: () => number;
@@ -515,7 +528,80 @@ export interface RunChildHandle {
   detach?: () => void;
 }
 
-export type RunChildLaunch = { started: false; reason: string } | RunChildHandle;
+/** W1-T10000: the wait for admission was abandoned. No claim was taken and no spec written, so nothing may run in-process. */
+export interface RunChildAbandoned {
+  started: false;
+  abandoned: true;
+  reason: "admission-abandoned";
+  runId: string;
+  waitedMs: number;
+}
+
+export type RunChildLaunch = { started: false; reason: string; abandoned?: undefined } | RunChildAbandoned | RunChildHandle;
+
+function admissionWaitPath(stateRoot: string, taskId: string): string {
+  return join(stateRoot, RUN_CHILD_ADMISSION_WAITS_DIR, `${sanitiseId(taskId)}.json`);
+}
+
+/** When the abandoned admission wait for `taskId` began, carried across a restart; `undefined` when none was carried. */
+export function readCarriedAdmissionWait(stateRoot: string, taskId: string): number | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(admissionWaitPath(stateRoot, taskId), "utf8");
+  } catch (error) {
+    void error; // ENOENT is the usual answer: no wait was abandoned for this task.
+    return undefined;
+  }
+  try {
+    const sinceMs = (JSON.parse(raw) as { sinceMs?: unknown }).sinceMs;
+    return typeof sinceMs === "number" && Number.isFinite(sinceMs) ? sinceMs : undefined;
+  } catch (error) {
+    void error; // A torn file carries no position; the run queues from now, as it did before W1-T10000.
+    return undefined;
+  }
+}
+
+/** W1-T10000: the reservation wait. The caller is told the run is pending, and its abort abandons the wait. */
+async function reserveWhilePending(
+  input: SpawnRunChildInput, ports: SpawnRunChildPorts, entryKind: RunChildEntryKind, runId: string, clock: () => number, log: Log,
+): Promise<{ held: LearnedReservation } | RunChildAbandoned> {
+  const pending = new AbortController();
+  const signal = pending.signal;
+  const waitPath = admissionWaitPath(input.stateRoot, input.taskId);
+  const carried = readCarriedAdmissionWait(input.stateRoot, input.taskId);
+  const enteredMs = clock();
+  const sinceMs = Math.min(enteredMs, carried ?? enteredMs);
+  const carriedRow = carried === undefined ? {} : { carried_ms: enteredMs - sinceMs };
+  const abandon = (): RunChildAbandoned => {
+    const waitedMs = Math.max(0, clock() - sinceMs);
+    let carryError: string | undefined;
+    try {
+      writeAtomic(waitPath, JSON.stringify({ taskId: input.taskId, runId, sinceMs }));
+    } catch (error) {
+      carryError = reasonOf(error); // ledgered on the abandoned row: the next spawn then queues from its own start
+    }
+    log(RUN_CHILD_SPAWN_ABANDONED_STEP, { task_id: input.taskId, run_id: runId, waited_ms: waitedMs, ...carriedRow,
+      ...(carryError === undefined ? {} : { carry_error: carryError }) });
+    return { started: false, abandoned: true, reason: "admission-abandoned", runId, waitedMs };
+  };
+  let ended!: () => void;
+  const settled = new Promise<void>((resolve) => { ended = resolve; });
+  log(RUN_CHILD_ADMISSION_WAITING_STEP, { task_id: input.taskId, run_id: runId, queue_length: waitingStarts().length, ...carriedRow });
+  try {
+    input.onPending?.({ runId, abort: () => { pending.abort(); return settled; } });
+    const reservation = await (ports.reserve ?? ((kind, id, admission) => reserveRunChild(
+      { lane: input.lane ?? "implement", root: input.root, runId: id, taskId: input.taskId, entryKind: kind, ...admission },
+    )))(entryKind, runId, { signal, ...(carried === undefined ? {} : { sinceMs }) });
+    if (!signal.aborted) return { held: reservation };
+    reservation.releaseOccupancy();
+    return abandon();
+  } catch (error) {
+    if (signal.aborted) return abandon();
+    throw error;
+  } finally {
+    ended();
+  }
+}
 
 const defaultRunChildSpawn: NonNullable<SpawnRunChildPorts["spawn"]> = (command, args, options) =>
   nodeSpawn(command, [...args], { cwd: options.cwd, env: options.env, detached: true, stdio: ["ignore", "ignore", options.stderrFd] });
@@ -553,14 +639,17 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     engineSha = engine.sha;
     const admitted = await input.plan();
     dir = runDir(input.stateRoot, runId);
-    mkdirSync(dir, { recursive: true });
     launch = (ports.launch ?? ((tree, args) => engineChildEntryArgv(tree.root, RUN_CHILD_ENTRY.name, RUN_CHILD_ENTRY.source, args, undefined, { log })))(
       engine, ["--run-dir", dir], log,
     );
     log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow(RUN_CHILD_ENTRY.name, "run", launch));
-    reservation = await (ports.reserve ?? ((entryKind, id) => reserveRunChild(
-      { lane: input.lane ?? "implement", root: input.root, runId: id, taskId: input.taskId, entryKind },
-    )))(launch.kind, runId);
+    const waited = await reserveWhilePending(input, ports, launch.kind, runId, clock, log);
+    if (!("held" in waited)) return waited;
+    reservation = waited.held;
+    // A held reservation spends any carried wait; a state root that refuses the removal fails the spawn like writeSpec would.
+    rmSync(admissionWaitPath(input.stateRoot, input.taskId), { force: true });
+    // Only now, with the reservation held: a waiting run leaves no spec-less directory behind (W1-T10000).
+    mkdirSync(dir, { recursive: true });
     // The snapshot and the spec are written back to back, so a prune between them cannot take a snapshot a spec is about to name.
     const snapshot = writePlanSnapshot(input.stateRoot, admitted.plan.tasks);
     writeSpec(dir, {
