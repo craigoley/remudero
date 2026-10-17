@@ -201,7 +201,9 @@ class DirectoryProgress:
                 try:
                     os.mkdir(part, 0o700, dir_fd=fd)
                 except FileExistsError:
-                    pass
+                    # Existing parents are expected; still bound this path and
+                    # validate its no-follow descriptor/type/owner below.
+                    budget.check()
                 child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 s = os.fstat(child)
                 if s.st_uid != os.getuid() or part == "cache-reclaim-progress" and stat.S_IMODE(s.st_mode) != 0o700:
@@ -370,7 +372,8 @@ class DirectoryProgress:
                 if identity(os.stat(stage, dir_fd=self.fd, follow_symlinks=False)) == identity(os.fstat(fd)):
                     os.unlink(stage, dir_fd=self.fd)
             except OSError:
-                pass
+                # One fixed stage remains bounded and the next save holds it.
+                self.stats["saveStageRetained"] = True
             raise
         finally:
             os.close(fd)

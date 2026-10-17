@@ -212,14 +212,14 @@ ns['DirectoryProgress'].save=churn_and_save
 });
 
 test("cache scan progress cleans only its own failed save stage and never accumulates crash stages", () => {
-  for (const fault of ["write", "fsync", "replace", "race", "abandoned"]) {
+  for (const fault of ["write", "fsync", "replace", "unlink", "race", "abandoned"]) {
     const f = fixture();
     try {
       f.run(); const inventory = readFileSync(join(f.stateDir, "inventory.json"));
       if (fault === "abandoned") writeFileSync(join(f.stateDir, "inventory.tmp"), "retain unknown crash-left stage\n", { mode: 0o600 });
       const inject = String.raw`original_save=ns['DirectoryProgress'].save
 def failed_save(self):
-    original_fsync,original_replace,original_fdopen=ns['os'].fsync,ns['os'].replace,ns['os'].fdopen
+    original_fsync,original_replace,original_fdopen,original_unlink=ns['os'].fsync,ns['os'].replace,ns['os'].fdopen,ns['os'].unlink
     def fail(*a,**kw): raise OSError('owned-save-failure')
     def raced_replace(*a,**kw):
         ns['os'].unlink('inventory.tmp',dir_fd=self.fd)
@@ -235,17 +235,19 @@ def failed_save(self):
         if os.environ['SAVE_FAULT']=='write': ns['os'].fdopen=FailedWriter
         if os.environ['SAVE_FAULT']=='fsync': ns['os'].fsync=fail
         if os.environ['SAVE_FAULT']=='replace': ns['os'].replace=fail
+        if os.environ['SAVE_FAULT']=='unlink': ns['os'].replace=fail;ns['os'].unlink=fail
         if os.environ['SAVE_FAULT']=='race': ns['os'].replace=raced_replace
         original_save(self)
     finally:
-        ns['os'].fsync,ns['os'].replace,ns['os'].fdopen=original_fsync,original_replace,original_fdopen
+        ns['os'].fsync,ns['os'].replace,ns['os'].fdopen,ns['os'].unlink=original_fsync,original_replace,original_fdopen,original_unlink
 ns['DirectoryProgress'].save=failed_save
 `;
       for (let n = 0; n < 3; n++) {
         const r = f.run(false, 500_000, `os.environ['SAVE_FAULT']=${JSON.stringify(fault)}\n` + inject);
         assert.ok(r.decisions.some((v: any) => v.action === "keep" && /owned-|stage-present/.test(v.reason ?? "")), JSON.stringify(r));
         assert.deepEqual(readFileSync(join(f.stateDir, "inventory.json")), inventory);
-        assert.deepEqual(readdirSync(f.stateDir).sort(), fault === "race" || fault === "abandoned" ? ["inventory.json", "inventory.tmp", "key"] : ["inventory.json", "key"]);
+        assert.deepEqual(readdirSync(f.stateDir).sort(), ["unlink", "race", "abandoned"].includes(fault) ? ["inventory.json", "inventory.tmp", "key"] : ["inventory.json", "key"]);
+        if (fault === "unlink" && n === 0) assert.equal(r.inspection.progress.saveStageRetained, true);
       }
       if (fault === "race") assert.equal(readFileSync(join(f.stateDir, "inventory.tmp"), "utf8"), "preserve replaced stage");
       if (fault === "abandoned") assert.equal(readFileSync(join(f.stateDir, "inventory.tmp"), "utf8"), "retain unknown crash-left stage\n");
