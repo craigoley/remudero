@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern — a fix round whose scope amendment has merged merges main into its own worktree and dispatches the fix in the same pass; the amendment writer, its refusals and its dedupe are unchanged
   band_meaning: span
   origin: "operator session 2026-10-16 filing agent Q3 lead 2 (D4 lead a): #12289 (W1-T9541) amendment #12292 merged 11:24:40Z, branch_update_requested 11:42:59Z at head c7fc5e6, then a CI cycle before the next fix round"
-  plan_refs: [W1-T9802, W1-T6465, W1-T5534, W1-T2671, W1-T9541, W1-T9877, W1-T10026, W1-T7719]
+  plan_refs: [W1-T9802, W1-T6465, W1-T5534, W1-T2671, W1-T9541, W1-T9877, W1-T10026, W1-T7719, W1-T10070]
   files:
     - src/lib/proof-amendment.ts
     - src/run-task.ts
@@ -68,6 +68,8 @@
        evidence names them as restored from the round that asked for scope. The ordinary harness commit then stages
        them (they are now declared). A missing or unverifiable save is named on the `fix.scope_amendment` row and the
        worker's evidence names the paths the merged amendment admitted, never silence.
+       W1-T10070 needs the same save for a build that stops before its PR exists; build the save and restore once,
+       in whichever of the two lands first.
     5. Tests (new file, `test(` titles verbatim as in the proofs below). They drive `runFixRung` with fakes, and drive
        `requestScopeAmendment` directly:
        - a ledger shaped like #12289's round (`fix.scope_amendment` created at head H, its identity recorded merged)
