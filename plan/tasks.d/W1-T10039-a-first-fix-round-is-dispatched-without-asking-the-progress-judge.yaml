@@ -1,0 +1,88 @@
+- id: W1-T10039
+  title: "A PR WITH NO FIX ROUND GETS ITS FIRST ROUND WITHOUT ASKING THE PROGRESS JUDGE — on 2026-10-17 the judge, given round_count 0 and every signal zero, ruled `escalate` on #12542 (07:10Z and 07:11Z, after a `continue` at 07:06Z on the same input key) but `continue` on #12575 and #12582; #12542 never got a fix round and parked behind needs-human #12545 until a hand round merged it at 14:46Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, whether an unparked PR with no fix round is put to the progress judge; parked waits, rounds after the first and the judge itself are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 3 (2026-10-17, fleet defect from the PR-queue red triage)'
+  plan_refs: [W1-T9297, W1-T9502, W1-T7096, W1-T7243, W1-T7762, W1-T5999]
+  files:
+    - src/lib/fix-progress-judge.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-first-fix-round-is-dispatched-without-asking-the-progress-judge.test.ts
+  status: queued
+  priority: 1  # a stochastic verdict on an empty history parks a fixable PR behind a person
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger, 2026-10-10..17, every gz archive plus the live file, rows deduped by line; newest row read
+    15:44Z on 10-17):
+    - 2,068 fix.progress_judged rows (verdict field `verdict`): continue 1782, change-approach 220, escalate 54,
+      unavailable 12. 1,317 of them (64%) were at round_count 0, across 275 PRs.
+    - At the unparked site `fix-strike` with round_count 0: 1,249 rows, continue 1217, escalate 16, change-approach 11,
+      unavailable 5. 1,084 came from the sweep's `askProgress` over only 328 distinct input keys (up to 31 asks of
+      one key): a continue is not cached, so the same empty question is asked again each pass.
+    - 15 PRs were escalated at round 0 on the unparked site; 5 of them never got a fix dispatch afterwards (11401,
+      11444, 12044, 12406, 12542).
+    - #12542 (head cbdb897a, input key 32875092…): 07:06:12Z continue, 07:10:55Z and 07:11:52Z escalate; issues #12545
+      and #12549; 383 latched stand-downs "already escalated"; never dispatched; merged by a hand round at 14:46Z whose
+      commit body names the round-0 escalation.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/lib/sweep.ts, case "blocked-fixable": the closure `askProgress` builds `buildFixProgressInput`, checks the
+      `progress_escalated_key` latch, calls `judgeFixProgress` and appends fix.progress_judged with
+      `round_count: input.rounds.length`; an `escalate` verdict calls `deps.escalate` and latches. The call
+      `if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;` sits under the comment "Every
+      ordinary body-fix dispatch, including one beyond its former strike ceiling, remains judge-gated." The CodeQL arm
+      does the same.
+    - The pre-disposition block (W1-T7762) judges when the red class changed, also at 0 rounds, writing
+      fix.progress_judged without an input key.
+    - src/run-task.ts `runFixRung` asks the judge before the first fix.dispatch when no `progressDecision` was passed.
+    - src/lib/fix-progress-judge.ts `judgeFixProgress`, `buildFixProgressInput`. The production prompt tells the judge
+      "Missing receipts or unknown diffs are uncertainty", which it sometimes reads as a reason to escalate.
+    - Precedent: run-task.ts's operator path already judges only when `(pr.priorStrikes ?? 0) > 0`.
+    INFERRED: an empty history carries no evidence about progress, so the verdict at round 0 is noise; skipping it
+    removes about 1,249 judge spawns in 8 days and every unparked round-0 escalation.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9297 (queued, P1, same files) makes the judge see the red it rules on and keeps
+    "the judge still rules" at every round; this task takes round 0 out of the judge's hands for unparked PRs, so the
+    two must not be built at once (see note). W1-T9502 (queued) caches an unchanged input's verdict, complementary.
+    W1-T7096/W1-T7243 (merged) built the judge gate. Swept origin/main plan/tasks.d and the plan diffs of every open PR
+    head for progress_judged, round_count, progress judge and former_ceiling (2026-10-17 ~15:40Z).
+  design: |
+    1. src/lib/fix-progress-judge.ts gains a pure `firstFixRoundVerdict(input)` and a named
+       `FIRST_FIX_ROUND_UNJUDGED_REASON`. It returns a `continue` verdict carrying that reason exactly when the input has
+       no completed round, no spent strike and no parked reason; otherwise undefined. It is NOT folded into
+       `judgeFixProgress`, whose other callers (host-gap re-review, classify-capped) count other loops.
+    2. The three round-0 sites use `firstFixRoundVerdict(input) ?? await judgeFixProgress(input, judge)`: sweep.ts
+       `askProgress`, the sweep.ts pre-disposition block, and run-task.ts `runFixRung`.
+    3. The skip still writes fix.progress_judged (same step, so the newest-row readers stay consistent) with
+       verdict continue, the named reason, `judge_skipped: "first-round"`, round_count 0 and red_class.
+    4. Parked waits at round 0 (metadata, rerun-still-red, amendment-closed, proof-repair refusals, rebuild,
+       refused-twice) are still judged. A PR already latched by an earlier escalation stays latched (no change to
+       the latch).
+    5. TESTS in test/a-first-fix-round-is-dispatched-without-asking-the-progress-judge.test.ts, `test(` titles
+       verbatim as in the proofs, with a counting fixture judge that would return escalate; run the suites that wire
+       `fixProgressJudge` (`git grep -l fixProgressJudge test/`) as the census.
+  acceptance:
+    - claim: "a PR with no fix round is dispatched without the progress judge being asked"
+      proof: 'grep: test("W1-T10039: a first fix round is dispatched without asking the progress judge" in test/a-first-fix-round-is-dispatched-without-asking-the-progress-judge.test.ts'
+    - claim: "the skipped judgment is ledgered as a continue carrying the named reason at round_count 0"
+      proof: 'grep: test("W1-T10039: the skipped first-round judgment is ledgered with its reason" in test/a-first-fix-round-is-dispatched-without-asking-the-progress-judge.test.ts'
+    - claim: "a PR with a completed round, or a parked wait with none, is still judged"
+      proof: 'grep: test("W1-T10039: a completed round or a parked wait is still judged" in test/a-first-fix-round-is-dispatched-without-asking-the-progress-judge.test.ts'
+    - claim: "the reason is a named constant"
+      proof: 'grep: export const FIRST_FIX_ROUND_UNJUDGED_REASON in src/lib/fix-progress-judge.ts'
+  falsifier: |
+    A blocked-fixable PR with no fix.dispatch row, no parked reason and a fixture judge that counts calls and returns
+    escalate. At origin/main the judge is called, deps.escalate receives "fix progress loop: …" and no fix is
+    dispatched, so the first test fails. Skipping the judge always fails the third test; ignoring the parked reason
+    fails it too. Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISIONS named here: (1) this supersedes W1-T9297's "the judge still rules" stance at round 0 only;
+    build it before or after W1-T9297, never beside it (same files). (2) Whether the skip also releases a PR already
+    latched by a round-0 escalation; the default above leaves the latch alone. (3) The wording of
+    FIRST_FIX_ROUND_UNJUDGED_REASON. EFFECT, measured after merge from the core ledger: fix.progress_judged rows at
+    round_count 0 on the unparked fix-strike site with a verdict other than continue. Healthy shape: none.
