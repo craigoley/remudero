@@ -1,0 +1,93 @@
+- id: W1-T10056
+  title: "A TIMED-OUT SHARD WHOSE SUMMARY READS # fail 0 OVER CANCELLED TESTS IS NOT A PASSING SUMMARY — the ci-friction gardener's poolOrTimeoutSignature reads `# fail 0` alone, so a shard whose only failures were node:test timeouts (counted `# cancelled N`) is named \"timed out after a passing summary\", the class #12472 fixed in pure-test-pool judgeRun; and the learnings fact run-task-has-zero-catch-erasure-headroom still says 64 of 64 where the ratchet row is 49"
+  repo: remudero
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: two concerns (ci-friction-gardener, architecture learnings) bundled into one task by the coordinator brief, so the sizing rule asks risk:high; the classifier change narrows one arm of poolOrTimeoutSignature and the learnings edit rewrites one fact; no other signature, gate or ratchet row moves
+  band_meaning: span
+  origin: 'coordinator brief 2026-10-17: ci-friction cancelled blind spot plus the stale catch-erasure headroom figure'
+  plan_refs: [W1-T8038, W1-T2906, W1-T2295, W1-T2507]
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - test/a-timed-out-summary-with-cancelled-tests-is-not-a-passing-summary.test.ts
+    - learnings/architecture.yaml
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, item 1 (ci-friction blind spot):
+    - READ at origin/main 952508792 (symbols, not lines): src/lib/ci-friction-gardener.ts `poolOrTimeoutSignature`
+      (W1-T8038), reached through `ciFailureSignature` once a CI_RUNNER_TIMEOUT_LINE is present. Its `failZero` is
+      any line matching `^(?:#|ℹ) fail 0\b` (or a pure-test-pool "run complete … # fail 0" line), `ran` is any
+      `# tests`/`# pass` > 0, and `failZero && ran` returns "timed out after a passing summary". Nothing reads
+      `# cancelled`.
+    - node:test counts a timed-out test under `# cancelled`, not `# fail` (learnings/testing.yaml
+      a-cancelled-test-is-a-failure, #12610; its files: already list src/lib/ci-friction-gardener.ts). #12472 made
+      scripts/pure-test-pool.mjs `judgeRun` push "# cancelled N" as a problem, so the pool's "run complete" line no
+      longer prints over cancelled tests; the raw node:test summary lines the classifier also reads still do.
+    - PROBE 2026-10-17 on 952508792's tree (node --import tsx, the pure function only): lines `# tests 90`,
+      `# pass 88`, `# fail 0`, `# cancelled 2`, then the runner's "exceeded the maximum execution time" and "The
+      operation was canceled." return "timed out after a passing summary" from both `poolOrTimeoutSignature` and
+      `ciFailureSignature`. Adding "Last started unfinished test: test/b.test.ts > slow case (ci-shard (7/8))." still
+      returns "timed out after a passing summary": the passing-summary arm runs before the unfinished-test arm.
+    OBSERVED, item 2 (stale learnings fact):
+    - learnings/architecture.yaml `run-task-has-zero-catch-erasure-headroom` says "ZERO headroom on the bare-catch
+      ratchet — 64 of 64". The baseline is `BASELINE_BARE_CATCH_COUNTS` in test/catch-erasure-ratchet.test.ts; its
+      src/run-task.ts row reads 49 at 952508792 and left 64 in db7701946 (#4591, 2026-09-08).
+    - RE-MEASURED 2026-10-17: test/catch-erasure-ratchet.test.ts passes 29/29 (`# fail 0`, `# cancelled 0`),
+      including both PROPERTY tests ("count exceeds its baseline" and "allowance sits slack above its actual"). With
+      `CATCH_COUNT_SLACK = 0` (W1-T2906) those two together mean the actual bare-catch count of src/run-task.ts is
+      exactly 49, so the zero-headroom premise still holds and only the figure is stale.
+    - test/claude-md-rules-reach-their-scope.test.ts lists the id in MIGRATED_RULE_IDS and asserts it is selected
+      for a task touching src/run-task.ts, so retiring it (lifecycle superseded) would also edit that test.
+    INFERRED: a shard killed at its ceiling after its only failures timed out gets the passing-summary signature, so
+    the gardener groups it with genuine post-summary hangs and its remedy names no test; and every worker touching
+    src/run-task.ts is injected a wrong count.
+    WHY THIS IS NOT ANOTHER TASK: W1-T8038 (merged) added the signature and its tests; W1-T8585 (merged) reads
+    `# cancelled` in the coverage-file recovery, not here; W1-T3652/W1-T3014/W1-T8946 are about cancelled CHECK
+    conclusions, not node:test counts. Swept origin/main plan/tasks.d and the diffs of all 7 open PR heads (#12570,
+    #12575, #12600, #12601, #12604, #12607, #12614) for poolOrTimeoutSignature, "passing summary", "# cancelled",
+    run-task-has-zero-catch-erasure-headroom and "64 of 64" (2026-10-17 ~17:32Z); #12600 only has `# cancelled 0`
+    in census-precheck fixtures.
+  design: |
+    1. CLASSIFIER. In `poolOrTimeoutSignature`, a summary is passing only when it also reports no cancelled test:
+       a line matching `^(?:#|ℹ) cancelled [1-9]` makes `failZero` false, so a cancelled summary is a failing
+       summary. It then falls through to the existing arms unchanged: "timed out during <last unfinished test>" when
+       the log names one, else "timed out with no test result". No new signature string is added, so
+       test/a-ci-friction-remedy-is-owned-by-the-code-its-failing-test-exercises.test.ts's list is untouched. A
+       `# cancelled 0` line changes nothing.
+    2. LEARNINGS (update, not retire: the premise holds, see rationale). Rewrite the `fact` of
+       `run-task-has-zero-catch-erasure-headroom` in learnings/architecture.yaml to the measured figure: src/run-task.ts
+       has ZERO headroom, 49 of 49, because the zero-slack census keeps its `BASELINE_BARE_CATCH_COUNTS` row equal to
+       its real count. Keep the rest of the instruction (rethrow, record, carry the distinction, or state the reason;
+       never raise the baseline). The phrases `49 of 49` and `BASELINE_BARE_CATCH_COUNTS` each sit on ONE physical
+       line of the folded scalar. Re-measure at the build's base first: if the row is no longer 49, write the row's
+       figure and say so in the PR body (the first proof below then needs an operator amendment). Add an
+       `evidence:` naming the re-measure and #4591, set `cited:` to the build date, keep `lifecycle: active`, and run
+       `npm run learnings-index:check` (the index is a local artifact since W1-T7954, so nothing else is committed).
+    3. TESTS in test/a-timed-out-summary-with-cancelled-tests-is-not-a-passing-summary.test.ts, `test(` titles
+       verbatim as in the proofs, timestamped lines in the W1-T8038 test's shape:
+       (a) `# tests 90`, `# pass 88`, `# fail 0`, `# cancelled 2` followed by the two runner timeout lines: the
+           signature is NOT "timed out after a passing summary" (it is "timed out with no test result");
+       (b) the same summary plus "Last started unfinished test: test/b.test.ts > slow case (ci-shard (7/8))."
+           reads "timed out during test/b.test.ts > slow case";
+       (c) a `# cancelled 0` summary still reads "timed out after a passing summary".
+  acceptance:
+    - claim: "a timed-out summary reading fail 0 over cancelled 2 is not named a passing summary"
+      proof: 'grep: test("W1-T10056: a timed-out summary reading fail 0 with cancelled 2 is not a passing summary" in test/a-timed-out-summary-with-cancelled-tests-is-not-a-passing-summary.test.ts'
+    - claim: "a cancelled summary that names its last unfinished test reads as timed out during that test"
+      proof: 'grep: test("W1-T10056: a cancelled summary naming its last unfinished test reads as timed out during it" in test/a-timed-out-summary-with-cancelled-tests-is-not-a-passing-summary.test.ts'
+    - claim: "the headroom fact carries the measured bare-catch figure"
+      proof: 'grep: 49 of 49 in learnings/architecture.yaml'
+    - claim: "the headroom fact names the baseline table it is measured against"
+      proof: 'grep: BASELINE_BARE_CATCH_COUNTS in learnings/architecture.yaml'
+  falsifier: |
+    At origin/main, `ciFailureSignature` over test (a)'s log returns "timed out after a passing summary", so (a) and
+    (b) fail and (c) passes. With the cancelled check in `failZero`, all three pass. Deleting the check gives
+    `# fail 2`, restoring it `# fail 0`. `grep -c '49 of 49' learnings/architecture.yaml` reads 0 at origin/main and
+    1 after the edit.
+  note: |
+    No operator decision. EFFECT, measured after merge: ci-friction groups keyed "timed out after a passing summary"
+    whose log tail holds `# cancelled` > 0. Healthy shape: none; those reds carry a "timed out during …" signature.
