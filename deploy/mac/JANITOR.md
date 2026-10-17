@@ -87,6 +87,11 @@ paths. Loading bounds expanded path text as well as encoded bytes; eviction
 rebases the first remaining record. Old writer/format scopes cold-reset. Only
 namespace observations are reused: current directories/symlinks, age, activity,
 payload identity and deletion guards are checked again. No scan limit increases.
+An authenticated candidate cursor resumes at a budget-interrupted candidate
+instead of repeatedly spending the pass on the same prefix. It only rotates
+inspection order after a fresh complete reference census; it never caches
+eligibility, KEEP conclusions or dependency anchors. Every resumed attempt
+rechecks the six-hour and activity guards, and a completed round clears the hint.
 
 An inaccessible physical reference subtree can be inspected by an explicitly
 configured, read-only peer account. The optional file

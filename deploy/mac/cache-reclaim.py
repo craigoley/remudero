@@ -192,11 +192,12 @@ class DirectoryProgress:
     """
     def __init__(self, home, budget):
         self.budget, self.records, self.fd = budget, {}, None
+        self.candidate_cursor = None  # scheduling hint, never cached eligibility
         self.stats = {"state": "cold", "loadedDirectories": 0, "reusedDirectories": 0,
                       "completedDirectories": 0, "invalidatedDirectories": 0,
                       "savedDirectories": 0, "evictedDirectories": 0, "metadataBytesRead": 0}
         self.path = home / ".local/state/remudero/cache-reclaim-progress"
-        self.scope = {"version": 3, "home": str(home), "uid": os.getuid(),
+        self.scope = {"version": 4, "home": str(home), "uid": os.getuid(),
                       "roots": [str(p) for p in reference_roots(home)],
                       "writer": regular_digest(Path(__file__), budget)}
         self.stats["metadataBytesRead"] = budget.read_bytes
@@ -251,6 +252,11 @@ class DirectoryProgress:
                 if payload["scope"] != self.scope:
                     self.stats["state"] = "reset-scope"
                     return
+                cursor = payload["candidateCursor"]
+                if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 4096 or "\0" in cursor
+                        or not Path(cursor).is_absolute() or str(Path(cursor)) != cursor or ".." in Path(cursor).parts
+                        or not Path(cursor).is_relative_to(home / ".codex/work-artifacts")):
+                    raise ValueError("candidate-cursor")
                 records = payload["records"]
                 if not isinstance(records, list):
                     raise ValueError("records")
@@ -286,6 +292,7 @@ class DirectoryProgress:
                     loaded[path] = {"identity": observed, "names": names}
                     previous = path
                 self.records = loaded
+                self.candidate_cursor = cursor
                 self.stats.update(state="resumed", loadedDirectories=len(records))
             except (ValueError, TypeError, KeyError, RecursionError) as error:
                 raise Hold("progress-state-invalid") from error
@@ -357,7 +364,7 @@ class DirectoryProgress:
             sizes.append((path, compact_size, full_size))
             previous = path
             expanded += len(path)
-        overhead = len(self.encode({"scope": self.scope, "records": []})) + 85
+        overhead = len(self.encode({"scope": self.scope, "records": [], "candidateCursor": self.candidate_cursor})) + 85
         size = overhead + sum(value for _, value, _ in sizes) + max(0, len(sizes) - 1)
         for index, (path, _compact_size, full_size) in enumerate(sizes):
             if size <= MAX_PROGRESS_BYTES and expanded <= 4 * MAX_PROGRESS_BYTES:
@@ -376,7 +383,7 @@ class DirectoryProgress:
             records.append(self.pack_record(previous, path, record))
             previous = path
         # Array order is recency; canonical object-key sorting cannot reorder it.
-        payload = {"scope": self.scope, "records": records}
+        payload = {"scope": self.scope, "records": records, "candidateCursor": self.candidate_cursor}
         encoded = self.encode(payload)
         data = b'{"mac":' + json.dumps(hmac.new(self.key, encoded, hashlib.sha256).hexdigest()).encode() + b',"payload":' + encoded + b'}'
         if len(data) > MAX_PROGRESS_BYTES:
@@ -1256,7 +1263,16 @@ def reclaim_artifacts(home, root, budget, apply, decisions, inspection):
         if pending:
             shared = references(home, pending, budget)
             inspection["referencesComplete"] = True
-        for workspace, target, kind in pending:
+        progress = budget.progress
+        cursor = getattr(progress, "candidate_cursor", None)
+        offset = next((index for index, (_w, target, _k) in enumerate(pending) if str(target) == cursor), 0)
+        pending = pending[offset:] + pending[:offset]
+        inspection["candidateStart"] = str(pending[0][1]) if pending else None
+        for index, (workspace, target, kind) in enumerate(pending):
+            if progress is not None:
+                # If this attempt exhausts its budget, begin HERE next pass.
+                # No prior KEEP/eligibility result or anchor is reused.
+                progress.candidate_cursor = str(target)
             row = rows[target]
             budget.phase("candidate-inspection", target)
             try:
@@ -1281,10 +1297,19 @@ def reclaim_artifacts(home, root, budget, apply, decisions, inspection):
                 return
             except (Hold, OSError) as error:
                 if str(error) == "inspection-budget":
+                    # Give an interrupted tail the next fresh pass, but an
+                    # indivisible first target must not starve every sibling.
+                    if index == 0 and progress is not None:
+                        progress.candidate_cursor = str(pending[(index + 1) % len(pending)][1])
+                        inspection["candidateRotationAfterExhaustion"] = True
                     raise
                 row["reason"] = str(error)
             row["deferred"] = False
+            if progress is not None:
+                progress.candidate_cursor = str(pending[(index + 1) % len(pending)][1])
         inspection["candidateEvaluationComplete"] = True
+        if progress is not None:
+            progress.candidate_cursor = None
     except (Hold, OSError) as error:
         if budget.current is not None:
             budget.current["error"] = str(error)
@@ -1308,7 +1333,8 @@ def reclaim_artifacts(home, root, budget, apply, decisions, inspection):
         inspection.update(discoveredCandidateCount=len(candidates),
                           undiscoveredCandidateCount=0 if inspection["discoveryComplete"] else None,
                           deferredCandidateCount=sum(row["deferred"] for row in rows.values()),
-                          prefilterKeepCount=sum(row.get("prefilterKeep", False) for row in rows.values()))
+                          prefilterKeepCount=sum(row.get("prefilterKeep", False) for row in rows.values()),
+                          candidateCursor=getattr(budget.progress, "candidate_cursor", None))
 
 
 def main(argv=None):

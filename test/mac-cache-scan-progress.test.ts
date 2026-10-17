@@ -191,7 +191,7 @@ for path in paths: p.remember(path,directory_stat,['child-\U0001f9ed','line\nbre
 expected=dict(p.records);p.save();p.close()
 state=home/'.local/state/remudero/cache-reclaim-progress/inventory.json'
 value=json.loads(state.read_text());records=value['payload']['records']
-assert set(value['payload'])=={'scope','records'}
+assert set(value['payload'])=={'scope','records','candidateCursor'}
 assert records[0][0]==0 and records[1][0]==len(os.path.commonprefix(tuple(map(str,paths[:2]))))
 p=ns['DirectoryProgress'](home,ns['Budget']())
 assert p.records==expected and list(p.records)==list(map(str,paths))
@@ -384,4 +384,38 @@ ns['DirectoryProgress'].save=failed_save
       assert.ok(existsSync(f.cache));
     } finally { rmSync(f.home, { recursive: true, force: true }); }
   }
+});
+
+test("cache scan progress rotates candidate inspection without reusing eligibility or starving the tail", () => {
+  const f = fixture();
+  try {
+    const targets = [f.cache];
+    const oversized = join(f.root, "aaa-indivisible/.next/cache/turbopack");
+    mkdirSync(oversized, { recursive: true });
+    for (let k = 0; k < 600; k++) writeFileSync(join(oversized, `cache-${k}.sst`), "generated\n");
+    for (let n = 0; n < 5; n++) {
+      const workspace = join(f.root, `tail-${n}`), target = join(workspace, ".next/cache/turbopack");
+      mkdirSync(target, { recursive: true }); targets.push(target);
+      writeFileSync(join(workspace, "package.json"), '{"private":true}\n');
+      writeFileSync(join(workspace, "unique-source.ts"), "preserve unversioned source\n");
+      for (let k = 0; k < 100; k++) writeFileSync(join(target, `cache-${k}.sst`), "generated\n");
+    }
+    const observed = new Set<string>(), starts = new Set<string>(), reports: any[] = [];
+    for (let n = 0; n < 18 && observed.size < targets.length; n++) {
+      const report = f.run(false, 450); reports.push(report);
+      if (report.inspection.candidateStart) starts.add(report.inspection.candidateStart);
+      for (const row of report.decisions) if (targets.includes(row.path) && row.deferred === false) observed.add(row.path);
+    }
+    assert.equal(observed.size, targets.length, JSON.stringify(reports));
+    assert.ok(starts.size > 1, "a fresh pass must inspect the interrupted tail first");
+    assert.ok(reports.some(r => r.inspection.candidateRotationAfterExhaustion), "an indivisible first target cannot block every sibling");
+    assert.ok(reports.every(r => r.apply === false && r.ageHours === 6 && r.entriesInspected <= 450));
+    assert.ok(reports.some(r => r.inspection.candidateCursor && r.inspection.referencesComplete));
+    for (const target of targets) assert.ok(existsSync(target));
+    assert.ok(existsSync(oversized));
+    for (let n = 0; n < 5; n++) assert.equal(readFileSync(join(f.root, `tail-${n}/unique-source.ts`), "utf8"), "preserve unversioned source\n");
+    const refreshed = f.run(true, 500_000, "", false);
+    assert.ok(refreshed.decisions.filter((r: any) => r.path).every((r: any) => r.reason === "recent-foreign-or-flagged"));
+    for (const target of targets) assert.ok(existsSync(target), "the cursor must not cache an old age verdict");
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
 });
