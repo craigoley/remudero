@@ -40523,7 +40523,7 @@ export async function daemonCommand(
         // W1-T9924: the same mode read `runInChildWhenOn` makes below; a run it would keep in-process reads false.
         ...(childMode ? {
           adoptRunChildren: () => adoptedChildren,
-          refillRunsAsChild: () => !flagValue(rest, "--plan") && runChildModeIsOn(childPolicy, childModeTracker.evidence).on,
+          refillRunsAsChild: () => runChildModeIsOn(childPolicy, childModeTracker.evidence).on && !flagValue(rest, "--plan"),
         } : {}),
         runOne: async (taskId, runOptions) => {
           const childOptions = { planPath: target.planPath, owner: target.owner, allowStale, skipGitSync: !!flagValue(rest, "--plan"), handOffAtPrOpen: true, pairedTrialHost: "daemon" } as const;
