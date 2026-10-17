@@ -7,20 +7,21 @@
  * sandbox runs in the last test where the host can start it.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { CHILD_ENTRY_SPAWNED_STEP } from "../src/lib/child-entry-argv.js";
+import { CHILD_ENTRY_SPAWNED_STEP } from "#src/lib/child-entry-argv.js";
 import {
   defaultGateContainment, defaultRunGate, findOnPath, GATE_FAILED_NO_STEP_NAMED, GATE_SUMMARY_NAME, preopenGateCommand,
   preopenGateEnv, preopenGateLaunch, preopenGateLedgerFields, preopenGateSandboxArgv, PREOPEN_GATE_ENV_ALLOWLIST,
   PREOPEN_GATE_ENV_ALLOWLIST_NAME, renderPreopenGatePrompt, runPreopenGate, type GateContain, type GateContainInput,
-} from "../src/lib/preopen-gate.js";
-import { PROOF_ENV_ALLOWLIST } from "../src/lib/review.js";
-import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "../src/lib/test-slot.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+} from "#src/lib/preopen-gate.js";
+import { PROOF_ENV_ALLOWLIST } from "#src/lib/review.js";
+import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "#src/lib/test-slot.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const dirs: string[] = [];
 after(() => {
@@ -80,6 +81,60 @@ function plantPassingSummary(work: string): void {
   writeFileSync(join(work, "coverage", "preflight-summary.json"), JSON.stringify({ ok: true, finishedAt: future, steps: [] }));
 }
 
+const CREDENTIAL_SENTINEL = "w1t9619-sentinel";
+const DARWIN_RUNTIME_KEY = "__CF_USER_TEXT_ENCODING";
+
+/** Test-only classification of the child observation, never a forwarding permission. */
+function assertNoCredentialEnv(env: Record<string, string>, platform: NodeJS.Platform = process.platform): void {
+  for (const [key, value] of Object.entries(env)) {
+    assert.ok(!String(value).includes(CREDENTIAL_SENTINEL), `${key} carries a credential sentinel`);
+    // These runtime additions do not authorize the application to forward either key.
+    if (key === "NODE_V8_COVERAGE" || (platform === "darwin" && key === DARWIN_RUNTIME_KEY)) continue;
+    assert.ok((PREOPEN_GATE_ENV_ALLOWLIST as readonly string[]).includes(key), `${key} is not on the allowlist`);
+  }
+}
+
+test("W1-T10080: only the measured Darwin key is platform-added", () => {
+  // BACKSTOP: the real empty-env control must finish; no application wrapper or inherited environment is used.
+  const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.env))"], {
+    env: {}, encoding: "utf8", timeout: 30_000,
+  });
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0);
+  assert.equal(child.signal, null);
+  const observed = JSON.parse(child.stdout) as Record<string, string>;
+  const platformKeys = Object.keys(observed).filter((key) => key !== "NODE_V8_COVERAGE").sort();
+  assert.deepEqual(platformKeys, process.platform === "darwin" ? [DARWIN_RUNTIME_KEY] : []);
+  assertNoCredentialEnv(observed);
+  assert.throws(() => assertNoCredentialEnv({ [DARWIN_RUNTIME_KEY]: "runtime metadata" }, "linux"), /is not on the allowlist/);
+});
+
+test("W1-T10080: metadata cannot hide a credential sentinel", () => {
+  for (const key of [DARWIN_RUNTIME_KEY, "NODE_V8_COVERAGE", "GH_TOKEN", "UNKNOWN_APP_KEY", "PATH"]) {
+    assert.throws(() => assertNoCredentialEnv({ [key]: `prefix-${CREDENTIAL_SENTINEL}-suffix` }, "darwin"),
+      /carries a credential sentinel/, `${key} must not bypass the value check`);
+  }
+  for (const platform of ["darwin", "linux"] as const) {
+    assert.throws(() => assertNoCredentialEnv({ UNKNOWN_APP_KEY: "not a credential" }, platform), /is not on the allowlist/);
+  }
+  assert.throws(() => assertNoCredentialEnv({ __CF_UNAPPROVED_KEY: "runtime metadata" }, "darwin"), /is not on the allowlist/);
+  assert.throws(() => assertNoCredentialEnv({ NODE_V8_COVERAGE: "coverage metadata", GH_TOKEN: "not a canary" }, "darwin"), /is not on the allowlist/);
+  assert.doesNotThrow(() => assertNoCredentialEnv({ NODE_V8_COVERAGE: "coverage metadata" }, "linux"));
+});
+
+test("W1-T10080: the application still drops parent-only keys", () => {
+  const env = preopenGateEnv("/tmp/gate-home", {
+    PATH: "/usr/bin", HOME: "/parent-home", [DARWIN_RUNTIME_KEY]: CREDENTIAL_SENTINEL,
+    UNKNOWN_APP_KEY: CREDENTIAL_SENTINEL, NODE_V8_COVERAGE: CREDENTIAL_SENTINEL,
+  });
+  assert.equal(env.HOME, "/tmp/gate-home");
+  assert.equal(env.PATH, "/usr/bin");
+  for (const key of [DARWIN_RUNTIME_KEY, "UNKNOWN_APP_KEY", "NODE_V8_COVERAGE"]) assert.equal(env[key], undefined, key);
+  assert.deepEqual([...PREOPEN_GATE_ENV_ALLOWLIST], [...PROOF_ENV_ALLOWLIST, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV]);
+  assert.ok(!(PREOPEN_GATE_ENV_ALLOWLIST as readonly string[]).includes(DARWIN_RUNTIME_KEY));
+  for (const key of Object.keys(env)) assert.ok((PREOPEN_GATE_ENV_ALLOWLIST as readonly string[]).includes(key), key);
+});
+
 test("W1-T9619: a gate run sees no credential environment variables", async () => {
   const sentinels = { GH_TOKEN: "w1t9619-sentinel-gh", ANTHROPIC_API_KEY: "w1t9619-sentinel-model", GH_APP_ID: "w1t9619-sentinel-app" };
   const saved = Object.fromEntries(Object.keys(sentinels).map((k) => [k, process.env[k]]));
@@ -91,12 +146,7 @@ test("W1-T9619: a gate run sees no credential environment variables", async () =
     const result = await runPreopenGate(work, { runGate: (cwd) => defaultRunGate(cwd, rmd, undefined, {}, { contain: contained(fakeSandbox(harness)) }) });
     assert.equal(result.kind, "pass", JSON.stringify(result));
     const { env } = harnessRan(harness);
-    for (const [key, value] of Object.entries(env)) {
-      // Node itself re-adds NODE_V8_COVERAGE to every child of a process run under coverage; it is not ours to pass.
-      if (key === "NODE_V8_COVERAGE") continue;
-      assert.ok((PREOPEN_GATE_ENV_ALLOWLIST as readonly string[]).includes(key), `${key} is not on the allowlist`);
-      assert.ok(!String(value).includes("w1t9619-sentinel"), `${key} carries a credential sentinel`);
-    }
+    assertNoCredentialEnv(env);
     assert.notEqual(env.HOME, process.env.HOME, "the gate gets a throwaway HOME, never the daemon's");
     assert.ok(!existsSync(env.HOME), "the throwaway HOME is removed once the gate settles");
   } finally {
