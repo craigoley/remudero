@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import v8 from "node:v8";
 import { Worker } from "node:worker_threads";
 import test from "node:test";
-import type { EventLoopLag } from "../src/lib/daemon-health.js";
-import { RUNTIME_LOOP_LAG_STEP } from "../src/lib/incident-invariants.js";
-import { loopStallBoundMs, type LoopStallProfilerOptions } from "../src/lib/loop-stall-profiler.js";
-import { SERVE_LOOP_LAG_RESOLUTION_MS, startIncidentInvariantsMonitor } from "../src/lib/serve.js";
+import type { EventLoopLag } from "#src/lib/daemon-health.js";
+import { RUNTIME_LOOP_LAG_STEP } from "#src/lib/incident-invariants.js";
+import { loopStallBoundMs, type LoopStallProfilerOptions } from "#src/lib/loop-stall-profiler.js";
+import { SERVE_LOOP_LAG_RESOLUTION_MS, startIncidentInvariantsMonitor } from "#src/lib/serve.js";
 
 type Line = { step: string } & Record<string, unknown>;
 type Frame = { function: string; url: string; line: number; self_ms: number };
