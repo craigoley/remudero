@@ -96,6 +96,10 @@ test('whole author phase reader rereads physical native captures and refuses par
     writeFileSync(join(f.dir,e.path),JSON.stringify({...e.receipt,...override}));assert.throws(()=>runtime.readWholeAuthorPhases(f.dir,e.path,bindings));
   }
   writeFileSync(join(f.dir,e.path),original);
+  const incomplete=JSON.parse(original);incomplete.steps[0].diagnostics.nativeResult='';
+  writeFileSync(join(f.dir,e.path),JSON.stringify(incomplete));
+  assert.throws(()=>runtime.readWholeAuthorPhases(f.dir,e.path,bindings),/missing closed native capture/);
+  writeFileSync(join(f.dir,e.path),original);
   const nativePath=join(f.dir,'coverage/phase-control/static-preflight.native.json'),raw=readFileSync(nativePath,'utf8'),native=JSON.parse(raw);
   for(const change of [{status:1},{signal:'SIGTERM'},{outputComplete:false},{durationMs:999},{storedBytes:0},{finishedAt:new Date(Date.now()+60000).toISOString()}]){
     writeFileSync(nativePath,JSON.stringify({...native,...change}));assert.throws(()=>runtime.readWholeAuthorPhases(f.dir,e.path,bindings));
@@ -113,6 +117,13 @@ test('whole author planning CLI uses validated native profile and complete phase
   const now=Date.now(),result=planAuthorRuntime({root:f.dir,profilePath:observed.path,authorReceipt:e.path,workers:1,now,deadline:now+1000000});
   assert.equal(result.selection,'full-corpus');assert.equal(result.selectedFiles,2);assert.equal(result.calibratedSampleFiles,2);
   assert.equal(result.dispatchAllowed,false);assert.equal(result.capacityGranted,false);assert.equal(result.authorPassReused,false);assert.equal(result.fullSelectionQualified,false);
+  const script=join(process.cwd(),'scripts/plan-author-runtime.mjs');
+  const runCLI=(deadline:number)=>spawnSync(process.execPath,['--import','tsx',script,'--root',f.dir,
+    '--runtime-profile',observed.path,'--author-receipt',e.path,'--workers','1','--deadline',new Date(deadline).toISOString()],
+    {encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
+  const actual=runCLI(now+1000000);assert.equal(actual.status,0,actual.stderr);
+  const parsed=JSON.parse(actual.stdout);assert.equal(parsed.selection,'full-corpus');assert.equal(parsed.selectedFiles,2);assert.equal(parsed.dispatchAllowed,false);
+  const expired=runCLI(now);assert.equal(expired.status,3,expired.stderr);assert.equal(JSON.parse(expired.stdout).fits,false);
   e.receipt.verdict='over-capacity';e.save();
   assert.throws(()=>planAuthorRuntime({root:f.dir,profilePath:observed.path,authorReceipt:e.path,workers:1,deadline:now+1000000}),/incomplete or unsuccessful/);
 });
