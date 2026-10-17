@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { gitRepo } from "./helpers/git-repo.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 // @ts-ignore executable gate module.
-import { censusReaderBudget, main as censusMain, runCensusSuitesViaChild } from "../scripts/census-precheck.mjs";
+import { censusReaderBudget, main as censusMain, runCensusSuitesViaChild } from "#scripts/census-precheck.mjs";
 
 // @census-reads: none — runtime contexts belong to isolated fixture repositories.
 const POLICY = { floorMs: 1000, multiple: 4 };
