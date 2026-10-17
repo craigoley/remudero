@@ -19,7 +19,6 @@ import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, valid
   writeInboxGardenerStore, withInboxGardenerLock, readInboxGardenerFile, type InboxGardenerScope, type InboxGardenerStore, type InboxLifecycleEvent,
   inboxOperatorIntent, inboxMechanicalTaskDigest, inboxGardenerSource, inboxGardenerTaskFact, inboxGardenerMode, type InboxGardenerMode, sameInboxGardenerScope, type InboxGardenerTaskFact, type InboxTerminalProof, type RetirementProposal } from "./inbox-retirement.js";
 
-export const INBOX_GARDENER_INTERVAL_MS = 15 * 60_000;
 /** PRIMARY CONTROL: each pass admits bounded candidate, proof, judge and transition work. */
 export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerBudgetMs: 25, ledgerChunkBytes: 64 * 1024 } as const;
 export { inboxGardenerMode } from "./inbox-retirement.js";
