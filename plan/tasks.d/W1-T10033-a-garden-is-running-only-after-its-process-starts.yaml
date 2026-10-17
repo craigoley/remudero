@@ -1,0 +1,79 @@
+- id: W1-T10033
+  title: "A GARDEN IS RUNNING ONLY AFTER ITS PROCESS STARTS — pool admission currently marks a pass running before memory admission and spawn, so a controlled five-minute pre-spawn wait becomes five minutes of execution and zero queue time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # One concern: truthful phase and timing at an existing process boundary, not scheduling or admission policy.
+  band_meaning: blast-radius
+  origin: 'Operator-approved console, Inbox and gardener follow-ups, 2026-10-17: "Go with all six"; native remote reservation refs/rmd-id/W1-T10033 on codex/gardener-process-start-filing-20261017.'
+  plan_refs: [W1-T5114, W1-T9711, W1-T9761, W1-T8230]
+  files:
+    - src/lib/garden-registry.ts
+    - test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts
+    - test/a-garden-is-running-only-after-its-process-starts.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED locally against unchanged source at d83fece77c988f0f1e496c9c18cbd0770ff95e33:
+    boundedGardenPassSpawn invokes signal.admitted as soon as a pool slot is assigned. Its production
+    childGardenPassSpawn then awaits awaitMemoryAdmission before creating the child. startGardenOffLoop
+    uses that earlier callback for both its running event and execution clock.
+
+    Controlled observation: three tests passed, including real default private noop child creation/close
+    and a real pool-queue control. A simulated 300,000 ms pre-spawn wait produced running before a process
+    existed, queueMs 0 and executionMs 300,000. Receipt: gardener-admission-observation.fIpojT/receipt.json
+    in the operator console-next-2026-10-11.vddqtI evidence set. This is a local boundary falsifier, not a
+    claim of provider usage, live admission causality or Azure memory recovery.
+
+    OBSERVED live at 14:49:38Z: the 14:11:46.982Z daemon generation's runtime file still reported plan/gate
+    running from 14:23:01Z, while a complete bounded process inventory found no garden run child. The source
+    runtime receipt was old; absence does not prove owner death or authorize recovery. A separate complete
+    6,061-row current-generation audit had 42 assignments, 40 attempts and 21 parent rows as positive controls,
+    but no attributed gardener call pairs in its projection window. That is not zero SDK usage or zero dollars.
+
+    SUBJECT CONTROL at main 4a53aea3 and every four current open-head trees: 25 matching shards per head,
+    zero changed subject shards and zero garden-registry implementation overlap. W1-T9711 measures child
+    resource cost, W1-T9761 ages admission, W1-T8230 publishes memory reservations and W1-T5114 moves passes
+    off-loop. None defines running/execution as the successful process-start boundary.
+  design: |
+    Only a verified child spawn begins running.
+    1. Keep the existing runtime phases, public schema and pass identity. Move the existing start notification
+       from boundedGardenPassSpawn's pool acquisition to childGardenPassSpawn's successful child spawn event.
+       Node's spawn event occurs only after successful process creation; error without spawn is not execution
+       (https://nodejs.org/api/child_process.html#event-spawn). A created process is not proof of model work,
+       progress, successful completion, complete SDK coverage or an invoice.
+    2. While pool or memory admission is pending, retain queued and executionMs unknown. Queue timing ends at
+       the successful process start; execution timing begins there. Notify once only, preserving the same
+       passId in runtime events and garden.pass. No fallback from elapsed time or pool ownership to execution.
+    3. Preserve explicit no-execution outcomes for memory deferral, cancellation and failure before spawn.
+       A successful spawn followed by failure is distinct from failing to create the child. Retain release,
+       observer-error, pass settlement, prior-success, pacing, interruption and backpressure controls.
+    4. Existing controlled lifecycle producers must explicitly simulate successful process creation, not inherit
+       it from pool admission. Keep their original queue/execution, pass identity, completion, deferral and
+       cancellation assertions; do not weaken them or replace real default-path controls with injected fakes.
+    No memory policy, worker width or provider changes.
+    No admission arithmetic, reservation ownership, timers, priority, permissions, billing, service settings,
+    model calls or live recovery changes. Do not change host-memory-admission.ts to make this test pass.
+    Use strict TDD with source-only removal/restoration, the real default child and failed-spawn controls,
+    source-instrumented coverage, caller and mapped-census sweeps, exact-head author validation, stored-body
+    acceptance proof, governed review and hosted CI. Verify merge, adoption and natural live usage separately.
+  acceptance:
+    - claim: "a garden waiting before process creation stays queued with no execution claim"
+      proof: 'grep: test("W1-T10033: a garden waiting for memory is queued until its child starts" in test/a-garden-is-running-only-after-its-process-starts.test.ts'
+    - claim: "a controlled five-minute pre-spawn wait belongs to queue time, not execution time"
+      proof: 'grep: test("W1-T10033: queue timing ends at the successful child spawn" in test/a-garden-is-running-only-after-its-process-starts.test.ts'
+    - claim: "the real default child emits one start transition and keeps its pass identity and completion"
+      proof: 'grep: test("W1-T10033: the real default child reports one process start" in test/a-garden-is-running-only-after-its-process-starts.test.ts'
+    - claim: "deferred, cancelled and failed-before-spawn passes never claim execution, while true pool queueing is preserved"
+      proof: 'grep: test("W1-T10033: a pass that never spawns never claims execution" in test/a-garden-is-running-only-after-its-process-starts.test.ts'
+  falsifier: |
+    Before the source change, hold an inner pass on a controlled admission promise while the real pool grants
+    its slot: the observer reports running before the inner pass has started a child. Advance the injected
+    clock 300,000 ms, explicitly model a successful process start, then finish after a separate known interval.
+    Main charges the whole admission wait to execution. Removing only the process-boundary fix must restore
+    that failure; restored source must pass. A private real child and an invalid-executable control prove
+    production spawn/error wiring; no live model, service, reservation, claim or resource-policy action.
