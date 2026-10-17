@@ -1,0 +1,21 @@
+- id: a-garden-fallback-cadence-is-the-poll-tick
+  subsystem: architecture
+  lifecycle: active
+  files: [src/lib/garden-registry.ts, src/lib/host-memory-admission.ts, src/lib/gardener-runtime.ts]
+  fact: >-
+    A garden's scheduled fallback cadence (`intervalFor: sameInterval`, `minIntervalMs: 0`) is the
+    60 s poll tick, never a behavioural bound; a restart seed is age since the last completion, not
+    queueing time.
+  src: "PRs #12435, #12502; W1-T9975"
+  cited: "2026-10-17"
+
+- id: depends-on-is-a-dispatch-input
+  subsystem: plan
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/lib/dispatch-value.ts]
+  fact: >-
+    `depends_on` is a dispatch input: `costOfDelayContext` multiplies a score by 1 + open transitive
+    dependents, so a serial chain outranks independent P1 work. Declare it only for a real
+    dependency (until W1-T10020).
+  src: "PRs #12389, #12535; W1-T10020"
+  cited: "2026-10-17"
