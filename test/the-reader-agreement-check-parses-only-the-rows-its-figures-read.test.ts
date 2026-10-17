@@ -5,7 +5,7 @@ import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
-import { readLedgerUnionRawLinesSync } from "#src/lib/ledger-union.js";
+import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync, type LedgerRotationRecords } from "#src/lib/ledger-union.js";
 import { loadPlanFromYaml, type Plan } from "#src/lib/plan.js";
 import * as agreement from "#src/lib/reader-agreement.js";
 import * as status from "#src/lib/status.js";
@@ -232,4 +232,15 @@ test("W1-T9981: the default readers read a real state dir", async (t) => {
     independentReader: () => sentinel, appendLine: () => {} });
   assert.equal(findings.find(f => f.subject === HALTED)?.board_value, 2);
   assert.equal(findings.find(f => f.subject === "W2")?.board_value, at(8));
+});
+
+test("W1-T9981: a keep filter narrows the lines a union read scans, never what a rotation memo holds", async (t) => {
+  const { dir } = corpus(t);
+  const keep = (raw: string) => raw.includes('"deploy.ok"');
+  const read = readLedgerUnionRecordsSync(dir, { keep });
+  assert.deepEqual([...new Set(read.rows.map(row => row.step))], ["deploy.ok"]);
+  const held: LedgerRotationRecords[] = [];
+  readLedgerUnionRecordsSync(dir, { keep, rotationRecords: (_entry, parse) => { const records = parse(); held.push(records); return records; } });
+  assert.equal(held.length, 2);
+  assert.ok(held.every(records => records.rows.some(row => row.fixture === "unrelated")), "a memo serves other readers whole");
 });

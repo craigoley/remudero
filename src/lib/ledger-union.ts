@@ -1675,7 +1675,8 @@ export function readLedgerUnionRecordsSync(
   // split array, NOT what is kept. Scanning holds one file's decompressed buffer at a time.
   // W1-T4820: a replayed archive line is skipped BEFORE its parse, so dedupe makes the union cheaper, not dearer.
   const skipSeen = opts.dedupe === false ? undefined : (line: string): boolean => seen.has(line);
-  // W1-T9981: `keep` was typed but never applied here. It filters the lines this reader scans, never a memo's rows.
+  // W1-T9981: `keep` was typed but never applied here. It filters the lines this reader scans; a memo's rows,
+  // already parsed and shared, pass unfiltered.
   const keep = opts.keep;
   const skipUnkept = keep === undefined ? skipSeen : (line: string): boolean => !keep(line) || (skipSeen?.(line) ?? false);
   const scanBuffer = (buf: Buffer, onRow: (row: Record<string, unknown>, line: string) => void, onBad = opts.onTorn, skip = skipUnkept): number =>
