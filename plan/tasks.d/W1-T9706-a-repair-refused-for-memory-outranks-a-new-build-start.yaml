@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-repair-refused-for-memory-outranks-a-new-build-start.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: two hours of zero fix admissions means a red PR goes green only by hand
   attempts: 0
   rationale: |

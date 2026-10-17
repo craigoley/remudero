@@ -13,7 +13,7 @@
   files:
     - src/lib/run-child.ts
     - test/an-engine-on-main-newer-than-the-daemon-checkout-qualifies.test.ts
-  status: queued
+  status: merged
   priority: 1  # builds-as-children (ADR 0007) are the lever for the freshness yields, and no probe can run while the checkout trails main
   attempts: 0
   rationale: |

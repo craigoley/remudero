@@ -1,0 +1,69 @@
+- id: W1-T9971
+  title: "THE STALLED-STAGE BACKSTOP SEES A FIX ROUND STILL IN FLIGHT — reportStuckStage counts a conflict or own-red stage as repaired only once a fix.dispatch row exists, but the fix rung writes fix.dispatch when the round ENDS; on 2026-10-17 #12390's conflict round was dispatched at 00:55:58Z, its worker started at 01:25:54Z after memory admission, and BACKSTOP 30 opened needs-human #12490 at 01:28:49Z while that round was merging"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, what counts as a started repair in reportStuckStage's conflict/own-red liveness check. The bounds, the diagnoses and the escalation text are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 PR-queue fixer E33 (Craig: \"get them green, make sure things merge, fix the root causes\"): #12390 escalated MANUAL #12490 three minutes after its conflict round began"
+  plan_refs: [W1-T5900, W1-T8167, W1-T9433, W1-T9585, W1-T9955]
+  files:
+    - src/lib/sweep.ts
+    - test/the-stalled-stage-backstop-sees-a-fix-round-in-flight.test.ts
+  status: queued
+  priority: 1  # every conflict or own-red round that waits on memory admission past its backstop opens a false needs-human issue, and until W1-T9585 lands that issue stands the next strike down
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 on the core ledger (live ledger.ndjson on the Azure host, read-only, niced, streamed to the Mac).
+    #12390 is run-W1-T9722-1792150906434, head f74145eb. It conflicts with main in scripts/comment-load-baseline.json.
+    - 00:55:19Z: blocker_since for blocker conflict, owner conflict-rebase.
+    - 00:55:58Z: `sweep.fix.parallel_attempts_plan` and `sweep.fix.strike_schedule_plan` (pr_number 12390) show the
+      sweep handing the round to the fix lane.
+    - Every `sweep.disposed` row from then on reads "fix already dispatched for this head (f74145e) — awaiting its
+      outcome", repeat_streak 17 by 01:28Z.
+    - The memory budget held workers on unrealized-reservations throughout (`memory_budget.enforce_wait`, 9 waiting
+      at 01:33Z).
+    - 01:25:54Z: `fix.census_snapshot` task W1-T9722. The round's worker has started.
+    - 01:28:09Z: `pr.stuck` blocker conflict, BACKSTOP 30, diagnosis "unknown signature".
+    - 01:28:49Z: `escalation.issue_opened` MANUAL #12490 (needs-human), superseding #12439.
+    - 01:29:00Z: `fix.merge_started` task W1-T9722, strike 1. The repair the issue calls stalled is running.
+    READ at origin/main 0209f6837 (symbols, not lines):
+    - `reportStuckStage` (src/lib/sweep.ts) returns early for a conflict or own-red stage when `repairStarted` (this
+      pass's own dispatch) holds, or when any stage row since blocker_since is `fix.dispatch` or a `fix.done` with a
+      pushed head.
+    - run-task.ts writes `fix.dispatch` after the worker returns. #12409's row at 20:37:13.052Z carries elapsed_ms
+      330496 and sits 62 ms before its `fix.done`. So a round dispatched by an EARLIER pass has no qualifying row
+      until it ends, and a round held in memory admission past the bound reads as no repair at all.
+    - The same pass's dedup (`dispatchedThisHead && !fixRungStalledWithoutNewHead(...)`) already knows the round is
+      live. It is the reason that pass stood down, but reportStuckStage does not read it.
+    NOT COVERED ELSEWHERE:
+    - W1-T9433 (queued) excludes passes stood down on a fleet hold, capacity or light-pass deferral from the stage
+      age. #12390's passes stood down on the dispatch dedup, which it does not name.
+    - W1-T9585 (queued) stops an open stalled-stage issue from freezing later strikes. It does not stop the false
+      issue.
+    - W1-T8167 covers a review still running, not a fix round.
+    Swept plan/tasks.d on origin/main and every open PR head at 01:35Z for pr.stuck and reportStuckStage.
+  design: |
+    1. In reportStuckStage's conflict/own-red early return, a started repair also includes one the sweep handed to
+       the fix lane for THIS head since blocker_since that has not ended. Read it the way the dedup does: the head is
+       in the dispatched set, and `fixRungStalledWithoutNewHead` under the PR's fix key does not report the rung ended
+       (PR-<n> for a taskless PR, the key W1-T9955 corrects).
+    2. Once that rung ends without a new head, its `fix.dispatch` row is in the stage rows and today's early return
+       applies unchanged. No stage is held by a round that has finished.
+    3. A round that starts and never ends belongs to the fix rung's own child bounds and the W1-T1110 stall read. This
+       change adds no bound, no constant and no LLM call.
+  acceptance:
+    - claim: "a conflict stage whose fix round an earlier pass dispatched, still unfinished, is not escalated at its backstop"
+      proof: 'grep: test("W1-T9971: a conflict round still in flight keeps the stalled-stage backstop quiet" in test/the-stalled-stage-backstop-sees-a-fix-round-in-flight.test.ts'
+    - claim: "a conflict stage with no dispatched round still escalates at the same bound"
+      proof: 'grep: test("W1-T9971: a conflict stage with no dispatched round still escalates" in test/the-stalled-stage-backstop-sees-a-fix-round-in-flight.test.ts'
+  falsifier: |
+    At origin/main, a sweep over the #12390-shaped ledger (blocker_since past the bound, the sweep's dispatch rows,
+    no fix.dispatch yet) writes pr.stuck and calls escalate. Drop the in-flight arm and the first test reds.
+  note: |
+    EFFECT, measured after merge from the core ledger: count `pr.stuck` rows for blocker conflict or own-red that
+    have a `fix.merge_started` or `fix.census_snapshot` for the same task in the 30 minutes before them. Healthy
+    shape: none.

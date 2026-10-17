@@ -11,7 +11,7 @@
   plan_refs: ["W1-T4261"]
   files: ["src/lib/inbox-responder.ts","test/inbox-responder-verdict-index.test.ts"]
   priority: 4
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=057b2fc629ed5098
   attempts: 0
   rationale: |

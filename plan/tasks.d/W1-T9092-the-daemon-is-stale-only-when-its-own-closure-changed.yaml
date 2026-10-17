@@ -11,7 +11,7 @@
   origin: 'operator approval 2026-10-13 (verbatim: "Agree with all of this. Make sure that we are optimizing other parts of the daemon''s memory to account for this new pressure. Reduce parallelism if we need to. Think about how to ensure efficiency, but keep automated flow."): docs/adr/0007-build-runs-outlive-the-daemon.md'
   plan_refs: [W1-T79, W1-T2964, W1-T2965, W1-T4945, W1-T6093, W1-T8396, W1-T8171, W1-T9091]
   files: [src/lib/daemon-closure.ts, src/lib/self-sync.ts, src/run-task.ts, test/the-daemon-is-stale-only-when-its-own-closure-changed.test.ts]
-  status: queued
+  status: merged
   priority: 1.5
   attempts: 0
   rationale: |

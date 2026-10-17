@@ -13,7 +13,7 @@
   files:
     - src/lib/board-projection.ts
     - test/the-board-oracle-audits-a-rotating-slice.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
