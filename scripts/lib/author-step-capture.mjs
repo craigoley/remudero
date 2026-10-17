@@ -36,11 +36,14 @@ export function captureStepSync(file, args, { cwd, env = process.env, stdoutPath
   } catch (error) {
     outcome = { status: transport.status, signal: transport.signal, error: { message: error.message, code: error.code }, outputComplete: false };
   }
+  // Setup failures happen before the child can write to the step's stderr file. Surface the
+  // spooler's own diagnostic as well, so an initial heartbeat refusal is visible to the author.
+  const stepStderr = existsSync(stderrPath) ? readFileSync(stderrPath, 'utf8') : '';
   return { status: outcome.status, signal: outcome.signal,
     durationMs: outcome.durationMs, startedAt: outcome.startedAt, finishedAt: outcome.finishedAt,
     ...(outcome.error ? { error: Object.assign(new Error(outcome.error.message), { code: outcome.error.code }) } : {}),
     stdout: existsSync(stdoutPath) ? readFileSync(stdoutPath, 'utf8') : '',
-    stderr: existsSync(stderrPath) ? readFileSync(stderrPath, 'utf8') : '',
+    stderr: outcome.error && transport.stderr ? stepStderr + transport.stderr : stepStderr,
     outputComplete: outcome.outputComplete,
   };
 }
