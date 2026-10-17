@@ -1,0 +1,87 @@
+- id: W1-T10046
+  title: "A RESTARTED DAEMON'S RETRO CHECK AND AUTO-TRIAGE REFUSAL READ COME FROM DURABLE DIGESTS, NOT A WALK OF EVERY ROTATION — on 2026-10-17 each of 11 boots re-read the whole ledger corpus twice (14:23:22Z: about 288 MB async, 151 rotations oldest-first, ending at daemon.retro_trigger.backoff; 14:23:51Z: about 243 MB sync on the main thread, 103 rotations) for slices of about 1 MB and zero rows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, the two once-per-boot whole-union reads in run-task.ts move to the W1-T9710 slice reader with durable digests; what each check decides from its rows is unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 8 (rootio2 capture, 2026-10-17); the second reader is the "caller unidentified" sync burst the brief asked this task to name'
+  plan_refs: [W1-T9119, W1-T9527, W1-T9710, W1-T6263, W1-T9853, W1-T4203, W1-T4664]
+  files:
+    - src/run-task.ts
+    - test/the-retro-and-auto-triage-reads-come-from-durable-digests.test.ts
+  status: queued
+  priority: 1  # about 530 MB of reads, 243 MB of it blocking the main thread, on every boot; boots ran about 2/h on 10-17
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/rootio2-*: /proc per-task io and stat at 1 Hz, fd readlink at 40 Hz, of the core
+    container's process tree; core ledger 2026-10-15..17, every rotation plus live, deduped, newest row 15:40:17Z):
+    - 11 daemon.boot rows on 10-17 (00:25 … 14:53Z), 13 on 10-16.
+    - gzA, 14:23:22–14:23:44Z: 151 distinct rotations (2026-08-08 … 10-17) opened strictly oldest-first, daemon
+      libuv-worker reads 287.7 MB; it ends at the daemon.retro_trigger.backoff row at 14:23:44.603Z. The corpus on disk
+      then was 389 archives, 276,580,680 B. (The brief's 483 MB is the whole device in that phase; codex children read
+      213 MB of it.)
+    - 11 daemon.retro_trigger.backoff rows on 10-17, one per boot, 0 retro_triggered: every check paid the whole read to
+      back off.
+    - gzB, 14:23:51–14:24:07Z: MainThread 242.9 MB, 103 rotations (08-13 … 10-17) opened ascending, fd position 0;
+      the ledger is silent for 15.6 s after daemon.tick_phases at 14:23:51.915Z, the 60 s due-rung rows burst at
+      14:24:07.556Z, and auto_triage.fired follows at 14:24:11.656Z. All 11 auto_triage.fired rows on 10-17 fall 1–2
+      minutes after a daemon.boot_gate.opened.
+    - The slices are small: the retro's 7 run steps are 942 rows, 1.1 MB (0.39% of bytes) in 10-15..17; there are 0
+      triage.commit_refused and 0 triage.refusal_cleared rows in that sample.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - daemon.ts `retroCadence` → run-task.ts `buildRetroDaemonHooks` → `retroTriggerCheckAsync` →
+      `readRetroTriggerLedgerAsync` → ledger-union.ts `resolveLedgerUnionAsync(stateDir, RUN_LEDGER_STEP_PATTERN)`:
+      no memo, no digest, no since; the read precedes the back-off decision in `retroTriggerPrelude`.
+    - run-task.ts `autoTriageCheck`: the default `readRefusalRows` is
+      `readLedgerUnionRecordsSync(dirname(ledgerPathFor(config)), { step: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP], refuseIncomplete: true })`,
+      synchronous and whole-corpus, run when the rung would fire.
+    - The W1-T9710 pattern: sweep.ts `createEscalationTriageHistoryReader` (ledger-union.ts `createLedgerRotationMemo`
+      with `durableDigest`, `memo.load` off the loop, `createIncrementalLedgerUnion`, `lastPass()`); its quiet-bound
+      holder serves 389 digests (15.4 MB) where the archives are 277 MB.
+    INFERRED: gzB is autoTriageCheck's refusal read (timing, sync main-thread signature and once-per-boot shape all
+    match; no other sync whole-union read sits between those two rows). The builder confirms it with the test below
+    before changing it.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9119 (queued, P1) windows the retro read and gates it on heap headroom, but its
+    step 1 still "reads the whole union once" with no previous result, which is every check today (one per process);
+    this task makes that first read durable. W1-T9119 should depend on this one or drop its step 1 (coordinator's
+    call). W1-T9853 (queued) adds another sync read beside autoTriageCheck's and should use the same slice reader.
+    W1-T9527/W1-T9710 (merged) are the pattern. Swept origin/main plan/tasks.d and the plan diffs of every open PR
+    head for readRetroTriggerLedgerAsync, retro_trigger, resolveLedgerUnionAsync and retro trigger (2026-10-17
+    ~15:40Z).
+  design: |
+    1. `readRetroTriggerLedgerAsync` reads through a module-level `createEscalationTriageHistoryReader` with slice
+       { holder: "run-task.retro-trigger-runs", the RUN_LEDGER_STEP_PATTERN steps, version "1" } and hands
+       `retroTriggerPrelude` records. When the read is not ok it falls back to the live file, as today. The sync twin
+       `readRetroTriggerLedger` is unchanged; the parity test "the awaited and sync retro trigger reads answer the
+       same corpus identically" stays green, and a new test shows the digest read finds the same runs.
+    2. `autoTriageCheck`'s default `readRefusalRows` becomes an awaited module-level slice reader with holder
+       "run-task.auto-triage-refusals" over the two refusal steps, off the loop. An unreadable read still means no
+       refusals.
+    3. Each retro check ledgers `retro_trigger.ledger_read` (the row W1-T9119 named) with rows, ms, rotations,
+       seeded_rotations, digest hits and misses and the pass's loop read bytes and parsed lines from `lastPass()`; the
+       auto-triage rows (auto_triage.fired and .skipped) carry the refusal read's same counts.
+    4. No count, bound or env var is added. Each new holder adds one digest per rotation, pruned as the others are.
+    5. TESTS in test/the-retro-and-auto-triage-reads-come-from-durable-digests.test.ts, `test(` titles verbatim as in
+       the proofs: one reader writes digests over gzip fixtures, each archive is overwritten with same-length garbage
+       and its mtime restored, and a fresh reader (the restarted process) must still return the archived rows.
+  acceptance:
+    - claim: "a restarted retro check reads its run slice from digests, not rotations"
+      proof: 'grep: test("W1-T10046: a restarted retro check reads its run slice from digests, not rotations" in test/the-retro-and-auto-triage-reads-come-from-durable-digests.test.ts'
+    - claim: "a fresh auto-triage check reads its refusal slice from digests off the loop, and an archived refusal still holds"
+      proof: 'grep: test("W1-T10046: a fresh auto-triage check reads its refusal slice from digests off the loop" in test/the-retro-and-auto-triage-reads-come-from-durable-digests.test.ts'
+    - claim: "every retro check ledgers what its read cost"
+      proof: 'grep: retro_trigger\.ledger_read in src/run-task.ts'
+  falsifier: |
+    At origin/main a fresh process over the same-length-garbage archives cannot read them: the retro union refuses
+    as incomplete and falls back to the live file, losing the archived run.start, so the first test fails; the sync
+    refusal read returns not-ok, so an entry refused in an archived rotation fires, failing the second; and a
+    setImmediate turn counter sees 0 turns during the sync read. Deleting the fix gives `# fail N`, restoring it
+    `# fail 0`.
+  note: |
+    EFFECT, measured after merge: retro_trigger.ledger_read rows on the first check after a boot show digest hits
+    for every archive and loop read bytes near the live file's size; a rootio-style capture after a boot shows no
+    whole-corpus burst. Healthy shape: the two bursts are gone.
