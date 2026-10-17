@@ -17,7 +17,7 @@ import { runReadPlaneWorker } from "../src/lib/read-plane.worker.js";
 import {
   GitFetchError, createPlanRevisionStore, createPlanSyncCoalescer, createTickReadProducer, daemonPlanReaders,
   planAtRevisionAsync, readPlanRevisionAsync, planSyncGitRunnerAsync, syncPlanFromOriginAsync, tickReadProducer,
-} from "../src/run-task.js";
+} from "./helpers/run-task-daemon.js";
 
 function task(id: string, dependsOn: string[] = []): string {
   return `- id: ${id}\n  title: task ${id}\n  repo: remudero\n  type: implement\n  files: [src/${id}.ts]\n` +
