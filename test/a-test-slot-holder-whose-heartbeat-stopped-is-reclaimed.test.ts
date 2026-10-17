@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, type Stats } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
-  acquireTestSlot, beatTestSlot, probeReservedTree, releaseTestSlotForOwner, TEST_SLOT_DIR_ENV, TEST_SLOT_HEARTBEAT_MS,
+  acquireTestSlot, beatTestSlot, probeReservedTree, releaseTestSlotForOwner, startTestSlotHeartbeat, TEST_SLOT_DIR_ENV, TEST_SLOT_HEARTBEAT_MS,
   TEST_SLOT_PARENT_ENV, TEST_SLOT_RUN_ENV, type ReservedTreeEvidence, type TestSlotHolder, type TestSlotOptions,
   testSlotReservationIdentity,
 } from "../src/lib/test-slot.js";
-import { acquireSlotMutation, createGuardHolderProbe, defaultGuardHolderProbe, type GuardHolderEvidence } from "../src/lib/test-slot-mutation.js";
+import { acquireSlotMutation, createGuardHolderProbe, defaultGuardHolderProbe, reclaimOrphanedSlotMutation, type GuardHolderEvidence } from "../src/lib/test-slot-mutation.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { makeRuntimeFixture } from "./helpers/native-runtime-fixture.js";
 
@@ -157,6 +157,16 @@ test("W1-T9928: only proven quiescence or an identity-checked owner release free
   assert.equal(probeReservedTree({ ...owner, processStart: "proc:NaN" }, proc({})).state, "unknown", "invalid process start");
   assert.equal(probeReservedTree({ ...owner, host: "another-host" }, proc({})).state, "unknown", "another host");
   assert.equal(probeReservedTree(owner, { ...proc({}), platform: "darwin" }).state, "unknown", "no darwin tree probe: reserved");
+  const unreadableTable = probeReservedTree(owner, { ...proc({}), list: () => { throw eacces; } });
+  assert.equal(unreadableTable.state, "unknown");
+  assert.match(unreadableTable.reason, /process table unreadable.*denied/);
+  const unreadableStat = probeReservedTree(owner, { ...proc({}), list: () => ["11"], read: () => { throw eacces; } });
+  assert.equal(unreadableStat.state, "unknown");
+  assert.match(unreadableStat.reason, /11: process identity unreadable.*denied/);
+  const malformedMarker = probeReservedTree(owner, proc({ 11: { start: 600, environ: `${TEST_SLOT_RUN_ENV}={bad json\0` } }));
+  assert.equal(malformedMarker.state, "unknown");
+  assert.match(malformedMarker.reason, /malformed reservation marker/);
+  assert.match(malformedMarker.reason, /incomplete/);
 
   const dir = slotDir(t, "quiescence"), path = join(dir, "slot-1.json");
   const attempt = (probe: (held: TestSlotHolder) => ReservedTreeEvidence, extra: Partial<TestSlotOptions> = {}) => {
@@ -233,8 +243,26 @@ test("W1-T9928: only proven quiescence or an identity-checked owner release free
   writeHolder(path, silentOwner);
   assert.equal(release(ended, { ...request, processStart: "proc:9" }).outcome, "refused", "PID reuse");
   assert.equal(release(ended, { ...request, ownerNonce: "nonce-z" }).outcome, "refused", "a replaced reservation");
+  const allegedLive = { ...silentOwner, pid: deadPid() };
+  writeHolder(path, allegedLive);
+  const aliveResult = releaseTestSlotForOwner(path, { ...request, pid: allegedLive.pid }, { treeProbe: terminal,
+    isPidAlive: () => true, hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1", log: () => {} });
+  if (aliveResult.outcome === "released") assert.fail("a reported live owner cannot be released");
+  assert.match(aliveResult.reason, /owner pid .* is alive/);
+  writeHolder(path, silentOwner);
   assert.equal(release(() => { writeHolder(path, { ...silentOwner, heartbeatAt: new Date().toISOString() }); return ended(); }).outcome,
     "held", "a late refresh holds the record for re-observation");
+  writeHolder(path, silentOwner);
+  const changedDuringUnlink = releaseTestSlotForOwner(path, request, { treeProbe: terminal, isPidAlive: () => false,
+    hostname, bootId: () => "boot-1", pidNamespace: () => "ns-1",
+    log: () => writeHolder(path, { ...silentOwner, heartbeatAt: new Date(Date.now() + 1000).toISOString() }) });
+  assert.equal(changedDuringUnlink.outcome, "held", "a changed heartbeat after audit cannot be unlinked");
+  assert.equal(existsSync(path), true);
+  unlinkSync(path);
+  const absent = release(ended);
+  if (absent.outcome === "released") assert.fail("an absent reservation cannot be released");
+  assert.match(absent.reason, /no reservation at this path/);
+  writeHolder(path, silentOwner);
   writeHolder(path, { ...silentOwner, ownerNonce: undefined });
   assert.equal(release(ended).outcome, "refused", "unknown owner identity");
   writeHolder(path, silentOwner, 0o600);
@@ -345,6 +373,53 @@ test("W1-T9928: preflight-author keeps beating its slot while a step runs", asyn
   assert.equal(JSON.parse(observed.marker!).nonce, observed.record.ownerNonce);
 });
 
+test("W1-T9928: heartbeat faults retain diagnostics and never release a changed reservation", async t => {
+  const dir = slotDir(t, "heartbeat-faults");
+  const lease = acquireTestSlot("heartbeat faults", { dir, slots: 1, load: IDLE, waitBoundMs: 0, log: () => {} });
+  assert.equal(lease.outcome, "acquired");
+  assert.ok(lease.heartbeat);
+  const handle = { ...lease.heartbeat, intervalMs: 15 };
+  const path = handle.path, original = readFileSync(path, "utf8"), mode = lstatSync(path).mode & 0o777;
+  const logs: Record<string, unknown>[] = [];
+  const waitFor = async (step: string): Promise<void> => {
+    const deadline = Date.now() + 2_000;
+    while (!logs.some(row => row.step === step) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(logs.some(row => row.step === step), `expected ${step}: ${JSON.stringify(logs)}`);
+  };
+  const restore = (): void => {
+    try { lstatSync(path); unlinkSync(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    writeFileSync(path, original, { mode });
+  };
+  try {
+    assert.equal(beatTestSlot(handle), "beat");
+    unlinkSync(path);
+    assert.equal(beatTestSlot(handle), "lost", "an absent reservation is lost through the open error arm");
+    restore();
+    const lost = startTestSlotHeartbeat(handle, row => logs.push(row));
+    const changed = { ...JSON.parse(readFileSync(path, "utf8")) as TestSlotHolder, ownerNonce: "replacement" };
+    writeHolder(path, changed, mode);
+    await waitFor("test_slot.heartbeat_lost");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).ownerNonce, "replacement");
+    lost.stop(true);
+    restore();
+
+    const failed = startTestSlotHeartbeat(handle, row => logs.push(row));
+    unlinkSync(path); symlinkSync(join(dir, "missing-target"), path);
+    await waitFor("test_slot.heartbeat_failed");
+    failed.stop(false);
+    assert.ok(logs.some(row => row.step === "test_slot.heartbeat_stopped"));
+    assert.equal(lstatSync(path).isSymbolicLink(), true, "a failed beat never removes the replacement");
+    restore();
+
+    const withdrawal = startTestSlotHeartbeat(handle, row => logs.push(row));
+    unlinkSync(path); symlinkSync(join(dir, "missing-target"), path);
+    withdrawal.stop(true);
+    assert.ok(logs.some(row => row.step === "test_slot.heartbeat_withdraw_failed"));
+    restore();
+  } finally { restore(); lease.release(); }
+});
+
 test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept", t => {
   const dir = slotDir(t, "guard"), path = join(dir, "slot-1.json"), guard = join(dir, ".slot-1.json.mutation");
   const orphan = (ageMs = 3_600_000): void => {
@@ -434,6 +509,100 @@ test("W1-T9928: an orphaned mutation guard is reclaimed and an open one is kept"
       unlinkSync(guard);
     }
   }
+});
+
+test("W1-T9928: a changed or vanished orphan guard is re-observed before reclaim", t => {
+  const dir = slotDir(t, "guard-drift"), path = join(dir, "slot-1.json"), guard = join(dir, ".slot-1.json.mutation");
+  const makeOldGuard = (): void => {
+    writeFileSync(guard, "", { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(guard, old, old);
+  };
+  const rows: Record<string, unknown>[] = [];
+  const recovery = (probe: () => GuardHolderEvidence) => ({ boundMs: () => 1, now: () => Date.now(),
+    log: (row: Record<string, unknown>) => rows.push(row), probe });
+  assert.equal(reclaimOrphanedSlotMutation(path, recovery(() => assert.fail("an absent guard has no holder to probe"))), "gone");
+  makeOldGuard();
+  assert.equal(reclaimOrphanedSlotMutation(path, recovery(() => {
+    chmodSync(guard, 0o700);
+    return { state: "closed", probe: "fixture", reason: "no holder" };
+  })), "kept");
+  assert.equal(existsSync(guard), true);
+  assert.match(String(rows.at(-1)?.reason), /guard identity changed during the probe/);
+  unlinkSync(guard);
+  makeOldGuard();
+  assert.equal(reclaimOrphanedSlotMutation(path, recovery(() => {
+    unlinkSync(guard);
+    return { state: "closed", probe: "fixture", reason: "no holder" };
+  })), "gone");
+  assert.equal(existsSync(guard), false);
+});
+
+test("W1-T9928: guard probe filesystem failures retain the guard", t => {
+  const dir = slotDir(t, "guard-faults"), path = join(dir, "slot-1.json"), guard = join(dir, ".slot-1.json.mutation");
+  const moduleUrl = new URL("../src/lib/test-slot-mutation.ts", import.meta.url).href;
+  const run = (body: string): { state: string; reason: string; remains: boolean } => {
+    writeFileSync(guard, "", { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(guard, old, old);
+    const script = `import assert from 'node:assert/strict';
+      import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+      const api = await import(${JSON.stringify(moduleUrl)});
+      const guard = process.argv[1], path = process.argv[2];
+      const logs = []; const base = {boundMs: () => 1, now: () => Date.now(), log: row => logs.push(row),
+        probe: () => ({state: 'closed', probe: 'fixture', reason: 'no holder'})};
+      ${body}
+      console.log(JSON.stringify({state, reason, remains: fs.existsSync(guard)}));`;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, guard, path],
+      { encoding: "utf8", timeout: 10_000 });
+    assert.equal(child.status, 0, child.stderr);
+    const result = JSON.parse(child.stdout.trim().split("\n").at(-1)!) as { state: string; reason: string; remains: boolean };
+    if (existsSync(guard)) unlinkSync(guard);
+    return result;
+  };
+  const table = run(`const original = fs.readdirSync;
+    fs.readdirSync = (name, ...args) => { if (name === '/proc') throw Object.assign(Error('table denied'), {code: 'EACCES'});
+      return original(name, ...args); }; syncBuiltinESMExports();
+    const result = api.defaultGuardHolderProbe(guard, fs.lstatSync(guard), 'linux');
+    const state = result.state, reason = result.reason;`);
+  assert.deepEqual([table.state, table.remains], ["unknown", true]);
+  assert.match(table.reason, /process table unreadable.*table denied/);
+
+  const unreadable = run(`const original = fs.lstatSync;
+    fs.lstatSync = (name, ...args) => { if (name === guard) throw Object.assign(Error('guard lookup denied'), {code: 'EACCES'});
+      return original(name, ...args); }; syncBuiltinESMExports();
+    const state = api.reclaimOrphanedSlotMutation(path, base);
+    const reason = String(logs.at(-1)?.reason);`);
+  assert.deepEqual([unreadable.state, unreadable.remains], ["kept", true]);
+  assert.match(unreadable.reason, /guard unreadable.*guard lookup denied/);
+
+  const foreign = run(`const original = fs.lstatSync;
+    fs.lstatSync = (name, ...args) => { const st = original(name, ...args);
+      if (name !== guard) return st;
+      return Object.assign(Object.create(Object.getPrototypeOf(st)), st, {uid: process.getuid() + 1}); };
+    syncBuiltinESMExports();
+    const state = api.reclaimOrphanedSlotMutation(path, base);
+    const reason = String(logs.at(-1)?.reason);`);
+  assert.deepEqual([foreign.state, foreign.remains], ["kept", true]);
+  assert.match(foreign.reason, /foreign-uid guard/);
+
+  const unlinkFailure = run(`const original = fs.unlinkSync;
+    fs.unlinkSync = (name, ...args) => { if (name === guard) throw Object.assign(Error('unlink denied'), {code: 'EACCES'});
+      return original(name, ...args); }; syncBuiltinESMExports();
+    const state = api.reclaimOrphanedSlotMutation(path, base);
+    const reason = String(logs.at(-1)?.reason);`);
+  assert.deepEqual([unlinkFailure.state, unlinkFailure.remains], ["kept", true]);
+  assert.match(unlinkFailure.reason, /reclaim failed.*unlink denied/);
+
+  const receiptFailure = run(`const original = fs.unlinkSync;
+    fs.unlinkSync = (name, ...args) => { if (String(name).endsWith('/receipt')) {
+        original(name, ...args); throw Object.assign(Error('receipt unlink denied'), {code: 'EACCES'}); }
+      return original(name, ...args); }; syncBuiltinESMExports();
+    const observer = api.createGuardHolderProbe();
+    const result = observer.probe(guard, fs.lstatSync(guard), 'darwin'); observer.dispose();
+    const state = result.state, reason = result.reason;`);
+  assert.deepEqual([receiptFailure.state, receiptFailure.remains], ["unknown", true]);
+  assert.match(receiptFailure.reason, /receipt unlink denied/);
 });
 
 test("W1-T9928: the darwin guard observer reads terminal receipts while its caller's loop is blocked", t => {
