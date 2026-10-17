@@ -30,6 +30,7 @@ import {
   relieveServeMemory,
   sampleServeMemory,
   SERVE_MEMORY_RELIEVED_STEP,
+  SERVE_MEMORY_SAMPLE_FAILED_STEP,
   SERVE_MEMORY_STEP,
   snapshotHolder,
   startServeMemoryMonitor,
@@ -68,7 +69,7 @@ function manualTimer(): { tick: () => void; cleared: () => boolean; setInterval:
   };
 }
 
-function servedFixture(serveMemory: ServeDeps["serveMemory"]): { deps: ServeDeps; rows: Row[]; root: string; ledgerPath: string } {
+function servedFixture(serveMemory: ServeDeps["serveMemory"]): { deps: ServeDeps; rows: Row[]; root: string; ledgerPath: string; nextSample: () => Promise<void> } {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}serve-memory-`));
   mkdirSync(join(root, "plan"), { recursive: true });
   mkdirSync(join(root, "state"), { recursive: true });
@@ -77,6 +78,11 @@ function servedFixture(serveMemory: ServeDeps["serveMemory"]): { deps: ServeDeps
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const github: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
   const rows: Row[] = [];
+  let pendingSample: { resolve: () => void; reject: (error: Error) => void } | undefined;
+  const nextSample = (): Promise<void> => {
+    assert.equal(pendingSample, undefined, "each requested sample must finish before the next tick");
+    return new Promise<void>((resolve, reject) => { pendingSample = { resolve, reject }; });
+  };
   const deps: ServeDeps = {
     board: { plan: { tasks: [], byId: new Map() } as Plan, ledgerPath, github },
     panelGraph: {
@@ -93,15 +99,23 @@ function servedFixture(serveMemory: ServeDeps["serveMemory"]): { deps: ServeDeps
     questionsRoot: root,
     tokens: { read: "memory-read", write: "memory-write" },
     pollMs: 50,
-    log: (step, extra) => void rows.push({ step, ...extra }),
+    log: (step, extra) => {
+      rows.push({ step, ...extra });
+      if (step === SERVE_MEMORY_STEP || step === SERVE_MEMORY_SAMPLE_FAILED_STEP) {
+        const pending = pendingSample;
+        pendingSample = undefined;
+        if (step === SERVE_MEMORY_STEP) pending?.resolve();
+        else pending?.reject(new Error(String(extra?.reason ?? "memory sample failed")));
+      }
+    },
     serveMemory,
   };
-  return { deps, rows, root, ledgerPath };
+  return { deps, rows, root, ledgerPath, nextSample };
 }
 
 test("W1-T5175: serve ledgers a memory sample that names each holder size", async () => {
   const timer = manualTimer();
-  const { deps, rows, root } = servedFixture({ ...timer, usage: () => USAGE, headroom: headroomAt(0.5) });
+  const { deps, rows, root, nextSample } = servedFixture({ ...timer, usage: () => USAGE, headroom: headroomAt(0.5) });
   const server = buildServeServer(deps);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
@@ -109,7 +123,9 @@ test("W1-T5175: serve ledgers a memory sample that names each holder size", asyn
     const read = await fetch(`http://127.0.0.1:${port}/v1/recent`, { headers: { authorization: "Bearer memory-read" } });
     assert.equal(read.status, 200);
     await read.text();
+    const sampled = nextSample();
     timer.tick();
+    await sampled;
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(root, { recursive: true, force: true });
@@ -332,11 +348,14 @@ test("W1-T5175: a dropped route cache rebuilds on demand without restoring what 
 
 test("W1-T5175: serve sheds its largest refreshable holder under pressure and ledgers the escalation once", async () => {
   const timer = manualTimer();
-  const { deps, rows, root, ledgerPath } = servedFixture({ ...timer, usage: () => USAGE, headroom: headroomAt(REFRESHABLE_RELIEF_HEADROOM / 2), clock: fixedClock(Date.UTC(2026, 9, 1, 16, 9, 17)) });
+  const { deps, rows, root, ledgerPath, nextSample } = servedFixture({ ...timer, usage: () => USAGE, headroom: headroomAt(REFRESHABLE_RELIEF_HEADROOM / 2), clock: fixedClock(Date.UTC(2026, 9, 1, 16, 9, 17)) });
   const server = buildServeServer(deps);
   try {
-    timer.tick();
-    timer.tick();
+    for (let tick = 0; tick < 2; tick += 1) {
+      const sampled = nextSample();
+      timer.tick();
+      await sampled;
+    }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
