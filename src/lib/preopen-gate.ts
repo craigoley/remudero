@@ -228,7 +228,7 @@ function within(path: string, root: string): boolean {
  * read-only, as the host has it. Kept, it broke every gate from 2026-10-17 03:43Z: a worker worktree's
  * `node_modules` links to the run's engine tree's (the harness), itself a link to the managed checkout's install
  * (W1-T9738), and W1-T9860 binds that middle hop. bwrap resolves the hop's source to the install but mounts onto
- * the hop's DESTINATION, which inside the sandbox is the harness's absolute symlink, so the mount fails ENOENT.
+ * the hop's DESTINATION, which inside the sandbox is the harness's absolute symlink, so the mount fails ENOENT (PR 12595).
  */
 export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJS.ProcessEnv = process.env): string[] {
   const base = proofSandboxArgv({ cwd: input.cwd, home: input.home, env: parentEnv });
