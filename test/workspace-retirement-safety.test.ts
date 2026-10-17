@@ -18,6 +18,11 @@ function mac(fx: Fixture, apply = true, extra: Record<string, string> = {}) {
     ...extra,
   } });
 }
+function reporting(fx: Fixture, body: string, input?: string) {
+  return spawnSync("bash", ["-c", `set -euo pipefail; source "$1"; ${body}`, "report", GUARD, join(fx.root, "decisions.tsv")], {
+    encoding: "utf8", input, env: { ...process.env, HOME: fx.home, TMPDIR: fx.scratch },
+  });
+}
 // The production Mac guard uses mtime AND ctime. A fixture cannot backdate
 // ctime, so this probe supplies an aged ctime equal to mtime without changing
 // production logic. A separate case below exercises the actual ctime guard.
@@ -299,6 +304,8 @@ test("the scheduled Mac janitor invokes nested-cache cleanup from its installed 
     const job = join(fx.scratch, "historical-ci"); const cache = join(job, "tsx-501");
     mkdirSync(cache, { recursive: true }); mkdirSync(join(job, "fixture", ".git"), { recursive: true });
     const file = join(cache, `17920-${"a".repeat(40)}`); writeFileSync(file, "compiled cache"); age(job, 8);
+    const recentCache = join(fx.home, ".codex/work-artifacts/job/.next/cache/turbopack");
+    mkdirSync(recentCache, { recursive: true }); writeFileSync(join(recentCache, "payload"), "recent cache");
     const dest = join(fx.root, "installed");
     const install = spawnSync("bash", ["deploy/mac/install-janitor.sh"], { encoding: "utf8", env: { ...process.env, REMUDERO_JANITOR_INSTALL_DIR: dest } });
     assert.equal(install.status, 0, install.stderr);
@@ -312,5 +319,96 @@ test("the scheduled Mac janitor invokes nested-cache cleanup from its installed 
     assert.ok(existsSync(join(job, "fixture", ".git")));
     assert.match(r.stdout, /generated-cache: pruned tsx cache files=1/);
     assert.match(readFileSync(join(fx.root, "mac.log"), "utf8"), /cache-reclaim:.*"sourceOrGitRetired":false/);
+    const rows = readFileSync(join(fx.home, ".local/state/remudero/janitor-decisions.tsv"), "utf8").trim().split("\n").map(line => line.split("\t"));
+    assert.ok(rows.some(row => row[2] === "remove" && row[3] === "generated_cache_eligible" && row[4]!.includes("pruned tsx cache files=1")));
+    assert.ok(rows.some(row => row[2] === "keep" && row[3] === "cache_recent_foreign_or_flagged" && row[4]!.includes(recentCache) && row[5] === "unknown"));
+    assert.match(r.stdout, /retirement skips: cache_recent_foreign_or_flagged=1/);
+    assert.ok(existsSync(join(recentCache, "payload")));
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("janitor reporting keeps completion informational and types TSX outcomes without path guesses", () => {
+  const fx = fixture();
+  try {
+    const r = reporting(fx, `
+rmd_decision_record "$2" '=== done: live-skip=7 young-skip=2 ==='
+rmd_decision_record "$2" 'SKIP live /private/path'
+rmd_decision_record "$2" 'generated-cache: KEEP RISKY (TSX cache process command references path): /private/cache with spaces'
+rmd_decision_record "$2" 'generated-cache: KEEP RISKY (TSX cache open file or lsof scan uncertain): /private/live-cache'
+rmd_decision_record "$2" 'generated-cache: KEEP RISKY (TSX discovery incomplete): /private/root'
+rmd_decision_record "$2" 'generated-cache: pruned tsx cache files=2 (older than 360 min): /private/cache'
+rmd_decision_record "$2" 'generated-cache: would prune tsx cache files=2 (older than 360 min): /private/cache'
+rmd_decision_record "$2" 'generated-cache: KEEP RISKY (TSX cache prune incomplete): /private/cache'
+rmd_decision_record "$2" $'SKIP unknown-directory /private/percent%tab\\tline\\nreturn\\r'
+`);
+    assert.equal(r.status, 0, r.stderr);
+    const rows = readFileSync(join(fx.root, "decisions.tsv"), "utf8").trim().split("\n").map(line => line.split("\t"));
+    assert.deepEqual(rows.map(row => row.slice(2, 4)), [
+      ["info", "other"], ["keep", "active"], ["keep", "active"], ["keep", "probe_unknown"],
+      ["keep", "discovery_incomplete"], ["remove", "generated_cache_eligible"],
+      ["planned", "generated_cache_eligible"], ["info", "removal_unverified"], ["keep", "unknown_directory"],
+    ]);
+    assert.ok(rows.every(row => row.length === 7 && row[5] === "unknown" && row[6] === "unknown"));
+    assert.equal(rows[8]![4], "SKIP unknown-directory /private/percent%25tab%09line%0Areturn%0D");
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("janitor reporting translates bounded cache JSON including deferred and unverified removals", () => {
+  const fx = fixture();
+  try {
+    const receipt = { version: 1, inspection: { mode: "artifacts", discoveryComplete: false, candidateEvaluationComplete: false, undiscoveredCandidateCount: null }, decisions: [
+      { action: "keep", reason: "reference-corpus-incomplete", deferred: true, path: "/private/deferred cache" },
+      { action: "keep", reason: "recent-foreign-or-flagged", path: "/private/recent", pathAllocatedBytes: 4096 },
+      { action: "would-remove", path: "/private/planned", pathAllocatedBytes: 8192 },
+      { action: "removed", path: "/private/removed", pathAllocatedBytes: 0 },
+      { action: "removed-unverified", reason: "post-removal-verification-unavailable", path: "/private/partial" },
+      { action: "keep", reason: "[Errno 13] Permission denied", path: "/private/unknown", pathAllocatedBytes: true },
+    ] };
+    const r = reporting(fx, 'rmd_decision_cache_json "$2"; rmd_decision_summary "$2"', `cache-reclaim: ${JSON.stringify(receipt)}\n`);
+    assert.equal(r.status, 0, r.stderr);
+    const rows = readFileSync(join(fx.root, "decisions.tsv"), "utf8").trim().split("\n").map(line => line.split("\t"));
+    assert.deepEqual(rows.map(row => row.slice(2, 4)), [
+      ["keep", "cache_reference_corpus_incomplete"], ["keep", "cache_recent_foreign_or_flagged"],
+      ["planned", "generated_cache_eligible"], ["remove", "generated_cache_eligible"],
+      ["info", "cache_removal_unverified"], ["keep", "cache_probe_unknown"], ["info", "cache_inspection_incomplete"],
+    ]);
+    assert.deepEqual(rows.map(row => row[5]), ["unknown", "4096", "8192", "0", "unknown", "unknown", "unknown"]);
+    assert.match(r.stdout, /cache_reference_corpus_incomplete=1 known-observed-bytes=0 unknown-size-decisions=1 total-bytes=unknown/);
+    assert.match(r.stdout, /cache_recent_foreign_or_flagged=1 known-observed-bytes=4096 unknown-size-decisions=0 total-bytes=unknown/);
+    assert.match(r.stdout, /unique-total=unknown/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("janitor skipped sizes reuse only successful existing probes and keep legacy unknown rows", () => {
+  const fx = fixture();
+  try {
+    const r = reporting(fx, `
+du() { echo unexpected-size-scan >&2; return 99; }
+find() { echo unexpected-tree-scan >&2; return 99; }
+rmd_decision_known_kib 8 0; rmd_decision_record "$2" 'SKIP open /private/known'
+rmd_decision_known_kib 9 1; rmd_decision_record "$2" 'SKIP open /private/failed'
+rmd_decision_known_kib '' 0; rmd_decision_record "$2" 'SKIP open /private/missing'
+rmd_decision_known_kib 000 0; rmd_decision_record "$2" 'SKIP open /private/empty'
+rmd_decision_known_kib 99999999999999999999 0; rmd_decision_record "$2" 'SKIP open /private/overflow'
+printf '%s\\tlegacy-time\\tkeep\\tactive\\tSKIP open legacy\\n' "$RMD_DECISION_PASS_ID" >> "$2"
+rmd_decision_summary "$2"
+`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    const rows = readFileSync(join(fx.root, "decisions.tsv"), "utf8").trim().split("\n").map(line => line.split("\t"));
+    assert.deepEqual(rows.slice(0, 5).map(row => row[5]), ["8192", "unknown", "unknown", "0", "unknown"]);
+    assert.match(r.stdout, /active=6 known-observed-bytes=8192 unknown-size-decisions=4 total-bytes=unknown/);
+  } finally { rmSync(fx.root, { recursive: true, force: true }); }
+});
+
+test("janitor reporting refuses malformed cache receipts before recording a partial success", () => {
+  const fx = fixture();
+  try {
+    const input = 'cache-reclaim: {"version":1,"decisions":[{"action":"removed"},{"action":"invented"}]}\n';
+    const r = reporting(fx, 'if rmd_decision_cache_json "$2"; then exit 9; fi; rmd_decision_record "$2" "cache report unrecognized" info cache_report_unknown', input);
+    assert.equal(r.status, 0, r.stderr);
+    const rows = readFileSync(join(fx.root, "decisions.tsv"), "utf8").trim().split("\n").map(line => line.split("\t"));
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]!.slice(2, 4), ["info", "cache_report_unknown"]);
   } finally { rmSync(fx.root, { recursive: true, force: true }); }
 });
