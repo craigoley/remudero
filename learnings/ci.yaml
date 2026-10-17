@@ -379,7 +379,8 @@
 
 - id: hand-review-collides-with-the-daemon
   subsystem: ci
-  lifecycle: active
+  # retired 2026-10-17 by the session retro: W1-T5540 shipped in #9217, which honours shared pending claims
+  lifecycle: superseded
   files: [src/lib/review.ts]
   fact: >-
     The remudero-review pending claim is read from the LOCAL ledger only, so `rmd review` on one
@@ -720,4 +721,35 @@
     repair's causal link were NOT read from the CI log in this entry, so the trigger is not verified here.
     The recorded recommended action is unclear, and guidance changes are parked for a person's decision.
   src: "ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver)"
+  cited: "2026-10-16"
+
+- id: an-advisory-ignore-needs-the-operator-yes
+  subsystem: ci
+  lifecycle: active
+  files: [osv-scanner.toml, ".github/semgrep/**", ".github/workflows/osv-scanner*.yml", commitlint.config.mjs, .github/workflows/pr-title-lint.yml, src/lib/code-scanning-merge-policy.mjs]
+  fact: >-
+    Never add a security-advisory ignore, a scanner exclusion or any gate loosening without the
+    operator's explicit yes. A reachability argument is not a waiver: leave the gate red and escalate.
+    Before pushing to another session's PR, read ALL its comments.
+  evidence: >-
+    #12305 merged a GHSA-84m7-p3x7-pcfv ignore in .github/semgrep/osv-scanner.toml, argued
+    unreachable, over the PR owner's comment asking for no security exception; #12342 reverted it.
+    #12322 exempted Dependabot titles from commitlint header-max-length; #12343 reverted it on the
+    operator's 2026-10-16 ruling of no gate loosening.
+  src: "PRs #12305/#12342, #12322/#12343"
+  cited: "2026-10-16"
+
+- id: a-lowered-ceiling-is-rederived-on-current-main
+  subsystem: ci
+  lifecycle: active
+  files: ["scripts/*-baseline.json"]
+  fact: >-
+    A shared count ceiling is judged on each PR's own base, so a PR that LOWERS a baseline row on a
+    stale base reds main once siblings adding lines merge. Right before merge, re-derive a lowered
+    row against current origin/main, until W1-T9962 automates that.
+  evidence: >-
+    2026-10-16: #12428 and #12437 each added a comment line to src/run-task.ts while #12388 lowered
+    its comment-load row to 18250 on a base without them. All three were green alone; main read 18253
+    over 18250 from its first verdict at 22:11Z until main-repair #12454 recorded 18253.
+  src: "PRs #12428, #12388, #12437, #12454; W1-T9962"
   cited: "2026-10-16"

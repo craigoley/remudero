@@ -342,7 +342,9 @@
   cited: "2026-08-31"
 - id: next-task-id-max-across-both-plan-sources
   subsystem: plan
-  lifecycle: active
+  # retired 2026-10-17 by the session retro: a grep max+1 mints on hope; reserve with rmd next-task-id
+  lifecycle: superseded
+  superseded_by: next-task-id-needs-a-fresh-pull
   files: [ plan/tasks.yaml, "plan/tasks.d/**" ]
   fact: >-
     Compute a new task id from the max across BOTH `plan/tasks.yaml` AND every
@@ -584,3 +586,35 @@
     unattributed; a writer-side `model` on the verdict row is the filed complement.
   src: 'operator-session#deep-research-2026-09-07; docs/forensics/retro.md "P53"'
   cited: "2026-09-07"
+
+- id: a-garden-fallback-cadence-is-the-poll-tick
+  subsystem: architecture
+  lifecycle: active
+  files: [src/lib/garden-registry.ts, src/lib/host-memory-admission.ts, src/lib/gardener-runtime.ts]
+  fact: >-
+    A garden's scheduled fallback cadence is not its pass cadence: where `gardenSchedule` returns
+    `intervalFor: sameInterval` and `minIntervalMs: 0` it is the 60 s poll tick, never a behavioural
+    bound. A restart seed is age since the last completion, not queueing time.
+  evidence: >-
+    W1-T9761 (#12435) admitted a deferred garden once its streak reached its cadence. The first live
+    core rows after the 2026-10-17 boots named cadence_basis scheduled at 60000 ms for 12 of 19
+    gardens, so evidence-coverage (natural gap about 57 min) aged after one tick (W1-T9975), and
+    selector-shadow aged at attempt 0 with 0 deferrals on its restart seed (#12502).
+  src: "PRs #12435, #12502; W1-T9975"
+  cited: "2026-10-17"
+
+- id: depends-on-is-a-dispatch-input
+  subsystem: plan
+  lifecycle: active
+  files: ["plan/tasks.d/**", src/lib/dispatch-value.ts]
+  fact: >-
+    A filing's `depends_on` is a dispatch input: `costOfDelayContext` multiplies a task's score by 1
+    plus its open transitive dependents, so a serial chain lifts its enablers over independent P1
+    work. Declare `depends_on` only for a real dependency, until W1-T10020 weights dependents by value.
+  evidence: >-
+    #12389 filed the test restructure as 21 serial waves (W1-T9860..W1-T9901). Each early enabler had
+    26-34 open dependents and scored about 3.6 against about 0.5 for independent P1 fixes, and
+    W1-T9089 and W1-T9757 (P1) sat at ranks 28 and 31 behind the family (offline dispatch replay,
+    W1-T10020). #12535 resumes yielded runs first and leaves the fan-out term unchanged.
+  src: "PRs #12389, #12535; W1-T10020"
+  cited: "2026-10-17"

@@ -1,0 +1,67 @@
+diff --git a/learnings/ci.yaml b/learnings/ci.yaml
+index 1111111..2222222 100644
+--- a/learnings/ci.yaml
++++ b/learnings/ci.yaml
+@@ -0,0 +1,21 @@
++- id: an-advisory-ignore-needs-the-operator-yes
++  subsystem: ci
++  lifecycle: active
++  files: [osv-scanner.toml, ".github/semgrep/**", ".github/workflows/osv-scanner*.yml", commitlint.config.mjs, .github/workflows/pr-title-lint.yml, src/lib/code-scanning-merge-policy.mjs]
++  fact: >-
++    Never add a security-advisory ignore, a scanner exclusion or any gate loosening without the
++    operator's explicit yes. A reachability argument is not a waiver: leave the gate red and escalate.
++    Before pushing to another session's PR, read ALL its comments.
++  src: "PRs #12305/#12342, #12322/#12343"
++  cited: "2026-10-16"
++
++- id: a-lowered-ceiling-is-rederived-on-current-main
++  subsystem: ci
++  lifecycle: active
++  files: ["scripts/*-baseline.json"]
++  fact: >-
++    A shared count ceiling is judged on each PR's own base, so a PR that LOWERS a baseline row on a
++    stale base reds main once siblings adding lines merge. Right before merge, re-derive a lowered
++    row against current origin/main, until W1-T9962 automates that.
++  src: "PRs #12428, #12388, #12437, #12454; W1-T9962"
++  cited: "2026-10-16"
+diff --git a/learnings/architecture.yaml b/learnings/architecture.yaml
+index 1111111..2222222 100644
+--- a/learnings/architecture.yaml
++++ b/learnings/architecture.yaml
+@@ -0,0 +1,21 @@
++- id: a-garden-fallback-cadence-is-the-poll-tick
++  subsystem: architecture
++  lifecycle: active
++  files: [src/lib/garden-registry.ts, src/lib/host-memory-admission.ts, src/lib/gardener-runtime.ts]
++  fact: >-
++    A garden's scheduled fallback cadence is not its pass cadence: where `gardenSchedule` returns
++    `intervalFor: sameInterval` and `minIntervalMs: 0` it is the 60 s poll tick, never a behavioural
++    bound. A restart seed is age since the last completion, not queueing time.
++  src: "PRs #12435, #12502; W1-T9975"
++  cited: "2026-10-17"
++
++- id: depends-on-is-a-dispatch-input
++  subsystem: plan
++  lifecycle: active
++  files: ["plan/tasks.d/**", src/lib/dispatch-value.ts]
++  fact: >-
++    A filing's `depends_on` is a dispatch input: `costOfDelayContext` multiplies a task's score by 1
++    plus its open transitive dependents, so a serial chain lifts its enablers over independent P1
++    work. Declare `depends_on` only for a real dependency, until W1-T10020 weights dependents by value.
++  src: "PRs #12389, #12535; W1-T10020"
++  cited: "2026-10-17"
+diff --git a/learnings/testing.yaml b/learnings/testing.yaml
+index 1111111..2222222 100644
+--- a/learnings/testing.yaml
++++ b/learnings/testing.yaml
+@@ -0,0 +1,10 @@
++- id: a-cancelled-test-is-a-failure
++  subsystem: testing
++  lifecycle: active
++  files: [scripts/pure-test-pool.mjs, scripts/test-run.mjs, scripts/test-with-retry.mjs, scripts/pool-run-tally.mjs, scripts/preflight-author.mjs, scripts/lib/native-author-runtime.mjs, src/lib/retro-preflight.ts, src/lib/ci-friction-gardener.ts, src/lib/plan-pr-emitter.ts]
++  fact: >-
++    node:test prints a timed-out test as `not ok` but counts it under `# cancelled`, not `# fail`, so
++    `# fail 0` can sit over tests that never finished. Any judge of node test output must treat
++    `# cancelled` > 0 as a failure.
++  src: "PR #12472"
++  cited: "2026-10-16"

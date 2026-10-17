@@ -1,0 +1,10 @@
+- id: a-cancelled-test-is-a-failure
+  subsystem: testing
+  lifecycle: active
+  files: [scripts/pure-test-pool.mjs, scripts/test-run.mjs, scripts/test-with-retry.mjs, scripts/pool-run-tally.mjs, scripts/preflight-author.mjs, scripts/lib/native-author-runtime.mjs, src/lib/retro-preflight.ts, src/lib/ci-friction-gardener.ts, src/lib/plan-pr-emitter.ts]
+  fact: >-
+    node:test prints a timed-out test as `not ok` but counts it under `# cancelled`, not `# fail`, so
+    `# fail 0` can sit over tests that never finished. Any judge of node test output must treat
+    `# cancelled` > 0 as a failure.
+  src: "PR #12472"
+  cited: "2026-10-16"

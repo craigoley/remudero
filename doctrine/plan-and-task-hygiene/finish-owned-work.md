@@ -1,5 +1,5 @@
 - **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
-  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave
   worktree retirement to the harness.**
 
 This applies to interactive builders and every dispatched worker, regardless of provider or role.
