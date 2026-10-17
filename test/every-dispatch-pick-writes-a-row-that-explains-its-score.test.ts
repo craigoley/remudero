@@ -237,7 +237,8 @@ test("W1-T9325: calibrated age, starts and imputation survive in the explanation
   assert.equal(explanation.starts, 1);
   assert.equal(explanation.open_dependents, 1);
   assert.equal(explanation.imputed, false);
-  assert.equal(explanation.stride_pass, 2 / explanation.score!);
+  // W1-T9968: the stride pass is a no-fan-out slot of the task's tier; alone in it, the task holds its own.
+  assert.equal(explanation.stride_pass, 2 / (explanation.score! / (1 + explanation.open_dependents)));
   const undated = dispatchValue.explainDispatchScore(imputed, result.context);
   assert.equal(undated.basis, "cost-of-delay");
   assert.equal(undated.filing_age_ms, 0);
