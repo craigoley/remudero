@@ -56,11 +56,11 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 ## Plan and task hygiene
 
 - **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
-  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave
   worktree retirement to the harness.** → doctrine/plan-and-task-hygiene/finish-owned-work.md
-
 - **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
-  `run-<taskId>-*` branch — never from ledger verdict lines.** → doctrine/plan-and-task-hygiene/derive-merged-tasks.md
+  `run-<taskId>-*` branch, and a PR's merge state from the API — never ledger verdict lines, a
+  shard's `status:` or main's log.** → doctrine/plan-and-task-hygiene/derive-merged-tasks.md
 - **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`
   (claimed or in flight?) and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.** → doctrine/plan-and-task-hygiene/run-both-scope-checks.md
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
@@ -73,8 +73,6 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 - **File a plan task from the OPERATOR CHECKOUT — a session that cannot reserve mints on hope.** → doctrine/plan-and-task-hygiene/file-from-the-operator-checkout.md
 - **`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —
   the record ALONE passes at `verify: auto`.** → doctrine/plan-and-task-hygiene/rule15-plan-record.md
-- **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
-  shipped.** → doctrine/plan-and-task-hygiene/status-is-not-completion.md
 - **Decode citations: "Rule N" = MASTER-PLAN §12; "G-N" = §14 "Grill RESOLVED"; "P48"/"DR-N" =
   its retro ledger; `rule15-*` names an artifact, not a rule.** → doctrine/plan-and-task-hygiene/decode-rule-citations.md
 - **Take the cheap candidate beside a costly one, and name what the costly one now waits for.** → doctrine/plan-and-task-hygiene/take-the-cheap-candidate.md
@@ -85,22 +83,20 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 
 ## CI and merging
 
-- **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.** → doctrine/ci-and-merging/stale-red-self-clears.md
 - **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
-  SECONDARY limit 403s on RATE while `rate_limit` reads full.** → doctrine/ci-and-merging/gh-read-cadence.md
-- **`gh pr create` may die on API quota; git push is unaffected.** → doctrine/ci-and-merging/pr-create-quota.md
+  SECONDARY limit 403s on RATE while `rate_limit` reads full; `gh pr create` may die, git push won't.** → doctrine/ci-and-merging/gh-read-cadence.md
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.** → doctrine/ci-and-merging/conflicting-pr-zero-checks.md
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
   the ours-side block yourself; esbuild says only `Unexpected end of file`.** → doctrine/ci-and-merging/close-the-ours-side-block.md
 - **A RETITLE ALONE re-runs the title lint — `pr-title-lint.yml` fires on `edited`; push no sha to
-  clear a title red.** → doctrine/ci-and-merging/edit-relints-the-title.md
+  clear a title red, nor a stale-red `ci-gate` (it self-clears).** → doctrine/ci-and-merging/edit-relints-the-title.md
+- **Never add an advisory ignore, scanner exclusion or gate loosening without the operator's explicit
+  yes; read ALL comments on another session's PR before pushing to it.** → doctrine/ci-and-merging/no-unapproved-waivers.md
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
   recycle, not at merge — confirm with `docker inspect` before calling it shipped.** → doctrine/ci-and-merging/a-baked-path-merge-ships-itself.md
 - **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet
   collision, and main records it (#10724).** → doctrine/ci-and-merging/ratchet-collision.md
-- **Main push runs are cancelled while PENDING, so most main commits never get a CI verdict — never
-  read CANCELLED as red.** → doctrine/ci-and-merging/cancelled-is-not-red.md
 - **Compare a base-red PR's failing check to main's FULL check census, not ci-gate's aggregates, or
   every shard red is held.** → doctrine/ci-and-merging/base-red-full-census.md
 
@@ -146,8 +142,10 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 - **A clock-shifted run failing ENOENT on its own fixture is the boot temp sweep, not a time bomb —
   use a private TMPDIR.** → doctrine/investigation-discipline/clock-shift-enoent.md
 - **Judge main from its newest commit with genuine evidence — its head alone reads undetermined
-  forever under steady merges.** → doctrine/investigation-discipline/main-genuine-evidence.md
-- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair (#3030/#3039/#3043).** → doctrine/investigation-discipline/recurrence-is-a-class-signal.md
+  forever under steady merges, and a push run CANCELLED while pending is not red.** → doctrine/investigation-discipline/main-genuine-evidence.md
+- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair.** → doctrine/investigation-discipline/recurrence-is-a-class-signal.md
+- **Replay a projected effect on the ledger before building for it; audit a shipped mechanism's
+  first live rows for contradictions.** → doctrine/investigation-discipline/replay-then-audit.md
 
 ## Code traps
 

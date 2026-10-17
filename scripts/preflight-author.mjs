@@ -260,7 +260,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
     // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment },
+    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
       ...logs, resultPath, runtimeMs: runtimeLimitMs, ...(heartbeat ? { heartbeat } : {}) });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };

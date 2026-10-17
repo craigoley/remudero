@@ -639,7 +639,7 @@ test('author preflight leaves a running receipt and live private logs when its w
   f.git('add', '.'); f.git('commit', '-m', 'test: hold native static step');
   const parent = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
     `import {main} from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; process.exit(main([], {root:${JSON.stringify(f.root)}}));`],
-  { cwd: ROOT, stdio: 'ignore' });
+  { cwd: ROOT, stdio: 'ignore', env: { ...process.env, RMD_TEST_SLOT_DIR: join(f.root, 'coverage/test-slots') } });
   const closed = new Promise<string | null>((resolve) => parent.once('close', (_code, signal) => resolve(signal)));
   const waitFor = async (predicate: () => boolean) => {
     for (let turn = 0; turn < 1000 && !predicate(); turn++) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -664,10 +664,16 @@ test('author preflight leaves a running receipt and live private logs when its w
     assert.equal(statSync(logRoot).mode & 0o077, 0);
     assert.equal(parent.kill('SIGKILL'), true);
     assert.equal(await closed, 'SIGKILL');
-    writeFileSync(release, 'release');
+    // No release: the held step can only end because its parent-tracked capture cancels it.
     const native = join(logRoot, 'static-preflight.native-result.json');
     await waitFor(() => existsSync(native));
-    assert.equal(JSON.parse(readFileSync(native, 'utf8')).status, 7);
+    const result = JSON.parse(readFileSync(native, 'utf8'));
+    assert.equal(result.error.code, 'ERR_AUTHOR_CAPTURE_PARENT_EXITED');
+    assert.equal(result.parentTracking.ownerLost, true);
+    assert.equal(result.status, null);
+    assert.equal(result.signal, 'SIGTERM');
+    assert.equal(result.outputComplete, false);
+    assert.throws(() => process.kill(result.parentTracking.childPid, 0), { code: 'ESRCH' });
     assert.equal(JSON.parse(readFileSync(join(logRoot, 'progress.json'), 'utf8')).verdict, 'running');
     assert.equal(existsSync(join(logRoot, 'receipt.json')), false, 'loss of the author cannot certify a completed gate');
     assert.match(readFileSync(join(logRoot, 'static-preflight.stderr.log'), 'utf8'), /live static stderr/);

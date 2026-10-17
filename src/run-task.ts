@@ -246,7 +246,10 @@ import { ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, re
 import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import {
+  gardenFamilyRecord, isRulingShaped, machineJudgeFoundWork, machineJudgeInputsAsync, operatorRulingTimes, parkedEscalation, readOperatorReleases,
+  recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts,
+} from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, evidenceCoveragePassDue, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, resolveSreLaneInstance, sreLaneEnabled, sreLaneStartRow } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, hostResourceInputStamp, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
@@ -49721,6 +49724,15 @@ export function productionMachineFilingJudgePorts(opts: {
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
     operatorReleases: () => readOperatorReleases(opts.stateDir),
+    // W1-T9043: a ledgered release, `rmd release`, or an `rmd note` on a parked escalation is a ruling that stops its withdrawal.
+    operatorRulings: () => {
+      // ledger-read-intent: live — `dispatch.breaker_released` is in the retention set, and `rmd approve` is durable in operator-releases.json.
+      const ledgered = operatorRulingTimes(readLedgerLines(join(opts.stateDir, LEDGER_FILENAME)) as unknown as Record<string, unknown>[]);
+      return (taskId) => {
+        const times = [ledgered.get(taskId), loadOperatorNotesForTask(opts.repoRoot, taskId).at(-1)?.ts].filter((t): t is string => t !== undefined);
+        return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
+      };
+    },
     openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
@@ -49892,7 +49904,10 @@ export function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, 
     // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
     // W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
     // a ruling already executed and credited (`pr:`, `done`, ledger merge credit) is settled, never judged again.
-    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || task.author_class === "machine" || !isRulingShaped(task)) continue;
+    // W1-T9043: a machine record the judge ESCALATED to a person is admitted too, so it rides the 14/30/60-day
+    // age-band re-asks a person already reads; an unjudged machine record stays the machine-filing judge's alone.
+    const heldForAPerson = task.author_class === "machine" ? parkedEscalation(task) : isRulingShaped(task);
+    if (task.verify !== "human" || task.status !== "queued" || planTaskLanded(task, ledgerCredited) || !heldForAPerson) continue;
     const deps = task.depends_on ?? [];
     out.push({
       id: task.id,

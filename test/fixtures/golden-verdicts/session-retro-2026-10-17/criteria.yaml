@@ -1,0 +1,10 @@
+- claim: this retro adds the operator-approval rule for advisory ignores and gate loosening to the CI shard
+  proof: "grep: id: an-advisory-ignore-needs-the-operator-yes in learnings/ci.yaml"
+- claim: this retro adds the stale-base lowered-ceiling learning to the CI shard
+  proof: "grep: id: a-lowered-ceiling-is-rederived-on-current-main in learnings/ci.yaml"
+- claim: this retro adds the garden fallback-cadence learning to the architecture shard
+  proof: "grep: id: a-garden-fallback-cadence-is-the-poll-tick in learnings/architecture.yaml"
+- claim: this retro adds the depends_on dispatch-input learning to the architecture shard
+  proof: "grep: id: depends-on-is-a-dispatch-input in learnings/architecture.yaml"
+- claim: this retro adds the cancelled-is-a-failure learning to the testing shard
+  proof: "grep: id: a-cancelled-test-is-a-failure in learnings/testing.yaml"

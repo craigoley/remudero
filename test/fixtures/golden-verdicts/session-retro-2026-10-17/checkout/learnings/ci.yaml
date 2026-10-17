@@ -1,0 +1,20 @@
+- id: an-advisory-ignore-needs-the-operator-yes
+  subsystem: ci
+  lifecycle: active
+  files: [osv-scanner.toml, ".github/semgrep/**", ".github/workflows/osv-scanner*.yml", commitlint.config.mjs, .github/workflows/pr-title-lint.yml, src/lib/code-scanning-merge-policy.mjs]
+  fact: >-
+    Never add a security-advisory ignore, scanner exclusion or gate loosening without the operator's
+    explicit yes; a reachability argument is not a waiver. Read ALL comments on another session's PR
+    before pushing to it.
+  src: "PRs #12305/#12342, #12322/#12343"
+  cited: "2026-10-16"
+
+- id: a-lowered-ceiling-is-rederived-on-current-main
+  subsystem: ci
+  lifecycle: active
+  files: ["scripts/*-baseline.json"]
+  fact: >-
+    Ceiling ratchets judge each PR on its own base: re-derive a LOWERED baseline row against current
+    origin/main right before merge, or siblings that add lines red main (until W1-T9962).
+  src: "PRs #12428, #12388, #12437, #12454; W1-T9962"
+  cited: "2026-10-16"
