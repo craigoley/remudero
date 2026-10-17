@@ -96,6 +96,8 @@ export interface RemedyEffect {
   windowDays: number;
   /** The one-sided z score of the fall (negative = the share fell). */
   z: number;
+  /** Conditional, one-sided pointwise comparison for count metrics; not a causal or sequential guarantee. */
+  pValue?: number;
   /** Why, in one line, for a ledger row and a task's evidence pack. */
   reason: string;
 }
@@ -108,6 +110,35 @@ const ONE_SIDED_Z = -1.6449;
 export const CI_FRICTION_EFFECT_MAX_WINDOW_MS = 14 * 24 * 3_600_000;
 
 const share = (w: ShareWindow): number => (w.n > 0 ? w.k / w.n : 0);
+
+function logChoose(n: number, k: number): number {
+  let value = 0;
+  for (let i = 1, end = Math.min(k, n - k); i <= end; i++) value += Math.log(n - i + 1) - Math.log(i);
+  return value;
+}
+
+/** Fisher's conditional tail, enumerating the rarer column so near-saturated counts stay small. */
+function countFallProbability(before: ShareWindow, after: ShareWindow): number {
+  const total = before.n + after.n, hits = before.k + after.k;
+  const failures = total - hits;
+  const complement = hits > failures;
+  const k = complement ? failures : hits;
+  const observed = complement ? after.n - after.k : after.k;
+  const logMass = logChoose(after.n, observed) + logChoose(before.n, k - observed) - logChoose(total, k);
+  let relative = 1, sum = 1;
+  if (complement) {
+    for (let x = observed, end = Math.min(after.n, k); x < end; x++) {
+      relative *= ((after.n - x) / (x + 1)) * ((k - x) / (before.n - k + x + 1));
+      sum += relative;
+    }
+  } else {
+    for (let x = observed, end = Math.max(0, k - before.n); x > end; x--) {
+      relative *= (x / (after.n - x + 1)) * ((before.n - k + x) / (k - x + 1));
+      sum += relative;
+    }
+  }
+  return Math.min(1, Math.exp(logMass) * sum);
+}
 
 /**
  * Did the cause's share of fix rounds fall after the remedy merged? Windows are equal: `after` runs from
@@ -127,25 +158,35 @@ export function ciFrictionRemedyEffect(rounds: readonly RemedyRound[], causeKey:
     if (r.causeKey === causeKey) side.k += 1;
   }
   const windowDays = Math.round((span / 86_400_000) * 10) / 10;
-  return judgeShareWindows(before, after, windowDays, causeKey, { noun: "round", share: "share of fix rounds" });
+  return judgeShareWindows(before, after, windowDays, causeKey, { noun: "round", share: "share of fix rounds", sampleUnit: "count" });
 }
 
 /**
  * The one judgement every remedy effect shares (W1-T9060): a cause's share in a before window against the same share
  * after the merge. No cause in the before window is `unmeasurable`, never a verdict; a significant one-sided fall is a
- * credit; as much evidence after as the before window needed to show the cause is a debit; anything between is pending.
+ * credit. Count metrics use an exact pointwise tail; an inconclusive observed decrease keeps measuring.
+ * Equal/worse shares retain the exposure-based debit rule. PR-hours keep their separate duration calculation.
  */
 export function judgeShareWindows(before: ShareWindow, after: ShareWindow, windowDays: number, causeKey: string,
-  label: { noun: string; share: string }): RemedyEffect {
+  label: { noun: string; share: string; sampleUnit?: "count" }): RemedyEffect {
+  if (label.sampleUnit === "count" && (![before, after].every(w => Number.isSafeInteger(w.k) && Number.isSafeInteger(w.n) && w.k >= 0 && w.n >= w.k)
+    || !Number.isSafeInteger(before.n + after.n))) {
+    return { verdict: "unmeasurable", before, after, windowDays, z: 0, reason: "invalid count evidence: nonnegative integer counts within each population are required" };
+  }
   if (before.k === 0 || before.n === 0) {
     return { verdict: "unmeasurable", before, after, windowDays, z: 0, reason: `no ${causeKey} ${label.noun} in the ${windowDays}-day window before the merge, so no fall can be measured` };
   }
   const pooled = (before.k + after.k) / (before.n + after.n);
   const se = after.n > 0 ? Math.sqrt(pooled * (1 - pooled) * (1 / before.n + 1 / after.n)) : 0;
   const z = se > 0 ? (share(after) - share(before)) / se : 0;
+  const fell = after.n > 0 && share(after) < share(before);
+  const pValue = label.sampleUnit === "count" && fell ? countFallProbability(before, after) : undefined;
+  const measured = pValue === undefined ? {} : { pValue };
   const pct = (w: ShareWindow) => `${(share(w) * 100).toFixed(1)}% (${w.k}/${w.n})`;
-  const line = `${label.share} ${pct(before)} before, ${pct(after)} after, over ${windowDays} day(s) each side`;
-  if (after.n > 0 && z <= ONE_SIDED_Z) return { verdict: "credit", before, after, windowDays, z, reason: `fell: ${line}` };
+  const line = `${label.share} ${pct(before)} before, ${pct(after)} after, over ${windowDays} day(s) each side${pValue === undefined ? "" : `; pointwise exact p=${pValue}`}`;
+  const significant = label.sampleUnit === "count" ? pValue !== undefined && pValue <= 0.05 : z <= ONE_SIDED_Z;
+  if (after.n > 0 && significant) return { verdict: "credit", before, after, windowDays, z, ...measured, reason: `fell: ${line}` };
+  if (label.sampleUnit === "count" && fell) return { verdict: "pending", before, after, windowDays, z, ...measured, reason: `measuring: ${line}` };
   // Equal evidence: the after window has seen as many rounds as the before window needed to show
   // the cause `before.k` times. A remedy is never debited on less evidence than it was filed on.
   const expectedAfter = share(before) * after.n;

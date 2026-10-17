@@ -64,16 +64,16 @@ test("W1-T9060: an unmeasurable remedy effect is never resolved", () => {
 test("W1-T9060: a flake-incident remedy is credited when its file stops failing unrelated PRs", () => {
   const file = "test/flaky.test.ts";
   const rows: FlakeLedgerRow[] = [];
-  // 20 PRs finished in the 14 days before the merge, 4 of them failed by the file; 20 finished after, none failed.
+  // Five of twenty PRs failed before and none after: the pointwise exact tail supports a credit.
   for (let i = 0; i < 20; i++) rows.push({ step: "pr.terminal", ts: new Date(MERGE - (i + 1) * 16 * HOUR).toISOString(), pr_number: 100 + i });
-  for (let i = 0; i < 4; i++) rows.push({ step: "test.flake_retry", ts: new Date(MERGE - (i + 1) * 16 * HOUR).toISOString(), file, pr_numbers: [100 + i] });
+  for (let i = 0; i < 5; i++) rows.push({ step: "test.flake_retry", ts: new Date(MERGE - (i + 1) * 16 * HOUR).toISOString(), file, pr_numbers: [100 + i] });
   for (let i = 0; i < 20; i++) rows.push({ step: "pr.terminal", ts: new Date(MERGE + (i + 1) * 16 * HOUR).toISOString(), pr_number: 200 + i });
   const task = { id: "W1-T9002", origin: `flake-incident:${file}` };
   const credit = mergeCredit(task.id, { bodies: new Map([[task.id, new Date(MERGE).toISOString()]]) });
   const now = MERGE + 14 * DAY;
   const measured = measureRemedy(task, flakeIncidentMetric(rows), credit, now);
   assert.equal(measured.verdict, "credit");
-  assert.equal(measured.effect.before.k, 4);
+  assert.equal(measured.effect.before.k, 5);
   assert.equal(measured.effect.after.k, 0);
   // The same PRs failing again after the merge is a debit, not a credit.
   const again = [...rows, ...Array.from({ length: 6 }, (_, i): FlakeLedgerRow => ({ step: "test.flake_retry", ts: new Date(MERGE + (i + 1) * 16 * HOUR).toISOString(), file, pr_numbers: [200 + i] }))];
