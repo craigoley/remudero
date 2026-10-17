@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+// @ts-expect-error shared plain .mjs lookup has no declaration file.
+import { manifestEntryFor, mergeDurations, reportManifestFallbacks } from "../../scripts/test-tier-manifest.mjs";
 
 import { systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
@@ -157,12 +159,16 @@ export function settleDurationRows(
   quietPinnedFiles: ReadonlySet<string> = new Set(),
 ): { rows: SettledRow[]; bandLog: number; full: boolean } {
   const full = observations.length >= DURATION_WINDOW_RUNS;
+  const current = { files: Object.fromEntries([...knownFiles].map(file => [file, file])) };
   const byFile = new Map<string, number[]>();
   for (const run of observations) {
-    for (const [file, ms] of Object.entries(run)) {
-      if (!knownFiles.has(file) || !(ms > 0)) continue;
-      byFile.set(file, [...(byFile.get(file) ?? []), ms]);
+    const perRun = new Map<string, number>();
+    for (const [recordedFile, ms] of Object.entries(run)) {
+      const file = manifestEntryFor(current, recordedFile) as string | undefined;
+      if (file === undefined || !(ms > 0)) continue;
+      perRun.set(file, Math.max(perRun.get(file) ?? 0, ms));
     }
+    for (const [file, ms] of perRun) byFile.set(file, [...(byFile.get(file) ?? []), ms]);
   }
   const spreads: number[] = [];
   for (const obs of byFile.values()) {
@@ -175,7 +181,7 @@ export function settleDurationRows(
   const threshold = committed.thresholdMs;
   const rows: SettledRow[] = [];
   for (const [file, obs] of byFile) {
-    const from = committed.files[file];
+    const from = manifestEntryFor(committed, file) as number | undefined;
     const to = roundDurationMs(median(obs));
     if (!(typeof from === "number" && from > 0)) {
       rows.push({ file, from, to, kind: "first" });
@@ -223,8 +229,7 @@ export function durationCandidates(
   const { bandLog, full } = settledRows;
   const rows = recent ? settledRows.rows.filter(row => row.kind !== "drift") : settledRows.rows;
   if (rows.length === 0) return [];
-  const settled: TestManifest = { thresholdMs: committed.thresholdMs, files: { ...committed.files } };
-  for (const r of rows) settled.files[r.file] = r.to;
+  const settled: TestManifest = mergeDurations(committed, Object.fromEntries(rows.map(r => [r.file, r.to])));
   if (recent) {
     const before = fastLaneSlowestMs(probe, committed, settled, testFiles);
     const after = fastLaneSlowestMs(probe, settled, settled, testFiles);
@@ -262,11 +267,13 @@ interface FlakeEvidence {
   complete: boolean;
 }
 
-function flakeEvidence(stateDir: string, now: number): FlakeEvidence {
+function flakeEvidence(stateDir: string, now: number, testFiles: string[]): FlakeEvidence {
   const read = readLedgerUnionRecordsSync(stateDir, { step: ["test.flake_retry", "flake_incident.filed"], refuseIncomplete: true });
+  const current = { files: Object.fromEntries(testFiles.map(file => [file, file])) };
   const runs = new Map<string, Set<number>>(), lastRetry = new Map<string, number>(), incidents = new Map<string, string>();
   for (const row of read.rows) {
-    const file = typeof row.file === "string" ? row.file : typeof row.origin === "string" ? flakeIncidentOriginFile(row.origin) : undefined;
+    const recordedFile = typeof row.file === "string" ? row.file : typeof row.origin === "string" ? flakeIncidentOriginFile(row.origin) : undefined;
+    const file = recordedFile === undefined ? undefined : manifestEntryFor(current, recordedFile) as string | undefined;
     if (file === undefined) continue;
     if (row.step === "flake_incident.filed") {
       if (typeof row.task_id === "string") incidents.set(file, row.task_id);
@@ -285,11 +292,11 @@ function flakeEvidence(stateDir: string, now: number): FlakeEvidence {
 
 /** A daily retier counts distinct recovered CI runs in the flake-incident window; the threshold is its existing lever. */
 export function retierFlakerCandidates(stateDir: string, probe: TestManifestProbe, committed: TestManifest, testFiles: string[],
-  recent = false, now = systemClock.now(), evidence = flakeEvidence(stateDir, now)): TestGardenAction[] {
+  recent = false, now = systemClock.now(), evidence = flakeEvidence(stateDir, now, testFiles)): TestGardenAction[] {
   if (recent) return [];
   const known = new Set(testFiles), out: TestGardenAction[] = [];
   for (const [file, runs] of evidence.runs) {
-    if (!known.has(file) || runs.size < RETIER_THRESHOLD || (committed.files[file] ?? 0) >= committed.thresholdMs) continue;
+    if (!known.has(file) || runs.size < RETIER_THRESHOLD || (manifestEntryFor(committed, file) ?? 0) >= committed.thresholdMs) continue;
     const incident = evidence.incidents.get(file);
     out.push({
       class: "retier-flaker",
@@ -362,11 +369,12 @@ export function testGardenInventory(
   // are files to fill them, which those two functions do not clamp for themselves.
   const shardCount = Math.max(1, Math.min(probe.DEFAULT_CI_SHARD_COUNT, testFiles.length || 1));
   const candidates: TestGardenAction[] = [];
-  const now = (opts.clock ?? systemClock).now(), evidence = flakeEvidence(stateDir, now);
+  const now = (opts.clock ?? systemClock).now(), evidence = flakeEvidence(stateDir, now, testFiles);
   const quietPinnedFiles = new Set([...evidence.lastRetry].filter(([, at]) =>
     evidence.complete && at < now - FLAKE_INCIDENT_POLICY.windowMs).map(([file]) => file));
   for (const ledger of durationLedgers(probe.DEFAULT_MANIFEST_RELATIVE_PATH)) {
     const committed = probe.loadManifest(join(repoRoot, ledger.manifestPath));
+    reportManifestFallbacks(testFiles, committed);
     const proposalPath = testManifestProposalPath(stateDir, ledger.statePrefix);
     const history = rawObservationWindow(readTestProposalHistory(stateDir, ledger.statePrefix).runs);
     const observations = history.length > 0 ? history : existsSync(proposalPath) ? [probe.loadManifest(proposalPath).files] : [];
@@ -402,9 +410,8 @@ export function applyTestGardenActions(root: string, probe: TestManifestProbe, a
   for (const path of paths) {
     const manifestPath = join(root, path);
     const manifest = probe.loadManifest(manifestPath);
-    const files = { ...manifest.files };
-    for (const a of actions) if (a.file === path) files[a.edit.key] = a.edit.to;
-    probe.writeManifest(manifestPath, { thresholdMs: manifest.thresholdMs, files });
+    const measured = Object.fromEntries(actions.filter(a => a.file === path).map(a => [a.edit.key, a.edit.to]));
+    probe.writeManifest(manifestPath, mergeDurations(manifest, measured));
   }
   return paths;
 }
