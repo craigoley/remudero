@@ -8,7 +8,7 @@ import { affectedSelectionOrFull, changedSymbols, isPlanOnlyDiff, planOnlySelect
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
-import { listTestFiles, medianMeasuredDurationMs, weightedDurationMs } from './test-tier-manifest.mjs';
+import { listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
@@ -82,11 +82,18 @@ export function priceSelection(suites, manifest) {
   const median = medianMeasuredDurationMs(files);
   let unmeasured = 0, total = 0;
   for (const suite of suites) {
-    if (!(files.files[suite] > 0)) unmeasured += 1;
+    if (!(manifestEntryFor(files, suite) > 0)) unmeasured += 1;
     total += Math.max(AUTHOR_MIN_SUITE_COST_MS, weightedDurationMs(suite, files, median));
   }
   return { suites: suites.length, unmeasured, medianMs: median, rawMs: total,
     costMs: Math.ceil(total * AUTHOR_RUNTIME_SAFETY_FACTOR), safetyFactor: AUTHOR_RUNTIME_SAFETY_FACTOR };
+}
+
+export function runtimeSelectionFit(files, manifest, profile, options) {
+  reportManifestFallbacks(files, manifest);
+  const current = mergeDurations(manifest, Object.fromEntries(files.map(file =>
+    [file, manifestEntryFor(manifest, file)])));
+  return runtimeDeadlineFit(files, current, profile, options);
 }
 
 /** Whether the priced selection fits the host budget. */
@@ -434,7 +441,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
             runtimeManifest ??= JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8'));
-            const decision = runtimeDeadlineFit(files, runtimeManifest, runtimeProfile, {
+            const decision = runtimeSelectionFit(files, runtimeManifest, runtimeProfile, {
               workers, deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
             });
             receipt.runtimeAdmission = { stage, profile: relative(root, resolve(root, values['runtime-profile'])), ...decision };
@@ -473,6 +480,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const budget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
             const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot.concurrency);
             receipt.executionWorkers = executionWorkers;
+            reportManifestFallbacks(receipt.suites, manifest);
             const verdict = capacityVerdict(receipt.suites, manifest, budget);
             receipt.capacity = verdict;
             let ranSuites = receipt.suites;

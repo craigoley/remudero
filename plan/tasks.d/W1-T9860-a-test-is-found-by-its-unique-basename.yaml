@@ -20,7 +20,7 @@
     - scripts/proof-resolve-precheck.mjs
     - test/a-moved-test-is-found-by-its-unique-basename.test.ts
     - test/every-test-basename-is-unique.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

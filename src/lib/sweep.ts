@@ -285,7 +285,7 @@ import type {
 } from "./supersession.js";
 export type { SupersessionDiffFinding, SupersessionEvidence, SupersessionStatus, SupersessionVerdict };
 import type { ConflictFileDiff, MergeConflictEvidence, MergeState } from "./merge-state.js";
-import type { WorkflowRunObservation } from "./workflow-run.js";
+import type { WorkflowRunJobObservation, WorkflowRunObservation } from "./workflow-run.js";
 import type { ReviewCapacityPolicy } from "./review-capacity.js";
 import {
   dispatchMainRunGaps,
@@ -3325,7 +3325,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
     },
 
-    dispatchFix: async (pr, evidence, onPhase) => {
+    dispatchFix: async (pr, evidence, onPhase, control) => {
       await observePr(pr, "repair");
       let worktreePath = "";
       let keepWorktree = false;
@@ -4035,7 +4035,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             // W1-T3718: the repair ladder's fleet state follows THIS spawn — a capacity refusal
             // records (or extends) the stall, the first spawn that returns clears it.
             spawn: trackRepairLadder(
-              (args: SpawnWorkerArgs) => (spawnImpl ?? benchmarkNonDispatchSpawn("sweep-fix"))({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
+              async (args: SpawnWorkerArgs) => {
+                let sinceMs = control?.admissionSinceMs;
+                let attempts = 0;
+                return (spawnImpl ?? benchmarkNonDispatchSpawn("sweep-fix"))({ ...args,
+                  resumeSessionId: args.resumeSessionId || undefined,
+                  ...(control ? { signal: args.signal ? AbortSignal.any([args.signal, control.signal]) : control.signal } : {}),
+                  memoryAdmissionSinceMs: sinceMs,
+                  onMemoryAdmissionEnd: () => { onPhase?.("worker"); args.onMemoryAdmissionEnd?.(); },
+                  memoryShadow: { ...args.memoryShadow, sleep: async (ms, signal) => {
+                    sinceMs ??= systemClock.now();
+                    onPhase?.("admission", { sinceMs, attempts: ++attempts });
+                    await (args.memoryShadow?.sleep ?? ((ms, signal) => delay(ms, undefined, { signal })))(ms, signal);
+                  } },
+                });
+              },
               { config, log: (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, ...extra }) },
             ),
             waitForCiGreen: async (prUrl: string, waitLog: (step: string, extra?: Record<string, unknown>) => void) => {
@@ -6930,19 +6944,38 @@ const JOB_TERMINAL_STATUSES = new Set(["completed"]);
  *  NOT an absence of jobs, which the reading measurement falsified. It needs no threshold, so this
  *  takes no `policy` or `now`, and every unreadable input FAILS TOWARD "NOT STALLED". */
 export function stalledRunReason(runs: readonly WorkflowRunObservation[] | undefined): string | undefined {
+  const found = firstStalledJob(runs);
+  if (found === undefined) return undefined;
+  return (
+    `a job is still "${found.job.status ?? "unstarted"}" but its own run already concluded "${found.conclusion}" — ` +
+    `a terminal run schedules nothing further, so that job will never move`
+  );
+}
+
+/** The first non-terminal job inside an already-concluded run — the ONE job {@link stalledRunReason} names. */
+function firstStalledJob(runs: readonly WorkflowRunObservation[] | undefined): { job: WorkflowRunJobObservation; conclusion: string } | undefined {
   if (runs === undefined) return undefined;
   for (const run of runs) {
     const conclusion = (run.conclusion ?? "").trim();
     if (conclusion === "") continue; // run still in progress — untouched, not this function's concern
-    const stuck = (run.jobs ?? []).find((j) => !JOB_TERMINAL_STATUSES.has((j.status ?? "").toLowerCase()));
-    if (stuck) {
-      return (
-        `a job is still "${stuck.status ?? "unstarted"}" but its own run already concluded "${conclusion}" — ` +
-        `a terminal run schedules nothing further, so that job will never move`
-      );
-    }
+    const job = (run.jobs ?? []).find((j) => !JOB_TERMINAL_STATUSES.has((j.status ?? "").toLowerCase()));
+    if (job) return { job, conclusion };
   }
   return undefined;
+}
+
+/** W1-T2947 — the stalled-run rung's reason always begins with this; runSweep keys the pinned-job requeue on it. */
+export const STALLED_RUN_REASON_PREFIX = "stalled, not pending — ";
+
+/** W1-T2947 — the one job a terminal run pinned non-terminal, WITH the identity the single-job requeue needs.
+ *  `undefined` when nothing is stalled OR the pinned job carries no name or no id: a job we cannot name
+ *  authorizes no mutation, so the caller keeps the existing escalation. */
+export function stalledRunPinnedJob(runs: readonly WorkflowRunObservation[] | undefined): { name: string; jobId: string } | undefined {
+  const found = firstStalledJob(runs);
+  const name = found?.job.name?.trim();
+  const jobId = found?.job.id;
+  if (!name || !jobId || !/^\d+$/.test(jobId)) return undefined;
+  return { name, jobId };
 }
 
 /** W1-T1278 — of the checks a fix rung believes are red, which are STILL red on a FRESH rollup read.
@@ -10775,13 +10808,14 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // like ordinary in-flight CI to the rows below, and would wait out the ceiling even though the
     // run that pinned the job is DONE. Ordered STRICTLY BEFORE them so a stalled head is named the
     // moment it is detectable; this shape needs no threshold at all. GATED ON `"pending"`
-    // EXPLICITLY, never `"none"`, so it cannot fire on the input the ABSENT arm owns. TAKES NO
-    // ACTION — re-running a concluded run is left to the operator, GitHub having refused it 403.
+    // EXPLICITLY, never `"none"`, so it cannot fire on the input the ABSENT arm owns. THE ROW ONLY
+    // CLASSIFIES; a run-level rerun is refused 403, so runSweep's blocked-ambiguous arm tries the one pinned
+    // JOB's rerun first (W1-T2947) and escalates only when that is unavailable or already spent.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.checksState === "pending" && stalledRunReason(pr.workflowRuns) !== undefined,
     blocker: "awaiting-ci",
     reason: (pr) =>
-      `stalled, not pending — ${stalledRunReason(pr.workflowRuns)} — a required check that never truly ` +
+      `${STALLED_RUN_REASON_PREFIX}${stalledRunReason(pr.workflowRuns)} — a required check that never truly ` +
       `finished still blocks the merge; escalating once rather than waiting on something that will not arrive`,
   },
   {
@@ -12854,7 +12888,8 @@ export interface SweepDeps {
   dispatchFix: (
     pr: OpenPrView,
     evidence: FixDispatchEvidence,
-    onPhase?: (phase: DetachedFixPhase) => void,
+    onPhase?: DetachedFixPhaseObserver,
+    control?: DetachedFixControl,
   ) => boolean | void | FixClaimDeclined | Promise<boolean | void | FixClaimDeclined>;
   /** W1-T3390 — dispatched once a capped verdict's non-discriminating proofs exhaust
    *  `dispatchFix`'s body-repair budget — the shard's OWN text is wrong, and Standing rule 15's
@@ -14179,6 +14214,8 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
       stalled = line.state !== "success";
     } else if (line.step === "fix.stood_down") {
       stalled = line.outcome !== "handed_off"; // a stand-down ENDS the rung; a hand-off to the sweep is a live wait
+    } else if (line.step === "fix.done" && line.subtype === "admission_abandoned") {
+      stalled = true;
     } else if (line.step === "fix.done" && line.worker_exit === "unobserved") {
       stalled = true; // #10555: the worker threw with no process end — no review or push will follow
     } else if (line.step === "fix.done" && line.worker_exit === "exit" && typeof line.worker_exit_code === "number" &&
@@ -14587,7 +14624,7 @@ export function fixRoundTally(
       repeatedNoCommit = count > 1;
     }
     if (isRealStrike({
-      workerRan: round.done !== undefined,
+      workerRan: round.done !== undefined && round.done.worker_exit !== "not_spawned" && round.done.subtype !== "admission_abandoned",
       judgmentPosted: round.reviewed === true || (typeof pushedHead === "string" && pushedHead !== round.dispatch.head_sha) ||
         repeatedNoCommit,
     })) tally.strikes++;
@@ -14608,11 +14645,22 @@ function repeatedFixRefusalReason(reason: string): string {
  *  DAEMON-LIFETIME seam (the freshness exit drains it), and the retro is the loop's other long await. */
 export type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
   | "light-pass-action";
-export type DetachedFixPhase = "worker" | "ci-wait";
+export type DetachedFixPhase = "admission" | "worker" | "ci-wait";
+export type DetachedFixPhaseObserver = (phase: DetachedFixPhase, wait?: { sinceMs: number; attempts: number }) => void;
+export interface DetachedFixControl { signal: AbortSignal; admissionSinceMs?: number }
+interface DetachedFixClaim {
+  fixKey: string; release: () => void; abandon: AbortController; control: DetachedFixControl;
+  run: <T>(fn: () => T | Promise<T>) => Promise<T>;
+}
 
 interface DetachedSweepActionRegistration {
   actionKind: DetachedActionKind; taskId: string; startedAtMs: number;
   phase: DetachedFixPhase | "best-effort";
+  fixKey?: string;
+  release?: () => void;
+  abandon?: AbortController;
+  admissionSinceMs?: number;
+  admissionAttempts?: number;
 }
 
 export interface DetachedSweepActionDescriptor {
@@ -14621,20 +14669,54 @@ export interface DetachedSweepActionDescriptor {
 
 const detachedSweepActions = new Map<Promise<void>, DetachedSweepActionRegistration>();
 const detachedPhaseListeners = new Set<() => void>();
+const detachedDescriptors = new WeakMap<DetachedSweepActionDescriptor, Promise<void>>();
+const fixAdmissionSince = new Map<string, number>();
+
+function detachedFixHolder(fixKey: string, nowMs: number) {
+  const action = [...detachedSweepActions.values()].find(action => action.fixKey === fixKey);
+  if (!action) return undefined;
+  const ageMs = Math.max(0, nowMs - (action.phase === "admission" ? action.admissionSinceMs ?? action.startedAtMs : action.startedAtMs));
+  return {
+    reason: `duplicate fix-dispatch key (${fixKey}) is held by its own detached fix dispatch, ${action.phase} for ${Math.floor(ageMs / 1000)}s` +
+      (action.phase === "admission" ? ` (${action.admissionAttempts ?? 0} admission attempts)` : ""),
+    fields: { in_flight_action: "fix-dispatch", in_flight_phase: action.phase, in_flight_age_ms: ageMs },
+  };
+}
+
+export async function abandonDetachedSweepAction(descriptor: DetachedSweepActionDescriptor): Promise<{
+  released_fix_key: string | null; held_by?: string;
+}> {
+  const work = detachedDescriptors.get(descriptor);
+  const action = work && detachedSweepActions.get(work);
+  if (!action) return { released_fix_key: null, held_by: "settled" };
+  if (action.actionKind !== "fix-dispatch") return { released_fix_key: null, held_by: action.actionKind };
+  if (action.phase !== "admission" || !action.abandon || !action.fixKey || !action.release) {
+    return { released_fix_key: null, held_by: action.phase === "ci-wait" ? "ci-wait" : "live-worker" };
+  }
+  action.abandon.abort();
+  // The claim's finally releases only after the admission has ended; never delete a live owner's key.
+  await work;
+  return { released_fix_key: action.fixKey };
+}
 
 /** W1-T2379: hand a started action to {@link detachedSweepActions} so the caller need not await it.
  *  The stored promise is already settled-safe — its rejection is caught here — so a drain can never
  *  itself reject. */
 export function detachSweepAction(
-  work: Promise<unknown> | ((onPhase: (phase: DetachedFixPhase) => void) => Promise<unknown>),
-  action: Omit<DetachedSweepActionRegistration, "startedAtMs" | "phase"> & { phase?: DetachedFixPhase },
-): (phase: DetachedFixPhase) => void {
+  work: Promise<unknown> | ((onPhase: DetachedFixPhaseObserver) => Promise<unknown>),
+  action: Omit<DetachedSweepActionRegistration, "startedAtMs" | "phase"> & { phase?: DetachedFixPhase; startedAtMs?: number },
+): DetachedFixPhaseObserver {
   const registration: DetachedSweepActionRegistration = {
-    ...action, startedAtMs: Date.now(),
+    ...action, startedAtMs: action.startedAtMs ?? Date.now(),
     phase: action.actionKind === "fix-dispatch" || action.actionKind === "light-pass-action" ? action.phase ?? "worker" : "best-effort",
   };
-  const onPhase = (phase: DetachedFixPhase) => {
+  const onPhase: DetachedFixPhaseObserver = (phase, wait) => {
     registration.phase = phase;
+    if (phase === "admission" && wait) {
+      registration.admissionSinceMs = wait.sinceMs;
+      registration.admissionAttempts = wait.attempts;
+      if (registration.fixKey && !fixAdmissionSince.has(registration.fixKey)) fixAdmissionSince.set(registration.fixKey, wait.sinceMs);
+    }
     for (const listener of detachedPhaseListeners) listener();
   };
   const started = typeof work === "function" ? work(onPhase) : work;
@@ -14660,7 +14742,7 @@ export async function drainDetachedSweepActions(
   const detachedDrainBoundMs = Math.max(0, opts.boundMs);
   const released = new Set<Promise<void>>();
   const waitingActions = () => [...detachedSweepActions].filter(([work, action]) => {
-    if (!opts.freshness || action.phase === "worker") return true;
+    if (!opts.freshness || action.phase === "worker" || action.phase === "admission") return true;
     if (!released.has(work)) {
       released.add(work);
       opts.onRelease?.({
@@ -14692,11 +14774,12 @@ export async function drainDetachedSweepActions(
       }
       if (await Promise.race([settled, changed, bound]) === "bounded") {
         const observedAtMs = Date.now();
-        return waitingActions().map(([, action]) => ({
-          actionKind: action.actionKind,
-          taskId: action.taskId,
-          ageMs: Math.max(0, observedAtMs - action.startedAtMs),
-        }));
+        return waitingActions().map(([work, action]) => {
+          const descriptor = { actionKind: action.actionKind, taskId: action.taskId,
+            ageMs: Math.max(0, observedAtMs - action.startedAtMs) };
+          detachedDescriptors.set(descriptor, work);
+          return descriptor;
+        });
       }
     }
   } finally {
@@ -15584,17 +15667,17 @@ export async function runSweep(
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
-    dispatchFix: (pr, evidence, onPhase) => {
+    dispatchFix: (pr, evidence, onPhase, control) => {
       const started = performance.now();
       try {
         return sweepDeps.dispatchFix(pr,
-          { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, phase => {
+          { ...evidence, progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, (phase, wait) => {
             if (phase === "ci-wait") {
               fixCapacityReleases.get(pr.prNumber)?.();
               fixCapacityReleases.delete(pr.prNumber);
             }
-            onPhase?.(phase);
-          });
+            onPhase?.(phase, wait);
+          }, control);
       } finally {
         sweepDeps.log?.("sweep.fix.prepare_timing", { pr_number: pr.prNumber, stage: "dispatch-call",
           synchronous_ms: performance.now() - started });
@@ -16761,7 +16844,7 @@ export async function runSweep(
 
   /** W1-T5932 — {@link detachSweepAction} for a fix dispatch: a rejection, which `dispatchFix` raises only
    *  before its `fix.dispatch` row (W1-T1127), is ledgered so the next pass does not read it as dispatched. */
-  function detachFixDispatch(pr: OpenPrView, work: (onPhase: (phase: DetachedFixPhase) => void) => Promise<unknown>, dedupeKey?: string): void {
+  function detachFixDispatch(pr: OpenPrView, work: (onPhase: DetachedFixPhaseObserver) => Promise<unknown>, claim: DetachedFixClaim, dedupeKey?: string): void {
     detachSweepAction(
       (onPhase) => work(onPhase).catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
@@ -16772,7 +16855,8 @@ export async function runSweep(
         dedupe_key: dedupeKey,
         error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
       })),
-      { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr) },
+      { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr), startedAtMs: deps.now?.(),
+        fixKey: claim.fixKey, release: claim.release, abandon: claim.abandon },
     );
   }
 
@@ -16784,13 +16868,14 @@ export async function runSweep(
     pr: OpenPrView,
     /** W1-T5544: the dispatch is the plan-shard flag (no worker round), so two refused WORKER rounds do not bar it. */
     planFlagRung = false,
-  ): { ok: true; release: () => void; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
+  ): ({ ok: true } & DetachedFixClaim) | { ok: false; reason: string } {
     const fixTaskId = fixLedgerTaskIdFor(pr);
     const fixKey = `${fixTaskId ?? ""}@${pr.headSha}`;
     if (inFlightFixKeys.has(fixKey)) {
       return {
         ok: false,
-        reason: `duplicate fix-dispatch key (${fixKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
+        reason: detachedFixHolder(fixKey, deps.now?.() ?? systemClock.now())?.reason ??
+          `duplicate fix-dispatch key (${fixKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
       };
     }
     inFlightFixKeys.add(fixKey);
@@ -16824,16 +16909,24 @@ export async function runSweep(
     }
     pr.priorStrikes = freshTally.strikes;
     pr.fixRefusalsAtHead = freshTally.refusals.length;
+    const lastDone = freshLines.findLast(row => row.task_id === fixTaskId && row.head_sha === pr.headSha && row.step === "fix.done");
+    if (!fixAdmissionSince.has(fixKey) && lastDone?.subtype === "admission_abandoned" &&
+        typeof lastDone.admission_since_ms === "number" && Number.isFinite(lastDone.admission_since_ms)) {
+      fixAdmissionSince.set(fixKey, lastDone.admission_since_ms);
+    }
+    const abandon = new AbortController();
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       inFlightFixKeys.delete(fixKey);
+      if (!abandon.signal.aborted) fixAdmissionSince.delete(fixKey);
       fixCapacityReleases.get(pr.prNumber)?.();
       fixCapacityReleases.delete(pr.prNumber);
     };
     return {
       ok: true,
+      fixKey, abandon, control: { signal: abandon.signal, admissionSinceMs: fixAdmissionSince.get(fixKey) },
       release,
       run: async (fn) => {
         try {
@@ -17479,7 +17572,8 @@ export async function runSweep(
               appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
               repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
             });
-            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr) });
+            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr),
+              fixKey: claimed.fixKey, release: claimed.release, abandon: claimed.abandon });
             else await work;
           }
         }
@@ -17643,7 +17737,7 @@ export async function runSweep(
     // W1-T78: render the question up front for blocked-ambiguous PRs — it is ledgered EVERY sweep
     // so an unanswered question stays visible, even on a deduped pass. Skipped for an
     // unattributable filing PR, where there is only a stand-down to record.
-    const question =
+    let question =
       (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling && !strikeLadderDue && !priorContradiction
         ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
         : undefined;
@@ -18101,10 +18195,7 @@ export async function runSweep(
                 extraDisposedFields = { code_scanning_fix_dispatched: true };
                 const fixEvidence = { unmetCriteria: [], ciFailures: codeScanningFixCiFailures(codeScanning.alerts, codeScanning.reason) };
                 if (deps.detachFixWait) {
-                  detachSweepAction((onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)), {
-                    actionKind: "fix-dispatch",
-                    taskId: escalationTaskIdFor(pr),
-                  });
+                  detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim);
                   break;
                 }
                 const fixOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -18491,7 +18582,7 @@ export async function runSweep(
                 const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision,
                   progressApproach: progressDecision?.verdict === "change-approach" ? progressDecision.approach : undefined };
                 if (deps.detachFixWait) {
-                  detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase)), dedupeKey);
+                  detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase, codeqlClaim.control)), codeqlClaim, dedupeKey);
                   break;
                 }
                 const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence));
@@ -19175,7 +19266,8 @@ export async function runSweep(
                     fixClaim.run(() => dispatchPlanOnlyRepair(pr, planRepairEvidence)),
                     // Shares "fix-dispatch"'s kind, deliberately: a plan-shard repair and an
                     // ordinary body repair must never race for the SAME task's detached slot.
-                    { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr) },
+                    { actionKind: "fix-dispatch", taskId: escalationTaskIdFor(pr),
+                      fixKey: fixClaim.fixKey, release: fixClaim.release, abandon: fixClaim.abandon },
                   );
                   break;
                 }
@@ -19190,7 +19282,7 @@ export async function runSweep(
                 standDownReason = `flake claim refuted at ${pr.headSha} — dispatching a real fix round`;
               }
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase)));
+                detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim);
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -19270,7 +19362,7 @@ export async function runSweep(
               }
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase)));
+                detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence, onPhase, conflictedFixClaim.control)), conflictedFixClaim);
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(() => deps.dispatchFix(pr, conflictedEvidence));
@@ -19338,6 +19430,34 @@ export async function runSweep(
                   standDownReason = dirtyFleetRebase.standDownReason;
                   break;
                 }
+              }
+              // W1-T2947 — A TERMINAL RUN PINNING ONE JOB is the shape the single-job requeue (W1-T1223)
+              // already fixes: POST actions/jobs/{job_id}/rerun, NEVER a run-level rerun. Bounded by the
+              // SAME head+check ledger row, written BEFORE the POST; a second observation escalates naming
+              // the job. No job name or id, or no wired effect, leaves the escalation below untouched.
+              const pinnedJob = pr.checksState === "pending" && reason.startsWith(STALLED_RUN_REASON_PREFIX) && deps.requeueCheck
+                ? stalledRunPinnedJob(pr.workflowRuns) : undefined;
+              if (pinnedJob) {
+                const key = `${pr.headSha}@${pinnedJob.name}`;
+                const named = `pinned job "${pinnedJob.name}" (id ${pinnedJob.jobId})`;
+                let followUp: string | undefined;
+                if (requeuedCheckKeys.has(key) || checkDeferrals.has(key)) {
+                  followUp = `${named} was already sent its one bounded single-job requeue on this head and a terminal run still pins it`;
+                } else {
+                  const result = await requeueCheckJob(deps, pr, { name: pinnedJob.name, jobId: pinnedJob.jobId }, undefined, undefined,
+                    { surface: "pr", signature: "terminal-run-pinned-job", outcome: "attempting", worker_strike_avoided: true });
+                  if (result.kind === "dispatched" || result.kind === "failed") requeuedCheckKeys.add(key);
+                  if (result.kind === "failed") followUp = `the single-job rerun of ${named} failed`;
+                  else {
+                    acted = false;
+                    standDownReason = result.kind === "dispatched"
+                      ? `re-queued ${named} once instead of escalating — its run already concluded; no worker strike spent`
+                      : `${named} requeue ${result.note ?? "was deferred"} — no escalation this pass, the next observation escalates`;
+                    break;
+                  }
+                }
+                reason = `${reason} — ${followUp}`;
+                question = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
               }
               // W1-T3422 — the target was already filtered by a terminal required failure's
               // completion time, a newer observed main repair, a declared route, and a bounded
@@ -19726,9 +19846,15 @@ export async function runSweep(
         contradictory_interval_ms: state.interval, contradictory_next_row_at: state.next };
       contradictoryCheckpoint = state;
     }
+    const fixHolder = !acted && (disposition === "blocked-fixable" || disposition === "conflicted" || disposition === "mergeable")
+      ? detachedFixHolder(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`, deps.now?.() ?? systemClock.now()) : undefined;
+    if (fixHolder) {
+      standDownReason = fixHolder.reason;
+      extraDisposedFields = { ...extraDisposedFields, ...fixHolder.fields };
+    }
     // W1-T9595: a head queued for refresh admission is disposed once the admission has settled it.
     const finalize = () => finalizeDisposition(prIndex, pr, disposition, reason, question, acted, alreadyDone, actionError,
-      admissionReasons.get(pr.prNumber) ?? standDownReason, depReviewOutcome, armOutcome, spent, baseCausedMainTipSha, extraDisposedFields);
+      fixHolder?.reason ?? admissionReasons.get(pr.prNumber) ?? standDownReason, depReviewOutcome, armOutcome, spent, baseCausedMainTipSha, extraDisposedFields);
     if (refreshAdmission.has(pr.prNumber)) admissionFinalizations.push(finalize);
     else await finalize();
     if (contradictoryCheckpoint) {

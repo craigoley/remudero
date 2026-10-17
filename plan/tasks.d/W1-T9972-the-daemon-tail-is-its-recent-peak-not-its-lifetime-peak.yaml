@@ -15,7 +15,7 @@
     - test/the-daemon-tail-is-its-recent-peak-not-its-lifetime-peak.test.ts
     - test/the-memory-budget-treats-the-daemon-as-one-more-tail.test.ts
     - test/the-memory-budget-measures-what-the-host-can-show.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: the tail behind every unrealized-reservations wait since W1-T9762 decayed the worker claims
   attempts: 0
   rationale: |
