@@ -18,8 +18,8 @@
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
@@ -570,6 +570,7 @@ export interface ScopeAmendmentRequest {
 }
 
 export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "ineligible" } | { kind: "refused" }> |
+  { kind: "amendment_merged"; amendmentNumber: number } |
   { kind: "refused"; reason: string; detail: string };
 
 export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
@@ -599,8 +600,7 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   const key = `scope:${request.taskId}:${request.prNumber}:${digest}`;
   const existing = deps.lookupIdentity(key);
   if (existing?.merged) {
-    const result = deps.updateBranch(request.prUrl, request.headSha);
-    return { kind: "branch_update_requested", ...result };
+    return { kind: "amendment_merged", amendmentNumber: existing.amendmentNumber };
   }
   if (existing) return { kind: "resumed", amendmentUrl: existing.amendmentUrl, amendmentNumber: existing.amendmentNumber };
   const branch = `scope-amendment/${request.taskId}-${request.prNumber}`;
@@ -688,4 +688,105 @@ export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: Proo
   } finally {
     deps.worktreeRemove(deps.repoDir, wp);
   }
+}
+
+export interface ScopeAmendmentWork {
+  root: string;
+  worktreePath: string;
+  taskId: string;
+  prNumber: number;
+  amendmentNumber: number;
+  paths: readonly string[];
+}
+
+function scopeWorkIdentity(input: ScopeAmendmentWork): string {
+  return JSON.stringify([input.taskId, input.prNumber, input.amendmentNumber, [...new Set(input.paths)].sort()]);
+}
+
+function scopeWorkRecoveryPath(input: ScopeAmendmentWork): string {
+  const key = createHash("sha256").update(scopeWorkIdentity(input)).digest("hex");
+  return join(input.root, "recovery", "scope-amendment", `${key}.json`);
+}
+
+// Recovery copies contain regular files or deletions only; neither a source nor a destination may
+// follow a worker-controlled symlink out of the worktree (including an ancestor directory).
+function scopeWorkPath(root: string, path: string): string {
+  if (!path || /[\\\x00-\x1f\x7f:]/.test(path) || path.split("/").some((p) => !p || p === "." || p === ".." || p === ".git")) {
+    throw new Error(`unsafe scope recovery path: ${path}`);
+  }
+  let current = resolve(root);
+  const parts = path.split("/");
+  for (let i = 0; i < parts.length; i++) {
+    current = join(current, parts[i]);
+    const stat = lstatSync(current, { throwIfNoEntry: false });
+    if (stat && (stat.isSymbolicLink() || (i < parts.length - 1 ? !stat.isDirectory() : !stat.isFile()))) {
+      throw new Error(`scope recovery requires a regular path: ${path}`);
+    }
+  }
+  return current;
+}
+
+interface ScopeWorkEntry { path: string; data: string | null; mode: number }
+
+function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
+  const file = scopeWorkRecoveryPath(input);
+  if (!existsSync(file)) throw new Error("missing saved work from the round that asked for scope");
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  if (saved.identity !== scopeWorkIdentity(input) || typeof saved.payload !== "string" ||
+      saved.digest !== createHash("sha256").update(saved.payload).digest("hex")) {
+    throw new Error("scope recovery identity or digest did not verify");
+  }
+  const entries: ScopeWorkEntry[] = JSON.parse(saved.payload);
+  const paths = [...new Set(input.paths)].sort();
+  if (!Array.isArray(entries) || entries.length !== paths.length || entries.some((entry, i) =>
+    entry.path !== paths[i] || (entry.data !== null && typeof entry.data !== "string") ||
+    !Number.isInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o777)) {
+    throw new Error("scope recovery paths or file content did not verify");
+  }
+  return entries;
+}
+
+/** Shared by any lane that parks edits behind a scope amendment. A resume verifies its existing
+ *  immutable copy instead of replacing the asking round's work with an empty, later checkout. */
+export function saveScopeAmendmentWork(input: ScopeAmendmentWork): string {
+  const file = scopeWorkRecoveryPath(input);
+  if (!existsSync(file)) {
+    const entries = [...new Set(input.paths)].sort().map((path): ScopeWorkEntry => {
+      const source = scopeWorkPath(input.worktreePath, path);
+      const stat = lstatSync(source, { throwIfNoEntry: false });
+      return { path, data: stat ? readFileSync(source).toString("base64") : null, mode: stat ? stat.mode & 0o777 : 0 };
+    });
+    const payload = JSON.stringify(entries);
+    const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
+      digest: createHash("sha256").update(payload).digest("hex") });
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(join(input.root, "recovery", ".rmd-scratch-keep"), "preserved scope-amendment work\n", { flush: true });
+    writeFileSync(file, text, { flag: "wx", mode: 0o600, flush: true });
+    if (readFileSync(file, "utf8") !== text) throw new Error("saved scope recovery bytes did not verify");
+    for (const path of [dirname(file), dirname(dirname(file)), input.root]) {
+      const fd = openSync(path, "r");
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+    }
+  }
+  readScopeWork(input);
+  return file;
+}
+
+export function restoreScopeAmendmentWork(input: ScopeAmendmentWork): string[] {
+  const entries = readScopeWork(input);
+  const targets = entries.map((entry) => scopeWorkPath(input.worktreePath, entry.path));
+  for (let i = 0; i < entries.length; i++) {
+    const { data, mode } = entries[i];
+    const target = targets[i];
+    if (data === null) {
+      rmSync(target, { force: true });
+    } else {
+      mkdirSync(dirname(target), { recursive: true });
+      const bytes = Buffer.from(data, "base64");
+      writeFileSync(target, bytes, { mode, flush: true });
+      chmodSync(target, mode);
+      if (!readFileSync(target).equals(bytes)) throw new Error(`restored scope recovery bytes did not verify: ${entries[i].path}`);
+    }
+  }
+  return entries.map((entry) => entry.path);
 }
