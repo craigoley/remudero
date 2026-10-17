@@ -9044,17 +9044,30 @@ type AdmissionEntry = Pick<RefreshAdmissionCandidate, "pr" | "arm" | "heldSinceM
 const behindText = (prs: readonly number[], why: string) =>
   `waiting for refresh admission behind ${prs.length > 0 ? prs.map((n) => `#${n}`).join(", ") : "this pass's closed admission"} (${why})`;
 
-/** W1-T9595 — oldest held first, slow start: one head with no uptake read, then twice the cohort while it carries this board. */
-export function createRefreshAdmission(reading: RefreshAdmissionReading, surface: SweepRepairSurface) {
+/** A full pass presses in arrival order; overflow and light admissions retain oldest-held-first order. */
+export function createRefreshAdmission(reading: RefreshAdmissionReading, surface: SweepRepairSurface, passPrs?: readonly OpenPrView[]) {
   const candidates = new Map<number, RefreshAdmissionCandidate>();
+  const pressed = new Set<number>();
   const held: Array<Record<string, unknown>> = [];
   const refused: Array<Record<string, unknown>> = [];
   const admitted: Array<Record<string, unknown>> = [];
+  const signalFor = (prs: readonly OpenPrView[]) => reading.signal === "clear" && !prs.some((pr) => reading.carried.has(`${pr.prNumber}@${pr.headSha}`))
+    ? "slow-start" as const : reading.signal;
+  const widthFor = (signal: RefreshAdmissionReading["signal"]) => signal === "waiting" ? 0 : signal === "clear" ? 2 * reading.cohort : 1;
+  let signal = signalFor(passPrs ?? []);
+  let width = widthFor(signal);
   let closed: number[] | undefined;
   const entry = (c: AdmissionEntry, extra: Record<string, unknown>) => ({ pr_number: c.pr.prNumber, head_sha: c.pr.headSha, arm: c.arm,
     ...(Number.isFinite(c.heldSinceMs) ? { held_since: clockFromMillisFn(() => c.heldSinceMs).iso() } : {}), ...extra });
+  const press = async (c: RefreshAdmissionCandidate) => {
+    pressed.add(c.pr.prNumber);
+    const outcome = await c.refresh();
+    admitted.push(entry(c, { outcome }));
+    c.settle({ outcome });
+  };
   return {
     has: (prNumber: number) => candidates.has(prNumber),
+    settled: (prNumber: number) => pressed.has(prNumber),
     holding: () => closed !== undefined || reading.signal === "waiting",
     hold(c: AdmissionEntry): string | undefined {
       const behind = closed ?? (reading.signal === "waiting" ? reading.notStarted : undefined);
@@ -9063,22 +9076,21 @@ export function createRefreshAdmission(reading: RefreshAdmissionReading, surface
       return behindText(behind, closed !== undefined ? (closed.length > 0 ? "admitted earlier this pass" : "the next pass admits it")
         : behind.length === 1 ? "its CI has not started" : "their CI has not started");
     },
-    enter: (c: RefreshAdmissionCandidate): void => { candidates.set(c.pr.prNumber, c); },
+    async enter(c: RefreshAdmissionCandidate): Promise<void> {
+      if (candidates.has(c.pr.prNumber)) return;
+      candidates.set(c.pr.prNumber, c);
+      if (passPrs !== undefined && pressed.size < width) await press(c);
+    },
     refuse: (c: AdmissionEntry, evidence: string): void => { refused.push(entry(c, { evidence })); },
     async run(append: (row: LedgerLine) => void, runId: string): Promise<number[]> {
-      const order = [...candidates.values()].sort((a, b) => a.heldSinceMs - b.heldSinceMs || a.pr.prNumber - b.pr.prNumber);
-      const signal = reading.signal === "clear" && !order.some((c) => reading.carried.has(`${c.pr.prNumber}@${c.pr.headSha}`))
-        ? "slow-start" : reading.signal;
-      const width = signal === "waiting" ? 0 : signal === "clear" ? 2 * reading.cohort : 1;
+      const order = [...candidates.values()].filter((c) => !pressed.has(c.pr.prNumber))
+        .sort((a, b) => a.heldSinceMs - b.heldSinceMs || a.pr.prNumber - b.pr.prNumber);
+      if (passPrs === undefined) { signal = signalFor(order.map((c) => c.pr)); width = widthFor(signal); }
       const why = signal === "unreadable" ? `signal unreadable: CI uptake of #${reading.unreadable.join(", #")} is unread`
         : signal === "slow-start" ? "slow start: no earlier admission's CI uptake is read" : `this pass's width of ${width} is full`;
-      const take = order.slice(0, width);
-      for (const c of take) {
-        const outcome = await c.refresh();
-        admitted.push(entry(c, { outcome }));
-        c.settle({ outcome });
-      }
-      const ahead = take.map((c) => c.pr.prNumber);
+      const take = passPrs === undefined ? order.slice(0, width) : [];
+      for (const c of take) await press(c);
+      const ahead = [...pressed];
       closed = ahead;
       for (const c of order.slice(take.length)) {
         held.push(entry(c, { behind: ahead, refresh_row: c.row }));
@@ -15870,7 +15882,7 @@ export async function runSweep(
         const clearance = await admissionClearance(pr, "stalled-stage", checks, fixedFiles, mainTipSha);
         if (clearance.refresh && refreshAdmission.hold(admit) !== undefined) return;
         if (clearance.refresh) {
-          refreshAdmission.enter({ ...admit, settle: (verdict) => { if ("outcome" in verdict && (verdict.outcome === "updated" || verdict.outcome === "head-moved")) refreshed(verdict.outcome); },
+          await refreshAdmission.enter({ ...admit, settle: (verdict) => { if ("outcome" in verdict && (verdict.outcome === "updated" || verdict.outcome === "head-moved")) refreshed(verdict.outcome); },
             refresh: () => pressRefresh(pr, admit.row, (done) => { baseRedHistory.refreshed.add(refreshKey); recordRefresh(pr, checks, fixedFiles, done); }) });
           return;
         }
@@ -16310,7 +16322,7 @@ export async function runSweep(
   const recordRefresh = (pr: OpenPrView, checks: readonly string[], testFiles: readonly string[], outcome: string) => {
     if (outcome === "updated") refreshRecords.set(pr.prNumber, [...(refreshRecords.get(pr.prNumber) ?? []), { checks: [...checks], testFiles: [...testFiles] }]);
   };
-  const refreshAdmission = createRefreshAdmission(refreshAdmissionReading(openPrs, ledgerLines), deps.repairAdmissionSurface ?? "full");
+  const refreshAdmission = createRefreshAdmission(refreshAdmissionReading(openPrs, ledgerLines), deps.repairAdmissionSurface ?? "full", openPrs);
   const admissionReasons = new Map<number, string>();
   const clearedRefreshKeys = new Set(ledgerLines.flatMap((row) => row.step === REFRESH_CLEARANCE_STEP && row.refresh === true
     ? [`${String(row.pr_number)}@${String(row.head_sha)}@${String(row.main_sha)}`] : []));
@@ -17237,6 +17249,8 @@ export async function runSweep(
   // front once its one fresh read has rebuilt its view. `rederivedPrs` spends that read once per
   // (PR, pass); `rederivedIndices` marks the entries now acting on a view read during this pass.
   const walkOrder = sweepWalkOrder(openPrs);
+  // Preserve held-head priority before arrival consumes the pass's refresh slots.
+  if (!refreshAdmission.holding()) walkOrder.sort((a, b) => heldSinceMs(openPrs[a]) - heldSinceMs(openPrs[b]));
   const rederivedPrs = new Set<number>();
   const admissionFinalizations: Array<() => Promise<void>> = [];
   for (let walkStep = 0; walkStep < walkOrder.length; walkStep++) {
@@ -18763,7 +18777,7 @@ export async function runSweep(
                   }
                   const held = refreshAdmission.hold(admit);
                   if (held === undefined) {
-                    refreshAdmission.enter({ ...admit, refresh: () => pressRefresh(pr, admit.row),
+                    await refreshAdmission.enter({ ...admit, refresh: () => pressRefresh(pr, admit.row),
                       settle: (verdict) => admissionReasons.set(pr.prNumber, "outcome" in verdict
                         ? `base red: ${check} was held while main was red; main is green at ${mainSha}, so the branch refresh was requested (${verdict.outcome}) — no fix dispatched`
                         : `base red: ${check} was held while main was red; main is green, but ${verdict.hold} — no fix dispatched`) });
@@ -19062,7 +19076,7 @@ export async function runSweep(
                     : `base reproduction clear at main ${mainTipSha}`;
                   const held = clearance === undefined ? refreshUnwired : refreshAdmission.hold(admit);
                   if (held === undefined) {
-                    refreshAdmission.enter({ ...admit,
+                    await refreshAdmission.enter({ ...admit,
                       refresh: () => pressRefresh(pr, admit.row, (outcome) => { baseRedHistory.refreshed.add(key); recordRefresh(pr, refreshChecks, reproductionFiles, outcome); }),
                       settle: (verdict) => admissionReasons.set(pr.prNumber, "outcome" in verdict
                         ? `${clearText}; branch refresh requested (${verdict.outcome}) — no fix dispatched${fixedOnMain ? " or strike spent" : ""}`
@@ -19852,10 +19866,10 @@ export async function runSweep(
       standDownReason = fixHolder.reason;
       extraDisposedFields = { ...extraDisposedFields, ...fixHolder.fields };
     }
-    // W1-T9595: a head queued for refresh admission is disposed once the admission has settled it.
+    // Pressed heads dispose now; only overflow waits for the admission's final settlement.
     const finalize = () => finalizeDisposition(prIndex, pr, disposition, reason, question, acted, alreadyDone, actionError,
       fixHolder?.reason ?? admissionReasons.get(pr.prNumber) ?? standDownReason, depReviewOutcome, armOutcome, spent, baseCausedMainTipSha, extraDisposedFields);
-    if (refreshAdmission.has(pr.prNumber)) admissionFinalizations.push(finalize);
+    if (refreshAdmission.has(pr.prNumber) && !refreshAdmission.settled(pr.prNumber)) admissionFinalizations.push(finalize);
     else await finalize();
     if (contradictoryCheckpoint) {
       contradictoryMemory.set(`${deps.ledgerPath}@${contradictoryCheckpoint.key}`, contradictoryCheckpoint);
@@ -20460,7 +20474,7 @@ export async function runLightPassRefreshAdmission(
           row === null || typeof row !== "object") continue;
       const admit = { pr, arm: held.arm as RefreshArm, heldSinceMs: Date.parse(String(held.held_since)) || Infinity,
         row: { ...(row as LedgerLine), run_id: deps.runId, surface: "light" } };
-      admission.enter({ ...admit, settle: () => {}, refresh: async () => {
+      await admission.enter({ ...admit, settle: () => {}, refresh: async () => {
         let outcome: string;
         recordForcedRefresh(deps, pr, REFRESH_ADMISSION_FORCED_BY); // W1-T7735: the repair still writes its decision row
         try { outcome = await updateBranch(pr); }
