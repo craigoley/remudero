@@ -443,6 +443,12 @@ test("GOLDEN — SESSION RETRO LEARNINGS: all five evidence-backed rules execute
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — SESSION RETRO 2026-10-17: the five component-scoped rules execute from their active shards", () => {
+  const { verdict, golden } = judgeCase("session-retro-2026-10-17");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — KNOWLEDGE RETIRE LEDGER: the observed ledger learning retirement keeps its text and arms with a golden replay", () => {
   const { verdict, golden } = judgeCase("knowledge-retire-ledger");
   assert.equal(golden.violation, "none");

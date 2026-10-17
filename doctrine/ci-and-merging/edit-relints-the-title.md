@@ -1,5 +1,5 @@
 - **A RETITLE ALONE re-runs the title lint — `pr-title-lint.yml` fires on `edited`; push no sha to
-  clear a title red.** The PR-title commitlint is `.github/workflows/pr-title-lint.yml`'s
+  clear a title red, nor a stale-red `ci-gate` (it self-clears).** The PR-title commitlint is `.github/workflows/pr-title-lint.yml`'s
   `commitlint` job. Its `on: pull_request` lists `types: [opened, synchronize, reopened, edited]`,
   and it reads the title LIVE (`gh pr view --json title`), so the edit's own run sees the new title.
   Since #6062, 2026-09-19. `ci.yml`'s `commitlint` job (`light-gates`) no longer reads the title
@@ -12,6 +12,7 @@
   frozen rule below predates #6062.)*
 
 *(Index line merged 2026-10-16: the superseded W1-T3323 bullet below no longer ships beside its successor; its id resolves here through `doctrine/merged-rules.json`.)*
+*(Index line merged 2026-10-17: the LAST W1-T3323 bullet below is carried by this headline's stale-red `ci-gate` clause. It is kept verbatim; its id resolves here through `doctrine/merged-rules.json`.)*
 
 - **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
   nothing.** `ci.yml`'s commitlint job reads the title LIVE (`gh pr view --json title --jq .title`),
@@ -19,3 +20,10 @@
   the defaults `[opened, synchronize, reopened]` exclude `edited` and a retitle alone triggers no run.
   Cheapest path is retitle THEN push; backwards, re-run the job. Close/reopen fires `reopened` without
   touching another lane's branch. *(W1-T351; re-derived 2026-08-06)*
+
+- **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.** ci-gate RE-READS
+  inside a bounded grace window before concluding FAILURE, so a required check flipping
+  FAILURE→SUCCESS on the SAME head sha needs no new commit and no manual re-run (W1-T261); its wait
+  cap is sized against this repo's real required-check wall-clock, so a green-in-progress sibling is
+  waited out rather than timed out (W1-T312, `WAIT_CAP_SECONDS` in `.github/workflows/ci-gate.yml`).
+  Both are FIXED; the citations are the detail. *(#873/#877, W1-T261/#885, W1-T312)*
