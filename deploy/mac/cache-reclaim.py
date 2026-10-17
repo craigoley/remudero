@@ -4,10 +4,16 @@
 Each pass has one serial owner, at most 45 seconds of admission/inspection,
 500,000 inspected entries and 2 GiB of content reads. A commit already admitted
 finishes or restores its staging even when the inspection budget expires.
+Completed directory namespaces are checkpointed in at most 16 MiB of private,
+authenticated state and physically revalidated before reuse. Checkpoints never
+grant removal permission. A single crash-left save stage is held for inspection,
+never accumulated or adopted. A single directory too wide to enumerate within one
+pass remains held; it is never skipped using an unverified directory offset.
 """
 import argparse
 from contextlib import contextmanager, ExitStack
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -24,6 +30,7 @@ AGE_SECONDS = 6 * 3600
 MAX_SECONDS = 45
 MAX_ENTRIES = 500_000
 MAX_READ_BYTES = 2 * 1024**3
+MAX_PROGRESS_BYTES = 16 * 1024**2
 PRUNE = {".git", "node_modules", ".next", "state", ".ssh", ".claude"}
 KEEP = {".rmd-janitor-keep", ".rmd-scratch-keep", ".rmd-dependency-seed-root.json"}
 RETAINED_PACKAGE_ENTRIES = {".vite", ".rmd-dependency-seed.json"}
@@ -50,6 +57,7 @@ class Budget:
         self.scans, self.current = [], None
         self.tick = self.started
         self.exhausted = None
+        self.progress = None
 
     def phase(self, stage, root):
         self.finish_interval()
@@ -111,19 +119,267 @@ def checked_directory(path, budget, parent_fd=None, name=None, expected=None):
         os.close(fd)
 
 
-def directory_entries(path, budget, parent_fd=None, name=None, expected=None):
+class NamespaceEntry:
+    """A checkpointed name always gets current no-follow metadata, never cached stat."""
+    def __init__(self, name, fd):
+        self.name, self.fd = name, fd
+
+    def stat(self, follow_symlinks=True):
+        return os.stat(self.name, dir_fd=self.fd, follow_symlinks=follow_symlinks)
+
+    def is_symlink(self):
+        return stat.S_ISLNK(self.stat(False).st_mode)
+
+    def is_dir(self, follow_symlinks=True):
+        return stat.S_ISDIR(self.stat(follow_symlinks).st_mode)
+
+
+def directory_entries(path, budget, parent_fd=None, name=None, expected=None, progress=None):
     with checked_directory(path, budget, parent_fd, name, expected) as fd:
         budget.count("directoriesEnumerated")
-        with os.scandir(fd) as children:
-            while True:
-                budget.check()  # A wide flat directory must not evade the wall bound.
-                try:
-                    child = next(children)
-                except StopIteration:
-                    break
+        before = os.fstat(fd)
+        cached = progress.lookup(path, before) if progress is not None else None
+        names = []
+        if cached is not None:
+            # A complete, authenticated namespace with unchanged directory
+            # identity proves the omitted regular entries are still regular.
+            # Directory/symlink names are re-statted and traversed this pass.
+            for child_name in cached:
                 budget.count("childrenEnumerated")
-                budget.check(entries=1)  # Charge every child before inspecting its type.
-                yield child, path / child.name, fd
+                budget.check(entries=1)
+                yield NamespaceEntry(child_name, fd), path / child_name, fd
+        else:
+            with os.scandir(fd) as children:
+                while True:
+                    budget.check()  # A wide flat directory must not evade the wall bound.
+                    try:
+                        child = next(children)
+                    except StopIteration:
+                        break
+                    budget.count("childrenEnumerated")
+                    budget.check(entries=1)  # Charge every child before inspecting its type.
+                    if progress is not None and (child.is_symlink() or child.is_dir(follow_symlinks=False)):
+                        names.append(child.name)
+                    yield child, path / child.name, fd
+    # Never checkpoint an interrupted enumeration or a changed physical parent.
+    if progress is not None and cached is None:
+        progress.remember(path, before, names)
+
+
+def reference_roots(home):
+    roots = [home / name for name in ["Remudero", "rmd-work", "Developer", ".codex/work-artifacts"]]
+    roots.append(Path(tempfile.gettempdir()).resolve())
+    if home == Path(pwd.getpwuid(os.getuid()).pw_dir):
+        roots.append(Path("/private/tmp"))
+    return list(dict.fromkeys(roots))
+
+
+class DirectoryProgress:
+    """Authenticated namespace observations, not candidates or deletion grants.
+
+    Only fully enumerated directories are saved. Every reuse checks current
+    dev/inode/mode/owner/size/mtime/ctime/nlink through a no-follow parent FD;
+    every descendant directory and symlink is visited again. A changed tree is
+    rescanned. A forged/corrupt checkpoint holds the entire artifact pass.
+    The private key protects against accidental/unauthenticated state edits,
+    not a malicious account owner who can also replace this executable.
+    """
+    def __init__(self, home, budget):
+        self.budget, self.records, self.fd = budget, {}, None
+        self.stats = {"state": "cold", "loadedDirectories": 0, "reusedDirectories": 0,
+                      "completedDirectories": 0, "invalidatedDirectories": 0,
+                      "savedDirectories": 0, "evictedDirectories": 0, "metadataBytesRead": 0}
+        self.path = home / ".local/state/remudero/cache-reclaim-progress"
+        self.scope = {"version": 2, "home": str(home), "uid": os.getuid(),
+                      "roots": [str(p) for p in reference_roots(home)],
+                      "writer": regular_digest(Path(__file__), budget)}
+        self.stats["metadataBytesRead"] = budget.read_bytes
+        fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in [".local", "state", "remudero", "cache-reclaim-progress"]:
+                budget.check()
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                s = os.fstat(child)
+                if s.st_uid != os.getuid() or part == "cache-reclaim-progress" and stat.S_IMODE(s.st_mode) != 0o700:
+                    os.close(child)
+                    raise Hold("progress-directory-not-private-owned")
+                os.close(fd)
+                fd = child
+            self.fd, fd = fd, None
+            self.directory_id = (os.fstat(self.fd).st_dev, os.fstat(self.fd).st_ino)
+            try:
+                self.key = self.read("key", 32)
+            except FileNotFoundError:
+                try:
+                    os.stat("inventory.json", dir_fd=self.fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    self.key = os.urandom(32)
+                    key_fd = os.open("key", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+                    try:
+                        os.write(key_fd, self.key)
+                        os.fsync(key_fd)
+                    finally:
+                        os.close(key_fd)
+                    os.fsync(self.fd)
+                else:
+                    raise Hold("progress-key-missing")
+            if len(self.key) != 32:
+                raise Hold("progress-key-invalid")
+            try:
+                raw = self.read("inventory.json", MAX_PROGRESS_BYTES)
+            except FileNotFoundError:
+                return
+            try:
+                envelope = json.loads(raw)
+                payload = envelope["payload"]
+                encoded = self.encode(payload)
+                signature = hmac.new(self.key, encoded, hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(envelope["mac"], signature):
+                    raise ValueError("authentication")
+                if payload["scope"] != self.scope:
+                    self.stats["state"] = "reset-scope"
+                    return
+                records = payload["directories"]
+                if not isinstance(records, dict):
+                    raise ValueError("directories")
+                for path, record in records.items():
+                    # Parsing authenticated, byte-bounded metadata is not a
+                    # second filesystem inspection. Keep its time/read costs,
+                    # but charge current names only when physically revisited.
+                    budget.check()
+                    if (not Path(path).is_absolute() or not isinstance(record, dict)
+                            or len(record["identity"]) != 8
+                            or not all(type(v) is int for v in record["identity"])
+                            or not isinstance(record["names"], list)):
+                        raise ValueError("record")
+                    names = record["names"]
+                    for name in names:
+                        budget.check()
+                        if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\0" in name:
+                            raise ValueError("name")
+                    if len(set(names)) != len(names):
+                        raise ValueError("duplicate-name")
+                recency = payload["recency"]
+                if (not isinstance(recency, list) or not all(isinstance(p, str) for p in recency)
+                        or len(recency) != len(records) or set(recency) != set(records)):
+                    raise ValueError("recency")
+                self.records = {path: records[path] for path in recency}
+                self.stats.update(state="resumed", loadedDirectories=len(records))
+            except (ValueError, TypeError, KeyError, RecursionError) as error:
+                raise Hold("progress-state-invalid") from error
+        except BaseException:
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
+            raise
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    @staticmethod
+    def encode(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+    def read(self, name, maximum):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+        try:
+            s = os.fstat(fd)
+            if (not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_nlink != 1
+                    or stat.S_IMODE(s.st_mode) != 0o600 or getattr(s, "st_flags", 0) or s.st_size > maximum):
+                raise Hold("progress-file-not-private-owned-regular")
+            self.budget.check(read_bytes=s.st_size)
+            self.stats["metadataBytesRead"] += s.st_size
+            data = b""
+            while len(data) < s.st_size:
+                self.budget.check()
+                block = os.read(fd, min(1024 * 1024, s.st_size - len(data)))
+                if not block:
+                    break
+                data += block
+            if (len(data) != s.st_size or identity(os.fstat(fd)) != identity(s)
+                    or identity(os.stat(name, dir_fd=self.fd, follow_symlinks=False)) != identity(s)):
+                raise Hold("progress-file-changed")
+            return data
+        finally:
+            os.close(fd)
+
+    def lookup(self, path, observed):
+        record = self.records.pop(str(path), None)
+        if record is not None and record["identity"] == list(identity(observed)):
+            self.records[str(path)] = record  # Least-recently-used observations go first.
+            self.stats["reusedDirectories"] += 1
+            return record["names"]
+        if record is not None:
+            self.stats["invalidatedDirectories"] += 1
+        return None
+
+    def remember(self, path, observed, names):
+        self.records.pop(str(path), None)
+        self.records[str(path)] = {"identity": list(identity(observed)), "names": names}
+        self.stats["completedDirectories"] += 1
+
+    def save(self):
+        # Eviction discards observations, never files or safety checks. Bound
+        # state even during incomplete scans and ordinary deleted-tree churn.
+        # Account for exact canonical encoding once; avoid repeated full dumps.
+        sizes = [(path, 2 * len(self.encode(path)) + len(self.encode(record)) + 3)
+                 for path, record in self.records.items()]
+        overhead = len(self.encode({"scope": self.scope, "directories": {}, "recency": []})) + 85
+        size = overhead + sum(value for _, value in sizes) - (2 if sizes else 0)
+        for path, value in sizes:
+            if size <= MAX_PROGRESS_BYTES:
+                break
+            del self.records[path]
+            self.stats["evictedDirectories"] += 1
+            size -= value
+            if not self.records:
+                size += 2
+        # Canonical encoding sorts keys, so persist recency separately instead
+        # of accidentally turning eviction into lexical-order starvation.
+        payload = {"scope": self.scope, "directories": self.records,
+                   "recency": list(self.records)}
+        encoded = self.encode(payload)
+        data = b'{"mac":' + json.dumps(hmac.new(self.key, encoded, hashlib.sha256).hexdigest()).encode() + b',"payload":' + encoded + b'}'
+        if len(data) > MAX_PROGRESS_BYTES:
+            raise Hold("progress-state-size-limit")
+        if (self.path.lstat().st_dev, self.path.lstat().st_ino) != self.directory_id:
+            raise Hold("progress-directory-changed")
+        stage = "inventory.tmp"
+        # O_EXCL bounds crash recovery to one stage. Unknown/replaced stages
+        # are retained and reported, never adopted or swept speculatively.
+        try:
+            fd = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+        except FileExistsError as error:
+            raise Hold("progress-save-stage-present") from error
+        try:
+            with os.fdopen(os.dup(fd), "wb") as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            if identity(os.stat(stage, dir_fd=self.fd, follow_symlinks=False)) != identity(os.fstat(fd)):
+                raise Hold("progress-save-stage-changed")
+            os.replace(stage, "inventory.json", src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            os.fsync(self.fd)
+        except BaseException:
+            # Remove only the still-open stage we created, not a raced path.
+            try:
+                if identity(os.stat(stage, dir_fd=self.fd, follow_symlinks=False)) == identity(os.fstat(fd)):
+                    os.unlink(stage, dir_fd=self.fd)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(fd)
+        self.stats.update(savedDirectories=len(self.records), stateBytes=len(data))
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
 
 
 def cache_target(path, entry, parent_fd, budget):
@@ -377,7 +633,7 @@ def discovery(root, budget, candidates=None):
     candidates = [] if candidates is None else candidates
     budget.phase("discovery", root)
     def visit(path, depth, parent_fd=None, name=None, expected=None):
-        for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected):
+        for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected, progress=budget.progress):
             if entry.is_symlink():
                 budget.count("symlinksSeen")
                 continue
@@ -397,13 +653,10 @@ def discovery(root, budget, candidates=None):
 
 
 def references(home, candidates, budget):
-    roots = [home / name for name in ["Remudero", "rmd-work", "Developer", ".codex/work-artifacts"]]
-    roots.append(Path(tempfile.gettempdir()).resolve())
-    if home == Path(pwd.getpwuid(os.getuid()).pw_dir):
-        roots.append(Path("/private/tmp"))
+    roots = reference_roots(home)
     shared = set()
     def visit(path, depth, parent_fd=None, name=None, expected=None):
-        for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected):
+        for entry, child, fd in directory_entries(path, budget, parent_fd, name, expected, progress=budget.progress):
             if entry.is_symlink():
                 budget.count("symlinksSeen")
                 before = identity(entry.stat(follow_symlinks=False))
@@ -689,7 +942,17 @@ def main(argv=None):
     elif root.is_dir() and not root.is_symlink() and root.resolve() == root:
         try:
             with cache_owner(home):
-                reclaim_artifacts(home, root, budget, args.apply, decisions, inspection)
+                progress = DirectoryProgress(home, budget)
+                budget.progress = progress
+                inspection["progress"] = progress.stats
+                try:
+                    reclaim_artifacts(home, root, budget, args.apply, decisions, inspection)
+                finally:
+                    try:
+                        progress.save()
+                    finally:
+                        progress.close()
+                        budget.progress = None
         except (Hold, OSError) as error:
             decisions.append({"action": "keep", "reason": str(error)})
     budget.finish_interval()
