@@ -186,10 +186,14 @@ export function readModelDirtyMarkerPath(path: string): string {
   return `${path}.dirty`;
 }
 
-function identifyLockFailure(error: unknown, path: string, connection: string, readOnly: boolean): void {
+/** Finite adapter operations identify the failing call, never its SQL or the blocking owner. */
+type LockOperation = "connect" | "exec.begin-immediate" | "exec.begin-read" | "exec.commit" | "exec.rollback" | "exec"
+  | "prepare" | "run" | "get" | "all" | "iterate" | "iterate-next" | "iterate-return" | "read-route";
+
+function identifyLockFailure(error: unknown, path: string, connection: string, readOnly: boolean, operation: LockOperation): void {
   const code = sqliteErrcode(error);
   if (error instanceof Error && code !== undefined && [5, 6].includes(code & 0xff)) {
-    error.message += ` [connection=${connection}/${readOnly ? "reader" : "writer"} pid=${process.pid} thread=${threadId} path=${path}]`;
+    error.message += ` [connection=${connection}/${readOnly ? "reader" : "writer"} pid=${process.pid} thread=${threadId} path=${path}] [operation=${operation}]`;
   }
 }
 
@@ -197,11 +201,11 @@ function identifyLockFailure(error: unknown, path: string, connection: string, r
 function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"], marker?: { path: string; unclean: boolean }): ReadModelDb {
   let reader: DatabaseSync | undefined;
   const connection = randomUUID();
-  const checked = <T>(target: DatabaseSync, operation: () => T): T => {
+  const checked = <T>(target: DatabaseSync, operation: () => T, label: LockOperation = "read-route"): T => {
     try {
       return operation();
     } catch (error) {
-      identifyLockFailure(error, path, connection, target !== raw || readOnly);
+      identifyLockFailure(error, path, connection, target !== raw || readOnly, label);
       throw error;
     }
   };
@@ -217,10 +221,13 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
       const beginRead = /^BEGIN(?: DEFERRED)?(?: TRANSACTION)?$/i.test(command);
       const endRead = /^(?:COMMIT|END|ROLLBACK)(?: TRANSACTION)?$/i.test(command) && reader?.isTransaction && !raw.isTransaction;
       const target = beginRead ? reading() : endRead ? reader! : raw;
-      checked(target, () => target.exec(sql));
+      const label: LockOperation = /^BEGIN IMMEDIATE(?: TRANSACTION)?$/i.test(command) ? "exec.begin-immediate"
+        : beginRead ? "exec.begin-read" : /^(?:COMMIT|END)(?: TRANSACTION)?$/i.test(command) ? "exec.commit"
+        : /^ROLLBACK(?: TRANSACTION)?$/i.test(command) ? "exec.rollback" : "exec";
+      checked(target, () => target.exec(sql), label);
     },
     prepare: (sql, opts = {}) => {
-      const statement: StatementSync = checked(raw, () => raw.prepare(sql));
+      const statement: StatementSync = checked(raw, () => raw.prepare(sql), "prepare");
       if (opts.bigInts) statement.setReadBigInts(true);
       let readStatement: StatementSync | undefined;
       let tempSchemaVersion: number | undefined;
@@ -240,32 +247,32 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
         }
         if (readsTemp) return { target: raw, statement };
         if (!readStatement) {
-          readStatement = checked(target, () => target.prepare(sql));
+          readStatement = checked(target, () => target.prepare(sql), "prepare");
           if (opts.bigInts) readStatement.setReadBigInts(true);
         }
         return { target, statement: readStatement };
       };
       return {
-        run: (...params) => checked(raw, () => statement.run(...params)) as { changes: number },
+        run: (...params) => checked(raw, () => statement.run(...params), "run") as { changes: number },
         get: (...params) => {
           const read = forRead();
-          return checked(read.target, () => read.statement.get(...params)) as SqlRow | undefined;
+          return checked(read.target, () => read.statement.get(...params), "get") as SqlRow | undefined;
         },
         all: (...params) => {
           const read = forRead();
-          return checked(read.target, () => read.statement.all(...params)) as SqlRow[];
+          return checked(read.target, () => read.statement.all(...params), "all") as SqlRow[];
         },
         iterate: function* (...params) {
           const read = forRead();
-          const iterator = checked(read.target, () => read.statement.iterate(...params));
+          const iterator = checked(read.target, () => read.statement.iterate(...params), "iterate");
           try {
             for (;;) {
-              const next = checked(read.target, () => iterator.next());
+              const next = checked(read.target, () => iterator.next(), "iterate-next");
               if (next.done) return;
               yield next.value as SqlRow;
             }
           } finally {
-            checked(read.target, () => iterator.return?.());
+            checked(read.target, () => iterator.return?.(), "iterate-return");
           }
         },
       };
@@ -297,7 +304,7 @@ function connect(path: string, readOnly: boolean): DatabaseSync {
     return raw;
   } catch (error) {
     raw?.close();
-    identifyLockFailure(error, path, connection, readOnly);
+    identifyLockFailure(error, path, connection, readOnly, "connect");
     throw error;
   }
 }
