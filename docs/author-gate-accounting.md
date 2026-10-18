@@ -5,6 +5,20 @@ expensive validation, then checks the same donor again after static work and at
 closure. A vanished or changed symlink donor invalidates the receipt. This is a
 cheap precondition, not full package byte attestation or cached-test permission.
 
+For an opt-in setup check before expensive work, run
+`node scripts/check-author-checkout.mjs --head <committed-sha> --upstream https://github.com/craigoley/remudero.git`.
+An optional `--bundle <path> --bundle-head <sha>` checks the actual advertised
+refs (including a HEAD-only bundle) and Git's prerequisite verification. The
+diagnostic does not fetch, import a bundle, change refs/config, install packages,
+take capacity or execute tests. Ready (exit0), blocked (exit3) and unknown (exit2)
+describe local metadata only, never fresh upstream, author assurance or execution
+authority. Normal fresh fetch, genuine admission and current-head gates remain.
+
+The shared subprocess envelope uses one process-local monotonic start, charges
+elapsed time once, floors fractional milliseconds to a valid integer and refuses
+an exhausted/zero timeout. It never converts exhaustion into Node's unbounded
+timeout0 or silently starts a new deadline for a later subprocess.
+
 Closed capture records include monotonic duration for census, static and test
 phases, including failures. The final receipt separates native work from selection
 and admission overhead. Partial/over-capacity runs are ineligible for whole-gate
