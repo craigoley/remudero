@@ -3146,10 +3146,11 @@ function defaultRegistryLockSleep(ms: number): void {
 
 const ownedAsyncRegistryLocks = new Set<string>();
 
-export class ProposalRegistryBusyError extends Error {
+export class ProposalRegistryBusyError extends RmdError {
   constructor(readonly outcome: "same-process-busy" | "cancelled" | "deadline", readonly lockPath: string,
     readonly holder: RegistryLockInfo | undefined) {
-    super(`proposal registry ${outcome}: ${lockPath} (held by pid ${holder?.pid ?? "unknown"})`);
+    super("registry", GENERIC_EXIT_CODE, `proposal registry ${outcome}: ${lockPath} (held by pid ${holder?.pid ?? "unknown"})`,
+      { outcome, lockPath, holder: holder ?? null });
     this.name = "ProposalRegistryBusyError";
   }
 }
@@ -3376,14 +3377,14 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
   let holder: RegistryLockInfo | undefined;
   let reportedIdentity: string | undefined;
   let measurement: { held_ms: number } | undefined;
-  let measurementState = "missing";
+  let measurementState = { kind: "missing" };
   try {
     const value = JSON.parse(await fs.promises.readFile(`${registryPath}.lock-hold.json`, "utf8"));
     if (!Number.isFinite(value.held_ms) || value.held_ms < 0) throw new Error("invalid hold measurement");
     measurement = value;
-    measurementState = "observed";
+    measurementState = { kind: "observed" };
   } catch (error) {
-    if (!isEnoent(error)) measurementState = "unreadable";
+    measurementState = { kind: isEnoent(error) ? "missing" : "unreadable" };
   }
   const waitingAt = systemClock.now();
   const check = () => {
@@ -3426,13 +3427,13 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
         const identity = JSON.stringify(holder);
         if (identity !== reportedIdentity && (!measurement || systemClock.now() - waitingAt > measurement.held_ms)) {
           opts.log?.(measurement ? "proposal_registry.lock_wait_long" : "proposal_registry.lock_measurement_unavailable",
-            { lock_path: lockPath, holder, measurement: measurementState, observed_hold_ms: measurement?.held_ms ?? null });
+            { lock_path: lockPath, holder, measurement: measurementState.kind, observed_hold_ms: measurement?.held_ms ?? null });
           reportedIdentity = identity;
         }
         try {
           await waitForRegistryPoll(Math.min(pollIntervalMs, deadline - systemClock.now()), undefined, { signal: opts.signal });
         } catch (error) {
-          if (!opts.signal?.aborted) throw error;
+          if (opts.signal?.aborted !== true) throw error;
           check();
         }
       }
