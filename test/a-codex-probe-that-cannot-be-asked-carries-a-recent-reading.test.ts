@@ -19,7 +19,7 @@ function fixture(t: test.TestContext) {
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-last-good-"));
   const cfg: Config = {root,claudeBin:"/unused",workerProviders:{enabled:["codex"],codexBin:"/bin/sh",codexHome:join(root,"codex"),capacityCacheMs:1}};
   const state = {now:START, used:20, mode:"ok" as Mode, spawns:0, duration:120 as number | undefined,
-    reset:Math.floor((START+60*60_000)/1000), quotaExtras:{} as Record<string,unknown>, models:structuredClone(MODELS)};
+    reset:Math.floor((START+60*60_000)/1000), quotaExtras:{} as Record<string,unknown>, models:structuredClone(MODELS), byLimitId:false};
   const spawn = () => {
     state.spawns++;
     const stdin=new PassThrough(), stdout=new PassThrough(), stderr=new PassThrough();
@@ -33,8 +33,11 @@ function fixture(t: test.TestContext) {
           if(state.mode==="rpc") stdout.write(JSON.stringify({id:2,error:{message:"fixture RPC refused"}})+"\n");
           else if(state.mode==="malformed") stdout.write("not-json\n");
           else if(state.mode==="empty") stdout.write(JSON.stringify({id:2,result:null})+"\n");
-          else stdout.write(JSON.stringify({id:2,result:{rateLimits:{limitId:"codex",primary:{
-            usedPercent:state.used,windowDurationMins:state.duration,resetsAt:state.reset,...state.quotaExtras}}}})+"\n");
+          else {
+            const bucket={limitId:"codex",primary:{usedPercent:state.used,windowDurationMins:state.duration,resetsAt:state.reset,...state.quotaExtras}};
+            stdout.write(JSON.stringify({id:2,result:{rateLimits:bucket,
+              ...(state.byLimitId?{rateLimitsByLimitId:{codex:bucket}}:{})}})+"\n");
+          }
         }
         if(request.id===3) stdout.write(JSON.stringify({id:3,result:{data:state.models,nextCursor:null}})+"\n");
       }
@@ -205,4 +208,15 @@ test("a concurrent telemetry publisher wins over this default atomic stage",asyn
     assert.match((await f.read()).detail??"",/stood aside for a concurrent reading/);
     assert.equal(readFileSync(f.path,"utf8"),published);
   } finally {patch.mock.restore();syncBuiltinESMExports();}
+});
+
+test("projection keeps real independent buckets and refuses unreadable quota or invisible models",async t=>{
+  const zero=fixture(t);zero.state.byLimitId=true;zero.state.used=0;zero.state.reset+=60*60;
+  await zero.read();zero.fail();assert.equal((await zero.read()).readable,true);
+  const invalid=fixture(t);await invalid.read();const raw=JSON.parse(readFileSync(invalid.path,"utf8"));
+  raw.current.value.rateLimits.rateLimits.primary.usedPercent="unknown";
+  writeFileSync(invalid.path,JSON.stringify(raw));invalid.fail();
+  assert.match((await invalid.read()).detail??"",/unreadable quota window/);
+  const hidden=fixture(t);await hidden.read();hidden.cfg.workerProviders!.codexModel="not-a-visible-model";hidden.fail();
+  assert.match((await hidden.read()).detail??"",/last-good unavailable/);
 });
