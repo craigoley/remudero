@@ -91,6 +91,39 @@ function validTranscripts(values: readonly unknown[]): FixTranscript[] {
   return out;
 }
 
+export function fixTranscriptsFromLedger(
+  records: readonly Record<string, unknown>[],
+  taskTypeOf: (taskId: string) => string | undefined,
+): { transcripts: FixTranscript[]; unmodelled: number } {
+  const text = (value: unknown) => typeof value === "string" ? value.trim() : "";
+  const done = new Map<string, Record<string, unknown>>();
+  for (const row of records) {
+    if (row.step === "fix.done" && text(row.round_id) && boundedString(text(row.selected_model), 80)) {
+      done.set(text(row.round_id), row);
+    }
+  }
+  const transcripts: FixTranscript[] = [];
+  let unmodelled = 0;
+  for (const row of records) {
+    if (row.step !== "fix.commit_refused") continue;
+    const completion = done.get(text(row.round_id));
+    const model = text(completion?.selected_model);
+    if (!boundedString(model, 80)) {
+      unmodelled += 1;
+      continue;
+    }
+    const taskId = (text(row.task_id) || text(completion?.task_id) || "unknown").slice(0, MAX_ID);
+    const reason = (text(row.reason) || "unstated refusal reason").slice(0, MAX_TEXT);
+    const outcome = (text(row.fix_outcome) || text(completion?.fix_outcome) || "unstated").slice(0, 60);
+    transcripts.push({
+      taskId, model, taskShape: (taskTypeOf(taskId)?.trim() || "unknown").slice(0, 80),
+      commitRefusedReason: reason,
+      excerpt: `${reason.slice(0, 240)}\nfix_outcome: ${outcome}`,
+    });
+  }
+  return { transcripts, unmodelled };
+}
+
 /**
  * Deterministically splits recorded transcripts into a TRAIN half and a HELD-OUT half, keyed by a
  * stable hash of each transcript's `taskId` and the supplied `seed` — never by array order or a
