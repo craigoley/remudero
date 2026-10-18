@@ -49,3 +49,17 @@ test('workspace external scratch shares the unchanged inspection budget and neve
   const linked = sampleWorkspaceUsage(workspace, { roots: [], scratchRoots: roots, maxMs: 1000 });
   assert.equal(linked.completeness, 'lower-bound');
 });
+
+test('workspace external scratch never reports complete when the entry budget leaves a declared root uninspected', t => {
+  const { dir } = ownedFixtureDir(t, 'external-scratch-root-budget');
+  const workspace = join(dir, 'workspace'), first = join(dir, 'first'), second = join(dir, 'second');
+  mkdirSync(workspace); mkdirSync(first); mkdirSync(second);
+  writeFileSync(join(second, 'unobserved'), Buffer.alloc(65536, 1));
+  const measured = sampleWorkspaceUsage(workspace, { roots: [],
+    scratchRoots: [pinWorkspaceScratchRoot(first), pinWorkspaceScratchRoot(second)], maxEntries: 1, maxMs: 1000 });
+  assert.equal(measured.entries, 1);
+  assert.equal(measured.completeness, 'lower-bound');
+  assert.ok(measured.reasons.includes('sampling-bound'));
+  const exact = sampleWorkspaceUsage(workspace, { roots: [], scratchRoots: [pinWorkspaceScratchRoot(first)], maxEntries: 1, maxMs: 1000 });
+  assert.equal(exact.completeness, 'complete', 'an exactly exhausted complete population is still complete');
+});

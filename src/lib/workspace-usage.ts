@@ -142,7 +142,6 @@ export function sampleWorkspaceUsage(workspace: string, opts: { roots?: readonly
         incomplete = true; result.reasons.push("entry-unreadable-or-changed");
       }
     }
-    if (!budget()) break;
   }
   result.generatedPathBytes = observed ? total : null;
   result.completeness = observed ? incomplete ? "lower-bound" : "complete" : "unknown";
