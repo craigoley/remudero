@@ -18,7 +18,7 @@
     - src/run-task.ts
     - src/lib/spend-rows.ts
     - src/lib/ledger-steps.ts
-    - test/machine-filing-judge.test.ts
+    - test/the-machine-filing-judge-releases-or-escalates.test.ts
     - test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts
   rationale: |
     OBSERVED current-generation retained exposure, not an invoice or proof of all SDK calls:
