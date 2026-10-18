@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync,writeFileSync,createReadStream} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {test} from 'node:test';
 import readMapPlatformReporter,{platformEventRecord} from '#scripts/lib/read-map-platform-reporter.mjs';
 const reporter=fileURLToPath(import.meta.resolve('#scripts/lib/read-map-platform-reporter.mjs'));
@@ -21,7 +21,8 @@ test('platform metadata uses actual entry identity and preserves concurrent line
  try{
   const entry=join(root,'entry.test.mjs'),imported=join(root,'imported.mjs');
   writeFileSync(imported,'import {test} from "node:test";test("imported definition",()=>{});');
-  writeFileSync(entry,'import {test} from "node:test";import "./imported.mjs";test("parent",{concurrency:true},async t=>{await Promise.all([t.test("same",async()=>{await new Promise(r=>setTimeout(r,10))}),t.test("same",()=>{})])});test("platform skip",{skip:process.platform!=="darwin"},()=>{});');
+  // The generated fixture has no repository package aliases: bind its real module by file URL.
+  writeFileSync(entry,'import {test} from "node:test";import '+JSON.stringify(pathToFileURL(imported).href)+';test("parent",{concurrency:true},async t=>{await Promise.all([t.test("same",async()=>{await new Promise(r=>setTimeout(r,10))}),t.test("same",()=>{})])});test("platform skip",{skip:process.platform!=="darwin"},()=>{});');
   // Forward generated coverage attribution only; never a preload or ambient credentials.
   const env={PATH:process.env.PATH,...(process.env.NODE_V8_COVERAGE?{NODE_V8_COVERAGE:process.env.NODE_V8_COVERAGE}:{})};
   const out=execFileSync(process.execPath,['--test','--test-concurrency=1','--test-reporter',reporter,entry],{cwd:root,env,encoding:'utf8',timeout:15000,maxBuffer:1<<20});
