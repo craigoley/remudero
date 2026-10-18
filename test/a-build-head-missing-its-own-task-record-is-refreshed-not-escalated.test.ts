@@ -2,13 +2,14 @@
 // found no record, skipped the reviewer and failed with no criteria; the sweep escalated it as "contradictory" until
 // a hand merge of main. The head is now PENDING with a named cause and the sweep refreshes it from main.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { gitRepo } from "./helpers/git-repo.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -84,26 +85,23 @@ function drive(scratch: string, scenarios: Scenario[]): ProbeRow[] {
 
 /** main = c1 (shard W1-T9999 present); the build head = c0 (cut before the shard merged). */
 function fixture(): { dir: string; c0: string; c1: string } {
-  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t9232-git-`));
-  const run = (args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: "pipe" });
-  run(["init", "--quiet", "-b", "main"]);
-  run(["config", "user.email", "t@example.invalid"]);
-  run(["config", "user.name", "T"]);
-  run(["remote", "add", "origin", "https://github.com/o/r.git"]);
+  const repo = gitRepo({ kind: "w1t9232-git", seedCommit: false });
+  const { dir } = repo;
+  repo.addRemote("origin", "https://github.com/o/r.git");
   mkdirSync(join(dir, "plan"), { recursive: true });
   mkdirSync(join(dir, ".remudero"), { recursive: true });
   copyFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
   const commit = (msg: string): string => {
-    run(["add", "-A"]);
-    run(["commit", "--quiet", "-m", msg, "--allow-empty"]);
-    return run(["rev-parse", "HEAD"]).trim();
+    repo.git("add", "-A");
+    repo.git("commit", "--quiet", "-m", msg, "--allow-empty");
+    return repo.git("rev-parse", "HEAD");
   };
   writeFileSync(join(dir, "plan", "tasks.yaml"), taskYaml("W1-T9000") + "\n");
   const c0 = commit("the build head's base: no shard yet");
   mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(dir, "plan", "tasks.d", "w1-t9999.yaml"), taskYaml("W1-T9999") + "\n");
   const c1 = commit("the shard merges");
-  run(["update-ref", "refs/remotes/origin/main", c1]);
+  repo.git("update-ref", "refs/remotes/origin/main", c1);
   return { dir, c0, c1 };
 }
 
