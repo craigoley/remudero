@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {dirname,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {test} from 'node:test';
+import {performance} from 'node:perf_hooks';
 import {readProofFileInside,observeProofFileInside,PROOF_FILE_READ_TIMEOUT_MS} from '#src/lib/proof-file-read.js';
 import {PROOF_FILE_READ_BYTES} from '#src/lib/proof-file-reader-child.js';
 
@@ -71,4 +72,14 @@ test('proof source bounded protocol refuses an oversized canonical request befor
  t.mock.method(fs,'realpathSync',((path:fs.PathLike)=>String(path)===join(f.tree,f.target)?f.tree+'/'+'a'.repeat(8193):original(path)) as typeof fs.realpathSync);syncBuiltinESMExports();
  try{assert.equal((await observeProofFileInside(f.tree,f.target,()=>{calls++;return 'must not run'})).state,'unavailable');assert.equal(calls,0);}
  finally{t.mock.restoreAll();syncBuiltinESMExports();}
+}));
+test('proof source keeps completed bytes when a held parent loop resumes after the nominal child budget',async t=>fixture(async f=>{
+ const ready=join(f.root,'child-ready'),original=childProcess.spawn;
+ t.mock.method(childProcess,'spawn',((file:string,_args:readonly string[],options:SpawnOptions)=>original(file,['-e','require("node:fs").writeFileSync('+JSON.stringify(ready)+',"ready");process.stdout.write("inside-positive\\n")'],options)) as typeof childProcess.spawn);syncBuiltinESMExports();
+ try{
+  const pending=readProofFileInside(f.tree,f.target);
+  await new Promise<void>((resolve,reject)=>{const check=setInterval(()=>{if(fs.existsSync(ready)){clearInterval(check);clearTimeout(limit);resolve();}},5),limit=setTimeout(()=>{clearInterval(check);reject(Error('fixture child did not become ready'));},10000);});
+  const until=performance.now()+PROOF_FILE_READ_TIMEOUT_MS+150;while(performance.now()<until){}
+  assert.equal(await pending,'inside-positive\n','a late wall-clock timer must not discard an already-completed child result');
+ }finally{t.mock.restoreAll();syncBuiltinESMExports();}
 }));
