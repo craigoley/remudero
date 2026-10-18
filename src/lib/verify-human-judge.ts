@@ -57,6 +57,11 @@ export interface ShardUnderJudgement {
   ageDays: number | null;
   /** Why `ageDays` is `null`, in words the operator reads; absent when the age was measured. */
   ageUnknownReason?: string;
+  /** Why this shard is being judged (W1-T8827). Absent reads as `"verify-human"`, the original
+   *  route before the adaptive lifetime-pressure path shared this judge. */
+  route?: "verify-human" | "lifetime-pressure";
+  /** Attributable dispatches, supplied by the `"lifetime-pressure"` route for its proposal text. */
+  attributableDispatches?: number;
   /** Whether every `depends_on` is merged — a shard blocked on unmerged work rarely needs a person YET. */
   depsAllMerged: boolean;
   /** Whether anything in `src/` cites this id — evidence the work landed under another shard. */
@@ -147,6 +152,15 @@ export function shardsNeedingJudgement(
 export function filingAgeText(shard: ShardUnderJudgement, suffix: string): string {
   if (shard.ageDays !== null) return `${shard.ageDays} days${suffix}`;
   return `an unknown number of days${suffix} (filing age unknown: ${shard.ageUnknownReason ?? "no filing date was read"})`;
+}
+
+/** The proposal's opening clause, said per route (W1-T8827): a lifetime-pressure item was sent
+ *  because its build kept failing, not because anyone filed it `verify: human`. */
+function proposalOpening(shard: ShardUnderJudgement): string {
+  if (shard.route === "lifetime-pressure") {
+    return `${shard.id} kept failing to build (${shard.attributableDispatches ?? 0} attempts over ${filingAgeText(shard, "")})`;
+  }
+  return `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")}`;
 }
 
 /** Render the judge's prompt. NOT the escalation judge's prompt reused: that one reasons about an
@@ -324,7 +338,7 @@ export function proposalFromJudgedShard(shard: ShardUnderJudgement, verdict: Ver
   return stampVerificationAsk({
     id: verifyHumanProposalId(shard),
     summary:
-      `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")} and a judge reads it as ` +
+      `${proposalOpening(shard)} and a judge reads it as ` +
       `still needing you:\n  ${verdict.reason}\n\n` +
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
@@ -342,7 +356,7 @@ export function automationProposalFromJudgedShard(shard: ShardUnderJudgement, ve
   return {
     id: verifyHumanAutomationProposalId(shard),
     summary:
-      `${shard.id} was filed \`verify: human\` ${filingAgeText(shard, " ago")} and a judge reads it as ` +
+      `${proposalOpening(shard)} and a judge reads it as ` +
       `safe to enter the self-improvement flow:\n  ${verdict.reason}\n\n` +
       `${shard.title}\n\n` +
       `Dependencies all merged: ${shard.depsAllMerged ? "yes" : "no"}. ` +
