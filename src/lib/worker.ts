@@ -100,7 +100,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
@@ -171,6 +171,8 @@ import {
   openWeightDeploymentReady,
   openWeightDeploymentHolds,
   openWeightEstimatedTokens,
+  openWeightReservationUsd,
+  readOpenWeightAllowance,
   spawnCodexWorker,
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -341,6 +343,7 @@ export interface WorkerResult {
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  cashAllowanceResetAt?: string;
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
   openWeightDeploymentAbsent?: string;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
@@ -1630,6 +1633,20 @@ export function cashFallbackRefusal(
   return undefined;
 }
 
+/** Refuse only when every candidate's first-request lower bound exceeds its observed room. */
+export function cashAllowanceFallbackRefusal(config: Config, prompt: string, deployments: readonly string[], atIso: string): string | undefined {
+  try {
+    if (deployments.length === 0) throw new Error("no eligible cash deployment");
+    const reading = readOpenWeightAllowance(config, { deployments, atIso, squeezed: true });
+    const candidates = reading.deployments.map(row => ({ ...row, wantUsd: openWeightReservationUsd(row.deployment, Buffer.byteLength(prompt, "utf8")) }));
+    if (candidates.some(row => row.remainingUsd >= row.wantUsd)) return undefined;
+    const cheapest = candidates.reduce((a, b) => a.wantUsd <= b.wantUsd ? a : b);
+    return `cash daily allowance exhausted until ${reading.resetAt}: committed $${cheapest.committedUsd.toFixed(6)} of $${cheapest.capUsd.toFixed(2)}, this spawn needs at least $${cheapest.wantUsd.toFixed(6)}`;
+  } catch (error) {
+    return `cash allowance observation unavailable: ${String((error as Error).message).slice(0, 512)}`;
+  }
+}
+
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
  * deleting a declared bound must make its own lookup refuse, not silently resume unrestricted). */
 export function resolveGenericRouteToolBound(lane: string): readonly string[] {
@@ -2617,6 +2634,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
+      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionPrompt, models,
+        fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
+      const plainCashModels = () => {
+        const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionPrompt, "utf8"),
+          { cashSqueezed: true, modelApprovals: config.modelApprovals,
+            ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}) });
+        return [choice.model, ...choice.alternatives];
+      };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2625,7 +2650,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const refusal = (!bothSubscriptionsObserved ? "both subscription capacities were not observed" : undefined) ??
           cashFallbackRefusal(config, divertTools) ??
           (!env[FOUNDRY_CLAUDE_API_KEY_ENV] || !env[FOUNDRY_CLAUDE_ENDPOINT_ENV]
-            ? "Foundry Opus endpoint or daemon key is absent" : undefined);
+            ? "Foundry Opus endpoint or daemon key is absent" : undefined) ??
+          allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
           return await spawnWorker({
@@ -2638,6 +2664,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           });
         }
         console.error(JSON.stringify({ event: "worker.provider.subscription_only_hold", requested_model: args.model, reason: refusal }));
+        error.message += `; ${refusal}`;
       } else if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
         // The surface the DIVERTED spawn would actually run, which is what eligibility must be
         // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
@@ -2646,6 +2673,18 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const refusal = cashFallbackRefusal(config, divertTools);
         // W1-T4785: a squeezed BALANCED task tries Foundry Sonnet 5.5 first; Luna stays the fallback.
         const sonnetEnv = args.env ?? process.env;
+        if (refusal === undefined) {
+          const models = plainCashModels();
+          if (requestedCapability === "balanced" && sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV])
+            models.push("claude-sonnet-5-5", "gpt-6.1-sol");
+          const held = allowanceRefusal([...new Set(models)]);
+          if (held !== undefined) {
+            console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
+            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+            error.message += `; ${held}`;
+            throw error;
+          }
+        }
         if (refusal === undefined && requestedCapability === "balanced" &&
             sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV]) {
           console.error(JSON.stringify({

@@ -16020,6 +16020,7 @@ export function alreadySatisfiedVerdict(
  *  the Anthropic-side api-error flag. Feeds W1-T7's {@link classifyFailure}. */
 function workerSignal(r: WorkerResult): FailureSignal {
   return {
+    cashAllowanceResetAt: r.cashAllowanceResetAt,
     subtype: r.subtype,
     text: [workerTranscript(r), r.stderr].join("\n"),
     apiError: r.apiError,
@@ -16106,7 +16107,8 @@ export function finishTransientRetry(
     cost_usd: costUsd,
     billing_mode: billingMode(worker.childEnvKeys),
     account_label: worker.accountLabel,
-    reason: `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
+    reason: driverResult.cashAllowanceExhausted ? driverResult.reason
+      : `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
     ...terminalVerdictFields(worker),
   });
   say(`verdict: blocked_transient — ${driverResult.reason}`);
