@@ -13,7 +13,9 @@ test('platform metadata uses actual entry identity and preserves concurrent line
   const entry=join(root,'entry.test.mjs'),imported=join(root,'imported.mjs');
   writeFileSync(imported,'import {test} from "node:test";test("imported definition",()=>{});');
   writeFileSync(entry,'import {test} from "node:test";import "./imported.mjs";test("parent",{concurrency:true},async t=>{await Promise.all([t.test("same",async()=>{await new Promise(r=>setTimeout(r,10))}),t.test("same",()=>{})])});test("platform skip",{skip:process.platform!=="darwin"},()=>{});');
-  const out=execFileSync(process.execPath,['--test','--test-concurrency=1','--test-reporter',reporter,entry],{cwd:root,env:{PATH:process.env.PATH},encoding:'utf8',timeout:15000,maxBuffer:1<<20});
+  // Forward generated coverage attribution only; never a preload or ambient credentials.
+  const env={PATH:process.env.PATH,...(process.env.NODE_V8_COVERAGE?{NODE_V8_COVERAGE:process.env.NODE_V8_COVERAGE}:{})};
+  const out=execFileSync(process.execPath,['--test','--test-concurrency=1','--test-reporter',reporter,entry],{cwd:root,env,encoding:'utf8',timeout:15000,maxBuffer:1<<20});
   const rows=out.trim().split('\n').map(x=>JSON.parse(x)),producer=rows[0],terminals=rows.filter(x=>x.event==='test:complete'),summaries=rows.filter(x=>x.event==='test:summary');
   assert.equal(producer.runtime.node,process.version);assert.equal(producer.runtime.platform,process.platform);assert.match(producer.runtime.executableSha256,/^[a-f0-9]{64}$/);assert.match(producer.reporterSha256,/^[a-f0-9]{64}$/);
   const parent=terminals.find(x=>x.data.name==='parent')!,siblings=terminals.filter(x=>x.data.name==='same'),definition=terminals.find(x=>x.data.name==='imported definition')!;
