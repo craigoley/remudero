@@ -1013,7 +1013,8 @@ import {
   type PlanCoherenceShardListing,
   probeGithubThrottle,
   probeGithubThrottleAsync,
-  recordFollowupHarvest,
+  publishFollowupHarvestAsync,
+  withRetroPublicationCancellation,
   renderGather,
   renderNetStateUnwiredAdvisories,
   renderPlanHealth,
@@ -1027,7 +1028,6 @@ import {
   type RetroLedgerRead,
   escalateRetroPublicationFailure,
   retireSettledFollowups,
-  routeFollowupsToRegistry,
   type FollowupReferentRead,
   runlessMergesSince,
   saveMarker,
@@ -34092,20 +34092,13 @@ async function retroCommand(
     }
   }
 
-  // W1-T105: harvest marks are a REAL-RUN-ONLY side effect — mineFollowups (inside
-  // buildGather, above) is pure, so the --dry-run branch above never wrote anything.
-  // This is the ONE place a followup candidate/dedup gets ledger-marked so a later
-  // retro's mineFollowups pass over the now-updated ledger mints neither again.
-  recordFollowupHarvest(gather.followups, { ledgerPath });
-  // W1-T2458: THE MISSING CONSUMER. Before this, `gather.followups` fed only
-  // `renderFollowupCandidates` (a markdown section this retro's own report prints, that no rung
-  // ever read back) — the ledger marks above stopped a candidate being re-minted, but nothing
-  // ever routed one anywhere an operator/inbox could act on it. This is the ONE real-run call
-  // site: every routable candidate this pass mined is filed through the SAME single writer
-  // (`updateProposalRegistry`) board-review.ts/rule-efficacy.ts/feedback-docket.ts already use,
-  // right alongside the ledger marks above (same real-run-only gate, same non-dry-run guard).
+  // W1-T9240: the real attempt owns cancellation; waiting yields to a live async holder.
+  // Publication precedes harvest acknowledgements and remains below the dry-run/integrity guards.
   const followupRegistryPath = join(config.root, "state", "inbox-proposals.json");
-  routeFollowupsToRegistry(gather.followups, { registryPath: followupRegistryPath });
+  await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(gather.followups,
+    { registryPath: followupRegistryPath, ledgerPath }, { signal,
+      log: (step, detail) => appendLedger(ledgerPath, { run_id: `RETRO-${retroReadStartedMs}`, task_id: "RETRO", step, ...detail }),
+    }));
 
   // W1-T2559: retro ships no code and supervises no worker, so G-17's Tier Invariant — which
   // exists to keep a supervisor strictly above what it reviews — does not bind it to plan

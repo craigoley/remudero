@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { hostname } from "node:os";
+import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { loadProposalRegistry, ProposalRegistryBusyError, pruneOrphanedDraftsAsync,
   updateProposalRegistry, updateProposalRegistryAsync, type Proposal } from "#src/lib/inbox.js";
+import { mineFollowups, parseLedger, publishFollowupHarvestAsync, withRetroPublicationCancellation } from "#src/lib/retro.js";
 
 const proposal = (id: string): Proposal => ({ id, summary: id, evidenceAnchors: [] });
 
@@ -155,4 +157,43 @@ test("W1-T9240: malformed hold evidence is explicit and measurement failure does
   assert.equal(loadProposalRegistry(f.path)[0]?.id, "saved");
   assert.equal(fs.existsSync(`${f.path}.lock`), false);
   assert.ok(rows.some(r => typeof r.reason === "string"));
+});
+
+test("W1-T9240: canceled retro publication leaves harvest acknowledgements retryable", async t => {
+  const f = planted(t);
+  const ledgerPath = join(f.path, "..", "ledger.ndjson");
+  const records = [{ ts: new Date().toISOString(), step: "report.followups", run_id: "fixture-run", task_id: "fixture-task",
+    entries: [{ type: "task", text: "repair the notification retry contract" }] }];
+  const controller = new AbortController();
+  const publication = publishFollowupHarvestAsync(mineFollowups(records), { registryPath: f.path, ledgerPath }, {
+    signal: controller.signal, maxWaitMs: 500, log: step => {
+      if (step === "proposal_registry.lock_measurement_unavailable") controller.abort();
+    },
+  });
+  await assert.rejects(publication, e => e instanceof ProposalRegistryBusyError && e.outcome === "cancelled");
+  assert.equal(fs.existsSync(ledgerPath), false, "an unpublished source must never be acknowledged");
+  assert.equal(fs.readFileSync(`${f.path}.lock`, "utf8"), f.raw);
+  assert.equal(mineFollowups(records).candidates.length, 1);
+  fs.unlinkSync(`${f.path}.lock`);
+  const deps = { registryPath: f.path, ledgerPath };
+  // The real default owns/removes its process handlers on success; no process is signalled.
+  const before = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+  await withRetroPublicationCancellation(signal => publishFollowupHarvestAsync(mineFollowups(records), deps, { signal }));
+  assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], before);
+  assert.equal(loadProposalRegistry(f.path).length, 1);
+  const marks = parseLedger(fs.readFileSync(ledgerPath, "utf8"));
+  assert.equal(mineFollowups([...records, ...marks]).candidates.length, 0);
+  await publishFollowupHarvestAsync(mineFollowups(records), deps, { maxWaitMs: 1000 });
+  assert.equal(loadProposalRegistry(f.path).length, 1, "publication replay preserves the existing stable-id dedup");
+});
+
+test("W1-T9240: the publication lifetime cancels waiting work and disposes handlers on failure", async () => {
+  const signals = new EventEmitter();
+  await assert.rejects(withRetroPublicationCancellation(async signal => {
+    signals.emit("SIGTERM");
+    assert.equal(signal.aborted, true);
+    throw new Error("attempt terminated");
+  }, signals as NodeJS.Process), /attempt terminated/);
+  assert.equal(signals.listenerCount("SIGINT"), 0);
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
 });
