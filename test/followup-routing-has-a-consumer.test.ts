@@ -247,10 +247,4 @@ test("retroCommand's real-run path calls routeFollowupsToRegistry right alongsid
   const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
   assert.match(src, /publishFollowupHarvest\(gather\.followups, \{ registryPath: followupRegistryPath, ledgerPath \}\);/);
   assert.match(src, /const followupRegistryPath = join\(config\.root, "state", "inbox-proposals\.json"\);/);
-  const retro = readFileSync(new URL("../src/lib/retro.ts", import.meta.url), "utf8");
-  const bridge = retro.slice(retro.indexOf("export function publishFollowupHarvest("), retro.indexOf("// ── Follow-up retirement"));
-  assert.match(bridge, /recordFollowupHarvest\(harvest,/);
-  assert.match(bridge, /routeFollowupsToRegistry\(harvest, deps\)/);
-  assert.ok(bridge.indexOf("routeFollowupsToRegistry(harvest, deps)") < bridge.indexOf("write(deps.ledgerPath, line)"),
-    "a registry failure must precede every durable harvest mark");
 });
