@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { Clock } from "../src/lib/clock.js";
-import { persistedInboxPath, fleetLaneStorePath } from "../src/lib/fleet-lane.js";
-import { inboxLegacyView, refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { INBOX_STALE_AFTER_MS } from "../src/lib/nav-badge-view.js";
-import { readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { makeTempDir } from "../src/lib/tmp.js";
-import { fakeGitHub } from "./helpers/fake-github.js";
+import type { Clock } from "#src/lib/clock.js";
+import { persistedInboxPath, fleetLaneStorePath } from "#src/lib/fleet-lane.js";
+import { inboxLegacyView, refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { INBOX_STALE_AFTER_MS } from "#src/lib/nav-badge-view.js";
+import { readSlowLaneInbox, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { makeTempDir } from "#src/lib/tmp.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 async function world(t: TestContext, count = 180) {
   const root = makeTempDir("inbox-shadow-pages");
