@@ -428,6 +428,12 @@ export function readReadModelTransactions(path: string | undefined, opts: { proc
     if (!path || path === ":memory:") throw new Error("no persistent database inventory");
     const inspect = opts.processIdentity ?? inspectReadModelProcess;
     const own = inspect(process.pid);
+    // The publisher thread runs concurrently with this scan: a record it finishes publishing mid-scan can be
+    // missed by the directory walk yet look settled afterwards. Entries pending at scan start stay unknown.
+    const pendingAtStart = new Set<string>();
+    for (const entry of transactionWriter?.entries.values() ?? []) {
+      if (Atomics.load(entry.control, 0) !== Atomics.load(entry.control, 3) || Atomics.load(entry.control, 4)) pendingAtStart.add(entry.id);
+    }
     dir = opendirSync(readModelTransactionDir(path));
     for (;;) {
       const entry = dir.readSync();
@@ -456,7 +462,7 @@ export function readReadModelTransactions(path: string | undefined, opts: { proc
     for (const entry of transactionWriter?.entries.values() ?? []) {
       if (dirname(entry.file) !== readModelTransactionDir(path)) continue;
       const pending = Atomics.load(entry.control, 0) !== Atomics.load(entry.control, 3);
-      if (!pending && !Atomics.load(entry.control, 4)) continue;
+      if (!pending && !Atomics.load(entry.control, 4) && !pendingAtStart.has(entry.id)) continue;
       result.complete = false; result.unknownRecords++;
       if (entry.current) {
         const record = { ...entry.current, identity: entry.current.identity ?? (own.status === "identified" ? own.identity : undefined) };
