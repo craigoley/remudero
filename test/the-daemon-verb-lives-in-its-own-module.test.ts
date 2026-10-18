@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { REPO_ROOT } from "./helpers/repo-root.js";
 
 // @source-text-subject: the claim under test IS where a declaration lives and what a module imports, which no
 // behaviour of the verb exposes. The verb's behaviour is held by its existing tests, which run untouched.
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const runTaskSrc = readFileSync(join(root, "src", "run-task.ts"), "utf8");
-const daemonSrc = readFileSync(join(root, "src", "cli", "commands", "daemon.ts"), "utf8");
+const runTaskSrc = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+const daemonSrc = readFileSync(join(REPO_ROOT, "src", "cli", "commands", "daemon.ts"), "utf8");
 
 /** The text of the top-level function starting at `header`, up to its closing brace in column 0. */
 function topLevelFunction(source: string, header: string): string {
