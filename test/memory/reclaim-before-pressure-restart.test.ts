@@ -117,6 +117,7 @@ test("an incomplete or changed-budget recheck never averts a pressure restart", 
     assert.equal(reclaimBeforeMemoryRestart(f.due, f.governor, f.log, f.reclaimer(() => f.set(incomplete))), f.due);
     assert.equal(f.rows[0].fields.recheck, "unavailable");
     assert.equal(f.rows[0].fields.relieved, false);
+    assert.equal(f.governor.inForcePercent!(), 10, "a rejected reading must not relax the original tightest GC factor");
   }
 });
 

@@ -285,7 +285,7 @@ export interface MemoryGovernorStep extends MemoryPressureDecision {
 }
 
 export interface DaemonMemoryGovernor {
-  step(): MemoryGovernorStep;
+  step(readingIsUsable?: (reading: DaemonMemoryReading) => boolean): MemoryGovernorStep;
   /** The growth percent last applied (W1-T8401: a reclaim restores it after its tightest-factor collection). */
   inForcePercent?(): number;
 }
@@ -311,8 +311,9 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
   let heldBudget: number | undefined;
   let heldSource: DaemonMemoryReading["budget_source"];
   return {
-    step() {
+    step(readingIsUsable) {
       const reading = read();
+      if (readingIsUsable && !readingIsUsable(reading)) throw new Error("post-reclaim charge or unchanged budget is unreadable; retain the restart");
       const decision = decideMemoryPressure(reading, policy, inForce);
       const charged = reading.rss_bytes + (reading.swap_bytes ?? 0);
       const initialReading = baseline === undefined;
@@ -892,6 +893,10 @@ export function reclaimBeforeMemoryRestart(
   let outcome = "unavailable";
   let recheck = "not-run";
   let reason: string | undefined;
+  const completeReading = (read: DaemonMemoryReading): boolean => Number.isFinite(read.rss_bytes) && read.rss_bytes > 0 &&
+    typeof read.budget_bytes === "number" && Number.isFinite(read.budget_bytes) && read.budget_bytes > 0 &&
+    read.budget_bytes === step.reading.budget_bytes && read.budget_source === step.reading.budget_source &&
+    typeof read.swap_bytes === "number" && Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0;
   try {
     if (reclaimer === undefined) reason = "no daemon slack reclaimer installed";
     else {
@@ -900,13 +905,8 @@ export function reclaimBeforeMemoryRestart(
       reason = record.reason;
       if (record.outcome === "reclaimed") {
         recheck = "unavailable";
-        const fresh = governor.step();
-        const read = fresh.reading;
-        const complete = Number.isFinite(read.rss_bytes) && read.rss_bytes > 0 &&
-          typeof read.budget_bytes === "number" && read.budget_bytes > 0 &&
-          Number.isFinite(fresh.share) && read.budget_bytes === step.reading.budget_bytes &&
-          read.budget_source === step.reading.budget_source &&
-          typeof read.swap_bytes === "number" && Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0;
+        const fresh = governor.step(completeReading);
+        const complete = completeReading(fresh.reading) && Number.isFinite(fresh.share);
         recheck = complete ? "measured" : "unavailable";
         if (complete) next = { ...fresh, previousTier: step.previousTier, changed: step.changed || fresh.changed };
         else reason = "post-reclaim charge or unchanged budget is unreadable; retain the restart";
