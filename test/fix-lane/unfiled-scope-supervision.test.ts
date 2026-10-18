@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildFixProgressInput } from "../../src/lib/fix-progress-judge.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../../src/lib/sweep.js";
+import { buildFixProgressInput } from "#src/lib/fix-progress-judge.js";
+import { DEFAULT_SWEEP_POLICY, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 
 const PR = 12703;
 const HEAD = "8da9f6470e2c9195afb101f123696e3fad7d5f6d";
