@@ -250,11 +250,11 @@ test("W1-T2800: HOME is required on the Codex spawn path — there is no process
 
 test("W1-T2800: the Claude spawn contract is unchanged, and Codex home cleanup wraps every local failure", () => {
   const source = readFileSync(join(process.cwd(), "src/lib/worker.ts"), "utf8");
-  const executionPrompt = source.indexOf("const executionPrompt = withWorkspaceCleanup(args.prompt);");
+  const executionPrompt = source.indexOf("execution.prompt = withWorkspaceCleanup(execution.prompt);");
   const childEnv = source.indexOf("const childEnv = buildWorkerEnv(args.env ?? {}, process.env");
   const markers = source.indexOf("Object.assign(childEnv, workerMarkerEnv(args.runId, args.taskId, workerInstallationScope(config.root)))");
   const options = source.indexOf("const options: Options = {");
-  const query = source.indexOf("const liveQuery = runQuery({ prompt: executionPrompt, options });");
+  const query = source.indexOf("const liveQuery = runQuery({ prompt: execution.prompt, options });");
   const collect = source.indexOf("collectWorkerResult(liveQuery, {", query);
   assert.ok(childEnv > 0, "Claude must still build its child env through buildWorkerEnv");
   assert.ok(executionPrompt > 0 && childEnv > executionPrompt, "cleanup augments only the execution prompt before the Claude environment is built");
@@ -263,7 +263,7 @@ test("W1-T2800: the Claude spawn contract is unchanged, and Codex home cleanup w
   assert.ok(query > options, "Claude sends its cleanup-enriched execution prompt and unchanged options to the SDK query");
   assert.ok(collect > query, "the SDK result collector consumes that same live query");
 
-  const optionsBlock = source.slice(options, source.indexOf("if (args.resumeSessionId)", options));
+  const optionsBlock = source.slice(options, source.indexOf("if (execution.resumeSessionId)", options));
   assert.match(optionsBlock, /cwd: args\.cwd/);
   assert.match(optionsBlock, /permissionMode: args\.permissionMode/);
   assert.match(optionsBlock, /pathToClaudeCodeExecutable: claudeBin/);
