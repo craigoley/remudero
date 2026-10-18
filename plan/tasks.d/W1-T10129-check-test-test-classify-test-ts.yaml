@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.14
   status: queued
@@ -50,3 +50,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.7
+    reasons:
+      - "The declared files are src/lib/classify.ts and a new test file (test/check-test-test-classify-test-ts.test.ts). Nothing in the description or files list touches secrets, credentials, auth, permissions, deploy, merge or review policy, or deletes data."
+      - "The remedy targets a recurring test failure in CI. The described failing tests concern mutation-trigger and stryker config coverage, which is ordinary test-maintenance work, and the change still goes through CI and review."
+      - "The ci-friction family has a mixed track record (28 merged, 40 declined, Beta mean 0.64), and the rounds appear to span several distinct failure causes. This is a mild concern about whether the fix will work, not a danger signal, so I don't treat it as grounds for HIGH."
+      - "No operator-only decision is requested. The acceptance criterion is a grep for a test name in a new file, which is verifiable."
+    judged_at: "2026-10-18T08:54:31.131Z"
+    pin: "4bfdaa9b1a8707012b0766e8e23cef9a9681529a36e6154519dedb5d27e99ac3"

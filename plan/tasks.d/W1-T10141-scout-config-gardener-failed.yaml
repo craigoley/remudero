@@ -1,0 +1,22 @@
+- id: W1-T10141
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — config.gardener_failed landed 198 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:config.gardener_failed"
+  files:
+    - test/scout-config-gardener-failed.test.ts
+  acceptance:
+    - claim: "config.gardener_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10141: config.gardener_failed no longer recurs\" in test/scout-config-gardener-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step config.gardener_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 56 in the older half, 142 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.

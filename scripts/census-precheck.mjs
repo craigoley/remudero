@@ -744,6 +744,37 @@ function addsLiteral({ changed, readHead, readBase }, pattern, group) {
 }
 
 const IMPORT_SPECIFIER_RE = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*(["'])([^"'\r\n]+)\1/g;
+const BAKED_CATALOG_PATHS = ["deploy/install-host-units.sh", "src/lib/baked-runtime-inputs.ts", ".github/workflows/acr-build.yml"];
+
+/** Both sides matter: removing an import or detaching a module also moves the catalogued closure. */
+function closureImportTrigger(seed) {
+  return ({ changed, readHead, readBase }) => {
+    if (changed.some((p) => p === seed || BAKED_CATALOG_PATHS.includes(p))) return true;
+    if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+    const specifiers = (text) => new Set([...String(text ?? "").matchAll(IMPORT_SPECIFIER_RE)].map((m) => m[2]));
+    const importChanges = changed.filter((path) => {
+      const head = specifiers(readHead(path));
+      const base = specifiers(readBase(path));
+      return head.size !== base.size || [...head].some((spec) => !base.has(spec));
+    });
+    if (importChanges.length === 0) return false;
+    const closure = (read) => {
+      const seen = new Set();
+      const queue = [seed];
+      while (queue.length > 0) {
+        const path = queue.pop();
+        if (seen.has(path)) continue;
+        seen.add(path);
+        for (const spec of specifiers(read(path))) {
+          if (spec.startsWith(".")) queue.push(posix.normalize(posix.join(posix.dirname(path), spec)).replace(/\.js$/, ".ts"));
+        }
+      }
+      return seen;
+    };
+    const reachable = new Set([...closure(readHead), ...closure(readBase)]);
+    return importChanges.some((path) => reachable.has(path));
+  };
+}
 const IMPORT_SCOPE_RE = /^(?:src|scripts)\/.+\.(?:[cm]?[jt]sx?)$/;
 const LIB_SCOPE_RE = /^src\/lib\/.+\.[cm]?[jt]sx?$/;
 /** What `src/lib` may never import (.dependency-cruiser.cjs): the CLI layer, the spike and the task runner. */
@@ -964,6 +995,15 @@ export const PRECHECK_TRIGGERED_SUITES = [
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
+  ...[
+    { testFile: "test/baked-supervisor-inputs.test.ts", seed: "src/lib/serve-supervisor-main.ts",
+      remedy: "catalog each module the closure gains or loses in BAKED_RUNTIME_SOURCE_PATHS (src/lib/baked-runtime-inputs.ts) and in .github/workflows/acr-build.yml's on.push.paths and drift loop" },
+    { testFile: "test/a-busy-primary-reaches-its-image-recycle.test.ts", seed: "src/lib/deployer.ts",
+      remedy: "catalog each module the closure gains or loses in DEPLOY_LOGIC_PATHS (deploy/install-host-units.sh)" },
+    { testFile: "test/acr-build-trigger.test.ts", seed: "src/lib/serve-supervisor-main.ts",
+      remedy: "update .github/workflows/acr-build.yml's on.push.paths and drift loop against BAKED_RUNTIME_SOURCE_PATHS (src/lib/baked-runtime-inputs.ts)" },
+  ].map(({ seed, ...row }) => ({ ...row, trigger: (input) =>
+    input.changed.includes(row.testFile) || closureImportTrigger(seed)(input) })),
   // W1-T9872: these test/ censuses now join listRuleSuites through their recursive Git enumeration.
   // Read both sides: removing a package scope or sweep lock can break a census without adding a token.
   { testFile: "test/architecture-fitness.test.ts", structural: true,
@@ -1080,6 +1120,7 @@ export const PRECHECK_PARITY = {
   "test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts": { modeled: scriptRatchetViolations },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  "test/a-suite-that-walks-an-import-closure-joins-its-diffs.test.ts": { modeled: evaluateAdmittedCensusSuites },
   "test/census-reader-runtime-calibration.test.ts": { modeled: runCensusSuitesViaChild },
   "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.

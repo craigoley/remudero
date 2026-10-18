@@ -250,7 +250,8 @@ test("a child is detached only after in-process fallback lanes drain", async () 
   assert.equal(lanes.inFlight, 0);
 });
 
-test("adoption rejects dead generations through the daemon's crash classification", async () => {
+test("adoption rejects dead generations as an outside kill that ends only its lane", async () => {
+  // W1-T10001: a generation gone with its container took the child, not the pass; the daemon goes on instead of ending in error.
   const f = fixture();
   try {
     f.add("A", { identity: { ...childIdentity(process.pid)!, containerGeneration: { containerId: "old", initStart: "old" } } });
@@ -258,12 +259,15 @@ test("adoption rejects dead generations through the daemon's crash classificatio
     writeFileSync(path, "- id: A\n  title: a\n  repo: remudero\n  type: implement\n  verify: auto\n  depends_on: []\n  status: queued\n");
     const outcome = await runDaemon(loadPlan(path), {
       adoptRunChildren: f.adopt, refreshMerged: () => () => false, log: f.log,
+      checkStop: () => (f.rows.some((r) => r.step === "run_child.settled") ? "STOP requested: test over" : undefined),
       sleep: async () => {}, runOne: async () => { throw new Error("must not dispatch"); },
     }, { laneCount: 1, pollIntervalMs: 5 });
-    assert.equal(outcome.stopReason, "error");
-    assert.match(outcome.stopDetail!, /run child A lost: status names container old/);
+    assert.notEqual(outcome.stopReason, "error");
     assert.equal(f.rows.filter((r) => r.step === "run_child.lost").length, 1);
-    assert.equal(f.rows.find((r) => r.step === "run_child.settled")!.outcome, "rejected");
+    const settled = f.rows.find((r) => r.step === "run_child.settled")!;
+    assert.equal(settled.outcome, "rejected");
+    assert.match(String(settled.reason), /run child A lost: status names container old/);
+    assert.equal(settled.loss, "container_stop");
     assert.deepEqual(f.adopt(), []);
   } finally { f.cleanup(); }
 });

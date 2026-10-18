@@ -75,7 +75,8 @@ test("the daemon footprint persists its samples and a restarted daemon reloads t
 
     // The restart: a new process, a new pid, the same state directory.
     const restarted = createDaemonFootprint(path);
-    assert.deepEqual(restarted.samples(), FOOTPRINT.slice(0, 6), "the previous process's samples survive the restart");
+    // W1-T9982: each sample now also names its generation; the readings themselves are what must survive.
+    assert.deepEqual(restarted.samples().map(({ boot: _boot, ...reading }) => reading), FOOTPRINT.slice(0, 6), "the previous process's samples survive the restart");
     for (const s of FOOTPRINT.slice(6)) restarted.record(s);
     assert.equal(restarted.samples().length, 12);
     const onDisk = parseDaemonFootprint(readFileSync(path, "utf8"));
