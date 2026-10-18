@@ -42,10 +42,22 @@ function planted(t: TestContext) {
 
 test("W1-T9240: a same-process registry holder can release while its contender waits", async t => {
   const f = await heldPrune(t);
-  const contender = updateProposalRegistryAsync(f.path, current => [...current, proposal("landed")], { maxWaitMs: 1000 });
-  const release = setTimeout(f.release, 0);
-  t.after(() => clearTimeout(release));
+  fs.writeFileSync(`${f.path}.lock-hold.json`, JSON.stringify({ held_ms: 0 }));
+  let release: ReturnType<typeof setTimeout> | undefined;
+  let observedContention = false;
+  const contender = updateProposalRegistryAsync(f.path, current => [...current, proposal("landed")], {
+    maxWaitMs: 1000, log: step => {
+      if (step === "proposal_registry.lock_wait_long" && !observedContention) {
+        observedContention = true;
+        release = setTimeout(f.release, 0);
+      }
+    },
+  });
+  // An independent release closes the real holder even when a mutant refuses before scheduling it.
+  const watchdog = setTimeout(f.release, 1500);
+  t.after(() => { clearTimeout(release); clearTimeout(watchdog); });
   const [holder, update] = await Promise.allSettled([f.holder, contender]);
+  assert.equal(observedContention, true, "the contender actually encountered the held lock before release");
   assert.equal(holder.status, "fulfilled");
   assert.equal(update.status, "fulfilled", "a ready holder must progress before the contender's deadline");
   if (holder.status === "fulfilled") assert.equal(holder.value?.count, 1);
