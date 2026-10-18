@@ -12,7 +12,9 @@
   files:
     - src/lib/repository-flow.ts
     - test/deploy/repository-flow-consumer-trailer-credit.test.ts
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=df30fde24ce5f522
   attempts: 0
   rationale: |
     Re-read in the triage checkout on 2026-10-18: captureRepositoryFlow still discovers

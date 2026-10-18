@@ -2178,6 +2178,11 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
   try {
     if (child.startCheck) startCheckSync(child, cwd);
     return spawnPreparedProofSync(child, cwd, timeoutMs);
+  } catch (error) {
+    // Piped stderr also rides execFileSync's message. Keep that public diagnostic bounded/redacted;
+    // retain the original stdout/stderr fields for the existing classifier and failure-tail formatter.
+    if (error instanceof Error) error.message = proofFailureTail(error.message);
+    throw error;
   } finally {
     child.cleanup();
   }
@@ -2187,7 +2192,7 @@ function spawnPreparedProofSync(child: PreparedProofChild, cwd: string, timeoutM
   return execFileSync(child.file, child.args, {
     cwd,
     env: { ...child.env, NODE_V8_COVERAGE: undefined },
-    stdio: ["ignore", "pipe", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
     timeout: timeoutMs,
     // W1-T3266: SIGKILL, NOT THE SIGTERM DEFAULT, AND THE DIFFERENCE IS A SIX-HOUR OUTAGE. The
     // `timeout` above only ASKS a child to die; one inside a synchronous cpu loop never turns its

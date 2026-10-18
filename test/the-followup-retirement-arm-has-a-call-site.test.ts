@@ -54,8 +54,12 @@ test("the retirement arm HAS a production call site — the defect was that it h
   );
   // And it must run beside its producer, against the SAME registry path — a retirement pointed at a
   // different file would silently retire nothing forever, which is the defect wearing a fix's coat.
-  assert.match(runTaskSrc, /routeFollowupsToRegistry\(gather\.followups, \{ registryPath: followupRegistryPath \}\)/);
-  const producerAt = runTaskSrc.indexOf("routeFollowupsToRegistry(gather.followups");
+  // The producer is now reached through `publishFollowupHarvest`, which routes then acknowledges.
+  assert.match(
+    runTaskSrc,
+    /publishFollowupHarvest\(gather\.followups, \{ registryPath: followupRegistryPath, ledgerPath \}\)/,
+  );
+  const producerAt = runTaskSrc.indexOf("publishFollowupHarvest(gather.followups");
   const retireAt = runTaskSrc.indexOf("retireSettledFollowups(followupReferentRead");
   assert.ok(producerAt > 0 && retireAt > producerAt, "retirement must run AFTER this pass routes its own candidates");
 });
