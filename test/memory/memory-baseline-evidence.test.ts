@@ -1,4 +1,5 @@
 // The measured Console exits need their actual baseline, not an inferred cold-start reading.
+// @not-a-rule-suite: a behavioural test of the memory governor's decision baseline; it walks no population.
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
