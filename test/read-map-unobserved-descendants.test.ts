@@ -6,8 +6,8 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
 import {promisify} from 'node:util';
-import {buildReadMap,readMapProblem,selectAffectedSuites} from '../src/lib/affected-suites.js';
-import {installReadMap,installReadMapFromEnv} from './setup/read-map.js';
+import {buildReadMap,readMapProblem,selectAffectedSuites} from '#src/lib/affected-suites.js';
+import {installReadMap,installReadMapFromEnv} from '#test/setup/read-map.js';
 
 const suite='test/descendant-fixture.test.ts';
 const fixture=()=>{const root=mkdtempSync(join(tmpdir(),'rmd-read-child-'));writeFileSync(join(root,'child-only.json'),'owned child bytes');return root;};
