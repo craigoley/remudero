@@ -15893,8 +15893,10 @@ export function headLacksOwnTaskRecord(atHead: TaskRecordRead, atMain: TaskRecor
 export function ownTaskRecordMissingRow(
   lines: readonly Record<string, unknown>[], pr: Pick<OpenPrView, "prUrl" | "headSha">,
 ): Record<string, unknown> | undefined {
+  // The provenance row is written before the skip and says nothing about the verdict: it never supersedes the cause.
+  const ignoredStep = "review.provider_provenance";
   const latest = lines.findLast((row) => typeof row.step === "string" && row.step.startsWith("review.") &&
-    row.pr_url === pr.prUrl && row.head_sha === pr.headSha && row.step !== "review.provider_provenance");
+    row.pr_url === pr.prUrl && row.head_sha === pr.headSha && row.step !== ignoredStep);
   return latest?.step === "review.reviewer.skipped" && latest.reason === OWN_TASK_RECORD_MISSING_CAUSE ? latest : undefined;
 }
 
