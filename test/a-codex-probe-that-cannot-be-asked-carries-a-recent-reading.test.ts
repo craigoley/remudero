@@ -99,7 +99,7 @@ test("W1-T10037: a reading stored by one process is carried by another",async t=
   assert.doesNotMatch(stored,/access_token|refresh_token|Authorization/);
   clearCodexCapacityCache();f.fail();
   const script = `import{EventEmitter}from"node:events";import{PassThrough}from"node:stream";
-    import{readCodexCapacity}from"./src/lib/worker-provider.ts";
+    import{readCodexCapacity}from"#src/lib/worker-provider.js";
     const spawn=()=>Object.assign(new EventEmitter(),{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>true});
     const read=await readCodexCapacity(${JSON.stringify(f.cfg)},{spawn,now:()=>${f.state.now},timeoutMs:10,requestedModel:"sonnet",requestedEffort:"medium"});
     console.log(JSON.stringify({readable:read.readable,carriedForward:read.carriedForward}));`;
