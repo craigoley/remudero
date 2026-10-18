@@ -930,4 +930,3 @@ export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: S
   await scopeWorkFiles(input, entries, true, io);
   return entries.map((entry) => entry.path);
 }
-

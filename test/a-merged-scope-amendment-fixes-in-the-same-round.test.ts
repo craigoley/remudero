@@ -462,4 +462,3 @@ test("a merged identity without its widened contract falls back without running 
   assert.match(String(row?.reason), /locally merged task contract does not admit/);
   assert.equal(f.repo.git("status", "--porcelain"), "");
 });
-
