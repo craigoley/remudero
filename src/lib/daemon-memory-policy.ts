@@ -880,6 +880,50 @@ export function installedDaemonSlackReclaimer(): DaemonSlackReclaimer | undefine
   return installedReclaimer;
 }
 
+/** Reclaim once before an otherwise-required cgroup restart; only a complete fresh reading can avert it. */
+export function reclaimBeforeMemoryRestart(
+  step: MemoryGovernorStep,
+  governor: DaemonMemoryGovernor,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  reclaimer: DaemonSlackReclaimer | undefined = installedDaemonSlackReclaimer(),
+): MemoryGovernorStep {
+  if (step.tier !== "restart") return step;
+  let next = step;
+  let outcome = "unavailable";
+  let recheck = "not-run";
+  let reason: string | undefined;
+  try {
+    if (reclaimer === undefined) reason = "no daemon slack reclaimer installed";
+    else {
+      const record = reclaimer.reclaim();
+      outcome = record.outcome;
+      reason = record.reason;
+      if (record.outcome === "reclaimed") {
+        recheck = "unavailable";
+        const fresh = governor.step();
+        const read = fresh.reading;
+        const complete = Number.isFinite(read.rss_bytes) && read.rss_bytes > 0 &&
+          Number.isFinite(fresh.share) && read.budget_bytes === step.reading.budget_bytes &&
+          read.budget_source === step.reading.budget_source &&
+          (step.reading.swap_bytes === undefined || read.swap_bytes !== undefined) &&
+          (read.swap_bytes === undefined || (Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0));
+        recheck = complete ? "measured" : "unavailable";
+        if (complete) next = fresh;
+        else reason = "post-reclaim charge or unchanged budget is unreadable; retain the restart";
+      }
+    }
+  } catch (error) {
+    outcome = "unavailable";
+    reason = String((error as Error)?.message ?? error).slice(0, 200);
+  }
+  log("daemon.memory_restart_reclaim", {
+    outcome, recheck, reason, prior_share: step.share, share: next.share,
+    budget_bytes: step.reading.budget_bytes, budget_source: step.reading.budget_source,
+    relieved: next.tier !== "restart",
+  });
+  return next;
+}
+
 /** The reclaim's fields on a hold row (`dispatch_deferred_wip`, `dispatch_memory_observed`, `sweep.fix_capacity`). */
 export function reclaimLedgerFields(record: SlackReclaimRecord | undefined): Record<string, unknown> {
   if (record === undefined) return {};
