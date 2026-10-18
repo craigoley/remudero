@@ -131,6 +131,11 @@ async function spool(config) {
   }
   const native = await new Promise((resolve) => child.once('close', (status, signal) => resolve({ status, signal })));
   const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch (cause) { return cause.code !== 'ESRCH'; } };
+  // 'close' proves the leader and its stdio closed, not that disconnected descendants ended.
+  // This group was created by this capture; never reap a PID or group from an external receipt.
+  if (!spawnFailed && child.pid && process.platform !== 'win32' && !escalation && groupAlive()) {
+    stop('native leader closed with live descendants', 'ERR_AUTHOR_DESCENDANTS_ALIVE');
+  }
   // A leader that obeyed SIGTERM closes the pipes while members that ignored it live on: finish the escalation.
   while (escalation && child.pid && process.platform !== 'win32' && groupAlive() &&
     !(killedAt !== undefined && performance.now() - killedAt > 2000)) await new Promise((resolve) => setTimeout(resolve, 50));
