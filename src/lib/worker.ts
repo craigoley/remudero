@@ -1,7 +1,8 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
-  workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_STRICT, type WorkerMcpExposure, type WorkerMcpIsolation,
+  workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
+  type WorkerPluginInventory, type WorkerMcpExposure, type WorkerMcpIsolation,
   type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead, securityMetadataGhArgs } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
@@ -595,6 +596,7 @@ export function workerLedgerFields(r: WorkerResult): {
   mcp_boundary?: typeof WORKER_MCP_STRICT;
   mcp_exposure?: WorkerMcpExposure;
   sdk_init_summary: WorkerInitSummary;
+  plugin_inventory: WorkerPluginInventory;
   worker_exit?: WorkerExit["kind"];
   worker_exit_signal?: string;
   worker_exit_code?: number;
@@ -652,6 +654,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
     ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),
     sdk_init_summary: r.initSummary ?? unavailableWorkerInitSummary(r.provider !== undefined && r.provider !== "claude"),
+    plugin_inventory: workerPluginInventory(r.initSummary),
     ...(r.exit ? { worker_exit: r.exit.kind } : {}),
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
     ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
