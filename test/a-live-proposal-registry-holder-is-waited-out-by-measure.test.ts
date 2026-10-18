@@ -109,7 +109,7 @@ test("W1-T9240: long wait evidence does not authorize stealing a live lock", asy
   fs.writeFileSync(`${f.path}.lock-hold.json`, JSON.stringify({ held_ms: 0 }));
   const rows: string[] = [];
   await assert.rejects(updateProposalRegistryAsync(f.path, () => [], {
-    maxWaitMs: 70, pollIntervalMs: 5, log: step => rows.push(step),
+    maxWaitMs: 300, pollIntervalMs: 5, log: step => rows.push(step),
   }), ProposalRegistryBusyError);
   assert.equal(rows.filter(s => s === "proposal_registry.lock_wait_long").length, 1);
   assert.equal(fs.readFileSync(`${f.path}.lock`, "utf8"), f.raw);
@@ -146,10 +146,14 @@ test("W1-T9240: malformed hold evidence is explicit and measurement failure does
   const f = planted(t);
   fs.writeFileSync(`${f.path}.lock-hold.json`, "not-json");
   const rows: Array<Record<string, unknown>> = [];
+  const steps: string[] = [];
+  // A budget wide enough that a slow runner cannot expire it before the first contended poll is observed.
   await assert.rejects(updateProposalRegistryAsync(f.path, () => [], {
-    maxWaitMs: 40, log: (_step, detail) => rows.push(detail),
+    maxWaitMs: 300, pollIntervalMs: 10, log: (step, detail) => { steps.push(step); rows.push(detail); },
   }), ProposalRegistryBusyError);
-  assert.equal(rows[0]?.measurement, "unreadable");
+  const at = steps.indexOf("proposal_registry.lock_measurement_unavailable");
+  assert.notEqual(at, -1, "the unreadable hold evidence is reported as unavailable measurement");
+  assert.equal(rows[at]?.measurement, "unreadable");
   fs.unlinkSync(`${f.path}.lock`);
   fs.unlinkSync(`${f.path}.lock-hold.json`);
   fs.mkdirSync(`${f.path}.lock-hold.json`);
