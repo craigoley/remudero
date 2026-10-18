@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human  # the capture needs the live host under the builder rules (per-task /proc io and stat, fd readlink only); a fleet worker cannot take it
+  # the capture needs the live host under the builder rules (per-task /proc io and stat, fd readlink only); a fleet worker cannot take it
+  verify: human
   principles: {tdd: strict}
   budget_usd: 6.00
   risk: high  # Rule 19: one concern, a per-run measurement and an options memo; no daemon code, no ledger step and no change to ~/.codex
@@ -79,3 +80,11 @@
     OPERATOR DECISIONS named here: the io and fd sampling rates (rootio2 used 1 Hz and 40 Hz), capture length and
     count, the start-time match tolerance, which instances to sample (core only, or core, site and console), where
     output goes (/mnt/scratch by default), and whether the image's Codex docs are read via docker exec.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.98
+    reasons:
+      - "high-risk verdict at confidence 0.98 — on the change's description/files alone, no diff was read — The filed note explicitly names unresolved OPERATOR DECISIONS: sampling rates, capture length/count, matching tolerance, instance scope, output location, and whether to use docker exec. The supplied escalation rule requires HIGH when a task asks for operator-only decisions.; on the change's description/files alone, no diff was read — The declared scope is measurement and an options memo, with no changes to ~/.codex; the escalation basis is the explicitly reserved decisions, not an inferred implementation defect."
+    judged_at: "2026-10-17T23:55:13.260Z"
+    pin: "bb9a22ecb915a0ed78ad627b67d5652e5c544f51b7f6e1667f5896067cb2a725"
