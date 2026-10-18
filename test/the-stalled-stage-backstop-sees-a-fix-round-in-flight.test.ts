@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readLedgerLines } from "../src/lib/status.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // #12390 (2026-10-17): the sweep handed the conflict round to the fix lane at 00:55:58Z, the worker started at
 // 01:25:54Z after memory admission, and the 30-minute backstop opened needs-human #12490 at 01:28:49Z, while the
