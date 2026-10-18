@@ -1568,6 +1568,9 @@ import {
   postReviewCommentGuarded,
   postReviewPending,
   postReviewStatusGuarded,
+  readReviewStatusEntry,
+  reviewStatusEntryFromCombined,
+  refreshReviewPublisherToken as refreshInstallationToken,
   priorReviewVerdictFromLedger,
   reviewLedgerKeyFor,
   UNFILED_RUN_SENTINEL,
@@ -3300,10 +3303,7 @@ import {
   resolveGithubWebhookSecretFilePath,
   wireSweepWakeToDaemon,
 } from "./lib/github-event-wake.js";
-import {
-  refreshInstallationToken,
-  startInstallationTokenRefresh,
-} from "./lib/github-app.js";
+import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
@@ -23797,17 +23797,9 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       reviewerCodeFreshness: await publicationFreshness(),
       fetchLifecycle: () => fetchPrLifecycle(view.url),
-      fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
-        const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
-          statuses?: Array<{ context?: string; state?: string }>;
-        };
-        if (!raw || !Array.isArray(raw.statuses)) throw new Error("combined commit status has no statuses array");
-        const state = raw.statuses.find((entry) => entry.context === REVIEW_CONTEXT)?.state;
-        if (state === undefined) return undefined;
-        if (state === "success" || state === "pending") return state;
-        if (state === "failure" || state === "error") return "failure";
-        throw new Error(`unrecognized remudero-review state: ${state}`);
-      },
+      fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
+      fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
+      fetchPublisher: deps.fetchView,
     });
     if (restored.posted) {
       replayStatusAction = "restored";
@@ -23818,6 +23810,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         evaluator_provenance: verdict.evaluatorProvenance,
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
         status_recovered: true,
+        status_publisher: restored.publisherEvidence,
       });
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
@@ -23829,6 +23822,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         evaluator_provenance: verdict.evaluatorProvenance,
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
         status_confirmed: true,
+        status_publisher: restored.publisherEvidence,
       });
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
@@ -33793,6 +33787,7 @@ async function retroCommand(
   if (opts.automated) {
     const tokenRunId = `retro-token-${process.pid}`;
     const refresh = (opts.startTokenRefresh ?? startInstallationTokenRefresh)({
+      refresh: refreshInstallationToken,
       log: (step, extra) => appendLedger(ledgerPath, {
         run_id: tokenRunId,
         task_id: "RETRO",
@@ -39344,7 +39339,7 @@ export async function daemonCommand(
   // when `armed` (a plain-`GH_TOKEN` host with no `GH_APP_*` names has nothing to wait for) and
   // NEVER rejects (github-app.ts's own doc on `ready`), so this await can only delay the first
   // sweep by the mint's own latency — it can never hang the daemon or surface a throw here.
-  const githubAppRefresh = (deps.startGithubAppRefresh ?? startInstallationTokenRefresh)({ log });
+  const githubAppRefresh = (deps.startGithubAppRefresh ?? startInstallationTokenRefresh)({ log, refresh: refreshInstallationToken });
   if (githubAppRefresh.ready) {
     await githubAppRefresh.ready;
   }

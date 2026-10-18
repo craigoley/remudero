@@ -56,6 +56,7 @@ const digestInput = {
 
 test("a replay restores a final review displaced by pending, but never overwrites a conflicting final status", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-review-status-replay-"));
+  let restoreIdentity = (): void => {};
   try {
     const ledgerPath = join(dir, "ledger.ndjson");
     const digest = reviewDecisionDigest(digestInput);
@@ -65,11 +66,21 @@ test("a replay restores a final review displaced by pending, but never overwrite
     });
     let current: ReviewState | undefined = "pending";
     const posts: ReviewState[] = [];
+    // Explicit publisher provenance: an unpinned review context (null app_id) and a server-attributed creator,
+    // so the replay guard reads its evidence from the fixture instead of reaching for live GitHub.
+    const savedIdentity = process.env.REMUDERO_REVIEWER_LOGIN;
+    delete process.env.REMUDERO_REVIEWER_LOGIN;
+    restoreIdentity = () => {
+      if (savedIdentity === undefined) delete process.env.REMUDERO_REVIEWER_LOGIN;
+      else process.env.REMUDERO_REVIEWER_LOGIN = savedIdentity;
+    };
+    const fetchPublisher = async (): Promise<unknown> => ({ contexts: [], checks: [{ context: "remudero-review", app_id: null }] });
     const options = {
+      fetchPublisher,
       owner: "o", repo: "r", sha: HEAD, state: "success" as const, taskId: TASK,
       evidence: "executed" as const, ledgerPath, runId: "replay", prUrl: PR,
       reviewDecisionDigest: digest, fetchLifecycle: () => ({ merged: false, closed: false }),
-      fetchCurrentStatus: () => current,
+      fetchCurrentStatus: () => current === undefined ? undefined : { state: current, posterLogin: "remudero-reviewer", posterType: "User" },
       post: ({ state }: { state: ReviewState }) => { posts.push(state); current = state; },
     };
     const restored = await postReviewStatusGuarded(options);
@@ -96,6 +107,7 @@ test("a replay restores a final review displaced by pending, but never overwrite
     assert.match(unreadable.reason ?? "", /could not verify the live/);
     assert.equal(readLedgerLines(ledgerPath).filter((line) => line.step === "review.post_refused").length, 2);
   } finally {
+    restoreIdentity();
     rmSync(dir, { recursive: true, force: true });
   }
 });
