@@ -8,7 +8,7 @@ import { appendLedger } from "#src/lib/ledger.js";
 import * as review from "#src/lib/review.js";
 import { reviewCommand, reviewAttemptsForInput, type ReviewRunResult } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 
 const HEAD = "1234567890abcdef1234567890abcdef12345678";
 const PR = "https://github.com/acme/portal/pull/8";
