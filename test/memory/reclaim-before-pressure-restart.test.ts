@@ -58,6 +58,8 @@ test("pressure remaining after a reclaim still restarts without retrying the col
   const result = reclaimBeforeMemoryRestart(f.due, f.governor, f.log, f.reclaimer(() => {}));
   assert.equal(result.tier, "restart");
   assert.equal(result.share, 0.52);
+  assert.equal(result.changed, true, "the internal recheck must not erase the externally visible restart transition");
+  assert.equal(result.previousTier, "tighten");
   assert.equal(f.collections(), 1);
   assert.equal(f.rows[0].fields.relieved, false);
 });

@@ -908,7 +908,7 @@ export function reclaimBeforeMemoryRestart(
           (step.reading.swap_bytes === undefined || read.swap_bytes !== undefined) &&
           (read.swap_bytes === undefined || (Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0));
         recheck = complete ? "measured" : "unavailable";
-        if (complete) next = fresh;
+        if (complete) next = { ...fresh, previousTier: step.previousTier, changed: step.changed || fresh.changed };
         else reason = "post-reclaim charge or unchanged budget is unreadable; retain the restart";
       }
     }
