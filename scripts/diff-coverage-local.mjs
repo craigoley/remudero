@@ -193,6 +193,7 @@ runs, on the same inputs CI would produce.
   --dry-run      print the node invocation and diff base this would use; run nothing
   --keep-raw     retain the temporary raw V8 coverage directory and print its path
   --batch-size N run serial admitted batches, compacting closed raw output between batches
+  --disk-profile <path> batch disk reservations; cannot lower the existing coverage reserve
 `;
 
 // ── The real implementation behind each injectable seam, each its OWN export a test calls directly.
@@ -297,6 +298,7 @@ export function main(argv, deps = {}) {
       "dry-run": { type: "boolean", default: false },
       "keep-raw": { type: "boolean", default: false },
       "batch-size": { type: "string" },
+      "disk-profile": { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
