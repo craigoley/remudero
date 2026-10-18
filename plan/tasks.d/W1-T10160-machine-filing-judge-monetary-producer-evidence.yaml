@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: [W1-T9658]
   type: implement
-  verify: human
+  verify: auto
   author_class: machine
   principles: {tdd: strict}
   risk: high
@@ -116,3 +116,11 @@
     retries, providers, budgets, permissions, service settings or gates are authorized to change.
     This is operator approval, not a model verdict; the native release and pinned ruling remain
     separate workflow steps and must retain their actual receipts before publication.
+  risk_ruling:
+    verdict: "operator"
+    action: proceed
+    confidence: 1
+    reasons:
+      - "Released by the operator through native rmd approve W1-T10160 after direct approval of the exact existing-call telemetry scope: reported cost and billing mode, explicit unknown prices and deduplication; no added calls/retries/providers/budgets/permissions/services or relaxed review/CI gates."
+    judged_at: "2026-10-18T19:33:41.008Z"
+    pin: "0d5cff903d7295af97500b398a14929887c40ceb9d0c041f700775290c0cbf55"
