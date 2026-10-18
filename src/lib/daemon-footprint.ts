@@ -21,12 +21,15 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { writeAtomic } from "./fs-race-safe.js";
-import { HEAP_SAMPLE_RETAIN_MS } from "./daemon-memory-policy.js";
+import { systemClock } from "./clock.js";
 import { collectMemoryCalibration, kernelMemoryObservation } from "./host-memory-calibration.js";
 
 export const DAEMON_FOOTPRINT_FILE = "daemon-footprint.json";
 /** The window the budget reads (host-memory-shadow.ts's last hour). */
 export const FOOTPRINT_RETAIN_MS = 60 * 60_000;
+/** W1-T9982: how long a generation's boot-growth entry is kept: the window the heap-ceiling learning uses
+ *  (daemon-memory-policy.ts's HEAP_SAMPLE_RETAIN_MS, which imports this module, so a test pins the two equal). */
+export const BOOT_GROWTH_RETAIN_MS = 7 * 24 * 60 * 60_000;
 /** BACKSTOP on samples kept: a heartbeat a minute for an hour, twice over. */
 export const FOOTPRINT_MAX_SAMPLES = 120;
 
@@ -41,7 +44,7 @@ export interface FootprintSample {
 }
 
 /** W1-T9982: what one daemon generation's footprint did: where it began, its peak, and how long after boot it peaked.
- *  Kept for the window the heap-ceiling learning already uses ({@link HEAP_SAMPLE_RETAIN_MS}). */
+ *  Kept for the window the heap-ceiling learning already uses ({@link BOOT_GROWTH_RETAIN_MS}). */
 export interface BootGrowth {
   boot: number;
   first_bytes: number;
@@ -96,7 +99,7 @@ export function parseBootGrowth(text: string): BootGrowth[] | { unread: string }
  *  older than the heap-ceiling learning's window are dropped, the sample's own generation never. */
 export function noteBootGrowth(boots: readonly BootGrowth[], sample: FootprintSample): BootGrowth[] {
   const boot = sample.boot;
-  const kept = boots.filter((b) => b.boot === boot || sample.at - b.boot <= HEAP_SAMPLE_RETAIN_MS);
+  const kept = boots.filter((b) => b.boot === boot || sample.at - b.boot <= BOOT_GROWTH_RETAIN_MS);
   if (boot === undefined) return kept;
   const own = kept.find((b) => b.boot === boot);
   if (!own) return [...kept, { boot, first_bytes: sample.bytes, peak_bytes: sample.bytes, peak_uptime_ms: Math.max(0, sample.at - boot) }];
@@ -138,7 +141,7 @@ export interface DaemonFootprint {
 export function createDaemonFootprint(
   path: string, io: DaemonFootprintIo = realIo, opts: { boot?: number } = {},
 ): DaemonFootprint {
-  const boot = opts.boot ?? Date.now();
+  const boot = opts.boot ?? systemClock.now();
   let held: FootprintSample[] = [];
   let bootsHeld: BootGrowth[] = [];
   try {

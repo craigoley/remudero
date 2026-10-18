@@ -9,8 +9,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { HEAP_SAMPLE_RETAIN_MS } from "#src/lib/daemon-memory-policy.js";
 import {
+  BOOT_GROWTH_RETAIN_MS,
   createDaemonFootprint,
   DAEMON_FOOTPRINT_FILE,
   parseBootGrowth,
@@ -18,16 +20,16 @@ import {
   type BootGrowth,
   type DaemonFootprintIo,
   type FootprintSample,
-} from "../src/lib/daemon-footprint.js";
-import type { HostMemoryReading } from "../src/lib/host-memory-ledger.js";
+} from "#src/lib/daemon-footprint.js";
+import type { HostMemoryReading } from "#src/lib/host-memory-ledger.js";
 import {
   footprintGrowthOf,
   recordShadowMemoryVerdict,
   resetShadowMemoryStateForTests,
   type HostMemoryBudgetPolicy,
   type ShadowMemoryPorts,
-} from "../src/lib/host-memory-shadow.js";
-import type { LedgerLine } from "../src/lib/ledger.js";
+} from "#src/lib/host-memory-shadow.js";
+import type { LedgerLine } from "#src/lib/ledger.js";
 
 const NOW = Date.parse("2026-10-17T02:34:25.000Z");
 const MIB = 1024 * 1024;
@@ -217,6 +219,7 @@ test("W1-T9982: each generation records its first and peak footprint and when it
   const read = readDaemonFootprint("/s", io.readFile) as { boots: BootGrowth[] };
   assert.equal(read.boots.length, 2, "a reader in another process sees both");
 
+  assert.equal(BOOT_GROWTH_RETAIN_MS, HEAP_SAMPLE_RETAIN_MS, "the window the heap-ceiling learning already uses");
   // Past the heap-ceiling learning's window, an old generation is dropped and the current one never.
   const week = 7 * 24 * 60 * 60_000;
   second.record({ at: 1_000 + week + 1, bytes: 400, pid: 123 });
