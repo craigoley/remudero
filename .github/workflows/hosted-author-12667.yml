@@ -64,6 +64,13 @@ jobs:
              const psi=Object.fromEntries(fs.readFileSync('/proc/pressure/memory','utf8').split('\n').find(l=>l.startsWith('full ')).split(' ').slice(1).map(x=>x.split('=')));
              return{at:new Date().toISOString(),memory:mem,swapInPages:Number(vm.pswpin),fullAvg60:Number(psi.avg60),workspaceFree:Number(fs.statfsSync(source).bavail)*Number(fs.statfsSync(source).bsize),tempFree:Number(fs.statfsSync(privateTmp).bavail)*Number(fs.statfsSync(privateTmp).bsize)};
             };
+            function mirrorIdentity(){
+             const roots=[source,config.controller],moduleUrl=pathToFileURL(path.join(source,'src/lib/owner-repo.ts')).href;
+             const probe='import {resolveOwnerRepoAt} from '+JSON.stringify(moduleUrl)+';console.log(JSON.stringify('+JSON.stringify(roots)+'.map(root=>({root,...resolveOwnerRepoAt(root)}))));';
+             const identities=JSON.parse(cp.execFileSync(process.execPath,['--import',path.join(source,'node_modules/tsx/dist/loader.mjs'),'--input-type=module','-e',probe],{cwd:source,env:{PATH:process.env.PATH,HOME:privateHome,TMPDIR:privateTmp,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_TERMINAL_PROMPT:'0'},encoding:'utf8',timeout:15000,maxBuffer:1024*1024}));
+             assert.equal(identities.length,2);for(const [i,row]of identities.entries()){assert.equal(row.root,roots[i]);assert.equal(row.owner,'craigoley');assert.equal(row.repo,'remudero');}
+             return{at:new Date().toISOString(),identities,reader:'actual unchanged resolveOwnerRepoAt',limits:'File-only mirrors retain canonical repository identity. No resolver fake, network, credential or product-source change.'};
+            }
             if(mode==='prepare'){
              assert(/^[a-f0-9]{40}$/.test(head)&&/^[a-f0-9]{40}$/.test(base));
              assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['rev-parse','--is-shallow-repository']),'false');assert.equal(git(['status','--porcelain']),'');
@@ -72,11 +79,11 @@ jobs:
              for(const dir of[output,privateHome,privateTmp])fs.mkdirSync(dir,{recursive:false,mode:0o700});
              assert(!fs.existsSync(path.join(source,'.git','objects','info','alternates')),'Borrowed Git objects are not admitted');
              git(['checkout','-b',publicationBranch,head]);git(['config','core.hooksPath','hooks']);
-             const mirror=path.join(path.dirname(output),'pilot-main.git');assert(!fs.existsSync(mirror));cp.execFileSync('git',['clone','--mirror','--no-local','--no-hardlinks',source,mirror],{encoding:'utf8',timeout:120000});
+             const mirror=path.join(path.dirname(output),'source-mirror','craigoley','remudero.git');assert(!fs.existsSync(mirror));fs.mkdirSync(path.dirname(mirror),{recursive:true,mode:0o700});cp.execFileSync('git',['clone','--mirror','--no-local','--no-hardlinks',source,mirror],{encoding:'utf8',timeout:120000});
              cp.execFileSync('git',['-C',mirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
              git(['remote','set-url','origin','file://'+mirror]);git(['update-ref','refs/remotes/origin/main',base]);assert.equal(git(['rev-parse','origin/main']),base);
              assert.equal(config.controllerBranch,'run-unfiled-1792334880000');
-             assert.equal(config.controllerPriorHead,'a9fe28414d8d49b8b90f0323d0655e89845b2c2b');
+             assert.equal(config.controllerPriorHead,'44545f64bce12d1eb0f4cf3cc2b3326c2475adac');
              const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();
              assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
              assert.equal(controlGit(['rev-parse','--is-shallow-repository']),'false');assert(!fs.existsSync(path.join(config.controller,'.git/objects/info/alternates')));
@@ -84,10 +91,11 @@ jobs:
              const recipes=['package.json','package-lock.json',...fs.readdirSync(path.join(source,'packages')).flatMap(n=>fs.existsSync(path.join(source,'packages',n,'package.json'))?['packages/'+n+'/package.json']:[])];
              for(const file of recipes)assert.equal(hash(path.join(source,file)),hash(path.join(config.controller,file)),'Controller/source dependency recipe differs: '+file);
              assert(!fs.existsSync(path.join(config.controller,'node_modules')));fs.symlinkSync(path.join(source,'node_modules'),path.join(config.controller,'node_modules'),'dir');
-             const controlMirror=path.join(path.dirname(output),'pilot-control-main.git');assert(!fs.existsSync(controlMirror));
+             const controlMirror=path.join(path.dirname(output),'controller-mirror','craigoley','remudero.git');assert(!fs.existsSync(controlMirror));fs.mkdirSync(path.dirname(controlMirror),{recursive:true,mode:0o700});
              cp.execFileSync('git',['clone','--mirror','--no-local','--no-hardlinks',config.controller,controlMirror],{encoding:'utf8',timeout:120000});
              cp.execFileSync('git',['-C',controlMirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
              controlGit(['remote','set-url','origin','file://'+controlMirror]);controlGit(['update-ref','refs/remotes/origin/main',base]);controlGit(['config','core.hooksPath','hooks']);
+             save('mirror-identity-prepared.json',mirrorIdentity());
              save('controller-prepared.json',{head:config.controllerHead,base,tree:controlGit(['rev-parse','HEAD^{tree}']),branch:config.controllerBranch,priorHead:config.controllerPriorHead,hookSha256:hash(path.join(config.controller,'hooks/pre-push')),sourceHookSha256:hash(path.join(source,'hooks/pre-push')),mirror:controlMirror,recipesVerified:recipes,limits:'Actual controller tree, separate from author source; unchanged hook must execute on this exact tree after bootstrap.'});
              const out={pilot:12667,stage:'prepared',at:new Date().toISOString(),head,base,tree:git(['rev-parse','HEAD^{tree}']),publicationBranch,deadline,node:process.version,platform:process.platform,arch:process.arch,kernel:os.release(),cpus:os.availableParallelism(),source,mirror,locks:{package:hash(path.join(source,'package-lock.json')),manifest:hash(path.join(source,'scripts/test-tier-manifest.json'))},limits:'Fresh public source and lockfile-installed dependencies only; source gate will fetch captured public main from a complete file-only mirror. No production state, credentials or test result reuse.'};save('prepared.json',out);console.log(JSON.stringify(out));
             }else if(mode==='run'){
@@ -100,6 +108,7 @@ jobs:
              await new Promise(resolve=>server.close(resolve));assert.equal(loopback,'loopback-control');
              save('network-control.json',{pilot:12667,isolatedNamespace:fs.readlinkSync('/proc/self/ns/net'),hostNamespace:config.hostNetNamespace,loopback:'passed',routeTable:fs.readFileSync('/proc/net/route','utf8'),limits:'Loopback positive in a fresh network namespace; no production endpoint or credentials used.'});
              assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');assert.equal(process.versions.node,fs.readFileSync(path.join(source,'.nvmrc'),'utf8').trim());
+             save('mirror-identity-isolated.json',mirrorIdentity());
              const first=sample();await new Promise(r=>setTimeout(r,30000));const last=sample();
              const checks={memory:min(first.memory.MemAvailable,last.memory.MemAvailable)>=7*1024**3,disk:min(first.workspaceFree,last.workspaceFree,first.tempFree,last.tempFree)>=20*1024**3,noSwapIn:first.swapInPages===last.swapInPages,pressure:Math.max(first.fullAvg60,last.fullAvg60)<0.5};
              save('admission.json',{pilot:12667,at:new Date().toISOString(),head,deadline,first,last,checks,admitted:Object.values(checks).every(Boolean)});assert(Object.values(checks).every(Boolean),'Hosted admission refused after setup; no gate started');
@@ -310,7 +319,7 @@ jobs:
           import fs from 'node:fs';
           import path from 'node:path';
           const tmp=process.env.RUNNER_TEMP,workspace=process.env.GITHUB_WORKSPACE;
-          const config={concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792334880000",controllerPriorHead:"a9fe28414d8d49b8b90f0323d0655e89845b2c2b",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
+          const config={concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792334880000",controllerPriorHead:"44545f64bce12d1eb0f4cf3cc2b3326c2475adac",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
           fs.writeFileSync(path.join(tmp,'pilot-config.json'),JSON.stringify(config),{flag:'wx',mode:0o600});
           JS
           node "$RUNNER_TEMP/hosted-author-12667.mjs" prepare "$RUNNER_TEMP/pilot-config.json"
