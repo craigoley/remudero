@@ -80,6 +80,7 @@ test("W1-T108/R-42: positive control -- the real command really does name more t
       // so it moves with the set deliberately rather than being loosened to a subset check.
       "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts",
       "test/block-reason.test.ts",
+      "test/cash-fallback-reads-the-remaining-allowance.test.ts",
       "test/classify.test.ts",
       "test/codex-quota-window-refusal.test.ts",
       "test/fix-rung-classify.test.ts",
