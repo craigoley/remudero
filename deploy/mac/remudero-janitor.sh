@@ -1218,19 +1218,64 @@ else
 fi
 # This helper owns only exact ignored duplicate packages and Turbopack caches
 # below this account's artifact root. Source/Git/build outputs never retire.
+cache_reference_tmpdir() {
+  local account_record account_home cache_tmp
+  # getconf describes the running account, not an arbitrary selected HOME.
+  # Verify that relationship before substituting its implicit temp namespace.
+  account_record=$(dscl . -read "/Users/$RUN_USER" NFSHomeDirectory 2>/dev/null) || return 1
+  case "$account_record" in 'NFSHomeDirectory: '*) account_home=${account_record#NFSHomeDirectory: } ;; *) return 1 ;; esac
+  case "$account_home" in *$'\n'*|*$'\r'*) return 1 ;; /*) ;; *) return 1 ;; esac
+  account_home=$(cd "$account_home" 2>/dev/null && pwd -P) || return 1
+  [ "$account_home" = "$USER_HOME" ] || return 1
+  cache_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || return 1
+  case "$cache_tmp" in *$'\n'*|*$'\r'*) return 1 ;; /*) ;; *) return 1 ;; esac
+  # A trailing slash can hide a symlink from -L. Permit native /var's parent
+  # alias, but never a linked, foreign-owned or root temp directory itself.
+  while [ "${cache_tmp%/}" != "$cache_tmp" ]; do cache_tmp=${cache_tmp%/}; done
+  [ -n "$cache_tmp" ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] && [ -w "$cache_tmp" ] && [ -x "$cache_tmp" ] || return 1
+  cache_tmp=$(cd "$cache_tmp" 2>/dev/null && pwd -P) || return 1
+  [ "$cache_tmp" != / ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] && [ -w "$cache_tmp" ] && [ -x "$cache_tmp" ] || return 1
+  printf '%s\n' "$cache_tmp"
+}
 if [ -f "$SCRIPT_DIR/cache-reclaim.py" ] && command -v python3 >/dev/null 2>&1; then
   cache_mode=()
   [ "$APPLY" != 1 ] || cache_mode=(--apply)
-  # Stream the existing receipt: the reporter bounds JSON parsing and does not
-  # inspect any filesystem targets. Retain the full original in the human log.
-  python3 "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" 2>&1 | \
-    tee -a "$LOG" | rmd_decision_cache_json "$DECISION_LOG"
-  cache_status=("${PIPESTATUS[@]}")
-  [ "${cache_status[1]}" = 0 ] || exit 2
-  if [ "${cache_status[2]}" != 0 ]; then
-    rmd_decision_record "$DECISION_LOG" 'generated-cache receipt unavailable or unrecognized; original output retained in human log' info cache_report_unknown || exit 2
+  cache_command=(python3)
+  cache_scope_known=1
+  # Python chooses TMPDIR, then TEMP, then TMP. An unset/empty TMPDIR with an
+  # explicit fallback is not cron's all-unset default; preserve that selection.
+  cache_explicit_fallback=0
+  if [ -z "${TMPDIR:-}" ] && { [ -n "${TEMP:-}" ] || [ -n "${TMP:-}" ]; }; then
+    cache_explicit_fallback=1
   fi
-  [ "${cache_status[0]}" = 0 ] || log "WARN generated-cache helper refused or could not verify a removal"
+  if [ "$OS_NAME" = Darwin ] && [ "$cache_explicit_fallback" = 0 ]; then
+    case "$DEFAULT_TMP" in /tmp|/tmp/|/private/tmp|/private/tmp/)
+      # Cron omits TMPDIR. Match the GUI account's resolved temp root so their
+      # authenticated namespace checkpoints have the same reference scope.
+      # Leave explicit custom TMPDIR and every other Janitor phase unchanged.
+      if cache_tmp=$(cache_reference_tmpdir); then
+        cache_command=(env "TMPDIR=$cache_tmp" python3)
+      else
+        cache_scope_known=0
+      fi
+      ;;
+    esac
+  fi
+  if [ "$cache_scope_known" = 1 ]; then
+    # Stream the existing receipt: the reporter bounds JSON parsing and does not
+    # inspect any filesystem targets. Retain the full original in the human log.
+    "${cache_command[@]}" "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" 2>&1 | \
+      tee -a "$LOG" | rmd_decision_cache_json "$DECISION_LOG"
+    cache_status=("${PIPESTATUS[@]}")
+    [ "${cache_status[1]}" = 0 ] || exit 2
+    if [ "${cache_status[2]}" != 0 ]; then
+      rmd_decision_record "$DECISION_LOG" 'generated-cache receipt unavailable or unrecognized; original output retained in human log' info cache_report_unknown || exit 2
+    fi
+    [ "${cache_status[0]}" = 0 ] || log "WARN generated-cache helper refused or could not verify a removal"
+  else
+    log "SKIP generated-cache-scope (running-account temp namespace unverified; cache pass retained)"
+    rmd_decision_record "$DECISION_LOG" 'SKIP generated-cache-scope: running-account temp namespace unverified' keep cache_scope_unknown || exit 2
+  fi
 fi
 rmd_decision_summary "$DECISION_LOG"
 log "decision-report: $DECISION_LOG (six-hour guard; workspace and generated-cache decisions)"

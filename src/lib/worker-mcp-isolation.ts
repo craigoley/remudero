@@ -3,6 +3,22 @@ import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { WorkerInitSummary } from "./worker-init-summary.js";
 
 export type WorkerMcpIsolation = "repo-knowledge-only";
+export interface WorkerPluginInventory {
+  state: "observed" | "unknown";
+  plugins: string[] | null;
+  skills: string[] | null;
+  agents: string[] | null;
+  plugin_error_count: number | null;
+}
+
+/** Census only: incomplete evidence stays unknown, with any safely observed names retained. */
+export function workerPluginInventory(summary: WorkerInitSummary | undefined): WorkerPluginInventory {
+  const evidence = [summary?.pluginNames, summary?.skillNames, summary?.agentNames];
+  const names = evidence.map(entry => entry && entry.state !== "unavailable" ? entry.names : null);
+  return { state: evidence.every(entry => entry?.state === "observed") ? "observed" : "unknown",
+    plugins: names[0], skills: names[1], agents: names[2], plugin_error_count: summary?.pluginErrorCount ?? null };
+}
+
 /** PRIMARY CONTROL: the approved repository toolkit, not a network/filesystem permission boundary. */
 const REPO_TOOLS = new Set(["Read", "Write", "Edit", "Grep", "Glob", "Bash"]);
 export const ISOLATED_KNOWLEDGE_TOOL = "mcp__knowledge__rule";

@@ -1,7 +1,7 @@
 /** Execute the maintained shell script with private checkouts and no live reclaim helpers. */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -233,4 +233,181 @@ test("Janitor dependency health: unavailable Python or a failed probe never beco
 
 test("Janitor dependency health: no Core checkout produces no dependency warning", t => {
   assert.doesNotMatch(fixture(t).run(), /WARN dependency-health|lacks vitest/);
+});
+
+/** Execute only the maintained delegation, never the Janitor's real sweep phases. */
+function cacheDelegationFixture(t: TestContext) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-janitor-cache-scope-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, "bin"), home = join(root, "account home"), otherHome = join(root, "other home");
+  const deploy = join(root, "deploy"), canonical = join(root, "account temp"), custom = join(root, "custom temp");
+  for (const directory of [bin, home, otherHome, deploy, canonical, custom]) mkdirSync(directory);
+  symlinkSync(root, join(root, "parent alias"));
+  const nativeTemp = join(root, "parent alias/account temp/");
+  const linked = join(root, "linked temp"); symlinkSync(canonical, linked);
+  writeFileSync(join(deploy, "cache-reclaim.py"), "fixture only: never execute or scan\n");
+  const script = readFileSync(source, "utf8");
+  const start = script.indexOf("# This helper owns only exact ignored duplicate packages");
+  const end = script.indexOf('rmd_decision_summary "$DECISION_LOG"', start);
+  assert.ok(start >= 0 && end > start, "the maintained delegation must be located, not reimplemented");
+  const block = script.slice(start, end);
+  const command = (name: string, text: string) => writeFileSync(join(bin, name), `#!/bin/bash\nset -eu\n${text}\n`, { mode: 0o755 });
+  for (const name of ["env", "tee", "cat"]) {
+    const native = spawnSync("/bin/bash", ["-c", `command -v ${name}`], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+    assert.equal(native.status, 0, name); symlinkSync(native.stdout.trim(), join(bin, name));
+  }
+  command("getconf", '[ "$#" = 1 ] && [ "$1" = DARWIN_USER_TEMP_DIR ] || exit 97\nprintf getconf >> "$FIXTURE_PROBES"\nprintf "%s\\n" "$FIXTURE_NATIVE_TEMP"\nexit "$FIXTURE_GETCONF_STATUS"');
+  command("dscl", '[ "$*" = ". -read /Users/fixture NFSHomeDirectory" ] || exit 97\nprintf dscl >> "$FIXTURE_PROBES"\nprintf "%s\\n" "$FIXTURE_ACCOUNT_RECORD"\nexit "$FIXTURE_ACCOUNT_STATUS"');
+  // This stand-in observes environment/argv and cannot run the Python helper.
+  command("python3", '[ "$1" = "$FIXTURE_DEPLOY/cache-reclaim.py" ] || exit 97\nprintf "%s\\n" "${TMPDIR-UNSET}" > "$FIXTURE_OBSERVED"\nprintf "%s\\n%s\\n" "${TEMP-UNSET}" "${TMP-UNSET}" > "$FIXTURE_FALLBACKS"\nprintf "%s\\n" "$@" > "$FIXTURE_ARGS"\nprintf "cache-fixture-only\\n"\nexit "$FIXTURE_PYTHON_STATUS"');
+  const run = (options: {
+    temp?: string; tempFallback?: string; tmpFallback?: string; os?: "Darwin" | "Linux"; selectedHome?: string; nativeTemp?: string;
+    getconfStatus?: number; getconfMissing?: boolean; accountRecord?: string; accountStatus?: number; apply?: boolean;
+    pythonStatus?: number; reporterStatus?: number; teeFailed?: boolean;
+  } = {}) => {
+    for (const name of ["observed", "args", "fallbacks", "probes", "helper.log", "decisions.tsv"]) rmSync(join(root, name), { force: true });
+    if (options.getconfMissing) rmSync(join(bin, "getconf"));
+    if (options.teeFailed) { rmSync(join(bin, "tee")); command("tee", "cat >/dev/null; exit 3"); }
+    const selectedHome = options.selectedHome ?? home;
+    const result = spawnSync("/bin/bash", ["-c", `set -uo pipefail
+OS_NAME="$FIXTURE_OS"; USER_HOME="$FIXTURE_SELECTED_HOME"; RUN_USER=fixture
+SCRIPT_DIR="$FIXTURE_DEPLOY"; DEFAULT_TMP="\${TMPDIR:-/tmp}"; APPLY="$FIXTURE_APPLY"
+LOG="$FIXTURE_LOG"; DECISION_LOG="$FIXTURE_DECISIONS"
+log() { printf 'log:%s\\n' "$*"; }
+rmd_decision_cache_json() { cat; return "$FIXTURE_REPORTER_STATUS"; }
+rmd_decision_record() { printf '%s\\t%s\\n' "$3" "$4" >> "$1"; }
+${block}
+printf 'caller-TMPDIR=<%s>\\ncaller-DEFAULT_TMP=<%s>\\n' "\${TMPDIR-UNSET}" "$DEFAULT_TMP"
+`], { encoding: "utf8", timeout: 5_000, env: {
+      HOME: home, PATH: bin, ...(options.temp === undefined ? {} : { TMPDIR: options.temp }),
+      ...(options.tempFallback === undefined ? {} : { TEMP: options.tempFallback }),
+      ...(options.tmpFallback === undefined ? {} : { TMP: options.tmpFallback }),
+      FIXTURE_OS: options.os ?? "Darwin", FIXTURE_SELECTED_HOME: selectedHome, FIXTURE_DEPLOY: deploy,
+      FIXTURE_NATIVE_TEMP: options.nativeTemp ?? nativeTemp, FIXTURE_GETCONF_STATUS: String(options.getconfStatus ?? 0),
+      FIXTURE_ACCOUNT_RECORD: options.accountRecord ?? `NFSHomeDirectory: ${home}`, FIXTURE_ACCOUNT_STATUS: String(options.accountStatus ?? 0),
+      FIXTURE_APPLY: options.apply ? "1" : "0", FIXTURE_LOG: join(root, "helper.log"), FIXTURE_DECISIONS: join(root, "decisions.tsv"),
+      FIXTURE_PROBES: join(root, "probes"), FIXTURE_OBSERVED: join(root, "observed"), FIXTURE_ARGS: join(root, "args"),
+      FIXTURE_FALLBACKS: join(root, "fallbacks"), FIXTURE_PYTHON_STATUS: String(options.pythonStatus ?? 0), FIXTURE_REPORTER_STATUS: String(options.reporterStatus ?? 0),
+    } });
+    assert.equal(result.status, options.teeFailed ? 2 : 0, `${result.error || ""}\n${result.stderr}${result.stdout}`);
+    assert.equal(result.stderr, "");
+    if (!options.teeFailed) {
+      assert.ok(result.stdout.includes(`caller-TMPDIR=<${options.temp ?? "UNSET"}>\n`), "only the helper's environment may change");
+      assert.ok(result.stdout.includes(`caller-DEFAULT_TMP=<${options.temp || "/tmp"}>\n`), "other phases retain their original temp scope");
+    }
+    const read = (name: string) => existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : undefined;
+    if (read("observed") !== undefined) assert.equal(read("fallbacks"), `${options.tempFallback ?? "UNSET"}\n${options.tmpFallback ?? "UNSET"}\n`, "fallback environment is never changed");
+    return { observed: read("observed"), args: read("args"), decisions: read("decisions.tsv"), probes: read("probes"), log: read("helper.log"), stdout: result.stdout };
+  };
+  return { root, home, otherHome, deploy, canonical, custom, linked, run };
+}
+
+test("Janitor cache scope: cron defaults and GUI retain one canonical per-user reference root", t => {
+  const fx = cacheDelegationFixture(t);
+  for (const temp of [fx.canonical, undefined, "", "/tmp", "/tmp/", "/private/tmp", "/private/tmp/"]) {
+    const result = fx.run({ temp });
+    assert.equal(result.observed, `${fx.canonical}\n`, `TMPDIR=${temp ?? "<unset>"}`);
+    assert.equal(result.decisions, undefined);
+    assert.equal(result.args, `${fx.deploy}/cache-reclaim.py\n--home\n${fx.home}\n`);
+  }
+  assert.equal(fx.run({ apply: true }).args, `${fx.deploy}/cache-reclaim.py\n--home\n${fx.home}\n--apply\n`);
+  assert.equal(fx.run({ tempFallback: "", tmpFallback: "" }).observed, `${fx.canonical}\n`);
+});
+
+test("Janitor cache scope: explicit custom TMPDIR is retained without consulting current-user defaults", t => {
+  const fx = cacheDelegationFixture(t);
+  const result = fx.run({ temp: `${fx.custom}/`, getconfStatus: 1, accountStatus: 1 });
+  assert.equal(result.observed, `${fx.custom}/\n`);
+  assert.equal(result.probes, undefined);
+  assert.equal(result.decisions, undefined);
+});
+
+test("Janitor cache scope: explicit TEMP and TMP fallbacks retain Python selection when TMPDIR is unset or empty", t => {
+  const fx = cacheDelegationFixture(t);
+  for (const temp of [undefined, ""]) {
+    for (const fallback of [{ tempFallback: fx.custom }, { tmpFallback: fx.custom },
+      { tempFallback: "", tmpFallback: fx.custom }, { tempFallback: fx.custom, tmpFallback: fx.otherHome }]) {
+      const result = fx.run({ temp, ...fallback, getconfStatus: 1, accountStatus: 1 });
+      assert.equal(result.observed, `${temp ?? "UNSET"}\n`, "do not inject TMPDIR ahead of an explicit fallback");
+      assert.equal(result.probes, undefined);
+      assert.equal(result.decisions, undefined);
+    }
+  }
+});
+
+test("Janitor cache scope: unavailable or invalid Darwin temp probes keep the cache pass without invoking Python", t => {
+  for (const kind of ["missing-command", "failed-with-valid-path", "empty", "relative", "missing-directory", "regular-file", "symlink", "root", "double-root", "multiline"]) {
+    const fx = cacheDelegationFixture(t);
+    const paths: Record<string, string> = { empty: "", relative: "account temp", "missing-directory": join(fx.root, "absent"),
+      "regular-file": join(fx.deploy, "cache-reclaim.py"), symlink: `${fx.linked}/`, root: "/", "double-root": "//", multiline: `${fx.canonical}\n/other` };
+    const result = fx.run({ nativeTemp: paths[kind], getconfMissing: kind === "missing-command", getconfStatus: kind === "failed-with-valid-path" ? 1 : 0 });
+    assert.equal(result.observed, undefined, kind);
+    assert.equal(result.args, undefined, kind);
+    assert.equal(result.decisions, "keep\tcache_scope_unknown\n", kind);
+    assert.match(result.stdout, /SKIP generated-cache-scope/, kind);
+  }
+});
+
+test("Janitor cache scope: a foreign-owned native temp directory cannot narrow the reference census", t => {
+  const fx = cacheDelegationFixture(t);
+  let foreign = "/usr";
+  if (process.getuid?.() === 0) {
+    foreign = join(fx.root, "foreign temp"); mkdirSync(foreign); chownSync(foreign, 1, 0);
+  }
+  assert.notEqual(lstatSync(foreign).uid, process.getuid?.(), "ownership control must actually be foreign");
+  const result = fx.run({ nativeTemp: foreign });
+  assert.equal(result.observed, undefined);
+  assert.equal(result.decisions, "keep\tcache_scope_unknown\n");
+});
+
+test("Janitor cache scope: an unusable owned temp directory keeps the pass rather than allowing Python fallback", t => {
+  if (process.getuid?.() === 0) { t.skip("root bypasses directory permission controls"); return; }
+  const fx = cacheDelegationFixture(t);
+  for (const mode of [0o500, 0o600]) {
+    chmodSync(fx.canonical, mode);
+    try {
+      const result = fx.run();
+      assert.equal(result.observed, undefined, `mode=${mode.toString(8)} must not invoke the helper`);
+      assert.equal(result.decisions, "keep\tcache_scope_unknown\n");
+    } finally {
+      chmodSync(fx.canonical, 0o700);
+    }
+  }
+});
+
+test("Janitor cache scope: selected HOME must match the verified running account before normalization", t => {
+  const fx = cacheDelegationFixture(t);
+  for (const options of [
+    { selectedHome: fx.otherHome }, { accountStatus: 1 }, { accountRecord: "" },
+    { accountRecord: "NFSHomeDirectory: /missing/home" },
+    { accountRecord: `NFSHomeDirectory: ${fx.home}\nNFSHomeDirectory: ${fx.otherHome}` },
+  ]) {
+    const result = fx.run(options);
+    assert.equal(result.observed, undefined);
+    assert.equal(result.decisions, "keep\tcache_scope_unknown\n");
+    assert.doesNotMatch(result.probes ?? "", /getconf/, "do not look up another account's implicit temp scope");
+  }
+});
+
+test("Janitor cache scope: Linux keeps inherited TMPDIR semantics without consulting Darwin probes", t => {
+  const fx = cacheDelegationFixture(t);
+  for (const temp of [undefined, "", "/tmp/", "/private/tmp", `${fx.custom}/`]) {
+    const result = fx.run({ os: "Linux", temp, accountStatus: 1, getconfStatus: 1 });
+    assert.equal(result.observed, `${temp ?? "UNSET"}\n`);
+    assert.equal(result.probes, undefined);
+    assert.equal(result.decisions, undefined);
+  }
+});
+
+test("Janitor cache scope: delegation preserves helper refusals, original receipts and pipeline failure control", t => {
+  for (const options of [{}, { pythonStatus: 17 }, { reporterStatus: 19 }, { teeFailed: true }]) {
+    const fx = cacheDelegationFixture(t);
+    const result = fx.run(options);
+    assert.equal(result.observed, `${fx.canonical}\n`);
+    if (options.teeFailed) { assert.equal(result.decisions, undefined); continue; }
+    assert.equal(result.log, "cache-fixture-only\n", "retain the full original human-log receipt");
+    if (options.reporterStatus) assert.equal(result.decisions, "info\tcache_report_unknown\n");
+    else assert.equal(result.decisions, undefined);
+    if (options.pythonStatus) assert.match(result.stdout, /WARN generated-cache helper refused/);
+  }
 });
