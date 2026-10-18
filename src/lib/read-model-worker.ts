@@ -66,6 +66,7 @@ import {
   openReadModel,
   peekLease,
   quickCheckReadModel,
+  readReadModelTransactions,
   releaseLease,
   SOURCE_SNAPSHOT_DDL,
   withWriteTransaction,
@@ -1000,8 +1001,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * The watchdog: a tick that committed, or had nothing left to do, is progress. Outstanding work
-   * with no commit for {@link READ_MODEL_STALL_MS} ledgers the stall and reopens the store; the
+   * A commit or no outstanding work is progress. No commit for {@link READ_MODEL_STALL_MS} reopens the store;
    * same again without progress escalates through the oracle's path, once per episode.
    */
   function watchProgress(slot: Slot, now: number, outstanding: boolean): void {
@@ -1013,7 +1013,15 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const stall = (slot.stall ??= { since: now, generation, reopened: false, escalated: false });
     const stalledMs = now - stall.since;
-    const extra = { instance: slot.instance.name, stalledMs, generation, reason: slot.state.reason ?? "work outstanding" };
+    // Read sidecars only when emitting a tier, not on every hot-path tick. A missing path is unknown.
+    const emitting = (stalledMs >= READ_MODEL_STALL_MS && !stall.reopened) || (stalledMs >= 2 * READ_MODEL_STALL_MS && !stall.escalated);
+    let path = slot.db?.path;
+    if (emitting && !path) {
+      try { path = currentReadModelPath(opts.stateDir, slot.instance.name, LEDGER_PROJECTOR_SCHEMA_VERSION); }
+      catch { /* An unreadable pointer cannot establish a transaction inventory. */ }
+    }
+    const transactions = emitting ? readReadModelTransactions(path) : undefined;
+    const extra = { instance: slot.instance.name, stalledMs, generation, reason: slot.state.reason ?? "work outstanding", transactions };
     if (stalledMs >= READ_MODEL_STALL_MS && !stall.reopened) {
       stall.reopened = true;
       log("read_model.stalled", extra);
@@ -1024,7 +1032,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         class: "MANUAL",
         taskId: `READ-MODEL-${slot.instance.name.toUpperCase()}`,
         summary: `read model ${slot.instance.name} has stopped advancing`,
-        detail: `The projector has had work outstanding for ${Math.round(stalledMs / 1000)} s with no commit, and reopening its store did not help. Last reason: ${extra.reason}.`,
+        detail: `The projector has had work outstanding for ${Math.round(stalledMs / 1000)} s with no commit, and reopening its store did not help. Last reason: ${extra.reason}. Recorded transactions (lock ownership unverified): ${JSON.stringify(transactions)}.`,
         options: [
           { label: "rebuild the read model", detail: "Run `rmd read-model rebuild`; the views keep serving the old file until the new one passes its check.", kind: { type: "operator-only" } },
           { label: "restart serve", detail: "Recycle the serve container; the projector resumes from its checkpoints.", kind: { type: "operator-only" } },
