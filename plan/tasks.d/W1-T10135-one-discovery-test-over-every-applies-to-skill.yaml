@@ -1,0 +1,41 @@
+- id: W1-T10135
+  title: "Every .claude/skills/*/SKILL.md carrying applies-to: is covered by ONE discovery test, so a new skill needs no hand-written test and a typo'd applies-to or dead when-paths glob fails by name"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 60.00
+  rationale: "From a read-only comparison with nanocoai/nanoclaw, whose scripts/skill-conformance.test.ts discovers
+    every skill and enforces invariants with no per-skill test file. RE-VERIFIED at current main: two skills carry
+    applies-to: (proof-preflight, ci-state-forensics, both applies-to: implement), each with its own hand-written
+    test (test/a-proof-preflight-skill-is-selectable-and-bounded.test.ts, test/a-ci-state-forensics-skill-is-selectable-and-bounded.test.ts).
+    A third skill gets no test unless its author writes one. LINE DRIFT since the entry was read at efd226b50:
+    TASK_TYPES is now src/lib/plan.ts:124 (not 105) and scanSkillDraft is src/lib/skill-workshop.ts:308 (not 307);
+    DEFAULT_KNOWLEDGE_BUDGET_CHARS is still src/lib/learnings.ts:49 (8148); observeSkillSelection is skill-workshop.ts:712.
+    NOTE: no skill carries when-paths: today, so the glob check is vacuous on the live tree and is proven by the fixture."
+  design: |
+    Name the census test "every applies-to skill satisfies the discovery invariants" and the fixture test
+    "discovery rejects malformed applies-to and dead when-paths by skill name".
+    ADD test/every-applies-to-skill-is-selectable-and-bounded.test.ts. It globs .claude/skills/*/SKILL.md, keeps
+    those whose frontmatter has applies-to:, and per skill asserts: (1) applies-to is a TASK_TYPES member;
+    (2) every when-paths glob matches at least one tracked file (skip cleanly when absent); (3) the skill body alone
+    fits DEFAULT_KNOWLEDGE_BUDGET_CHARS; (4) observeSkillSelection selects it for a matching task type and excludes
+    it for every other TASK_TYPES member; (5) it passes scanSkillDraft's allowlist. Failure messages NAME the skill.
+    FALSIFIER FIXTURES: the check logic is a function taking a skill directory, and the test runs it against fixture
+    skills with applies-to: implemnt and with a when-paths glob matching nothing, asserting each fails naming the skill.
+    Retain the two existing hand-written tests unchanged; this task adds only the discovery test.
+    Do not change selection or scan behaviour."
+  acceptance:
+    - claim: "the discovery test declares the new skill-conformance census"
+      proof: "grep: every applies-to skill satisfies the discovery invariants in test/every-applies-to-skill-is-selectable-and-bounded.test.ts"
+    - claim: "the discovery test covers all five live-skill invariants and rejects typo applies-to and dead when-paths fixtures by skill name"
+      kind: guard
+      proof: "unit test: test/every-applies-to-skill-is-selectable-and-bounded.test.ts"
+  risk: low
+  origin: feedback#fb-1791856366583-e5a5e9
+  plan_refs: ["§7B"]
+  files: [test/every-applies-to-skill-is-selectable-and-bounded.test.ts]
+  status: queued
+  attempts: 0
+  note: "verify:auto — pure test addition over existing exports; no src change."
