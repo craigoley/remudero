@@ -16,6 +16,17 @@ head with REST `sha` or CLI `--match-head-commit`. Other repositories are untouc
 This source guard is not adopted merely because a private test passes. Durable
 UNKNOWN escalation and server enforcement remain mandatory before declaring done.
 
+Core merge callers require the exact canonical URL
+`https://github.com/craigoley/remudero/pull/<positive integer>`. Case changes,
+encoded path components, alternate schemes/hosts, credentials, whitespace and
+query/fragment suffixes must not make a core target look like another repository
+and bypass admission. Recognizable core aliases and unresolved CLI number/branch
+selectors return `unknown: noncanonical-pr-target` before metadata or merge writes.
+Use the canonical URL returned by GitHub; do not retry through an alias or omit
+`--match-head-commit`. Valid URLs for other repositories remain outside this
+core-only policy. This boundary does not qualify historical repository redirects
+or replace the server-side protection and bypass audit below.
+
 The producer runs only main's script. It executes no PR source or artifacts, installs
 no dependencies, calls no models, and creates no infrastructure. It checks complete
 changed-file/check corpora, rename predecessors, trusted GitHub Advanced Security
