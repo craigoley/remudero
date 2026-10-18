@@ -13468,6 +13468,11 @@ interface PriorActions {
    *  host gap earns a fresh review of the same input. `requestedForRefusal` is true once a
    *  {@link REFUSED_POST_HOST_GAP_REREVIEW_STEP} row answers THIS refusal. */
   reviewHostGapRefusals: Map<string, { attemptedAt: number | undefined; hostGap: string; requestedForRefusal: boolean }>;
+  /** W1-T9907 — exact-input keys whose verdict was WITHHELD because a reservation read timed out (every unknown
+   *  reservation reason is `base-unreadable:` or `baseline-unreadable:`), with the latest row's time. Not durable
+   *  (never in {@link reviewRefused}): the read is transient, so the next pass re-runs the review. Each row also counts
+   *  toward {@link reviewRetryableThrowCounts}, so the strike cap bounds a read that keeps timing out. */
+  reviewTimedOutReadRefusals: Map<string, number | undefined>;
   /** Exact-input keys where the thrown post-review attempt hit GitHub's permanent PR diff ceiling.
    *  The remedy is a new head with a smaller diff, so this is a terminal marker for the current
    *  key, not another entry in the timed retry bucket. */
@@ -13664,6 +13669,17 @@ function retryableReviewThrowBackoffReason(
     `retry backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
     `this is a retryable transport/process outcome, not a durable review refusal`
   );
+}
+
+/** W1-T9907 — a withheld verdict's `unknown_reservations` is a TIMED-OUT READ when it is non-empty and every
+ *  reason starts `base-unreadable:` or `baseline-unreadable:`. Any other unknown reason (ls-remote, fetch or log
+ *  failed; no head ref or checkout) is not transient in this sense and folds as a durable refusal. */
+function isTimedOutReservationReadWithhold(unknown: unknown): boolean {
+  if (!Array.isArray(unknown) || unknown.length === 0) return false;
+  return unknown.every((entry) => {
+    const reason = (entry as { reason?: unknown } | null)?.reason;
+    return typeof reason === "string" && /^(base|baseline)-unreadable:/.test(reason);
+  });
 }
 
 function isRetryableReviewerCodeFreshnessRefusal(
@@ -14173,6 +14189,7 @@ function priorActionsFromLedger(
   const reviewRetryableThrows = new Map<string, number | undefined>();
   const reviewFreshnessRefusals = new Map<string, ReviewerCodeFreshnessRefusal>();
   const reviewHostGapRefusals = new Map<string, { attemptedAt: number | undefined; hostGap: string; requestedForRefusal: boolean }>();
+  const reviewTimedOutReadRefusals = new Map<string, number | undefined>();
   const reviewDiffCeilingRefused = new Set<string>();
   const reviewRetryableThrowCounts = new Map<string, number>();
   const riskRefused = new Map<string, string | undefined>();
@@ -14258,6 +14275,16 @@ function priorActionsFromLedger(
           if (!reviewRetryableThrows.has(key)) reviewRetryableThrows.set(key, undefined);
           if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
             reviewRetryableThrows.set(key, parsed);
+          }
+        } else if (isTimedOutReservationReadWithhold(line.unknown_reservations)) {
+          // W1-T9907: a verdict withheld on a timed-out reservation read is neither durable nor a throw — it keeps
+          // its time (so the pending post it answers is provably finished) and counts toward the strike cap.
+          const parsed = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+          const existing = reviewTimedOutReadRefusals.get(key);
+          reviewRetryableThrowCounts.set(key, (reviewRetryableThrowCounts.get(key) ?? 0) + 1);
+          if (!reviewTimedOutReadRefusals.has(key)) reviewTimedOutReadRefusals.set(key, undefined);
+          if (!Number.isNaN(parsed) && (existing === undefined || parsed > existing)) {
+            reviewTimedOutReadRefusals.set(key, parsed);
           }
         } else if (line.reviewer_code_freshness === "unreadable" && typeof line.reviewer_code_host_gap === "string") {
           // W1-T7850: a vanished reviewer checkout is a host gap, not an unprovable source — it enters neither
@@ -14396,6 +14423,7 @@ function priorActionsFromLedger(
     reviewRetryableThrows,
     reviewFreshnessRefusals,
     reviewHostGapRefusals,
+    reviewTimedOutReadRefusals,
     reviewDiffCeilingRefused,
     reviewRetryableThrowCounts,
     riskRefused,
@@ -17667,7 +17695,8 @@ export async function runSweep(
     // A refusal on this exact input after the current pending post proves its owner
     // finished. An older refusal cannot preempt a newer review in flight.
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const refusalAttemptedAt = freshnessRefusal?.attemptedAt ?? hostGapRefusal?.attemptedAt;
+    const timedOutReadAt = prior.reviewTimedOutReadRefusals.get(reviewOutcomeKeyForPr(pr));
+    const refusalAttemptedAt = freshnessRefusal?.attemptedAt ?? hostGapRefusal?.attemptedAt ?? timedOutReadAt;
     const refusedCurrentPending = pr.reviewState === "pending" &&
       refusalAttemptedAt !== undefined && Number.isFinite(pendingSince) &&
       refusalAttemptedAt >= pendingSince;

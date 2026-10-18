@@ -8539,6 +8539,20 @@ export function reappendLostReviewPosted(
   return "reappended";
 }
 
+/** W1-T9907 — the row `runReview` logs when a verdict is withheld on an unreadable reservation. It carries the
+ *  review input digest so the sweep keys the refusal to the PR's exact current input (a digest-less row folds
+ *  under the legacy `<task>@<head>` key that no live view reads). */
+export function withheldReviewRefusalRow(opts: {
+  headSha: string; prUrl: string; reason: string;
+  ownership: Parameters<typeof unknownReservationReads>[0]; inputDigest: string | undefined;
+}): Record<string, unknown> {
+  return {
+    head_sha: opts.headSha, pr_url: opts.prUrl, reason: opts.reason,
+    unknown_reservations: unknownReservationReads(opts.ownership),
+    ...(opts.inputDigest !== undefined ? { review_input_digest: opts.inputDigest } : {}),
+  };
+}
+
 /**
  * THE REVIEW GATE CALL SITE (W1-T1D — the piece W1-T1C built the reviewer for but
  * nothing ever called; the split left the call site unowned). After the PR is open
@@ -9204,7 +9218,7 @@ async function runReview(args: {
   // comment for the full design.
   if (verdict.taskIdOwnershipWithheld) {
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
-    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld, unknown_reservations: unknownReservationReads(verdict.taskIdOwnership) });
+    log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
