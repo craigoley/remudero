@@ -4,7 +4,7 @@ import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
-import { constants as fsConstants, accessSync, appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants as fsConstants, accessSync, appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -194,6 +194,7 @@ export interface ProviderCapacity {
   /** W1-T3718: `readable: false` because the provider ANSWERED and every candidate sat below the
    *  reserve, not because the probe failed. See {@link providerRefusalCondition}. */
   exhausted?: boolean;
+  carriedForward?: { readAt: number; ageMs: number; failure: string };
 }
 
 export type CodexModelTier = "economy" | "balanced" | "frontier";
@@ -1484,7 +1485,7 @@ function codexRuntimeFailure(detail: string, failureKind: CodexRuntimeFailure["f
 }
 
 const codexCapacityCache = new Map<string, { at: number; value: CodexRuntimeReading }>();
-const codexCapacityFailureCache = new Map<string, { at: number; value: ProviderCapacity }>();
+const codexCapacityFailureCache = new Map<string, { at: number; value: ProviderCapacity; failureKind: CodexRuntimeFailure["failureKind"] }>();
 const codexCapacityInFlight = new Map<string, Promise<CodexRuntimeResult>>();
 const CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS = 10_000;
 const CODEX_CAPACITY_HEDGE_DELAY_MS = 6_000;
@@ -1891,6 +1892,120 @@ function backedOffCodexFailure(value: ProviderCapacity, ageMs: number, backoffMs
   };
 }
 
+interface CodexLastGoodPoint { readAt: number; value: CodexRuntimeReading; invalidated?: true }
+interface CodexLastGood { version: 1; bin: string; home: string; current: CodexLastGoodPoint; previous?: CodexLastGoodPoint }
+/** PRIMARY CONTROL: bound retained telemetry, never a quota or reading-age threshold. */
+const CODEX_LAST_GOOD_MAX_BYTES = 2 * 1024 * 1024;
+function codexLastGoodPath(config: Config): string { return join(config.root, "state", "codex-capacity-last-good.json"); }
+
+function readCodexLastGoodText(config: Config): string {
+  const fd = openSync(codexLastGoodPath(config), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size < 1 || stat.size > CODEX_LAST_GOOD_MAX_BYTES) throw new Error("last-good telemetry exceeds its readable byte bound");
+    const bytes = Buffer.alloc(stat.size + 1);
+    let count = 0, n: number;
+    while (count < bytes.length && (n = readSync(fd, bytes, count, bytes.length - count, null)) > 0) count += n;
+    if (count !== stat.size) throw new Error("last-good telemetry changed while reading");
+    return bytes.subarray(0, count).toString("utf8");
+  } finally { closeSync(fd); }
+}
+
+function decodeCodexLastGood(text: string, config: Config, bin: string): CodexLastGood {
+  const value = JSON.parse(text) as CodexLastGood;
+  const point = (p: CodexLastGoodPoint | undefined) => p && Number.isFinite(p.readAt) && p.readAt >= 0 &&
+    p.value && typeof p.value.rateLimits === "object" && p.value.rateLimits !== null &&
+    Array.isArray(p.value.models) && (p.invalidated === true || p.value.models.length > 0) && p.value.models.every(m => m && typeof m.id === "string");
+  if (!value || value.version !== 1 || value.bin !== bin || value.home !== codexHome(config) ||
+      !point(value.current) || (value.previous !== undefined && !point(value.previous)))
+    throw new Error("last-good telemetry has a different identity or unreadable shape");
+  return value;
+}
+
+function storedCodexRuntime(value: CodexRuntimeReading): CodexRuntimeReading {
+  const source = value.rateLimits as CodexRateLimitResult;
+  const window = (w: CodexRateLimitWindow | null | undefined) => w == null ? w
+    : { usedPercent: w.usedPercent, windowDurationMins: w.windowDurationMins, resetsAt: w.resetsAt };
+  const bucket = (b: CodexRateLimitBucket | null | undefined) => b == null ? b : ({ limitId: b.limitId, limitName: b.limitName,
+    primary: window(b.primary), secondary: window(b.secondary), rateLimitReachedType: b.rateLimitReachedType, spendControlReached: b.spendControlReached });
+  return { rateLimits: { rateLimits: bucket(source.rateLimits), accountId: source.accountId,
+    rateLimitsByLimitId: source.rateLimitsByLimitId && Object.fromEntries(Object.entries(source.rateLimitsByLimitId).map(([id, b]) => [id, bucket(b)])) },
+    models: value.models.map(({id, model, displayName, hidden, isDefault, defaultReasoningEffort, supportedReasoningEfforts}) =>
+      ({id, model, displayName, hidden, isDefault, defaultReasoningEffort,
+        supportedReasoningEfforts: supportedReasoningEfforts?.map(({reasoningEffort}) => ({reasoningEffort}))})) };
+}
+
+function rememberCodexRuntime(config: Config, bin: string, value: CodexRuntimeReading | undefined, readAt: number): string | undefined {
+  try {
+    let snapshot: string | undefined, previous: CodexLastGoodPoint | undefined;
+    try { snapshot = readCodexLastGoodText(config); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (snapshot !== undefined) {
+      try { previous = decodeCodexLastGood(snapshot, config, bin).current; }
+      catch { /* A corrupt or foreign record cannot improve this genuinely fresh reading. */ }
+    }
+    if (previous && previous.readAt >= readAt) return undefined;
+    const record: CodexLastGood = { version: 1, bin, home: codexHome(config), current: { readAt,
+      value: value ? storedCodexRuntime(value) : { rateLimits: {}, models: [] }, ...(value ? {} : { invalidated: true }) },
+      ...(previous ? { previous } : {}) };
+    const body = JSON.stringify(record);
+    if (Buffer.byteLength(body) > CODEX_LAST_GOOD_MAX_BYTES) throw new Error("last-good telemetry exceeds its byte bound");
+    const written = writeAtomic(codexLastGoodPath(config), body, { mode: 0o600, beforeRename: () => {
+      try { return readCodexLastGoodText(config) === snapshot; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return snapshot === undefined; throw error; }
+    } });
+    if (!written) return "last-good persistence stood aside for a concurrent reading";
+    return undefined;
+  } catch (error) {
+    const reason = `last-good persistence unavailable: ${String((error as Error).message).slice(0, 256)}`;
+    console.error(JSON.stringify({ event: "codex.capacity.last_good_unavailable", reason }));
+    return reason;
+  }
+}
+
+function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps, capabilities: CapabilityLadder | undefined,
+  failure: ProviderCapacity, failureKind: CodexRuntimeFailure["failureKind"], now: number): ProviderCapacity {
+  if (deps.forceRefresh || (failureKind !== "timeout" && failureKind !== "starved")) return failure;
+  try {
+    const saved = decodeCodexLastGood(readCodexLastGoodText(config), config, bin), current = saved.current, previous = saved.previous;
+    if (current.invalidated) throw new Error("last-good invalidated by terminal probe evidence");
+    const ageMs = now - current.readAt, reserve = deps.reservePercent ?? config.workerProviders?.reservePercent ?? 5;
+    if (!Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(reserve) || reserve < 0 || reserve >= 100) throw new Error("invalid clock or reserve");
+    let windows = 0;
+    const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined): CodexRateLimitWindow | null => {
+      if (!w) return null;
+      const used = w.usedPercent, duration = w.windowDurationMins, reset = w.resetsAt;
+      if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
+          typeof reset !== "number" || !Number.isFinite(reset) || reset * 1000 <= now) return null;
+      const elapsed = current.readAt - (reset * 1000 - duration * 60_000);
+      if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100 || elapsed < 0 || (elapsed === 0 && used > 0))
+        throw new Error("unreadable quota window");
+      let burn = elapsed > 0 ? used / elapsed : 0;
+      if (previous && previous.readAt < current.readAt && old?.resetsAt === reset && old.windowDurationMins === duration &&
+          typeof old.usedPercent === "number" && Number.isFinite(old.usedPercent) && old.usedPercent >= 0 && old.usedPercent <= used)
+        burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
+      const projected = used + burn * ageMs;
+      if (!Number.isFinite(projected) || projected >= 100 - reserve) throw new Error("projected burn reaches the reserve");
+      windows++;
+      return { usedPercent: projected, windowDurationMins: duration, resetsAt: reset };
+    };
+    const currentRates = current.value.rateLimits as CodexRateLimitResult, previousRates = previous?.value.rateLimits as CodexRateLimitResult | undefined;
+    const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => b == null ? b
+      : { ...b, primary: project(b.primary, old?.primary), secondary: project(b.secondary, old?.secondary) };
+    const rateLimits = { ...currentRates, rateLimits: bucket(currentRates.rateLimits, previousRates?.rateLimits),
+      rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
+        .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id])])) };
+    if (windows === 0) throw new Error("no unreset quota window with a duration");
+    const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities);
+    if (!selected.readable) throw new Error(selected.detail ?? "projected model is unavailable");
+    return { ...selected, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable" },
+      detail: `Codex capacity carried forward ${ageMs}ms from ${fixedClock(current.readAt).iso()}; ${failure.detail ?? "probe unavailable"}` };
+  } catch (error) {
+    const reason = String((error as Error).message).slice(0, 256);
+    return { ...failure, detail: `${failure.detail}; last-good unavailable: ${reason}` };
+  }
+}
+
 /** Read account-visible models and their subscription buckets through one app-server session. */
 export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps = {}): Promise<ProviderCapacity> {
   let bin: string;
@@ -1911,7 +2026,8 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     const failed = codexCapacityFailureCache.get(cacheKey);
     if (failed) {
       const ageMs = now() - failed.at;
-      if (ageMs < failureBackoffMs) return backedOffCodexFailure(failed.value, ageMs, failureBackoffMs);
+      if (ageMs < failureBackoffMs) return carryCodexCapacity(config, bin, deps, capabilities,
+        backedOffCodexFailure(failed.value, ageMs, failureBackoffMs), failed.failureKind, now());
       codexCapacityFailureCache.delete(cacheKey);
     }
   }
@@ -1940,18 +2056,22 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   if ("provider" in value) {
     const { failureKind, ...capacity } = value;
     codexCapacityCache.delete(cacheKey);
+    if (failureKind === "terminal") rememberCodexRuntime(config, bin, undefined, now());
     // A STARVED READ IS NOT EVIDENCE ABOUT CODEX, so it must not buy a failure backoff. Caching it
     // would suppress the next read for up to CODEX_CAPACITY_FAILURE_BACKOFF_MAX_MS on the strength
     // of an exchange that observed nothing -- turning one blocked tick into a window in which the
     // provider is declared unreadable and every lane routes to the subscription instead.
     if (!deps.forceRefresh && failureKind !== "starved") {
-      codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity });
+      codexCapacityFailureCache.set(cacheKey, { at: now(), value: capacity, failureKind });
     }
-    return capacity;
+    return carryCodexCapacity(config, bin, deps, capabilities, capacity, failureKind, now());
   }
   codexCapacityCache.set(cacheKey, { at: now(), value });
   codexCapacityFailureCache.delete(cacheKey);
-  return selectCodexRuntime(value, config, deps, capabilities);
+  const selected = selectCodexRuntime(value, config, deps, capabilities);
+  const persistence = rememberCodexRuntime(config, bin, value, now());
+  if (persistence && !selected.readable) rememberCodexRuntime(config, bin, undefined, now());
+  return persistence ? { ...selected, detail: [selected.detail, persistence].filter(Boolean).join("; ") } : selected;
 }
 
 /**
