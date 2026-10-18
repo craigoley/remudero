@@ -65,7 +65,7 @@ import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/ada
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
-import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
+import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
@@ -545,6 +545,7 @@ import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDep
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
+import { testPlaceOutcome } from "./lib/test-placement.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
@@ -908,7 +909,6 @@ import {
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   decideDraftDeferral,
-  declinedReasonInLedger,
   type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
@@ -978,6 +978,7 @@ import {
   ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
+import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
 import {
@@ -1570,6 +1571,9 @@ import {
   postReviewCommentGuarded,
   postReviewPending,
   postReviewStatusGuarded,
+  readReviewStatusEntry,
+  reviewStatusEntryFromCombined,
+  refreshReviewPublisherToken as refreshInstallationToken,
   priorReviewVerdictFromLedger,
   reviewLedgerKeyFor,
   UNFILED_RUN_SENTINEL,
@@ -1624,7 +1628,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
@@ -3302,10 +3306,7 @@ import {
   resolveGithubWebhookSecretFilePath,
   wireSweepWakeToDaemon,
 } from "./lib/github-event-wake.js";
-import {
-  refreshInstallationToken,
-  startInstallationTokenRefresh,
-} from "./lib/github-app.js";
+import { startInstallationTokenRefresh } from "./lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, runChildCredentialSocket, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
@@ -7888,6 +7889,14 @@ export function hostAlertCommand(rest: string[], clock: Clock = systemClock): nu
   return 0;
 }
 
+/** `rmd test-place <path...>` (W1-T9874): the folder a test belongs in, computed from its imports. */
+export function testPlaceCommand(rest: string[], root: string = repoRoot): number {
+  const done = testPlaceOutcome(rest, root, () => hostWorktreeGit(root, ["rev-parse", "HEAD^{tree}"]).trim());
+  if (done.out !== "") console.log(done.out);
+  if (done.error !== "") console.error(done.code === 2 ? `${done.error}\n${USAGE}` : done.error);
+  return done.code;
+}
+
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
 // LAST source line in this file, where `--experimental-test-coverage` stamps `DA:<line>,0` on the
 // trailing records, so adding a name to it costs a permanently-uncoverable added line at
@@ -9206,7 +9215,7 @@ async function runReview(args: {
   // comment for the full design.
   if (verdict.taskIdOwnershipWithheld) {
     // W1-T4414: an unreadable reservation holds the verdict — no terminal status, the same channel every caller honours.
-    log("review.post_refused", { head_sha: headSha, pr_url: prUrl, reason: verdict.taskIdOwnershipWithheld, unknown_reservations: unknownReservationReads(verdict.taskIdOwnership) });
+    log("review.post_refused", withheldReviewRefusalRow({ headSha, prUrl, reason: verdict.taskIdOwnershipWithheld, ownership: verdict.taskIdOwnership, inputDigest }));
     say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${verdict.taskIdOwnershipWithheld}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: verdict.taskIdOwnershipWithheld, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -16097,6 +16106,7 @@ export function alreadySatisfiedVerdict(
  *  the Anthropic-side api-error flag. Feeds W1-T7's {@link classifyFailure}. */
 function workerSignal(r: WorkerResult): FailureSignal {
   return {
+    cashAllowanceResetAt: r.cashAllowanceResetAt,
     subtype: r.subtype,
     text: [workerTranscript(r), r.stderr].join("\n"),
     apiError: r.apiError,
@@ -16169,11 +16179,15 @@ export function finishTransientRetry(
 ): RunResult | undefined {
   if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
   const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
-  try {
-    removeWorktree(repoDir, worktreePath);
-    log("worktree.remove", { on: "blocked_transient" });
-  } catch (e) {
-    log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+  if (driverResult.cashAllowanceExhausted) {
+    log("worktree.retained", { on: "cash_allowance_exhausted", reason: "a later tool turn may have left unpublished edits" });
+  } else {
+    try {
+      removeWorktree(repoDir, worktreePath);
+      log("worktree.remove", { on: "blocked_transient" });
+    } catch (e) {
+      log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+    }
   }
   log("verdict", {
     verdict: "blocked_transient",
@@ -16183,7 +16197,8 @@ export function finishTransientRetry(
     cost_usd: costUsd,
     billing_mode: billingMode(worker.childEnvKeys),
     account_label: worker.accountLabel,
-    reason: `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
+    reason: driverResult.cashAllowanceExhausted ? driverResult.reason
+      : `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
     ...terminalVerdictFields(worker),
   });
   say(`verdict: blocked_transient — ${driverResult.reason}`);
@@ -23874,17 +23889,9 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       reviewerCodeFreshness: await publicationFreshness(),
       fetchLifecycle: () => fetchPrLifecycle(view.url),
-      fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
-        const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
-          statuses?: Array<{ context?: string; state?: string }>;
-        };
-        if (!raw || !Array.isArray(raw.statuses)) throw new Error("combined commit status has no statuses array");
-        const state = raw.statuses.find((entry) => entry.context === REVIEW_CONTEXT)?.state;
-        if (state === undefined) return undefined;
-        if (state === "success" || state === "pending") return state;
-        if (state === "failure" || state === "error") return "failure";
-        throw new Error(`unrecognized remudero-review state: ${state}`);
-      },
+      fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
+      fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
+      fetchPublisher: deps.fetchView,
     });
     if (restored.posted) {
       replayStatusAction = "restored";
@@ -23895,6 +23902,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         evaluator_provenance: verdict.evaluatorProvenance,
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
         status_recovered: true,
+        status_publisher: restored.publisherEvidence,
       });
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
@@ -23906,6 +23914,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         evaluator_provenance: verdict.evaluatorProvenance,
         reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
         status_confirmed: true,
+        status_publisher: restored.publisherEvidence,
       });
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
@@ -33870,6 +33879,7 @@ async function retroCommand(
   if (opts.automated) {
     const tokenRunId = `retro-token-${process.pid}`;
     const refresh = (opts.startTokenRefresh ?? startInstallationTokenRefresh)({
+      refresh: refreshInstallationToken,
       log: (step, extra) => appendLedger(ledgerPath, {
         run_id: tokenRunId,
         task_id: "RETRO",
@@ -39421,7 +39431,7 @@ export async function daemonCommand(
   // when `armed` (a plain-`GH_TOKEN` host with no `GH_APP_*` names has nothing to wait for) and
   // NEVER rejects (github-app.ts's own doc on `ready`), so this await can only delay the first
   // sweep by the mint's own latency — it can never hang the daemon or surface a throw here.
-  const githubAppRefresh = (deps.startGithubAppRefresh ?? startInstallationTokenRefresh)({ log });
+  const githubAppRefresh = (deps.startGithubAppRefresh ?? startInstallationTokenRefresh)({ log, refresh: refreshInstallationToken });
   if (githubAppRefresh.ready) {
     await githubAppRefresh.ready;
   }
@@ -43523,8 +43533,9 @@ export function commitWorkerEdits(
     }
     if (mergeHead !== undefined) {
       runGit(["merge", "--quit"]);
-      runGit(["read-tree", sha]);
     }
+    // W1-T10068: refresh the index only after CAS; never update working-tree files.
+    runGit(["read-tree", sha]);
   }
   return {
     committed: true,
@@ -49034,7 +49045,7 @@ export function buildInboxDraftHook(
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+          isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
@@ -49352,7 +49363,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
-      isDeclined: (id) => declinedReasonInLedger(ledgerLinesForRatify, id),
+      isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -49431,7 +49442,7 @@ function loadProposalForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -49472,7 +49483,7 @@ function loadProposalsForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
@@ -49677,7 +49688,26 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   ledgerPath: string;
   runId: string;
   shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
+  clock?: Clock;
 };
+
+function lifetimeShardAge(
+  taskId: string,
+  root: string,
+  nowMs: number,
+  rows: readonly Record<string, unknown>[],
+): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const fromGit = shardAgeDays(taskId, root, nowMs);
+  if (fromGit.ageDays !== null) return fromGit;
+  let first: number | undefined;
+  for (const row of rows) {
+    if (row.task_id !== taskId && row.task !== taskId) continue;
+    const t = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isNaN(t) && (first === undefined || t < first)) first = t;
+  }
+  if (first === undefined) return fromGit;
+  return { ageDays: Math.max(0, Math.floor((nowMs - first) / 86400000)) };
+}
 
 function latestLifetimeOperatorRuling(note: string | undefined): { date: string; decision: "automate" | "needs_operator" } | undefined {
   if (!note) return undefined;
@@ -49695,6 +49725,7 @@ export async function routeAdaptiveLifetimePressure(
   deps: AdaptiveLifetimePressureRoute,
 ): Promise<VerifyHumanRouteResult> {
   const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
+  const nowMs = (deps.clock ?? systemClock).now();
   const shards: ShardUnderJudgement[] = [];
   const infraOnly: string[] = [];
   const rulings = new Map<string, VerifyHumanVerdict>();
@@ -49734,7 +49765,9 @@ export async function routeAdaptiveLifetimePressure(
         "inside the feature is not a build-time need. Judge why attributable attempts keep failing; " +
         "choose automate, backlog, or needs_operator for the build process.",
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
-      ageDays: 0,
+      route: "lifetime-pressure",
+      attributableDispatches,
+      ...lifetimeShardAge(task.id, deps.root, nowMs, rows),
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
@@ -54276,6 +54309,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.",
   },
   {
+    name: "test-place",
+    syntax: "rmd test-place <test-path...> [--json]",
+    summary: "Print the test/ folder each test file belongs in, computed from the src modules it imports.",
+    detail: "W1-T9874: a test's folder is computed, not chosen. Extracts the test's value, type-only and helper imports (helpers followed through test/helpers|setup|lib), repo path strings and imported symbol names with a comment-aware scanner, then scores every module by reach weight x IDF x symbol count plus name bonuses, sums per subsystem and maps the winner to one of the 21 folders (or rules/ for a suite that reads the repo as text). The data is scripts/test-placement/subsystem-map.json and test-folders.tsv. Prints the folder, the confidence (high, medium, low, none) and the reasons for each path; --json prints the same as an array. Exits 2 on no path or an unknown flag, 1 on a path that does not exist.",
+  },
+  {
     name: "claim",
     syntax: "rmd claim <task-id> [--drop]",
     summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
@@ -55388,6 +55427,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
+  ["test-place", (rest) => testPlaceCommand(rest)],
   ["claim", (rest) => claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))

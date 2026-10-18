@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.06
   status: queued
@@ -39,3 +39,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are src/lib/prompt-render.ts and test/check-reviewer-unmet.test.ts, which are an ordinary prompt-rendering source file and its test. Nothing in the description or files list touches secrets, credentials, auth, permissions, deletion of data or history, or merge/deploy/review policy."
+      - "The acceptance criterion is a grep for a named test in test/check-reviewer-unmet.test.ts, so it can be verified mechanically, and the filing was verified to cite 5 distinct PRs with both declared files existing at the base."
+      - "The family track record (28 merged, 40 declined, Beta mean 0.63) and the failed prior rung (W1-T6166 touched the same files and did not reduce the share) are concerns about effectiveness rather than danger. The description says to do something structurally different, but the declared file list is the same as the prior rung's. This points to a possible ineffective remedy, which the gardener's later measurement will catch and which CI and review also cover."
+      - "No bounded view of the actual change was supplied, so I cannot confirm scope beyond the declared files. The declared plan itself shows no operator-only decision and no irreversible action."
+    judged_at: "2026-10-18T01:22:07.969Z"
+    pin: "0cef46063f7bd1bbb317f6a994d3c03edb6de97caeecac23320e9b046f93dab6"

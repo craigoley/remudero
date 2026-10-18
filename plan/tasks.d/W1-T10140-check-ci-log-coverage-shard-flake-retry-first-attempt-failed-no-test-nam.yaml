@@ -1,0 +1,51 @@
+- id: W1-T10140
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-shard:flake-retry-first-attempt-failed-no-test-name-parsed-from-ou cost 19.8 PR minute(s) across 12 round(s) on 10 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 1.28
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-shard:flake-retry-first-attempt-failed-no-test-name-parsed-from-ou"
+  files:
+    - src/lib/affected-suites.ts
+    - test/check-ci-log-coverage-shard-flake-retry-first-attempt-failed-no-test-nam.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-shard:flake-retry-first-attempt-failed-no-test-name-parsed-from-ou"
+      proof: "grep: test(\"W1-T10140: check:ci-log:coverage-shard:flake-retry-first-attempt-failed-no-test-name-parsed-from-ou is prevented, not retried\" in test/check-ci-log-coverage-shard-flake-retry-first-attempt-failed-no-test-nam.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-shard:flake-retry-first-attempt-failed-no-test-name-parsed-from-ou's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-shard:flake-retry-first-attempt-failed-no-test-name-parsed-from-ou cost 19.8 PR minute(s) (seven-day half-life) across 12 fix round(s) on 10 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/affected-suites.ts: test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts imports it
+    - test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts: named by the failing check
+    - the rounds name a failing test: test/a-caller-chosen-git-tree-is-classified-at-the-call.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #11844 at 2026-10-14T23:49:08Z: hand fix PR #11844: src/lib/affected-suites.ts; minutes are the pass median proxy (5.971116666666667), not measured repair time
+    - PR #11800 at 2026-10-14T22:04:58Z: hand fix PR #11800: src/lib/affected-suites.ts; minutes are the pass median proxy (5.971116666666667), not measured repair time
+    - PR #11615 at 2026-10-14T08:58:22Z: hand fix PR #11615: src/lib/affected-suites.ts, src/lib/selector-shadow-gardener.ts, src/lib/test-impact-map.ts; minutes are the pass median proxy (5.971116666666667), not measured repair time
+    - PR #10516 (https://github.com/craigoley/remudero/pull/10516) at 2026-10-10T02:07:53.583Z: ci-log round — coverage-shard (6/8): test/review-wires-criteria-at-head.test.ts; coverage-shard (8/8): FLAKE-RETRY: first attempt failed — (no test name parsed from output); coverage-shard (2/8): test
+        failing tests: reviewCommand resolves at the PR's own head sha, judges a shard the PR's own diff adds, still fails closed on an id absent at that head, and still cannot see a shard that merges later; W1-T460 (5): the production showBlob pipes git's stderr — a review over an absent base path prints no `fatal:`
+    - PR #10392 (https://github.com/craigoley/remudero/pull/10392) at 2026-10-09T19:36:57.511Z: ci-log round — coverage-shard (1/8); coverage-shard (6/8): node_modules lockfile mismatch: worktree /tmp/rmd-refused-open-root-ZLkhMq/worktrees/run-WN-TN-N was cut from origin/mai; coverage-shard (2/8
+        failing tests: a failed directory listing reports unreadable storage and retains owner reservations
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are one library file (src/lib/affected-suites.ts) and one new test file. Neither is a secrets, auth, permissions, deploy, merge-policy or review-policy path, and the description names no deletion or irreversible action."
+      - "The task asks for no operator-only decision. Its acceptance is a grep for a named test in the new test file, which can be checked automatically."
+      - "The rationale cites 5 distinct PRs (#11844, #11800, #11615, #10516, #10392), and three of them touched affected-suites.ts. That makes the target file plausible as the source of the recurring failure."
+      - "The ci-friction family has a mixed record (28 merged, 40 declined, Beta mean 0.64), and the cause rests on a flake-retry signature with no test name parsed. That calls for review caution, but the PR still passes CI and review."
+      - "No bounded view of the actual change was supplied, so I cannot see its size or shape. The declared scope is small and bounded."
+    judged_at: "2026-10-18T12:29:40.886Z"
+    pin: "0e8260787b5f1ebb03e2abd7cd6f3ff5a164d5b44466af8dbe480274129badbc"

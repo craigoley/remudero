@@ -1,0 +1,34 @@
+- id: W1-T10159
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:src/lib/ci-friction-remedy.ts cost 16.8 PR minute(s) across 4 round(s) on 4 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.3
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:src/lib/ci-friction-remedy.ts"
+  files:
+    - src/lib/ci-friction-remedy.ts
+    - test/hand-fix-src-lib-ci-friction-remedy-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:src/lib/ci-friction-remedy.ts"
+      proof: "grep: test(\"W1-T10159: hand_fix:src/lib/ci-friction-remedy.ts is prevented, not retried\" in test/hand-fix-src-lib-ci-friction-remedy-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:src/lib/ci-friction-remedy.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:src/lib/ci-friction-remedy.ts cost 16.8 PR minute(s) across 4 red run(s) within the measured window on 4 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-friction-remedy.ts: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #12724 at 2026-10-18T05:29:58Z: hand fix PR #12724: src/lib/ci-friction-remedy.ts, src/lib/remedy-effect.ts; minutes are the pass median proxy (5.971116666666667), not measured repair time
+    - PR #11997 at 2026-10-15T12:58:39Z: hand fix PR #11997: src/lib/ci-friction-remedy.ts; minutes are the pass median proxy (5.971116666666667), not measured repair time
+    - PR #11075 at 2026-10-12T12:26:16Z: hand fix PR #11075: src/lib/ci-friction-remedy.ts; minutes are the pass median proxy (5.971116666666667), not measured repair time
+    - PR #11063 at 2026-10-12T11:22:31Z: hand fix PR #11063: src/lib/ci-friction-remedy.ts; minutes are the pass median proxy (5.971116666666667), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

@@ -364,6 +364,37 @@ assert calls==[],calls
   } finally { rmSync(fx.home, { recursive: true, force: true }); }
 });
 
+test("legacy sweeper retirement verifies exact macOS disabled tokens and retains ambiguous evidence", () => {
+  const fx = fixture();
+  try {
+    const program = String.raw`import runpy,pathlib,sys,plistlib,types
+ns=runpy.run_path(sys.argv[1]);home=pathlib.Path(sys.argv[2]);p=home/'Library/LaunchAgents/com.craigoley.disk-sweep.plist';p.parent.mkdir(parents=True)
+(home/'bin').mkdir();script=home/'bin/covtmp-sweep.zsh';script.write_bytes(b'known legacy fixture')
+ns['retire'].__globals__['LEGACY_SCRIPT_SHA256']=ns['hashlib'].sha256(script.read_bytes()).hexdigest()
+raw=plistlib.dumps({'Label':ns['LABEL'],'ProgramArguments':ns['LEGACY_ARGS']})
+for token in ['enabled','false','trueish','disabled-extra','unknown']:
+ p.write_bytes(raw);calls=[]
+ def run(argv,**kw):
+  calls.append(argv);return types.SimpleNamespace(returncode=0,stdout='"com.craigoley.disk-sweep" => '+token,stderr='')
+ ns['subprocess'].run=run
+ assert ns['retire'](home,True)=={'state':'disable-unverified','changed':True}
+ assert p.read_bytes()==raw and [a[1] for a in calls]==['disable','print-disabled']
+for output in ['"comXcraigoleyXdisk-sweep" => disabled','"com.craigoley.disk-sweep" => disabled\n"com.craigoley.disk-sweep" => enabled','']:
+ assert ns['confirmed_disabled'](output) is False
+p.write_bytes(raw);calls=[]
+def run(argv,**kw):
+ calls.append(argv);return types.SimpleNamespace(returncode=0,stdout='disabled services = {\n\t"com.craigoley.disk-sweep" => disabled\n}',stderr='')
+ns['subprocess'].run=run
+result=ns['retire'](home,True)
+assert result['state']=='disabled-legacy-job-plist-preserved',result
+assert pathlib.Path(result['archive']).read_bytes()==raw and not p.exists()
+assert [a[1] for a in calls]==['disable','print-disabled']
+`;
+    const r = spawnSync("python3", ["-c", program, retire, fx.home], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+  } finally { rmSync(fx.home, { recursive: true, force: true }); }
+});
+
 test("Node compile-cache batching preserves the six-hour rule, fresh files, unrelated data and cache root", () => {
   const fx = fixture();
   try {

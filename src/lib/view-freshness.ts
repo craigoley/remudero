@@ -59,6 +59,20 @@ export function describeSource(source: ViewSource): ViewSource {
   return { ...source, kind, ...(instance ? { instance } : {}), ...(budgetMs !== undefined ? { budgetMs } : {}) };
 }
 
+/** A declared ledger dependency is behind only by the age of a newer relevant row. */
+export function judgeLedgerReads(built: ViewSource, projector: ViewSource, newest: string | null, nowMs: number): ViewSource {
+  const current = { ...projector, asOf: built.asOf };
+  if (current.state !== "fresh") return current;
+  const headMs = newest === null ? Number.NaN : Date.parse(newest);
+  const builtMs = built.asOf === null ? Number.NEGATIVE_INFINITY : Date.parse(built.asOf);
+  if (!Number.isFinite(headMs) || headMs <= builtMs) return current;
+  const lagMs = Math.max(0, nowMs - headMs);
+  const behind = { ...current, lagMs };
+  const budgetMs = current.budgetMs!;
+  if (lagMs <= budgetMs) return behind;
+  return { ...behind, state: "stale", phase: "behind", reason: `the projector has newer rows read by this view as of ${newest}, ${Math.round(lagMs / 1000)} s old (budget ${Math.round(budgetMs / 1000)} s)` };
+}
+
 /**
  * Judges one source at `nowMs`: its lag is the age of its `asOf`, and a source its producer called
  * fresh whose lag exceeds its budget is stale, phase `behind`. A source already stale keeps its own

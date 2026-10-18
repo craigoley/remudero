@@ -1,0 +1,29 @@
+- id: W1-T10111
+  title: "REPAIR THE SELECTOR EDGE INTO test/resolver-divergence-detector.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  priority: 2.5
+  risk: low
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/resolver-divergence-detector.test.ts"
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-selector-runs-in-shadow.test.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 39071533441 at c5782eda9e6a1b46ab0a723f48ea9c01d5fa1e08: c5782eda9e6a1b46ab0a723f48ea9c01d5fa1e08 -> test/resolver-divergence-detector.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again. Add a test in test/the-affected-suite-selector-runs-in-shadow.test.ts that selects test/resolver-divergence-detector.test.ts for each edge: diff-coverage blocks an edge no test exercises."
+  acceptance:
+    - claim: "the narrow selector includes test/resolver-divergence-detector.test.ts when this edge is exercised"
+      proof: "grep: test/resolver-divergence-detector\\.test\\.ts in src/lib/affected-suites.ts"
+    - claim: "a regression test selects test/resolver-divergence-detector.test.ts for each recorded edge"
+      proof: "grep: test/resolver-divergence-detector\\.test\\.ts in test/the-affected-suite-selector-runs-in-shadow.test.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files are src/lib/affected-suites.ts and one test file. Both exist at base, and neither touches secrets, auth, deploy, merge or review policy."
+      - "The task adds a missing selector edge (a test-selection mapping) plus a regression test. It is not a deletion, and it is reversible and verifiable through grep acceptance and CI."
+      - "The author family (selector-shadow-miss) has 18 merged and 0 declined tasks, which is a clean track record. The task asks for no operator-only decision."
+    judged_at: "2026-10-18T08:05:13.715Z"
+    pin: "b81b5b000f13345cdaff290840726f512b5e9863d860a7d1bcbc9acd2d471a2f"

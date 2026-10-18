@@ -185,6 +185,7 @@ function servedCapabilities(stateDir: string, core: boolean): InstanceEntry["cap
 export function createInstancesView<S extends ProjectedState>(opts: InstancesViewOptions<S>): {
   name: string;
   version: number;
+  ledgerReads(db: ReadModelDb): string | null;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: InstancesData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
@@ -202,6 +203,10 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
   return {
     name: INSTANCES_VIEW_NAME,
     version: INSTANCES_VIEW_VERSION,
+    ledgerReads: (db) => {
+      const beat = db.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get();
+      return beat ? fixedClock(Number(beat.last_ms)).iso() : null;
+    },
     materialize: ({ now, instances }) => {
       const read = readFile(opts.repoPath);
       const parsed = parseRegistryRead(read);
