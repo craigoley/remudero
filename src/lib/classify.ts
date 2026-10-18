@@ -545,3 +545,21 @@ export async function runDiagnoseThenRetry(deps: DiagnoseThenRetryDeps): Promise
     if (deps.sleep) await deps.sleep(transientBackoffMs(attempts));
   }
 }
+
+// ── Mechanical ratchet rounds (W1-T9399) ────────────────────────────────────
+
+/** The two baseline ratchets whose remedy is mechanical: the gate prints the exact baseline line to record. */
+export type MechanicalRatchet = "comment-load-ratchet" | "source-size-ratchet";
+
+/**
+ * Names the mechanical ratchet a red CI log belongs to, or undefined. A comment-load or source-size
+ * ratchet red needs no judgement: `runCensusFix` (lib/census-fix.ts) records the new row before the
+ * worker's final commit, so such a round is PREVENTED upstream and a fix round must not be spent on it.
+ * Pure and fail-closed: only the ratchet's own check name counts, never a mere mention of comments.
+ */
+export function mechanicalRatchetOf(text: string | undefined): MechanicalRatchet | undefined {
+  const t = text ?? "";
+  if (/\bcomment-load-ratchet\b/.test(t)) return "comment-load-ratchet";
+  if (/\bsource-size-ratchet\b/.test(t)) return "source-size-ratchet";
+  return undefined;
+}
