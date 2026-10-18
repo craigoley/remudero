@@ -40,4 +40,3 @@ the complete source/toolchain/input closure and bounded drift policy.
 Cleanup must protect dependency donors referenced by live views even when no file
 is currently open. Six-hour age alone is insufficient. Source, history, dirty or
 unpushed work, active readers/writers and unknown provenance remain protected.
-
