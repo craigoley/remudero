@@ -2213,8 +2213,9 @@ export async function classifyAllProposalsSliced(
   // Only a complete archive read may replace the store; a partial one keeps what the store already holds.
   const receipts = retained.verdictReceiptsRead ? { verdictReceipts: mergeVerdictReceipts(fp.verdictReceipts, fp.ledgerLines.flatMap((row) => verdictReceiptOf(row) ?? [])) } : {};
   const reused = reusableResult(state, fp);
-  if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence)
-    ? { ...reused, ...receipts } : { ...reused, attentionEvidence, ...receipts };
+  if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence) &&
+    (receipts.verdictReceipts === undefined || JSON.stringify(reused.verdictReceipts) === JSON.stringify(receipts.verdictReceipts))
+    ? reused : { ...reused, attentionEvidence, ...receipts };
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
@@ -2224,9 +2225,9 @@ export async function classifyAllProposalsSliced(
       if (i > 0) await yieldNow();
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
-    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence };
+    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence, ...receipts };
     if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
-    return { ...result, ...receipts };
+    return result;
   };
   const promise = run().finally(() => {
     if (state.pending?.promise === promise) state.pending = undefined;

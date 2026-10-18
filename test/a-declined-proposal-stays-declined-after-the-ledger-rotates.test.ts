@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { buildPanelGraphRoutes, classifyAllProposalsSliced, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { refreshInboxClassification } from "../src/lib/inbox-view.js";
-import { registryThreadItems } from "../src/lib/inbox-responder.js";
-import { createService } from "../src/lib/service.js";
+import { buildPanelGraphRoutes, classifyAllProposalsSliced, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { refreshInboxClassification } from "#src/lib/inbox-view.js";
+import { registryThreadItems } from "#src/lib/inbox-responder.js";
+import { createService } from "#src/lib/service.js";
 // Imported per test, so this file still loads where the store does not exist and each test reports its own failure.
-const receipts = () => import("../src/lib/inbox-verdict-receipts.js");
-import { fakeGitHub } from "./helpers/fake-github.js";
+const receipts = () => import("#src/lib/inbox-verdict-receipts.js");
+import { fakeGitHub } from "#test/helpers/fake-github.js";
 
 const DECLINED = "verify-human:W1-T216";
 const OPEN = "verify-human:W1-T217";
