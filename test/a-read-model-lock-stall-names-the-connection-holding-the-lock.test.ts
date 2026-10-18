@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { fork } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { fork, spawnSync } from "node:child_process";
+import fs, { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -196,4 +197,44 @@ test("attached writers and close use the real default recorder without changing 
   const blocked = adapter.attachReadModel(f.db.path, 1, { report: step => reports.push(step) });
   blocked.exec("BEGIN IMMEDIATE"); blocked.exec("COMMIT"); blocked.close();
   assert.deepEqual(reports, ["read_model.holder_record_failed"], "real filesystem failure is advisory and bounded");
+});
+
+test("default process inspection and failed inventory close remain unknown", (t) => {
+  const f = fixture(t);
+  let calls = 0;
+  const read = t.mock.method(fs, "readFileSync", () => { calls++; throw Object.assign(Error("procfs denied"), { code: "EACCES" }); });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(adapter.readModelProcessIdentity(), undefined);
+    assert.equal(calls, 1, "the real default process reader ran and handled its failure");
+  } finally { read.mock.restore(); syncBuiltinESMExports(); }
+  const originalClose = fs.Dir.prototype.closeSync;
+  const close = t.mock.method(fs.Dir.prototype, "closeSync", function(this: fs.Dir) {
+    originalClose.call(this);
+    throw Error("directory close failed");
+  });
+  try {
+    const observed = adapter.readReadModelTransactions(f.db.path);
+    assert.equal(observed.complete, false);
+    assert.equal(observed.state, "unknown");
+  } finally { close.mock.restore(); }
+});
+
+test("a real default diagnostic sink reports once and never prevents child database writes", (t) => {
+  const f = fixture(t);
+  rmSync(adapter.readModelTransactionDir(f.db.path), { recursive: true });
+  writeFileSync(adapter.readModelTransactionDir(f.db.path), "not a directory");
+  const file = join(f.dir, "default-failure.mjs");
+  const module = pathToFileURL(join(process.cwd(), "src/lib/read-model-db.ts")).href;
+  writeFileSync(file, `import { openReadModel } from ${JSON.stringify(module)};
+const db=openReadModel({stateDir:process.argv[2],instance:'core',schemaVersion:1});
+db.exec('BEGIN IMMEDIATE');db.prepare('INSERT INTO value VALUES(?)').run(17);db.exec('COMMIT');
+db.exec('BEGIN IMMEDIATE');db.exec('ROLLBACK');db.close();
+`);
+  const child = spawnSync(process.execPath, ["--import", "tsx", file, f.dir], { encoding: "utf8", timeout: 20_000, maxBuffer: 65_536 });
+  assert.equal(child.status, 0, child.stderr);
+  const reports = child.stderr.split("\n").filter(line => line.includes('"step":"read_model.holder_record_failed"'));
+  assert.equal(reports.length, 1);
+  assert.equal(JSON.parse(reports[0]!).release, "unverified");
+  assert.equal(f.db.prepare("SELECT n FROM value").get()?.n, 17);
 });
