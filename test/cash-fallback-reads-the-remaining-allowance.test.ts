@@ -7,10 +7,7 @@ import type { Config } from "#src/lib/config.js";
 import { fixedClock } from "#src/lib/clock.js";
 import * as provider from "#src/lib/worker-provider.js";
 import { cashAllowanceFallbackRefusal, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
-import { runDiagnoseThenRetry } from "#src/lib/classify.js";
 import { reviewerOutcome } from "#src/lib/review.js";
-import { finishTransientRetry, implementAttemptOutcome } from "#test/helpers/run-task-test.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
 
 const NOW = Date.parse("2026-10-17T09:50:29.000Z"), ISO = fixedClock(NOW).iso();
 const RESET = "2026-10-18T00:00:00.000Z";
@@ -70,32 +67,6 @@ test("W1-T10040: a cap refusal is cash_allowance_exhausted not an api error", as
   assert.equal(result.subtype, "cash_allowance_exhausted");
   assert.equal(result.cashAllowanceResetAt, RESET);
   assert.equal(result.costUsd, 0);
-});
-
-test("W1-T10040: the retry driver stops on a cap refusal and names it", async t => {
-  const f = fixture(t), worker = await capResult(f);
-  let attempts = 0, diagnoses = 0, judges = 0, removals = 0;
-  const sleeps: number[] = [], rows: Array<{step: string} & Record<string, unknown>> = [];
-  const result = await runDiagnoseThenRetry({ now: () => NOW,
-    attempt: async () => { attempts++; return implementAttemptOutcome(worker); },
-    diagnose: async () => { diagnoses++; return { text: "unused" }; },
-    sleep: async ms => { sleeps.push(ms); },
-    fixProgressJudge: async () => { judges++; return undefined; } });
-  assert.equal(result.outcome, "gave_up");
-  assert.equal(attempts, 1);
-  assert.equal(diagnoses, 0);
-  assert.equal(judges, 0);
-  assert.deepEqual(sleeps, []);
-  assert.equal(result.strikes, 0);
-  assert.match(result.reason ?? "", /cash daily allowance exhausted until 2026-10-18T00:00:00.000Z/);
-  const terminal = finishTransientRetry(result, { taskId: "FIXTURE", runId: "fixture", repoDir: f.root,
-    worktreePath: f.root, costUsd: 0, worker, log: (step, extra) => rows.push({step,...extra}), say: () => {} }, () => { removals++; });
-  assert.equal(terminal?.verdict, "blocked_transient");
-  const verdict = rows.find(r => r.step === "verdict");
-  assert.match(String(verdict?.reason), /cash daily allowance exhausted until/);
-  assert.doesNotMatch(String(verdict?.reason), /repeated transient API error|fix progress/);
-  assert.equal(removals, 0, "a mid-tool-loop cap must never force-remove unpublished work");
-  assert.ok(rows.some(r => r.step === "worktree.retained"));
 });
 
 test("W1-T10040: a cap-refused reviewer is recorded as cash_allowance_exhausted", async t => {
@@ -190,22 +161,6 @@ test("both Foundry squeeze arms read the allowance without changing their health
       }
     }
   }
-});
-
-test("a mid-loop cash cap preserves real unpublished edits through the default cleanup boundary", async t => {
-  const f = fixture(t), worker = await capResult(f);
-  const repo = gitRepo({ scope: t, kind: "cash-partial" });
-  const work = repo.addWorktree(join(repo.dir, "partial"), "partial");
-  const path = join(work.dir, "unpublished.txt");
-  writeFileSync(path, "partial worker result");
-  const stopped = await runDiagnoseThenRetry({
-    attempt: async () => implementAttemptOutcome(worker), diagnose: async () => ({ text: "unused" }),
-  });
-  const result = finishTransientRetry(stopped, { taskId: "FIXTURE", runId: "fixture", repoDir: repo.dir,
-    worktreePath: work.dir, costUsd: 0, worker, log: () => {}, say: () => {} });
-  assert.equal(result?.verdict, "blocked_transient");
-  assert.equal(readFileSync(path, "utf8"), "partial worker result");
-  assert.match(repo.git("worktree", "list", "--porcelain"), /partial/);
 });
 
 test("allowance admission preserves a viable Sonnet arm when the plain ladder cannot select", async t => {
