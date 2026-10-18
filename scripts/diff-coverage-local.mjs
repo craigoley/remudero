@@ -307,6 +307,10 @@ export function main(argv, deps = {}) {
     log(HELP_TEXT);
     return 0;
   }
+  if (values['disk-profile'] !== undefined && values['batch-size'] === undefined) {
+    error('diff-coverage-local: --disk-profile requires --batch-size; a reservation must never be silently ignored.');
+    return 1;
+  }
 
   const testFiles = positionals;
   if (testFiles.length === 0) {

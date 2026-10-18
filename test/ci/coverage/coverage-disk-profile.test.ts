@@ -7,6 +7,8 @@ import { ownedFixtureDir } from '#test/helpers/owned-fixture-dir.js';
 import { coverageDiskAdmission, coverageDiskProfile } from '#scripts/lib/coverage-disk-profile.mjs';
 // @ts-expect-error Exercise profile propagation at the real CLI boundary.
 import { main } from '#scripts/coverage-batches.mjs';
+// @ts-expect-error Exercise refusal at the real local CLI entry point.
+import { main as localMain } from '#scripts/diff-coverage-local.mjs';
 
 const floor = 20 * 1024 ** 3;
 const profile = { minimumFreeBytes: floor, reservedBytes: 1024, estimatedPeakBytes: 2048 };
@@ -31,6 +33,11 @@ test('coverage disk profile preserves the existing floor and distinguishes unspe
     return { status: 75 };
   } });
   assert.equal(calls, 2);
+  const errors: string[] = [];
+  assert.equal(localMain(['--disk-profile', file, 'test/coverage-batches.test.ts'], {
+    error: (text: string) => errors.push(text), runInstrumentedTests: () => assert.fail('unbatched profile must refuse before tests'),
+  }), 1);
+  assert.match(errors.join('\n'), /requires --batch-size/);
 });
 
 test('coverage disk profiles refuse lower floors malformed fields and nonregular or oversized inputs', t => {
