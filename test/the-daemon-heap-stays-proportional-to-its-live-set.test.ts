@@ -221,7 +221,7 @@ test("the daemon loop drains and restarts on the cgroup share while V8's own lim
     assert.match(String(summary.stopDetail), /of the container's memory\.high/);
     assert.deepEqual(flags, ["--heap-growing-percent=10"], "the tightest factor was tried first");
     const pressure = rows.filter((r) => r.step === "daemon.memory_pressure").map((r) => r.extra.tier);
-    assert.deepEqual(pressure, ["tighten", "restart"]);
+    assert.deepEqual(pressure, ["clear", "tighten", "restart"], "the first unchanged clear decision is observable too");
     const exit = rows.find((r) => r.step === "daemon.heap_pressure_exit");
     assert.equal(exit?.extra.basis, "cgroup_share");
     assert.equal(exit?.extra.budget_bytes, HIGH);
