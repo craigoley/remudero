@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.12
+  # refusal-amendment (W1-T9407, run W1-T9407-1792332385903, 2026-10-18T14:44:53.257Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: Fix-round routing lives in `src/lib/sweep.ts` and `src/lib/prompt-render.ts`; the cited failures include census limits and documentation drift that `src/lib/config.ts` cannot prevent.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

@@ -670,7 +670,9 @@ test("a real fixed-argv cash check cannot inherit the daemon Azure credential", 
     const checkDir = join(root, "node_modules", ".bin");
     mkdirSync(checkDir, { recursive: true });
     const check = join(checkDir, "tsc");
-    writeFileSync(check, "#!/usr/bin/env node\nprocess.stdout.write(process.env.RMD_OPENWEIGHT_API_KEY ?? 'CASH_KEY_ABSENT')\n");
+    // The production boundary intentionally scrubs PATH. Pin this fixture's own interpreter,
+    // rather than adding a daemon path or credential to the child environment.
+    writeFileSync(check, `#!${process.execPath}\nprocess.stdout.write(process.env.RMD_OPENWEIGHT_API_KEY ?? 'CASH_KEY_ABSENT')\n`);
     chmodSync(check, 0o755);
 
     const requests: string[] = [];
@@ -708,6 +710,10 @@ test("a real fixed-argv cash check cannot inherit the daemon Azure credential", 
 
     assert.equal(result.isError, false);
     assert.equal(requests.length, 2, "the real check result must return to the model on a second turn");
+    const second = JSON.parse(requests[1]!) as { messages: Array<{ role: string; content: string }> };
+    const toolResult = second.messages.find((message) => message.role === "tool");
+    assert.ok(toolResult, "positive control: the fixed-argv child actually produced a tool result");
+    assert.deepEqual(JSON.parse(toolResult.content), { check: "typecheck", exitCode: 0, output: "CASH_KEY_ABSENT" });
     assert.match(requests[1]!, /CASH_KEY_ABSENT/);
     assert.doesNotMatch(requests[1]!, /cash-boundary-daemon-secret/);
   } finally {
