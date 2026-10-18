@@ -234,8 +234,9 @@ test("W1-T9240: cancellation arriving during real lock creation prevents a later
 test("W1-T9240: a failed lock publication cleans only its own inode", async t => {
   const root = ownedFixtureDir(t, "registry-lock-write-failure").dir;
   const open = fs.promises.open;
-  for (const replacement of [false, true]) {
-    const path = join(root, `${replacement}.json`);
+  for (const mode of ["own", "replacement", "missing"]) {
+    const replacement = mode === "replacement";
+    const path = join(root, `${mode}.json`);
     const raw = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
     const mock = t.mock.method(fs.promises, "open", async (...args: Parameters<typeof open>) => {
       const handle = await open(...args);
@@ -244,6 +245,7 @@ test("W1-T9240: a failed lock publication cleans only its own inode", async t =>
           fs.writeFileSync(`${path}.replacement`, raw);
           fs.renameSync(`${path}.replacement`, `${path}.lock`);
         }
+        if (mode === "missing") fs.unlinkSync(`${path}.lock`);
         throw new Error("fixture lock write failed");
       });
       return handle;
@@ -253,4 +255,13 @@ test("W1-T9240: a failed lock publication cleans only its own inode", async t =>
     assert.equal(fs.existsSync(`${path}.lock`), replacement, "never delete another acquisition's replacement");
     if (replacement) assert.equal(fs.readFileSync(`${path}.lock`, "utf8"), raw);
   }
+});
+
+test("W1-T9240: a rejected default timer is not converted to successful acquisition", async t => {
+  const f = planted(t);
+  await assert.rejects(updateProposalRegistryAsync(f.path, () => [], {
+    maxWaitMs: 500, signal: {} as AbortSignal,
+  }), /AbortSignal/);
+  assert.equal(fs.readFileSync(`${f.path}.lock`, "utf8"), f.raw);
+  assert.equal(fs.existsSync(f.path), false);
 });
