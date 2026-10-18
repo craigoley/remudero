@@ -1,3 +1,4 @@
+// The measured Console exits need their actual baseline, not an inferred cold-start reading.
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
