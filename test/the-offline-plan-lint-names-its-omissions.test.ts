@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ import { test, type TestContext } from "node:test";
 
 import { lintPlanCommand } from "../src/run-task.js";
 import { parseTasksFromYaml } from "../src/lib/plan.js";
-import { defaultCreditStorePath, invalidateDurableCredit, recordCredit, saveCreditStore, type CreditStore } from "../src/lib/status.js";
+import { defaultCreditOverridePath, defaultCreditStorePath, durableDependencyCredit, invalidateDurableCredit, loadCreditOverrides, loadCreditStore, recordCredit, saveCreditStore, type CreditReadState, type CreditStore } from "../src/lib/status.js";
 import { taskRulingPin } from "../src/lib/task-linter.js";
 import { withTempDir } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -21,7 +21,7 @@ import { ghShim } from "./helpers/gh-shim.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_IDENTITY = { name: "remudero offline lint fixture", email: "fixture@remudero.invalid" };
 
-// DESIGN/TDD ONLY: these native-format cache and release fixtures confer no live credit or authority.
+// Native-format PRIVATE cache/release fixtures confer no live credit or authority.
 const CREDIT_CHILD = "ZZ-T2", CREDIT_DEP = "ZZ-T1", CREDIT_GRANDPARENT = "ZZ-T0";
 const CREDIT_PR = "https://github.com/fixture-owner/remudero/pull/17";
 
@@ -46,8 +46,9 @@ function creditTaskYaml(id: string, depends: readonly string[], note: string, ma
 }
 
 interface DependencyCreditFixture {
-  root: string; env: NodeJS.ProcessEnv; base: string; configFile: string; cacheFile: string;
+  root: string; env: NodeJS.ProcessEnv; base: string; configFile: string; cacheFile: string; overrideFile: string;
   store: (value: CreditStore) => void; config: (value: string | undefined) => void;
+  overrides: (value: string) => void;
   child: (depends: readonly string[]) => void;
   offline: () => { code: number | null; output: string };
 }
@@ -69,6 +70,8 @@ async function withDependencyCreditFixture(
       LANG: "C", TZ: "UTC", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
       GIT_AUTHOR_NAME: FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: FIXTURE_IDENTITY.email,
       GIT_COMMITTER_NAME: FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: FIXTURE_IDENTITY.email,
+      // Preserve only native coverage output routing, not credentials or admission-bypass variables.
+      ...(process.env.NODE_V8_COVERAGE ? { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE } : {}),
     };
     const atGit = (args: string[]) => execFileSync("git", args, { cwd: root, env, encoding: "utf8" }).trim();
     atGit(["init", "-q"]);
@@ -89,9 +92,10 @@ async function withDependencyCreditFixture(
     // Omit claudeBin: a read-only credit consumer must NOT enter loadConfig().
     writeFileSync(configFile, JSON.stringify({ root: stateRoot }) + "\n");
     const cacheFile = defaultCreditStorePath(join(stateRoot, "state/ledger.ndjson"));
-    const maybe = (path: string) => existsSync(path) ? readFileSync(path, "utf8") : undefined;
+    const overrideFile = defaultCreditOverridePath(join(stateRoot, "state/ledger.ndjson"));
+    const maybe = (path: string) => existsSync(path) ? statSync(path).isFile() ? readFileSync(path, "utf8") : "<private non-file fixture>" : undefined;
     const offline = () => {
-      const before = [maybe(configFile), maybe(cacheFile)];
+      const before = [maybe(configFile), maybe(cacheFile), maybe(overrideFile)];
       const r = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"),
         join(REPO_ROOT, "scripts/lint-plan-offline.mjs"), "--base", base], {
         cwd: root, env, encoding: "utf8", timeout: 20_000, maxBuffer: 2 * 1024 * 1024,
@@ -99,15 +103,16 @@ async function withDependencyCreditFixture(
       assert.equal(r.error, undefined, "the actual offline child must complete"); assert.equal(r.signal, null);
       assert.deepEqual(tripwires.flatMap((shim, i) => shim.calls().map(call => commands[i] + " " + call)), [],
         "offline default must not call network tools or which claude");
-      assert.deepEqual([maybe(configFile), maybe(cacheFile)], before, "no default config/credit creation or mutation");
+      assert.deepEqual([maybe(configFile), maybe(cacheFile), maybe(overrideFile)], before, "no default config/credit/override creation or mutation");
       const output = r.stdout + "\n" + r.stderr;
       t.diagnostic(JSON.stringify({ code: r.status, output }));
       return { code: r.status, output };
     };
     await run({
-      root, env, base, configFile, cacheFile, child: depends => child(depends), offline,
+      root, env, base, configFile, cacheFile, overrideFile, child: depends => child(depends), offline,
       store: value => saveCreditStore(cacheFile, value),
       config: value => value === undefined ? rmSync(configFile) : writeFileSync(configFile, value),
+      overrides: value => { mkdirSync(dirname(overrideFile), { recursive: true }); writeFileSync(overrideFile, value); },
     });
   });
 }
@@ -166,7 +171,69 @@ const closedCreditCases: Array<{
   }, reason: /missing|absent|not.*found|root/i },
   { name: "missing config", seed: f => f.config(undefined), reason: /config|root|missing|absent/i },
   { name: "corrupt config", seed: f => f.config("{"), reason: /config|root|corrupt|parse/i },
+  { name: "relative configured root", seed: f => { f.store(nativeFixtureCredit()); f.config(JSON.stringify({ root: "relative-instance" })); }, reason: /config|root|absolute/i },
+  { name: "same-PR remove-credit override", seed: f => { f.store(nativeFixtureCredit()); f.overrides(removedCreditYaml()); }, reason: /override|removed/i },
+  { name: "malformed override YAML", seed: f => { f.store(nativeFixtureCredit()); f.overrides("{"); }, reason: /override.*corrupt|invalid.*YAML/i },
+  { name: "malformed override shape", seed: f => { f.store(nativeFixtureCredit()); f.overrides("{}"); }, reason: /override.*malformed|array/i },
+  { name: "refused override row", seed: f => { f.store(nativeFixtureCredit()); f.overrides('[{"action":"grant-credit"}]'); }, reason: /override.*invalid|refused|malformed/i },
+  { name: "unreadable nonmissing override", seed: f => { f.store(nativeFixtureCredit()); mkdirSync(f.overrideFile, { recursive: true }); }, reason: /override.*unreadable/i },
+  { name: "malformed invalidation container", seed: f => f.store({ [CREDIT_DEP]: { ...nativeFixtureCredit()[CREDIT_DEP], invalidated: [] } } as unknown as CreditStore), reason: /invalidat|quarantin/i },
+  { name: "malformed invalidation mark", seed: f => f.store({ [CREDIT_DEP]: { ...nativeFixtureCredit()[CREDIT_DEP], invalidated: { trailer: { prUrl: CREDIT_PR } } } } as CreditStore), reason: /invalidat|quarantin/i },
 ];
+
+function removedCreditYaml(): string {
+  return JSON.stringify([{ task: CREDIT_DEP, pr: 17, action: "remove-credit", reason: "private subtract-only fixture", author_class: "operator" }]);
+}
+
+test("lint dependency credit: a valid independent sibling survives subtract-only override or quarantine", async t => {
+  for (const exclusion of ["override", "quarantine"] as const) await t.test(exclusion, async child => {
+    await withDependencyCreditFixture(child, f => {
+      const store = exclusion === "quarantine" ? invalidateDurableCredit(nativeFixtureCredit(), CREDIT_DEP, "trailer", {
+        prUrl: CREDIT_PR, prNumber: 17, reason: "durable-credit-plan-only",
+      }) : nativeFixtureCredit();
+      f.store(recordCredit(store, CREDIT_DEP, { source: "head-branch", prUrl: CREDIT_PR.replace("/17", "/18"), prNumber: 18, prState: "MERGED" }));
+      if (exclusion === "override") f.overrides(removedCreditYaml());
+      assert.equal(f.offline().code, 0);
+    });
+  });
+});
+
+test("lint dependency credit: no-dependency admission needs no config or cache authority", async t => {
+  await withDependencyCreditFixture(t, f => {
+    f.child([]); f.config(undefined);
+    assert.equal(f.offline().code, 0);
+  });
+});
+
+test("lint dependency credit: native eligibility refuses URL confusion and malformed source identities", () => {
+  for (const url of [CREDIT_PR.replace("https:", "http:"), CREDIT_PR.replace("github.com", "user@github.com"),
+    CREDIT_PR + "?x=1", CREDIT_PR + "#fragment", CREDIT_PR + "/files", CREDIT_PR.replace("/pull/", "/issues/"),
+    CREDIT_PR.replace("fixture-owner", "%66ixture-owner"), CREDIT_PR.replace("/17", "/017")]) {
+    const read = durableDependencyCredit(nativeFixtureCredit("trailer", url), CREDIT_DEP, "fixture-owner/remudero", []);
+    assert.equal(read.state, "unknown", url);
+  }
+  for (const record of [null, [], { trailer: { ...nativeFixtureCredit()[CREDIT_DEP]!.trailer!, source: "head-branch" } },
+    { trailer: { ...nativeFixtureCredit()[CREDIT_DEP]!.trailer!, prNumber: 0 } },
+    { trailer: { ...nativeFixtureCredit()[CREDIT_DEP]!.trailer!, prNumber: 1.5 } },
+    { correction: { prUrl: CREDIT_PR }, backfillReceipt: { source: "sweep.credit_backfill", prUrl: CREDIT_PR, prNumber: 17 } }]) {
+    assert.equal(durableDependencyCredit({ [CREDIT_DEP]: record } as CreditStore, CREDIT_DEP, "fixture-owner/remudero", []).state, "unknown");
+  }
+  const quarantined = invalidateDurableCredit(nativeFixtureCredit(), CREDIT_DEP, "trailer", {
+    prUrl: CREDIT_PR, prNumber: 17, reason: "durable-credit-plan-only",
+  });
+  quarantined[CREDIT_DEP]!.trailer!.prUrl = CREDIT_PR.replace("fixture-owner", "FIXTURE-OWNER");
+  assert.equal(durableDependencyCredit(quarantined, CREDIT_DEP, "fixture-owner/remudero", []).state, "unknown", "the same quarantined PR cannot recover through URL case variation");
+});
+
+test("lint dependency credit: opt-in native read states do not change permissive return contracts", () => {
+  const observed: CreditReadState[] = [];
+  assert.deepEqual(loadCreditOverrides(() => "{", state => observed.push(state)), { rows: [], refused: [] });
+  assert.equal(observed[0]?.state, "corrupt");
+  assert.deepEqual(loadCreditOverrides(() => { throw Object.assign(new Error("private missing fixture"), { code: "ENOENT" }); }, state => observed.push(state)), { rows: [], refused: [] });
+  assert.equal(observed[1]?.state, "missing");
+  assert.deepEqual(loadCreditStore("unused-private-fixture", { existsSync: () => false } as never, state => observed.push(state)), {});
+  assert.equal(observed[2]?.state, "missing");
+});
 
 test("lint dependency credit: absent or unusable evidence stays closed with honest UNKNOWN reasons", async t => {
   for (const c of closedCreditCases) await t.test(c.name, async child => {
@@ -192,8 +259,9 @@ test("lint dependency credit: online projection includes transitive dependencies
       resolveOwnerRepo: () => ({ owner: "fixture-owner", repo: "remudero" }),
       ghGateway: (() => ({})) as never,
       // Scope probe only: stop before derivation, never return a fabricated merge verdict.
-      projectPlan: ((plan: { tasks: Array<{ id: string }> }) => {
+      projectPlan: ((plan: { tasks: Array<{ id: string }>; byId: Map<string, { id: string }> }) => {
         projected = plan.tasks.map(task => task.id).sort();
+        assert.deepEqual([...plan.byId.keys()].sort(), projected, "evidence byId indexes exactly the projected tasks");
         throw new Error("TDD scope probe stops before GitHub/status derivation");
       }) as never,
       openPlanShardSlugs: () => [],

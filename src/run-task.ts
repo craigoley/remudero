@@ -1,4 +1,7 @@
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
+import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
+  type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
+import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -30149,20 +30152,72 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // trap, `gh` unauthenticated/unavailable): `statusResolvable` stays false and the check
   // is skipped rather than redding a plan-only PR during a GitHub outage.
   let statusByTaskId: Map<string, StatusProjection> | undefined;
+  let dependencyStatusByTaskId: Map<string, StatusProjection> | undefined;
   let statusResolvable = false;
   if (!offline && scope && scope.size > 0) {
     try {
       const config = (deps.loadConfig ?? loadConfig)();
       const { owner, repo } = (deps.resolveOwnerRepo ?? resolveOwnerRepo)();
       const github = (deps.ghGateway ?? ghGateway)(owner, repo);
-      const scopedPlan: Plan = { tasks: plan.tasks.filter((t) => scope!.has(t.id)), byId: new Map() };
-      statusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, { ledgerPath: ledgerPathFor(config), github });
+      const evidenceIds = new Set(scope);
+      const pending = [...scope];
+      while (pending.length > 0) for (const id of plan.byId.get(pending.pop()!)?.depends_on ?? []) {
+        if (!evidenceIds.has(id)) { evidenceIds.add(id); pending.push(id); }
+      }
+      const tasks = plan.tasks.filter(t => evidenceIds.has(t.id));
+      const scopedPlan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
+      dependencyStatusByTaskId = (deps.projectPlan ?? projectPlan)(scopedPlan, {
+        ledgerPath: ledgerPathFor(config), github, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
+      });
+      // Additional dependency evidence must not widen duplicate/post-merge credit semantics.
+      statusByTaskId = new Map([...dependencyStatusByTaskId].filter(([id]) => scope!.has(id)));
       statusResolvable = true;
     } catch {
       statusByTaskId = undefined;
       statusResolvable = false;
     }
   }
+
+  // Read only for a changed machine task's non-retired dependency. Never enter loadConfig offline.
+  let offlineCredit: { store: CreditStore; repository: string; overrides: readonly CreditOverrideRow[] } | { reason: string } | undefined;
+  const dependencyEvidence = (candidate: Task): DependencyMergeEvidence => {
+    if (!offline) {
+      const projected = dependencyStatusByTaskId?.get(candidate.id);
+      return !projected || projected.indeterminate
+        ? { state: "unknown", reason: "online dependency credit projection unavailable or indeterminate" }
+        : { state: projected.merged ? "merged" : "unmerged" };
+    }
+    if (!offlineCredit) {
+      const configured = existingCliRootWithoutConfig();
+      if (configured.state !== "present" || !configured.root || !configured.root.trim() ||
+        !isAbsolute(configured.root) || configured.root.includes("\0")) {
+        offlineCredit = { reason: `instance config/root unavailable: ${configured.state}; an explicit usable absolute root is required` };
+      } else {
+        const ledgerPath = join(configured.root, "state", LEDGER_FILENAME);
+        const creditRead: { value?: CreditReadState } = {};
+        const store = loadCreditStore(defaultCreditStorePath(ledgerPath), undefined, state => { creditRead.value = state; });
+        const overrideRead: { value?: CreditReadState } = {};
+        const overrides = loadCreditOverrides(() => readFileSync(defaultCreditOverridePath(ledgerPath), "utf8"), state => { overrideRead.value = state; });
+        if (creditRead.value?.state !== "present") offlineCredit = { reason: creditRead.value && "reason" in creditRead.value ? creditRead.value.reason : "native credit read unavailable" };
+        else if (!overrideRead.value || overrideRead.value.state !== "present" && overrideRead.value.state !== "missing" ||
+          overrides.refused.length > 0 || overrides.rows.some(row => !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(row.task) || !Number.isSafeInteger(row.pr) || row.pr <= 0)) {
+          offlineCredit = { reason: overrideRead.value && "reason" in overrideRead.value ? overrideRead.value.reason : "credit overrides malformed or contain invalid/refused rows" };
+        } else {
+          try {
+            const origin = hostWorktreeGit(checkoutRoot, ["remote", "get-url", "origin"]).trim();
+            const repository = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(origin)?.[1];
+            offlineCredit = !repository || repository.split("/").some(part => part === "." || part === "..")
+              ? { reason: "credit repository origin unavailable or not a canonical github.com repository" }
+              : { store, repository, overrides: overrides.rows };
+          } catch {
+            offlineCredit = { reason: "credit repository origin unavailable" };
+          }
+        }
+      }
+    }
+    return "reason" in offlineCredit ? { state: "unknown", reason: offlineCredit.reason }
+      : durableDependencyCredit(offlineCredit.store, candidate.id, offlineCredit.repository, offlineCredit.overrides);
+  };
 
   // W1-T1076: the duplicate corpus, resolved ONCE here and ONLY in changed-tasks scope — see the
   // section comment ahead of `openPlanShardSlugs` for why the whole-plan pass gets nothing. Its
@@ -30343,6 +30398,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         plan,
         releasedIds: releasedIdsForAdmission,
         isMerged: (candidate) => statusByTaskId?.get(candidate.id)?.merged ?? false,
+        dependencyEvidence,
         pathExists: opts.moduleExists,
         pathExistsAtBase,
       };
@@ -55162,14 +55218,24 @@ function logCliInvocation(cmd: string | undefined, argv: string[], stateRootOver
 
 /** The ledger a CLI refusal lands in: the EXISTING config's `root`, else the documented default
  *  (`~/Remudero`). Never `loadConfig()`, which can create the config and call `resolveClaudeBin()`. */
-function cliLedgerPathWithoutConfig(): string {
-  let root = join(homedir(), "Remudero");
+function existingCliRootWithoutConfig(): { state: "present" | "missing" | "unreadable" | "corrupt"; root?: string } {
+  let text: string;
   try {
-    const parsed = JSON.parse(readFileSync(instanceConfigPath(), "utf8")) as { root?: unknown };
-    if (typeof parsed.root === "string" && parsed.root !== "") root = parsed.root;
-  } catch {
-    // deliberate: an absent or unreadable config names no root, so the documented default stands.
+    text = readFileSync(instanceConfigPath(), "utf8");
+  } catch (error) {
+    return { state: (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : "unreadable" };
   }
+  try {
+    const parsed = JSON.parse(text) as { root?: unknown };
+    return { state: "present", ...(typeof parsed.root === "string" && parsed.root !== "" ? { root: parsed.root } : {}) };
+  } catch {
+    return { state: "corrupt" };
+  }
+}
+
+function cliLedgerPathWithoutConfig(): string {
+  // Keep the diagnostic sink's exact old fallback/string semantics; admission validates separately.
+  const root = existingCliRootWithoutConfig().root ?? join(homedir(), "Remudero");
   return join(root, "state", LEDGER_FILENAME);
 }
 
