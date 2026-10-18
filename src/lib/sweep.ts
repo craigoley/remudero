@@ -14591,9 +14591,17 @@ export function metadataRedRuledOut(lines: ReadonlyArray<Record<string, unknown>
     line.metadata_repair_outcome === "not-metadata" && JSON.stringify(line.metadata_red_checks) === checks);
 }
 
+/** The acceptance-author-gate refusal that names a FILE the head lacks: the task's declared test suite is
+ *  absent, so no title or body edit can cure it and only a commit can. #12695 sat 13 h on it: metadata
+ *  repair found no body cure and escalated, and no fix worker was ever sent to ship the suite. */
+const FILE_DEFECT_AUTHOR_GATE_RED = /acceptance-author-gate: REFUSED \(credited-test-path\)/;
+
 export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
   if (!isBlockedCi(pr) || pr.reviewState === "failure") return undefined;
   const checks = redCheckNames(pr);
+  if (pr.ciFailures?.some((failure) => failure.name === "acceptance-author-gate" && FILE_DEFECT_AUTHOR_GATE_RED.test(failure.logTail))) {
+    return undefined;
+  }
   return checks.length > 0 && checks.every((name) => METADATA_RED_CHECKS.has(name)) ? checks : undefined;
 }
 
