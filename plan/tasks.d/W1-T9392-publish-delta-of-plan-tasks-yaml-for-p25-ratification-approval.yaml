@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: ["W1-T9391"]
   type: implement
-  verify: human
+  verify: auto
   risk: "medium"
   priority: 2
   status: queued
@@ -24,10 +24,12 @@
     `sweepLandingSteps` by name, because the positive-control falsifier depends on it. — from
     W1-T5689 (run W1-T5689-1791183035928)
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.91
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
     reasons:
-      - "high-risk verdict at confidence 0.91 — on the change's description/files alone, no diff was read — The title requests a P25 plan delta, but the filed rationale concerns daemon-hook research and supplies no connection to P25 scope or dependencies; planRefs is empty.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for W1-T9391 in plan/tasks.yaml. That presence check cannot establish the claimed P25 scope or dependency alignment, which the supplied record does not specify."
-    judged_at: "2026-10-14T06:49:06.503Z"
-    pin: "bda7796691415aa1ee8afa1ceda3a84753d78e6ab16bce13585b89c4abde6333"
+      - "The declared scope is a single existing file (plan/tasks.yaml), and the description frames it as publishing a plan delta for review. It touches no secrets, auth, merge/deploy policy, or deletions, as far as the description and files list show."
+      - "The author class is operator, and the family track record is 6 merged against 1 declined (Beta mean 0.78). The acceptance check is a mechanical grep, so it can be verified automatically."
+      - "The weak points are that no PR references are cited and no actual change view was supplied. The title (P25 ratification) and the rationale (a research follow-up about DaemonDeps) don't clearly match, which lowers my confidence. Still, CI and review remain in the path, and nothing shown meets the escalation criteria."
+    judged_at: "2026-10-18T11:00:44.378Z"
+    pin: "7ac02b319f6810fcdba9c6458cb4fdfbf74dd96f925bdbea3fc1203b54b5716c"

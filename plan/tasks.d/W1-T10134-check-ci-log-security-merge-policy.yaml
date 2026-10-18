@@ -47,3 +47,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
+    reasons:
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The record proposes preventing security-merge-policy fix rounds through src/lib/code-scanning-merge-adapter.mjs, but specifies no mechanism demonstrating that security merge enforcement remains intact.; on the change's description/files alone, no diff was read — The cited rounds show different failures, including uncovered lines, missing semgrep.sarif, and a baseline census failure; recurrence and cost do not establish a shared cause.; on the change's description/files alone, no diff was read — The acceptance proof checks for test-title text using grep; it does not verify self-healing or preservation of merge policy. The supplied evidence cannot verify the proposed remedy."
+    judged_at: "2026-10-18T10:55:42.318Z"
+    pin: "82be27bb7d22402e9676fbceba8c9d399bcca2bad8406aa58a7f57d90d279159"
