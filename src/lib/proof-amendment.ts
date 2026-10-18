@@ -18,11 +18,11 @@
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
@@ -721,13 +721,23 @@ function scopeWorkParts(path: string): string[] {
 
 interface ScopeWorkEntry { path: string; data: string | null; mode: number }
 
-interface ScopeWorkIo { run: (script: string, input: string) => string }
+interface ScopeWorkIo { run: (script: string, input: string) => string | Promise<string> }
 // BACKSTOP: bound the rare recovery subprocess and its private IPC, never truncate saved work.
 const SCOPE_WORK_IO_TIMEOUT_MS = 30_000;
 const SCOPE_WORK_IO_MAX_BYTES = 64 * 1024 * 1024;
-const scopeWorkIo: ScopeWorkIo = { run: (script, input) => execFileSync("python3", ["-I", "-c", script], {
-  input, encoding: "utf8", timeout: SCOPE_WORK_IO_TIMEOUT_MS, maxBuffer: SCOPE_WORK_IO_MAX_BYTES,
-}) };
+const scopeWorkIo: ScopeWorkIo = { async run(script, input) {
+  const command = execFileLoopBounded("python3", ["-I", "-c", script], {
+    encoding: "utf8", timeout: SCOPE_WORK_IO_TIMEOUT_MS, maxBuffer: SCOPE_WORK_IO_MAX_BYTES,
+    killSignal: "SIGKILL",
+  });
+  const fed = new Promise<void>((resolveInput, rejectInput) => {
+    const stdin = command.child.stdin!;
+    stdin.once("error", rejectInput);
+    stdin.end(input, (error?: Error | null) => error ? rejectInput(error) : resolveInput());
+  });
+  const [{ stdout }] = await Promise.all([command, fed]);
+  return stdout;
+} };
 
 // Python3 is already required by the deploy image. Its dir_fd operations expose openat/renameat
 // on both supported POSIX hosts; /dev/fd/<directory>/<child> is not portable to macOS.
@@ -828,9 +838,9 @@ except (OSError, ValueError) as error:
     print(json.dumps(dict(ok=False, error=message)))
 `;
 
-function scopeWorkFiles(input: ScopeAmendmentWork, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): ScopeWorkEntry[] {
+async function scopeWorkFiles(input: ScopeAmendmentWork, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): Promise<ScopeWorkEntry[]> {
   for (const entry of entries) scopeWorkParts(entry.path);
-  const result = JSON.parse(io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(input.worktreePath), entries, restore })));
+  const result = JSON.parse(await io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(input.worktreePath), entries, restore })));
   if (result.ok !== true) throw new RmdError("scope_recovery", 1, String(result.error ?? "scope recovery filesystem unavailable"));
   if (!Array.isArray(result.entries)) throw new Error("scope recovery filesystem response did not verify");
   return result.entries;
@@ -869,7 +879,7 @@ function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
 
 /** Shared by any lane that parks edits behind a scope amendment. A resume verifies its existing
  *  immutable copy instead of replacing the asking round's work with an empty, later checkout. */
-export function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): string {
+export async function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string> {
   const file = scopeWorkRecoveryPath(input);
   try {
     readScopeWork(input);
@@ -877,7 +887,7 @@ export function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkI
   } catch (error) {
     if (!(error instanceof MissingScopeWorkError)) throw error;
   }
-  const entries = scopeWorkFiles(input, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
+  const entries = await scopeWorkFiles(input, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
   const payload = JSON.stringify(entries);
   const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
     digest: createHash("sha256").update(payload).digest("hex") });
@@ -908,9 +918,9 @@ export function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkI
   return file;
 }
 
-export function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): string[] {
+export async function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): Promise<string[]> {
   const entries = readScopeWork(input);
-  scopeWorkFiles(input, entries, true, io);
+  await scopeWorkFiles(input, entries, true, io);
   return entries.map((entry) => entry.path);
 }
 

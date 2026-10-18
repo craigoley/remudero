@@ -168,38 +168,38 @@ test("W1-T9805: the file the asking round wrote is restored once its amendment m
   assert.match(f.prompt(), /restored.*round that asked for scope/i);
 });
 
-test("scope recovery verifies content, preserves modes and deletions, and never replaces an asking round's save", (t) => {
+test("scope recovery verifies content, preserves modes and deletions, and never replaces an asking round's save", async (t) => {
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42, amendmentNumber: 99,
     paths: [path, "src/deleted.ts"] };
   const bytes = Buffer.from([0, 1, 255, 10]);
   writeFileSync(join(f.repo.dir, path), bytes); chmodSync(join(f.repo.dir, path), 0o755);
-  const saved = saveScopeAmendmentWork(input);
+  const saved = await saveScopeAmendmentWork(input);
   rmSync(join(f.repo.dir, path));
-  assert.equal(saveScopeAmendmentWork(input), saved);
+  assert.equal(await saveScopeAmendmentWork(input), saved);
   writeFileSync(join(f.repo.dir, "src/deleted.ts"), "must be deleted again");
-  assert.deepEqual(restoreScopeAmendmentWork(input), ["src/deleted.ts", path]);
+  assert.deepEqual(await restoreScopeAmendmentWork(input), ["src/deleted.ts", path]);
   assert.deepEqual(readFileSync(join(f.repo.dir, path)), bytes);
   assert.equal(statSync(join(f.repo.dir, path)).mode & 0o777, 0o755);
   assert.equal(existsSync(join(f.repo.dir, "src/deleted.ts")), false);
-  assert.throws(() => restoreScopeAmendmentWork({ ...input, prNumber: 43 }), /missing/);
+  await assert.rejects(restoreScopeAmendmentWork({ ...input, prNumber: 43 }), /missing/);
   const record = JSON.parse(readFileSync(saved, "utf8"));
   writeFileSync(saved, JSON.stringify({ ...record, payload: "[]" }));
-  assert.throws(() => saveScopeAmendmentWork(input), /digest did not verify/);
-  assert.throws(() => restoreScopeAmendmentWork(input), /digest did not verify/);
+  await assert.rejects(saveScopeAmendmentWork(input), /digest did not verify/);
+  await assert.rejects(restoreScopeAmendmentWork(input), /digest did not verify/);
   assert.deepEqual(readFileSync(join(f.repo.dir, path)), bytes);
   const payload = JSON.stringify([{ path: "src/unrequested.ts", data: "", mode: 0o644 }]);
   writeFileSync(saved, JSON.stringify({ ...record, payload, digest: createHash("sha256").update(payload).digest("hex") }));
-  assert.throws(() => restoreScopeAmendmentWork(input), /paths or file content did not verify/);
+  await assert.rejects(restoreScopeAmendmentWork(input), /paths or file content did not verify/);
   assert.equal(existsSync(join(f.repo.dir, "src/unrequested.ts")), false);
 });
 
-test("scope recovery adopts a record created between its missing read and exclusive publish", (t) => {
+test("scope recovery adopts a record created between its missing read and exclusive publish", async (t) => {
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
     amendmentNumber: 99, paths: [path] };
   writeFileSync(join(f.repo.dir, path), "winner's work");
-  const saved = saveScopeAmendmentWork(input);
+  const saved = await saveScopeAmendmentWork(input);
   const winner = readFileSync(saved, "utf8");
   rmSync(saved);
   writeFileSync(join(f.repo.dir, path), "loser's work");
@@ -209,26 +209,26 @@ test("scope recovery adopts a record created between its missing read and exclus
     writeFileSync(saved, winner, { flag: "wx" });
     return f.repo.dir;
   } };
-  assert.equal(saveScopeAmendmentWork(racingInput), saved);
+  assert.equal(await saveScopeAmendmentWork(racingInput), saved);
   assert.equal(winnerPublished, 1);
   assert.equal(readFileSync(saved, "utf8"), winner);
   assert.deepEqual(readdirSync(dirname(saved)).filter((name) => name.endsWith(".tmp")), []);
-  assert.deepEqual(restoreScopeAmendmentWork(input), [path]);
+  assert.deepEqual(await restoreScopeAmendmentWork(input), [path]);
   assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), "winner's work");
 });
 
-test("scope recovery refuses symlinks and traversal at both save and restore", (t) => {
+test("scope recovery refuses symlinks and traversal at both save and restore", async (t) => {
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42, amendmentNumber: 99, paths: [path] };
   writeFileSync(join(f.repo.dir, path), content);
-  saveScopeAmendmentWork(input);
+  await saveScopeAmendmentWork(input);
   rmSync(join(f.repo.dir, "src/lib"), { recursive: true });
   const outside = join(f.opts.config.root, "outside"); mkdirSync(outside);
   symlinkSync(outside, join(f.repo.dir, "src/lib"));
-  assert.throws(() => restoreScopeAmendmentWork(input), /regular path/);
-  assert.throws(() => saveScopeAmendmentWork({ ...input, amendmentNumber: 100 }), /regular path/);
+  await assert.rejects(restoreScopeAmendmentWork(input), /regular path/);
+  await assert.rejects(saveScopeAmendmentWork({ ...input, amendmentNumber: 100 }), /regular path/);
   assert.equal(existsSync(join(outside, "rule-suites.ts")), false);
-  assert.throws(() => saveScopeAmendmentWork({ ...input, paths: ["../outside.ts"] }), /unsafe/);
+  await assert.rejects(saveScopeAmendmentWork({ ...input, paths: ["../outside.ts"] }), /unsafe/);
 });
 
 function scopeRace(t: TestContext, f: ReturnType<typeof fixture>, action: "save" | "restore", component: "leaf" | "ancestor") {
@@ -280,26 +280,26 @@ os.supports_dir_fd.add(racing)
 }
 
 for (const component of ["leaf", "ancestor"] as const) {
-  test(`scope recovery pins its save descriptors across a ${component} replacement`, (t) => {
+  test(`scope recovery pins its save descriptors across a ${component} replacement`, async (t) => {
     const f = fixture(t);
     writeFileSync(join(f.repo.dir, path), content);
     const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
       amendmentNumber: 99, paths: [path] };
     const race = scopeRace(t, f, "save", component);
-    const saved = saveScopeAmendmentWork(input, race.io);
+    const saved = await saveScopeAmendmentWork(input, race.io);
     assert.equal(race.fired(), 1, "one real replacement, including on the pre-fix implementation");
     const entries = JSON.parse(JSON.parse(readFileSync(saved, "utf8")).payload);
     assert.equal(Buffer.from(entries[0].data, "base64").toString(), content, "save followed an outside-worktree replacement");
     assert.equal(readFileSync(race.sentinel, "utf8"), "OUTSIDE_SENTINEL");
   });
-  test(`scope recovery pins its restore descriptors across a ${component} replacement`, (t) => {
+  test(`scope recovery pins its restore descriptors across a ${component} replacement`, async (t) => {
     const f = fixture(t);
     writeFileSync(join(f.repo.dir, path), content);
     const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
       amendmentNumber: 99, paths: [path] };
-    saveScopeAmendmentWork(input);
+    await saveScopeAmendmentWork(input);
     const race = scopeRace(t, f, "restore", component);
-    assert.deepEqual(restoreScopeAmendmentWork(input, race.io), [path]);
+    assert.deepEqual(await restoreScopeAmendmentWork(input, race.io), [path]);
     assert.equal(race.fired(), 1);
     assert.equal(readFileSync(race.sentinel, "utf8"), "OUTSIDE_SENTINEL", "restore followed an outside-worktree replacement");
     assert.equal(statSync(race.sentinel).mode & 0o777, 0o640, "restore changed an outside file's mode");
@@ -307,21 +307,21 @@ for (const component of ["leaf", "ancestor"] as const) {
   });
 }
 
-test("scope recovery deletes through a pinned parent after an ancestor replacement", (t) => {
+test("scope recovery deletes through a pinned parent after an ancestor replacement", async (t) => {
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
     amendmentNumber: 99, paths: [path] };
   rmSync(join(f.repo.dir, path), { force: true });
-  saveScopeAmendmentWork(input);
+  await saveScopeAmendmentWork(input);
   writeFileSync(join(f.repo.dir, path), "delete this inside file");
   const race = scopeRace(t, f, "restore", "ancestor");
-  assert.deepEqual(restoreScopeAmendmentWork(input, race.io), [path]);
+  assert.deepEqual(await restoreScopeAmendmentWork(input, race.io), [path]);
   assert.equal(race.fired(), 1);
   assert.equal(readFileSync(race.sentinel, "utf8"), "OUTSIDE_SENTINEL", "restore deleted an outside-worktree file");
   assert.equal(existsSync(join(f.repo.dir, "src-raced/lib/rule-suites.ts")), false);
 });
 
-test("scope recovery refuses a hard-linked save rather than reading an outside file", (t) => {
+test("scope recovery refuses a hard-linked save rather than reading an outside file", async (t) => {
   const f = fixture(t);
   const outside = join(f.opts.config.root, "outside-hardlink");
   mkdirSync(dirname(outside), { recursive: true });
@@ -329,43 +329,60 @@ test("scope recovery refuses a hard-linked save rather than reading an outside f
   linkSync(outside, join(f.repo.dir, path));
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
     amendmentNumber: 99, paths: [path] };
-  assert.throws(() => saveScopeAmendmentWork(input), /regular path/);
+  await assert.rejects(saveScopeAmendmentWork(input), /regular path/);
   assert.equal(readFileSync(outside, "utf8"), "OUTSIDE_SENTINEL");
 });
 
-test("scope recovery replaces restore targets without modifying their other hard links", (t) => {
+test("scope recovery replaces restore targets without modifying their other hard links", async (t) => {
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
     amendmentNumber: 99, paths: [path] };
   writeFileSync(join(f.repo.dir, path), content);
-  saveScopeAmendmentWork(input);
+  await saveScopeAmendmentWork(input);
   const outside = join(f.opts.config.root, "outside-hardlink");
   writeFileSync(outside, "OUTSIDE_SENTINEL"); chmodSync(outside, 0o640);
   rmSync(join(f.repo.dir, path)); linkSync(outside, join(f.repo.dir, path));
-  restoreScopeAmendmentWork(input);
+  await restoreScopeAmendmentWork(input);
   assert.equal(readFileSync(outside, "utf8"), "OUTSIDE_SENTINEL");
   assert.equal(statSync(outside).mode & 0o777, 0o640);
   assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), content);
 });
 
-test("scope recovery creates missing parents safely and refuses unavailable descriptor operations", (t) => {
+test("scope recovery creates missing parents safely and refuses unavailable descriptor operations", async (t) => {
   const f = fixture(t);
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
     amendmentNumber: 99, paths: [path] };
-  writeFileSync(join(f.repo.dir, path), content); saveScopeAmendmentWork(input);
+  writeFileSync(join(f.repo.dir, path), content); await saveScopeAmendmentWork(input);
   rmSync(join(f.repo.dir, "src/lib"), { recursive: true });
-  assert.deepEqual(restoreScopeAmendmentWork(input), [path]);
+  assert.deepEqual(await restoreScopeAmendmentWork(input), [path]);
   assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), content);
-  assert.throws(() => restoreScopeAmendmentWork(input, { run: () => JSON.stringify({ ok: false,
+  await assert.rejects(restoreScopeAmendmentWork(input, { run: () => JSON.stringify({ ok: false,
     error: "descriptor-relative scope recovery is unavailable" }) }), /unavailable/);
-  assert.throws(() => restoreScopeAmendmentWork(input, { run: () => '{"ok":true}' }), /response did not verify/);
-  assert.throws(() => restoreScopeAmendmentWork(input, { run: () => { throw new Error("python3 unavailable"); } }), /python3 unavailable/);
+  await assert.rejects(restoreScopeAmendmentWork(input, { run: () => '{"ok":true}' }), /response did not verify/);
+  await assert.rejects(restoreScopeAmendmentWork(input, { run: () => { throw new Error("python3 unavailable"); } }), /python3 unavailable/);
+});
+
+test("scope recovery awaits asynchronous IO before publishing its immutable record", async (t) => {
+  const f = fixture(t);
+  const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
+    amendmentNumber: 99, paths: [path] };
+  let release!: (value: string) => void;
+  const pending = saveScopeAmendmentWork(input, { run: () => new Promise<string>((resolveIo) => { release = resolveIo; }) });
+  assert.equal(typeof release, "function", "the async filesystem request actually began");
+  let settled = false;
+  void pending.then(() => { settled = true; });
+  await new Promise<void>((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(settled, false, "no recovery record is published before the awaited filesystem response");
+  release(JSON.stringify({ ok: true, entries: [{ path, data: Buffer.from(content).toString("base64"), mode: 0o644 }] }));
+  const saved = await pending;
+  const entries = JSON.parse(JSON.parse(readFileSync(saved, "utf8")).payload);
+  assert.equal(Buffer.from(entries[0].data, "base64").toString(), content);
 });
 
 test("an unverifiable asking-round save is named in the ledger and the worker evidence", async (t) => {
   const f = fixture(t);
   writeFileSync(join(f.repo.dir, path), content);
-  const saved = saveScopeAmendmentWork({ root: f.opts.config.root, worktreePath: f.repo.dir,
+  const saved = await saveScopeAmendmentWork({ root: f.opts.config.root, worktreePath: f.repo.dir,
     taskId, prNumber: 42, amendmentNumber: 99, paths: [path] });
   writeFileSync(saved, "{}"); rmSync(join(f.repo.dir, path));
   f.mergeAmendment();

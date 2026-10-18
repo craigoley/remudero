@@ -12311,7 +12311,7 @@ export async function runFixRung(opts: {
     if (saveWork && (outcome.kind === "created" || outcome.kind === "resumed")) {
       try {
         recovery = { recovery_status: "saved",
-          recovery_path: saveScopeAmendmentWork(scopeWork(paths, outcome.amendmentNumber)) };
+          recovery_path: await saveScopeAmendmentWork(scopeWork(paths, outcome.amendmentNumber)) };
       } catch (error) {
         const reason = String(error);
         recovery = { recovery_status: "unavailable", recovery_reason: reason };
@@ -13634,7 +13634,7 @@ export async function runFixRung(opts: {
       }
       let recovery: Record<string, unknown>;
       try {
-        const restored = restoreScopeAmendmentWork(scopeWork(paths, resumed.amendmentNumber));
+        const restored = await restoreScopeAmendmentWork(scopeWork(paths, resumed.amendmentNumber));
         recovery = { recovery_status: "restored", restored_paths: restored };
         scopeRecoveryEvidence = `Scope amendment #${resumed.amendmentNumber}: ${restored.join(", ")} restored from the round that asked for scope.`;
       } catch (error) {
