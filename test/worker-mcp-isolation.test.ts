@@ -7,12 +7,16 @@ import type { Options, HookInput } from "@anthropic-ai/claude-agent-sdk";
 import { applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpIsolationEvidence } from "../src/lib/worker-mcp-isolation.js";
 import { workerInitSummaryFromMessage } from "../src/lib/worker-init-summary.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, workerLedgerFields } from "../src/lib/worker.js";
-import { implementAttemptOutcome, terminalVerdictFields } from "../src/run-task.js";
 
 const rule = "mcp__knowledge__rule";
 const init = (servers: unknown = [], tools: unknown = []) => workerInitSummaryFromMessage({
   type: "system", subtype: "init", mcp_servers: servers, tools,
 });
+/** The success fold run-task.ts applies (terminalVerdictFields, implementAttemptOutcome), read off the fields it reads.
+ * Not imported: src/run-task.ts would join this suite to the affected-reach SCC. `{isError: true, subtype: "success"}`
+ * folds to success there, which is the hole this suite guards. */
+const graded = (r: { isError: boolean; subtype: string; apiError: boolean; usageRefusal?: unknown }) =>
+  !r.usageRefusal && (!r.isError || (r.subtype === "success" && !r.apiError));
 const approved = { mcpIsolation: "repo-knowledge-only" as const, mountProvider: "claude", tools: ["Read", "Bash"] };
 
 test("repo/knowledge isolation is opt-in and refuses unqualified routing, reuse and tool bounds", () => {
@@ -156,9 +160,11 @@ test("an opted-in run with unknown inventory takes the error_mcp_exposure subtyp
   const row = workerLedgerFields(result);
   assert.equal(row.verdict, "error_mcp_exposure");
   assert.equal(row.mcp_isolation?.original_subtype, "success");
-  // The run-task success folds: the routing receipt and the implement attempt both grade it as no success.
-  assert.equal(terminalVerdictFields(result).success, false);
-  assert.equal(implementAttemptOutcome(result).success, false);
+  // Neither an API error nor a usage refusal carries the denial: the subtype alone must fail the run-task fold.
+  assert.equal(result.apiError, false);
+  assert.equal(result.usageRefusal, undefined);
+  assert.equal(graded(result), false);
+  assert.equal(graded({ ...result, subtype: "success" }), true, "control: the same run keeping subtype success is credited");
 });
 
 test("an opted-in run denied by both the opt-in and the default boundary keeps the worker's original subtype", async t => {
@@ -170,5 +176,5 @@ test("an opted-in run denied by both the opt-in and the default boundary keeps t
   assert.equal(result.subtype, "error_mcp_exposure");
   assert.equal(result.mcpIsolation?.original_subtype, "success");
   assert.equal(result.mcpExposure?.original_subtype, "success", "never error_mcp_exposure");
-  assert.equal(terminalVerdictFields(result).success, false);
+  assert.equal(graded(result), false);
 });
