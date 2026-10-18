@@ -8,7 +8,7 @@ import { fixedClock } from "#src/lib/clock.js";
 import * as provider from "#src/lib/worker-provider.js";
 import { cashAllowanceFallbackRefusal, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { reviewerOutcome } from "#src/lib/review.js";
-import { finishTransientRetry, implementAttemptOutcome, runDiagnoseThenRetry } from "./helpers/run-task-test.js";
+import { finishTransientRetry, implementAttemptOutcome, runDiagnoseThenRetry } from "#test/helpers/run-task-test.js";
 
 const NOW = Date.parse("2026-10-17T09:50:29.000Z"), ISO = fixedClock(NOW).iso();
 const RESET = "2026-10-18T00:00:00.000Z";
