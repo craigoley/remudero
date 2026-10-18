@@ -8,6 +8,7 @@
   "test/codex-quota-window-refusal.test.ts",
   "test/a-capped-pr-exhausts-repair-before-it-reaches-a-human.test.ts",
   "test/cash-fallback-reads-the-remaining-allowance.test.ts",
+  "test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts",
   "stryker.conf.json",
   "scripts/mutation-ratchet.mjs",
   "scripts/mutation-baseline.json"

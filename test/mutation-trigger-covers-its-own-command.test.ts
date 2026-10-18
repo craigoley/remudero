@@ -82,6 +82,7 @@ test("W1-T108/R-42: positive control -- the real command really does name more t
       "test/block-reason.test.ts",
       // The cash-allowance refusal suite imports src/lib/classify.ts, so the runner selects it too.
       "test/cash-fallback-reads-the-remaining-allowance.test.ts",
+      "test/ci-friction-remedy-8cfe5bc13ae74a09.test.ts",
       "test/classify.test.ts",
       "test/codex-quota-window-refusal.test.ts",
       "test/fix-rung-classify.test.ts",
