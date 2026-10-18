@@ -1,0 +1,50 @@
+name: Hosted author pilot 12667
+
+# One explicitly approved pilot branch. No PR, schedule, deploy or production access.
+on:
+  push:
+    branches: [run-unfiled-1792334880000]
+    paths: [.github/workflows/hosted-author-12667.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-author-12667-capacity
+  cancel-in-progress: false
+
+jobs:
+  capacity:
+    name: hosted-author-12667-capacity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Measure capacity before source checkout or dependency installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, shutil, time
+          def read_sample():
+              mem = {line.split(':')[0]: int(line.split()[1]) * 1024 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith(('MemAvailable:', 'MemTotal:', 'SwapTotal:', 'SwapFree:'))}
+              vm = dict(line.split() for line in pathlib.Path('/proc/vmstat').read_text().splitlines())
+              pressure = dict(field.split('=') for line in pathlib.Path('/proc/pressure/memory').read_text().splitlines() if line.startswith('full ') for field in line.split()[1:])
+              return {'time_unix': time.time(), 'memory': mem, 'swap_in_pages': int(vm['pswpin']), 'full_avg60': float(pressure['avg60']), 'free_workspace_bytes': shutil.disk_usage(os.environ['GITHUB_WORKSPACE']).free, 'free_temp_bytes': shutil.disk_usage(os.environ['RUNNER_TEMP']).free}
+          first = read_sample()
+          time.sleep(30)
+          last = read_sample()
+          checks = {'memory_at_least_7_gib': min(first['memory']['MemAvailable'], last['memory']['MemAvailable']) >= 7 * 1024**3, 'workspace_at_least_20_gib': min(first['free_workspace_bytes'], last['free_workspace_bytes']) >= 20 * 1024**3, 'temp_at_least_20_gib': min(first['free_temp_bytes'], last['free_temp_bytes']) >= 20 * 1024**3, 'no_swap_in': first['swap_in_pages'] == last['swap_in_pages'], 'full_pressure_below_half_percent': max(first['full_avg60'], last['full_avg60']) < 0.5, 'at_least_one_cpu': len(os.sched_getaffinity(0)) >= 1}
+          out = {'pilot': 12667, 'stage': 'capacity-only', 'runner_name': os.environ.get('RUNNER_NAME'), 'runner_os': os.environ.get('RUNNER_OS'), 'runner_arch': os.environ.get('RUNNER_ARCH'), 'workflow_head': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'cpu_affinity': sorted(os.sched_getaffinity(0)), 'samples': [first, last], 'checks': checks, 'admitted': all(checks.values()), 'cost_basis': 'PUBLIC repository; standard ubuntu-latest compute is free, not a paid larger runner', 'limits': 'Capacity measurement only. No source checkout, dependencies, tests, author PASS, production access or future-run capacity guarantee.'}
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'hosted-author-12667-capacity.json'
+          path.write_text(json.dumps(out, indent=2) + '\n')
+          print(json.dumps(out))
+          raise SystemExit(0 if out['admitted'] else 1)
+          PY
+      - name: Preserve the measured capacity including refusals
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: hosted-author-12667-capacity-${{ github.run_id }}
+          path: ${{ runner.temp }}/hosted-author-12667-capacity.json
+          retention-days: 1
+          if-no-files-found: error
