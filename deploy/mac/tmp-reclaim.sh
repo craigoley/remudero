@@ -306,6 +306,12 @@ prune_tsx_cache() {
     entries=$(find -P "$dir" -xdev ! -type d -print 2>/dev/null) || { report_risk 'TSX content scan unavailable' "$dir"; return 0; }
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
+      # tsx creates <pid>.pipe Unix sockets beside its transpile cache. Keep
+      # these IPC endpoints, but do not let a stale endpoint hide old cache
+      # files. Whole-cache live/open checks below still protect a live server.
+      if [ -S "$entry" ] && [ ! -L "$entry" ] && [[ "${entry##*/}" =~ ^[0-9]+\.pipe$ ]] && [ "$(owner "$entry" 2>/dev/null)" = "$ME" ]; then
+        continue
+      fi
       if [ ! -f "$entry" ] || [ -L "$entry" ] || [[ ! "${entry##*/}" =~ ^[0-9]+-[0-9a-f]{40}$ ]]; then
         report_risk 'TSX discovery contains unrecognized or special data' "$dir"; return 0
       fi
@@ -335,11 +341,26 @@ prune_tsx_cache() {
   fi
 }
 
+prune_node_compile_cache() {
+  local dir="$1" resolved mode
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  if [ ! -f "$SEED_GUARD_DIR/cache-reclaim.py" ] || ! command -v python3 >/dev/null 2>&1; then
+    report_risk 'Node compile-cache helper unavailable; no generic fallback' "$dir"; return 0
+  fi
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P) || { report_risk 'Node cache path unavailable' "$dir"; return 0; }
+  mode=()
+  [ "$APPLY" != 1 ] || mode=(--apply)
+  if ! python3 "$SEED_GUARD_DIR/cache-reclaim.py" --node-compile-cache "$resolved" "${mode[@]+"${mode[@]}"}"; then
+    report_risk 'Node compile-cache cleanup refused or removal verification unavailable' "$dir"
+  fi
+}
+
 process_tmp_entry() {
   local path="$1" old_check old_status why k entry_owner
   [ -e "$path" ] || return 0
   # TSX is a regenerable per-file cache, handled separately; never remove its root.
   case "${path##*/}" in tsx-*) prune_tsx_cache "$path"; return 0;; esac
+  case "${path##*/}" in node-compile-cache) prune_node_compile_cache "$path"; return 0;; esac
   # Each account owns its own hourly sweep. Check ownership before traversal so
   # mode-700 paths owned by the other account aren't mislabeled as scan failures.
   entry_owner=$(owner "$path" 2>/dev/null)
@@ -469,6 +490,7 @@ if [ "$TSX_ONLY" = 0 ] && [ -n "$TMP_REAL" ] && [ "$TMP_REAL" != "$ROOT_REAL" ];
   for p in "$TSX_TMP_ROOT"/tsx-*; do
     [ -d "$p" ] && [ ! -L "$p" ] && prune_tsx_cache "$p"
   done
+  prune_node_compile_cache "$TMP_REAL/node-compile-cache"
 fi
 
 # The account-local Remudero session scratch root is opt-in by existence, never created here.

@@ -1,0 +1,56 @@
+- id: W1-T10079
+  title: "EVERY INBOX VERB THE CONSOLE OFFERS HAS A SANCTIONED NON-HTTP PATH, FROM ONE VERB TABLE: snooze, archive and keep exist only as HTTP routes needing a raw write token, rmd mcp --enable-write exposes only answer_question, and the core container cannot reach serve:4317; one table drives the HTTP routes, rmd archive/snooze/keep and the MCP tools, which read their own credentials"
+  repo: remudero
+  depends_on: [W1-T10078]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, the inbox verbs' entry points; what each verb does, its tier and its ledger row are unchanged
+  band_meaning: span
+  origin: "operator console end-to-end test 2026-10-17 fault (d), from the decision-recording agent"
+  plan_refs: [W1-T8831, W1-T2604, W1-T3407, W1-T10078]
+  files:
+    - src/lib/inbox-verdict-command.ts
+    - src/lib/operator-mcp.ts
+    - src/lib/panel-graph.ts
+    - src/run-task.ts
+    - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
+  status: queued
+  priority: 1  # operator 2026-10-17: an agent recording the operator's decisions has no sanctioned way to act
+  attempts: 0
+  rationale: |
+    READ at origin/main a1343d257 (symbols):
+    - panel-graph.ts buildArchiveProposalRoute and buildSnoozeProposalRoute (W1-T8831) write
+      state/inbox-triage.json and ledger inbox.archived/inbox.snoozed; no CLI calls setInboxArchived or
+      setInboxSnoozed.
+    - inbox-verdict-command.ts proposalVerdictCommand serves rmd decline and rmd restore through
+      applyProposalVerdict, the same decision as the HTTP routes; rmd reframe is what POST /v1/inbox/reframe runs.
+    - operator-mcp.ts: with a write token the only write tool is answer_question.
+    OBSERVED 2026-10-17 by the decision-recording agent: the core container and serve are on different docker
+    networks, so a process in core cannot reach serve:4317, and an agent has no sanctioned path for snooze,
+    archive or keep.
+  design: |
+    1. One verb table (in inbox-verdict-command.ts) lists each inbox verb the console offers: approve, decline,
+       restore, reframe, reply, archive, snooze, keep, with its HTTP path, tier, input fields and the function that
+       performs it. The HTTP routes, the rmd commands and the MCP tools are generated from it, so they cannot drift.
+    2. New commands: rmd archive <proposalId> [--undo], rmd snooze <proposalId> --until <RFC 3339 UTC>|--wake,
+       rmd keep <proposalId> [--reason <text>] [--undo]. Each acts on this checkout's config.root state directly,
+       as rmd decline does, and appends the same ledger row the route does, with origin rmd-cli.
+    3. rmd mcp --enable-write exposes one tool per verb from the table, each posting to the route with the token
+       the MCP server already reads, at the verb's own tier; the approve verb stays out of MCP (it files a task).
+    4. A table test fails when a verb the console can be served (inbox-plain.ts optionAction) has no CLI or MCP path.
+    5. TESTS in test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts, test( titles verbatim as below.
+  acceptance:
+    - claim: "every verb the console is served has a route, a command and an MCP tool from one table"
+      proof: 'grep: W1-T10079: every verb the console is served has a route, a command and an MCP tool from one table in test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts'
+    - claim: "rmd snooze writes the same mark and row as POST /v1/inbox/snooze"
+      proof: 'grep: W1-T10079: rmd snooze writes the same mark and row as POST /v1/inbox/snooze in test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts'
+    - claim: "rmd archive writes the same mark and row as POST /v1/inbox/archive"
+      proof: 'grep: W1-T10079: rmd archive writes the same mark and row as POST /v1/inbox/archive in test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts'
+  falsifier: |
+    At origin/main no rmd snooze or rmd archive command exists and the MCP server lists one write tool, so the table
+    test fails on the first verb it checks.
+  note: |
+    API CONTRACT for the console: no HTTP route changes; the MCP tool names are the verb names (decline_proposal,
+    restore_proposal, reframe_proposal, reply_thread, archive_proposal, snooze_proposal, keep_proposal).

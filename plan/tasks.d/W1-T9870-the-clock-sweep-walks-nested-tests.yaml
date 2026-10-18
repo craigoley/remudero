@@ -1,0 +1,55 @@
+- id: W1-T9870
+  title: "THE CLOCK SWEEP WALKS TESTS IN SUBFOLDERS WITHOUT LOSING ITS EXCLUSIONS — re-key its baseline and SPAWN_REACHING stems to basenames first, then walk recursively, so the mounts-wiring exclusion (a real $1.42 model spend) keeps matching (test restructure, letter D, part 2)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, the clock sweep over nested tests; spans the sweep, its baseline and its workflow
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter D (part 2 of 5)'
+  plan_refs: [W1-T9879]
+  files:
+    - scripts/clock-sweep.mjs
+    - scripts/clock-sweep-baseline.json
+    - .github/workflows/clock-sweep.yml
+    - test/the-clock-sweep-walks-nested-tests.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Citations re-verified at origin/main 889966ea5 (2026-10-16). (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section B, row 5)
+    - scripts/clock-sweep.mjs lists candidates with a top-level readdirSync (~102) and parses diff lines with the flat
+      regex `/^test\/([^/]+)\.test\.ts$/` (~123). It renders `test/${suite}.test.ts` at ~303, ~306, ~320, ~340 and ~344.
+    - Exclusions are keyed by stem: scripts/clock-sweep-baseline.json (11 stems) and SPAWN_REACHING (a Map at ~63,
+      subtracted at ~132).
+    - .github/workflows/clock-sweep.yml names three exact test paths in its pull_request `paths:` trigger:
+      test/clock-shift-probe.test.ts, test/clock-sweep.test.ts and
+      test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts. Its run: lines (~85, ~88) name two of them.
+    INFERRED:
+    - A moved file leaves the candidate list with the sweep still `ok`, which is a silent shrink.
+    - A recursive walk alone would turn stems into dir/stem, and the mounts-wiring exclusion, a real $1.42 model spend,
+      would stop matching.
+    - A moved self-check stops triggering the workflow.
+  design: |
+    1. FIRST, re-key exclusions to the basename stem: the baseline and SPAWN_REACHING match on the stem of the file's
+       basename wherever it lives. Each exclusion must match exactly one current file; a stale or ambiguous one is
+       reported as such (it already surfaces stale exclusions at ~340).
+    2. THEN walk test/ recursively, excluding fixtures. The diff regex accepts nested paths, and rendering prints the
+       real path.
+    3. clock-sweep.yml's paths: entries for test files become `test/**/<name>.test.ts` globs, so a moved self-check
+       still triggers the workflow. The run: lines are re-keyed by the move tool (W1-T9879), not here.
+    New test flat in test/.
+  acceptance:
+    - claim: 'a nested test is a clock-sweep candidate'
+      proof: 'grep: test("W1-T9870: a nested test is a clock-sweep candidate" in test/the-clock-sweep-walks-nested-tests.test.ts'
+    - claim: 'an exclusion keyed by stem still matches the file after it moves into a folder'
+      proof: 'grep: test("W1-T9870: a stem exclusion still matches a moved file" in test/the-clock-sweep-walks-nested-tests.test.ts'
+    - claim: 'an exclusion matching no current file is reported stale'
+      proof: 'grep: test("W1-T9870: an exclusion matching no file is reported stale" in test/the-clock-sweep-walks-nested-tests.test.ts'
+    - claim: 'the workflow trigger follows its self-check suites into any folder'
+      proof: 'grep: test/\*\*/clock-sweep\.test\.ts in .github/workflows/clock-sweep.yml'
+  falsifier: |
+    On origin/main readdirSync(testDir) is top-level only, so a planted nested test is not a candidate. The flat regex
+    at ~123 rejects nested diff lines. The workflow's paths: entries name exact flat paths, so the glob grep misses.

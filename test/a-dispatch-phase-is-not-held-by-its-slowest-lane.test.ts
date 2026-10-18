@@ -292,7 +292,7 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
     },
     sleep: () => { const sleep = deferred<void>(); sleeps.push(sleep); return sleep.promise; },
     ...extraDeps,
-  } as DaemonDeps, { laneCount: 3, max: 10, ...opts });
+  } as DaemonDeps, { freshnessMinLifetimeMs: 0, laneCount: 3, max: 10, ...opts });
   return {
     run, started, rows,
     /** W1-T7806: the run reaches a worker boundary and reads the daemon's restart latch. */
@@ -323,23 +323,22 @@ function phase(durationMs: number, extraDeps: Partial<DaemonDeps> = {}, opts: No
 test("lane refill uses the adaptive queue admission and resumes only an exact handoff head", async () => {
   const receipts = ["D", "E"].map((id) => JSON.stringify({ step: "verdict", task_id: id,
     verdict: "handed_off", reason: "freshness_yield", branch: `run-${id}-123`, head_sha: stale.oldSha }));
-  let branchReads = 0;
   const h = phase(5 * minute, {
     readLedgerLines: () => [...history(5 * minute), ...receipts],
     openPrCount: () => 10,
     checkQueueGovernor: () => undefined,
     readQueueAdmission: () => ({ wipLimit: 14, baseWipLimit: 10, observedOpenCount: 10,
       stuckOwnedCount: 1, tier: "under_limit" }),
-    readPushedRunBranches: () => branchReads++ === 0 ? "" :
-      `${stale.oldSha}\trefs/heads/run-D-123\n${stale.newSha}\trefs/heads/run-E-123\n`,
+    readPushedRunBranches: () => `${stale.oldSha}\trefs/heads/run-D-123\n${stale.newSha}\trefs/heads/run-E-123\n`,
   }, { wipLimit: 10 });
   try {
     await flush();
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C"]);
+    // D's exact handoff head resumes ahead of fresh work; E's receipt names a head its remote branch no longer has.
+    assert.deepEqual(h.started.map(({ id }) => id), ["D", "A", "B"], "a handoff with a different remote sha still blocks its task");
     await h.settle("B", 1);
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D"]);
+    assert.deepEqual(h.started.map(({ id }) => id), ["D", "A", "B", "C"]);
     await h.settle("C", 2);
-    assert.deepEqual(h.started.map(({ id }) => id), ["A", "B", "C", "D", "F"],
+    assert.deepEqual(h.started.map(({ id }) => id), ["D", "A", "B", "C", "F"],
       "a handoff with a different remote sha still blocks its task");
   } finally { await h.cleanup(); }
 });

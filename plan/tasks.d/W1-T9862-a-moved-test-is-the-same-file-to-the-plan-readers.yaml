@@ -1,0 +1,70 @@
+- id: W1-T9862
+  title: "PROOF DEBT, SYNTHETIC TASKS, GARDENER DEDUP KEYS AND DISPATCH OVERLAP TREAT A MOVED TEST AS THE SAME FILE — keyed on its unique basename, so a move mints no proof debt, files no duplicate and never lets two tasks edit one test in parallel (test restructure, letter A, part 3)"
+  repo: remudero
+  depends_on: [W1-T9860]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: spans plan readers, gardeners and dispatch; one shared predicate, sameTestFile
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter A (part 3 of 3)'
+  plan_refs: [W1-T9860, W1-T9875]
+  files:
+    - src/lib/test-path-resolver.ts
+    - src/lib/proof-queue-audit.ts
+    - src/lib/synthetic-tasks.ts
+    - src/lib/flake-incident-gardener.ts
+    - src/lib/selector-shadow-gardener.ts
+    - src/lib/gate-gardener.ts
+    - src/lib/dispatch-overlap.ts
+    - test/a-moved-test-is-the-same-file-to-the-plan-readers.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    Citations re-verified at origin/main 889966ea5 (2026-10-16). (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md sections 1a and 1b)
+    - Proof debt: src/lib/proof-queue-audit.ts reports `grep-path-absent` and `credited-test-path-absent` through its
+      pathExists (~174, ~195). measurement-cadence feeds those offenders into mintProofDebtProposals
+      (src/lib/measurement-cadence.ts ~1416). A `grep: ... in test/<moved>` on an open task therefore MINTS proof-debt
+      proposals (up to 55 tasks and 112 rows at the snapshot). creditedProofVisibility (src/run-task.ts) reports the
+      same.
+    - Synthetic tasks: src/lib/synthetic-tasks.ts mineSyntheticTasks (~96) re-grades a golden-corpus task's proofs on
+      today's main and calls `reject("proof on main was ...")` (~127). A moved path silently shrinks the pilot.
+    - Origin dedup keys:
+      - flake-incident-gardener.ts (~185) builds `flake-incident:${file}`, 16 open tasks at the snapshot;
+      - selector-shadow-gardener.ts (~1159) builds `selector-shadow-miss:${file}`, 89 open tasks;
+      - gate-gardener.ts (~237) builds `expiring-fixture:${finding.file}`, 2 open tasks.
+      A gardener files a duplicate under the new path.
+    - Dispatch overlap: src/lib/dispatch-overlap.ts overlappingPaths (~142) intersects exact paths. A task declaring the
+      old path and one declaring the new path are not serialized, which is the class behind memory note
+      parallel-agents-on-one-file-break-main.
+  design: |
+    1. Add sameTestFile(a, b) to src/lib/test-path-resolver.ts, built by W1-T9860. It is true when both are
+       test/**.test.ts paths with the same basename, and otherwise compares the paths exactly.
+    2. proof-queue-audit's pathExists resolves test paths through resolveTestPath. A moved test is not absent and mints
+       no proof debt; an unresolvable one still is absent and still mints.
+    3. mineSyntheticTasks grades on main with the resolver-aware executor. A corpus item citing a moved path is kept,
+       and one citing an absent path is still rejected.
+    4. The three gardeners compare the file part of an origin key with sameTestFile. An open task under
+       `flake-incident:test/x.test.ts` therefore dedups a new finding on `test/<folder>/x.test.ts`. New keys use the
+       current path.
+    5. dispatch-overlap's intersection uses sameTestFile for test paths, so the old path and the new path overlap.
+    Tests stay flat (phase 0). Delete each fix and confirm the matching test goes red.
+  acceptance:
+    - claim: 'a grep proof on a moved test path mints no proof debt, and an absent path still does'
+      proof: 'grep: test("W1-T9862: a moved test path mints no proof debt and an absent one still does" in test/a-moved-test-is-the-same-file-to-the-plan-readers.test.ts'
+    - claim: 'a synthetic item citing a moved test is kept, and one citing an absent test is rejected'
+      proof: 'grep: test("W1-T9862: a synthetic item citing a moved test is kept" in test/a-moved-test-is-the-same-file-to-the-plan-readers.test.ts'
+    - claim: 'a moved flake-incident, selector-shadow or expiring-fixture finding dedups against the open task'
+      proof: 'grep: test("W1-T9862: a moved finding dedups against the open task" in test/a-moved-test-is-the-same-file-to-the-plan-readers.test.ts'
+    - claim: 'two tasks naming the old and the new path of one test overlap for dispatch'
+      proof: 'grep: test("W1-T9862: two tasks naming the old and new path of one test overlap" in test/a-moved-test-is-the-same-file-to-the-plan-readers.test.ts'
+    - claim: 'dispatch overlap compares test paths through sameTestFile'
+      proof: 'grep: sameTestFile( in src/lib/dispatch-overlap.ts'
+    - claim: 'proof-queue-audit resolves test paths before calling them absent'
+      proof: 'grep: resolveTestPath( in src/lib/proof-queue-audit.ts'
+  falsifier: |
+    On origin/main proof-queue-audit calls existsSync on the cited path, so a moved test reads grep-path-absent and the
+    first test fails. The origin keys compare whole strings, so a moved finding files a duplicate. overlappingPaths
+    intersects exact paths, so the old and new paths do not overlap. The remaining tests fail the same way.

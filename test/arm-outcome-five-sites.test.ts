@@ -202,7 +202,7 @@ test("armAndLogOutcome ledgers automerge.armed only when the outcome actually ar
       // as armed (correctly — it succeeded), so it still writes `automerge.armed`, but it now ALSO
       // writes its own step. Folding a merge into "armed" is the conflation that step exists to end.
       r.steps.map((s) => s.step),
-      outcome === "direct-merged" ? ["automerge.armed", "automerge.clean_status_direct_merge"] : ["automerge.armed"],
+      outcome === "direct-merged" ? ["automerge.armed", "automerge.clean_status_direct_merge", "pr.terminal"] : ["automerge.armed"],
       `${outcome}: this did NOT turn every lane into a reporter of failure — a real arm still reads as one`,
     );
     assert.equal(r.steps[0].extra?.outcome, outcome);
@@ -418,7 +418,7 @@ test("W1-T1079: the clean-status case still routes to the direct merge", () => {
   );
 
   assert.equal(outcome, "direct-merged");
-  assert.deepEqual(r.steps.map((s) => s.step), ["automerge.armed", "automerge.clean_status_direct_merge"]);
+  assert.deepEqual(r.steps.map((s) => s.step), ["automerge.armed", "automerge.clean_status_direct_merge", "pr.terminal"]);
   assert.equal(r.steps[0].extra?.error, undefined, "a completed direct merge is a success, not an ignored error");
   assert.ok(said.some((m) => m.includes("clean_status_direct_merge")));
 });
@@ -521,7 +521,8 @@ test("dep-review drives its arm branch to a real outcome and reports that outcom
       gh: () => ({
         number: 80,
         url: "https://github.com/craigoley/remudero/pull/80",
-        title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm-minor-and-patch group",
+        // Kept <= 100 characters: a longer Dependabot title is retitled first (W1-T9828) and holds.
+        title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm group",
         body: "Updates `@anthropic-ai/claude-agent-sdk` from 0.3.209 to 0.3.210",
         headRefOid: "beefcafe1234",
         author: { login: "app/dependabot" },
@@ -663,7 +664,7 @@ async function driveDepReview(opts: {
 test("impl-FR: a minor/patch bump whose arm did NOT take is detected and escalated", async () => {
   const rec = issueRecorder();
   const r = await driveDepReview({
-    title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm-minor-and-patch group",
+    title: "build(deps): bump @anthropic-ai/claude-agent-sdk from 0.3.209 to 0.3.210 in the npm group",
     arm: () => "ledger-refused",
     issues: rec.gateway,
   });

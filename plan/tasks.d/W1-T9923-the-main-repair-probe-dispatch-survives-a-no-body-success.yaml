@@ -1,0 +1,145 @@
+- id: W1-T9923
+  title: "THE MAIN-REPAIR BISECT PROBE HAS NEVER DISPATCHED — workflow_dispatch answers 204 with no body, ghJsonAsync parses the empty body as JSON and throws \"gh api response body was unreadable\", so since 10-10 every probe failed (5 of 5, 0 bisecting rows) and the bd42ca367 red was written unlocated on every pass; accept a no-body success, retry a transient failure, and keep unlocated as the last resort"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern, the red-main lane reaching a located offender when main's own runs were cancelled; the transport change is confined to a no-body success, and a wrong name still meets the existing writer backstop
+  band_meaning: span
+  origin: "operator session 2026-10-16, filing agent F8: main red at bd42ca367 (CI run 38946416242), core ledger main.repair rows 17:40-19:24Z; coordinator's re-scope at 19:17Z around the failed probe dispatch"
+  plan_refs: [W1-T7760, W1-T6403, W1-T9665, W1-T3791, W1-T5843, W1-T4817]
+  files:
+    - src/lib/github-transport.ts
+    - src/lib/main-health-rung.ts
+    - src/run-task.ts
+    - test/the-main-repair-probe-dispatch-survives-a-no-body-success.test.ts
+  status: blocked
+  retirement: withdrawn  # AMENDED 2026-10-16 (overlap): #12421 (75de061fd) and W1-T9927 cover it; see the rationale's first paragraph
+  attempts: 0
+  rationale: |
+    AMENDED 2026-10-16 (overlap): WITHDRAWN. #12421 (75de061fd, merged 20:14Z) and the queued W1-T9927 (filed in
+    #12414) cover this task. Both came before this shard's filing PR #12415 merged (21:13Z). Each design point, read
+    against #12421's diff at origin/main 6fb8ee06f:
+      - Point 1 (a no-body success) LANDED, at the only call sites that fail. `writeWithNoContent` in
+        src/lib/main-health-rung.ts treats the 204 empty body as success for `restMainProbes` `dispatch` (the
+        workflow dispatch POST) and `release` (the ref DELETE). The repo's other `/dispatches` callers in
+        src/lib/sweep.ts run through `ghRunImpl`, not the JSON fetcher, so no other caller has this defect.
+        Widening `ghJsonAsync` itself would change no observed outcome.
+      - Point 4 (unlocated as a named last resort) LANDED, in a stronger form. `locateOffender` no longer returns
+        unlocated when no probe can be dispatched. It names the first completed red with method
+        `first-red-unattributed`, records the unattributed span and the refusals, and dispatches the fix with its
+        revert withheld. The red is repaired, not left.
+      - Points 2 and 3 (deferral with backoff, and idempotent re-dispatch) have no failure left to answer. In the
+        core ledger (the 133 archives dated 2026-10-10 to 2026-10-16, plus the live file), all 9
+        `main.repair.probe_dispatch_failed` rows carry "gh api response body was unreadable", the 204 class that
+        #12421 fixed. None is a rate limit, a 5xx or a timeout. The control: 23 `main.repair.located` rows were read
+        from the same archives. A transient refusal now still reaches a fix through `first-red-unattributed`. A ref
+        left by an earlier probe is already reused by the "already exists" arm.
+      - Point 5 (the fallback) is W1-T9927. It bisects by running the red's failing test files locally at the
+        cancelled commits, before any CI probe. The no-green-boundary half of point 5 has no stuck case to answer:
+        across the same corpus, the 17 rows reading "names no first red merge after a green run" are the wait
+        before the first red's push run concludes. A `main.repair.located` row follows within about an hour where
+        the red persisted (for example 2026-10-13 16:00Z to 16:19Z, and 2026-10-14 19:30Z to 20:01Z).
+      - REFILE WHEN a `main.repair.probe_dispatch_failed` row carries any other error class, or when a
+        `first-red-unattributed` located row's `attribution_refused` names a transient failure.
+    EVIDENCE, core ledger (host ~/rmd-state2/state, bounded niced zgrep), 2026-10-16:
+      - 18:28:55Z `main.repair.unlocated` head bd42ca367, reason "main's push run history names no first red merge
+        after a green run". The same reason recurs at 18:35:58Z and 18:37:01Z, and at 17:40:09Z for an earlier red.
+      - Once a boundary was read (first_red_sha bd42ca367, after_green_sha 479b097de), the lane tried to probe
+        c73ab052d. It wrote `main.repair.probe_dispatch_failed` with error "gh api response body was unreadable", then
+        `main.repair.unlocated` reason "no probe could be dispatched for the cancelled commits since 479b097de...".
+        The pair repeats at 18:48:55Z, 19:08:56Z, 19:17:04Z and 19:24:52Z, once per pass, every time on the same probe.
+      - CORPUS-WIDE, 131 archives since 2026-10-10 plus the live file:
+        - 25 `main.repair.located`, every one method `first-red-run` (POSITIVE CONTROL: the query saw the corpus);
+        - 0 `main.repair.bisecting` and 0 `main.repair.probe_concluded`;
+        - 5 `main.repair.probe_dispatch_failed`, every one "gh api response body was unreadable";
+        - 23 `main.repair.unlocated`.
+        The W1-T7760 probe locator has never dispatched a probe in production.
+      - origin still holds the probe refs that `dispatch` created before it threw:
+        refs/heads/rmd-attribution/c73ab052d71bab68fdbf4b22a16a8aea023bc434 and
+        refs/heads/rmd-attribution/db88033a3992d3663c0ad5abdcac4d39050df697 (`git ls-remote origin 'refs/heads/rmd-*'`).
+    ROOT CAUSE, READ at origin/main 32dc6614f:
+      - `restMainProbes(...).dispatch` (src/lib/main-health-rung.ts) creates the ref (POST git/refs answers 201 with a
+        JSON body, which succeeds). It then POSTs `actions/workflows/ci.yml/dispatches`, which GitHub answers with
+        204 No Content.
+      - src/run-task.ts wires the rung's fetch as `(args) => ghJsonAsync(args)`, with no rate-limit reader, so
+        `ghJsonAsync` returns `parseGhJsonBody(args, stdout)` on the bare stdout.
+      - `parseGhJsonBody` (src/lib/github-transport.ts, #6129, 2026-09-19) runs `JSON.parse(body)` and wraps any throw
+        in `GhJsonUnreadableResponseError`, whose message is exactly "gh api response body was unreadable".
+        `JSON.parse("")` throws "Unexpected end of JSON input". An exit-0 `gh api` with an empty body is therefore
+        reported as a transport failure.
+      - `release` (DELETE git/refs, also 204) fails the same way, which is why the refs above were never released.
+      - `locateOffender` then returns `unlocated` as soon as every dispatch in a pass throws and none is in flight.
+        There is no retry and no deferral, so each pass repeats the same failure.
+    WHAT THE TRUTH WAS. The span 479b097de..bd42ca367 is 6 first-parent merges: 9156fd658, d6f6dddf3, c73ab052d,
+    f34685418, 6841dac49 (#12389) and bd42ca367 (#12364). The failing assertion printed one unresolved doctrine body
+    path, which a shard that 6841dac49 added names. The first red's own merge is innocent. Main's push runs are
+    cancelled while pending (doctrine ci-and-merging/cancelled-is-not-red), so the culprit's run never concluded.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main and the plan diffs of all 436 open heads for
+    main.repair.unlocated, "no first red merge", probe_dispatch_failed, bisected-first-red, planMainBisection and
+    "response body was unreadable". W1-T7760 and W1-T6403 (merged) built the probe locator and the repair lane,
+    W1-T3791 (#6129) added the unreadable-body error, and W1-T9665 (merged) lists merges since green. None has a
+    no-body success or a probe retry.
+  design: |
+    Operator rulings: no hard thresholds (no fixed retry count, wait or span cap), lean into automation.
+    1. A NO-BODY SUCCESS IS A SUCCESS. In src/lib/github-transport.ts, an `api` call whose process exits 0 with an
+       empty or whitespace-only body returns `undefined` from `ghJson` and `ghJsonAsync`, instead of throwing
+       `GhJsonUnreadableResponseError`. A non-empty body that does not parse still throws, which is #6129's case.
+       When the `-i` header block is present, its status line must read 2xx. The test pins both the bare-stdout and
+       the header paths. Every 204 caller gains from this (dispatch, ref DELETE). A census in the test lists the
+       repo's `--method DELETE` and `/dispatches` call sites at head, so a new one inherits the case by construction.
+    2. A TRANSIENT DISPATCH FAILURE DEFERS, AND NEVER ENDS IN UNLOCATED. A probe dispatch that fails transiently
+       does not count toward "no probe could be dispatched". Transient means `classifyGhFailure` reads rate_limit,
+       a 5xx, a timeout, or an unreadable body. The lane writes `main.repair.probe_dispatch_deferred` with the
+       error, the attempt number and the next attempt time, then returns `probing`, so the lane still owns the red.
+       The backoff is measured: the `Retry-After` or rate-limit reset when GitHub gives one, otherwise the measured
+       interval between the rung's own recent passes, doubling per consecutive failure of the same probe. There is no
+       fixed count. The deferral row joins the rotation-retained steps.
+    3. IDEMPOTENT RE-DISPATCH. Before re-dispatching a probe whose earlier dispatch threw, the lane reads the ref's
+       workflow runs (`probes.read`). A dispatch GitHub accepted, whose answer was lost, is adopted as in flight,
+       never dispatched twice. The two refs already left on origin are reused by the existing "already exists" arm
+       and released once their run concludes.
+    4. UNLOCATED IS THE LAST RESORT, NAMED. It is written only for a non-transient refusal (a 4xx other than rate
+       limit, a missing workflow, a ref that cannot be created) or when the fallback below cannot prove a pair. It
+       carries `local_reason` and the probe's last error class.
+    5. FALLBACK, KEPT FROM THE FIRST DRAFT: NO GREEN BOUNDARY, OR A NON-TRANSIENT PROBE REFUSAL.
+       a. NAMED-PATH ATTRIBUTION. Take the strings each failing assertion prints (its `+`/`-` lines and message)
+          and find the first-parent merges in the range that added or removed each one (`git log --first-parent
+          -S<string>`). The range is from the last green when known; otherwise it steps back from the head.
+       b. LOCAL SINGLE-FILE BISECT, to prove it. Run only the failing test files, with CI's flags, at the candidate
+          and its first parent, then bisect the range when there is no candidate. Probe count follows the range size
+          (log2). With no green, step back by doubling until the files pass. A proof is a red at X and a green at X's
+          first parent on the same files.
+       c. SEAMS. The rung has no git or test seam today, so `MainHealthRungDeps` gains `searchHistory` and
+          `runFilesAt(sha, files)`. src/run-task.ts wires defaults on the daemon's managed checkout and a worker
+          worktree under the existing worker sandbox, never the host shell.
+       d. VERDICTS. Local verdicts enter `probeVerdicts` as evidence kind `local-file`, so `locatedWriterRefusal`
+          still judges them. A named path with no proven pair is written as `main.repair.suspect`, never located.
+    6. THEN THE NORMAL PATH. `main.repair.located` is written with method `bisected-first-red` (CI probe),
+       `named-path-bisect` or `local-bisect`, with its inputs, and the lane proceeds to its fix PR or revert proposal
+       as for `first-red-run`.
+    7. Tests (new file, test titles verbatim as in the proofs below; drive `ghJsonAsync` with a fake exec, and the
+       rung with the existing probe, fetch and ledger fakes the W1-T7760 suite uses):
+       - an exit-0 `gh api` with an empty body resolves `undefined`, and a non-empty unparseable body still throws
+         `GhJsonUnreadableResponseError` (positive control). At origin/main the first throws;
+       - `restMainProbes` over a fetch that answers the dispatches POST with an empty body returns a handle, and
+         `release` resolves;
+       - a dispatch that fails transiently writes `main.repair.probe_dispatch_deferred` and returns probing, never
+         `main.repair.unlocated`. A re-dispatch first reads the ref's runs and adopts one already started;
+       - with no green boundary, a failing assertion naming a path that one merge added, and a local runner red there
+         and green at its parent, the lane writes `main.repair.located` with method `named-path-bisect`.
+  acceptance:
+    - claim: "an exit-0 gh api call with an empty body is a success, and a non-empty unparseable body still throws"
+      proof: 'grep: test("W1-T9923: an exit-0 gh api call with an empty body resolves undefined" in test/the-main-repair-probe-dispatch-survives-a-no-body-success.test.ts'
+    - claim: "the probe dispatch and release survive GitHub's 204 No Content"
+      proof: 'grep: test("W1-T9923: the probe dispatch and release survive a 204 with no body" in test/the-main-repair-probe-dispatch-survives-a-no-body-success.test.ts'
+    - claim: "a transient dispatch failure defers with a measured backoff and never writes unlocated"
+      proof: 'grep: test("W1-T9923: a transient probe dispatch failure defers and never writes unlocated" in test/the-main-repair-probe-dispatch-survives-a-no-body-success.test.ts'
+    - claim: "with no green boundary, the culprit is located from the path its assertion names and a local bisect"
+      proof: 'grep: test("W1-T9923: with no green boundary the culprit is located from its named path" in test/the-main-repair-probe-dispatch-survives-a-no-body-success.test.ts'
+  falsifier: |
+    At origin/main, `ghJsonAsync(["api", "--method", "POST", ".../dispatches", ...])` over a fake exec that exits 0
+    with empty stdout throws "gh api response body was unreadable", so the first test fails. `locateOffender` over a
+    dispatch that throws once returns unlocated, so the third fails.

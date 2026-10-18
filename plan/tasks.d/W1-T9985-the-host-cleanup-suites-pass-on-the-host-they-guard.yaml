@@ -1,0 +1,93 @@
+- id: W1-T9985
+  title: "THE HOST-CLEANUP SUITES PASS ON THE AZURE HOST THEY GUARD — four tests fail there at main and pass in CI because each reads the machine it runs on: the-mac-reclaims-its-own-scratch stubs its foreign owner as 'craigoleyagent', the host's own account, and its real-lsof case reads lsof's warnings about the host's docker overlay and nsfs mounts as open files; host-root-disk-janitor's two root-pass cases make every repo foreign with GIT_TEST_ASSUME_DIFFERENT_OWNER, and git 2.43's local upload-pack then refuses the fixture origin, so publication reads unverified. Every preflight-author run on the host reports them, and each builder must prove by hand that they are pre-existing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern, that these suites read only their own fixtures; the scripts' behaviour is unchanged
+  band_meaning: blast-radius
+  origin: 'W1-T9803 and W1-T9710 preflights (logs-8864/9803-9710-STATUS.txt, 9710-preflight-fails-base.txt); reproduced on main by the batch1017 filer'
+  plan_refs: [W1-T4770, W1-T8863, W1-T5513]
+  files:
+    - test/the-mac-reclaims-its-own-scratch.test.ts
+    - test/host-root-disk-janitor.test.ts
+    - test/helpers/host-cleanup-fixture.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED, reproduced at origin/main 999d96d9a (logs-8864/batch1017-item2-repro-main.tap, 2026-10-17 ~02:45Z, a
+    clean worktree, fresh npm ci, default TMPDIR /mnt/rmd/tmp, both files together): `# tests 39 / # fail 4`. The
+    four tests:
+    - host-root-disk-janitor: "the root pass keeps unpublished repos another user owns and retires published linked
+      trees" and "a root pass proves publication without fetching objects or invoking runuser". Both print
+      `publication-unverified`.
+    - the-mac-reclaims-its-own-scratch: "real lsof preserves a held nested cache while an idle historical cache is
+      pruned" (the idle cache is kept as "open file or lsof scan uncertain"), and "owner is checked before recursive
+      age scans, and stale safe symlink scratch is reclaimable" (the foreign-owned tree is deleted).
+    None of the six files involved changed between 999d96d9a and a89ed1c86. The same four failed at the W1-T9803
+    merge base (logs-8864/9803-janitor-base.tap) and in W1-T9617's main and head runs on 10-15
+    (9617-janitor-main.tap, janitor pair only). The W1-T9710 preflight saw the mac pair the same way at its merge
+    base.
+    OBSERVED, cause per test (each one checked on this host):
+    1. Foreign owner. The case's `stat` stub prints `craigoleyagent` for the foreign-owned tree.
+       deploy/mac/tmp-reclaim.sh compares the owner with `ME`, from `id -un`. On this host `id -un` is
+       craigoleyagent, so the tree reads as its own and is deleted.
+    2. Real lsof. `lsof -nP -Fn +D <idle dir>` as uid 1000 here exits 1 and prints "WARNING: can't stat()" lines
+       for tracefs, docker overlay and nsfs mounts. The script judges `-n "$open_text" || status > 1`, and it
+       captures stderr into open_text (2>&1). So the warnings read as an open file.
+    3. Root pass. GIT_TEST_ASSUME_DIFFERENT_OWNER=1 makes every repository foreign, the fixture's own origin
+       included. The guard (deploy/workspace-retirement-guard.sh rmd_retirement_git) passes
+       `-c safe.directory=<repo top>`, but `ls-remote origin` to a local path runs upload-pack in the origin repo,
+       and git clears config-parameter env for that local child. A probe on git 2.43.0 here: refused with
+       "detected dubious ownership", including with GIT_CONFIG_COUNT safe.directory=*. It is read once the
+       origin is trusted in global config (GIT_CONFIG_GLOBAL): `<origin>.git` for a bare origin, and
+       `<origin>/.git` for a non-bare one.
+    OBSERVED, test-only experiments with each cause removed (logs-8864/batch1017-item2-experiment.patch and
+    experiment2.patch, restored after): the mac pair passes with a foreign name that is not the running account and
+    with `lsof -w` in the real-lsof case. The runuser case passes once the fixture trusts its bare origin, and the
+    linked tree of the first root case is retired. Its clone, whose origin is the non-bare fixture repo, then needs
+    `main/.git` trusted.
+    OBSERVED (PR #12500, head d7c2712c7, merged as 999d96d9a): all 8 ci-shard checks, both test-slow shards and
+    ci-gate are SUCCESS. INFERRED: CI runs these suites (both are in scripts/test-tier-manifest.json) and passes them,
+    because the runner's account is not craigoleyagent, its lsof prints no such warnings, and its newer git takes the
+    fixture origin. The rollup does not show that these two files ran.
+    NOT a product defect for core: the root janitor's real origins are GitHub URLs, not local paths. INFERRED, not
+    checked: a host clone whose origin is a local path would read publication-unverified as root on git 2.43 and be
+    kept. That is the safe direction, and it is out of scope here.
+    Near-duplicates: swept origin/main's plan (4,061 shards) and the plan diffs of all 442 remote heads
+    (logs-8864/batch1017-sweep-item2.txt). No shard names the-mac-reclaims-its-own-scratch, GIT_TEST_ASSUME_DIFFERENT_OWNER,
+    dubious ownership or lsof warnings. W1-T4770, W1-T8863 and W1-T5513 name the janitor's product behaviour.
+  design: |
+    Make each case read only its fixture. No change to deploy/mac/tmp-reclaim.sh, deploy/rmd-host-cleanup.sh or
+    deploy/workspace-retirement-guard.sh.
+    1. Foreign owner: the stub's name is derived from the running account so that it can never equal it (for
+       example `${os.userInfo().username}-foreign`), and the report assertion uses the same value.
+    2. Real lsof: the case still runs the real lsof, through a two-line wrapper that adds `-w` and keeps lsof's exit
+       status. The case is about real held-file detection. How the script treats lsof warnings is a separate safety
+       policy. ALTERNATIVE, named and not taken: change the script to judge open files by stdout `n` lines only.
+       That relaxes a safety hold on the operator's Mac, so it is an OPERATOR DECISION.
+    3. Root pass: the fixture writes a gitconfig of its own and points GIT_CONFIG_GLOBAL at it in run(). It trusts
+       only the fixture origins, `<root>/origin.git` and `<root>/main/.git`, and never `*`. The case's assertion
+       that each safe.directory scope is a repo top still holds, because it reads argv. Since run() no longer reads
+       the operator's global config, the suite is hermetic there too.
+    4. One new case per cause, titled verbatim as in the proofs. Each runs on any machine and reproduces the host's
+       condition in a fixture: an `id` shim that answers the stub's old literal name; under the case's lsof
+       wrapper, a stub lsof that prints a WARNING on stderr and exits 1 unless it is given `-w`, as lsof does on
+       this host; and a root pass whose origin is foreign under the switch. Each fails with main's fixture and
+       passes at head.
+  acceptance:
+    - claim: "the foreign-owner case never names the account that runs it"
+      proof: 'grep: test("W1-T9985: the foreign-owner case names an account other than the one running it" in test/the-mac-reclaims-its-own-scratch.test.ts'
+    - claim: "the real-lsof case passes where lsof warns about mounts the fixture does not use"
+      proof: 'grep: test("W1-T9985: real lsof warnings about unrelated mounts do not hold the idle cache" in test/the-mac-reclaims-its-own-scratch.test.ts'
+    - claim: "a root pass reads the fixture origin it trusts, and only that origin"
+      proof: 'grep: test("W1-T9985: a root pass under assumed foreign ownership reads only the fixture origin it trusts" in test/host-root-disk-janitor.test.ts'
+  falsifier: |
+    On origin/main, on the Azure host (account craigoleyagent, lsof 4.95 with docker overlay and nsfs mounts, git
+    2.43.0), the two files give `# tests 39 / # fail 4` (logs-8864/batch1017-item2-repro-main.tap); at head they
+    give 0 failures. On any machine, each new case run with main's fixture fails: the `id` shim makes the stub owner
+    the running account, the warning lsof (given no `-w`) holds the idle cache, and the untrusted origin reads
+    publication-unverified.

@@ -1,8 +1,11 @@
 type Coverage = "observed" | "partial" | "unavailable";
-type Scope = { instance: string; repository: string; proposalId: string; taskId: string | null };
-type Receipt = { id: string; kind: "retire" | "restore" | "outcome"; scope: Scope; snapshotKey: string; at: string;
+export type InboxDismissalScope = { instance: string; repository: string; proposalId: string; taskId: string | null };
+type Scope = InboxDismissalScope;
+export type InboxDismissalReceipt = { id: string; kind: "retire" | "restore" | "outcome"; scope: Scope; snapshotKey: string; at: string;
   authority?: "operator" | "automatic"; heldAtRetirement?: boolean; retirementId?: string;
+  operator?: string; intentId?: string;
   outcome?: "false_dismissal" | "terminal_confirmed"; evidence?: string };
+type Receipt = InboxDismissalReceipt;
 export interface InboxDismissalAuditInput {
   scope?: { instance: string; repository: string };
   window: { from: string; to: string };
@@ -17,7 +20,7 @@ const id = (value: unknown): value is string => typeof value === "string" && val
 const stamp = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
 const hash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
-function receiptOf(raw: unknown): Receipt | undefined {
+export function inboxDismissalReceipt(raw: unknown): Receipt | undefined {
   const value = object(raw), scope = object(value.scope);
   if (!id(value.id) || !stamp(value.at) || !hash(value.snapshotKey) || !id(scope.instance) || !id(scope.repository)
     || !id(scope.proposalId) || !(scope.taskId === null || id(scope.taskId))
@@ -26,10 +29,12 @@ function receiptOf(raw: unknown): Receipt | undefined {
   if (value.kind !== "retire" && !id(value.retirementId)) return undefined;
   if (value.kind === "outcome" && ((value.outcome !== "false_dismissal" && value.outcome !== "terminal_confirmed") || !id(value.evidence))) return undefined;
   if (value.heldAtRetirement !== undefined && typeof value.heldAtRetirement !== "boolean") return undefined;
+  if (value.operator !== undefined && !id(value.operator) || value.intentId !== undefined && !id(value.intentId)) return undefined;
   return { id: value.id, kind: value.kind, scope: scope as Scope, snapshotKey: value.snapshotKey, at: value.at,
     ...(value.authority === "operator" || value.authority === "automatic" ? { authority: value.authority } : {}),
     ...(typeof value.heldAtRetirement === "boolean" ? { heldAtRetirement: value.heldAtRetirement } : {}),
     ...(id(value.retirementId) ? { retirementId: value.retirementId } : {}),
+    ...(id(value.operator) ? { operator: value.operator } : {}), ...(id(value.intentId) ? { intentId: value.intentId } : {}),
     ...(value.kind === "outcome" ? { outcome: value.outcome as Receipt["outcome"], evidence: value.evidence as string } : {}) };
 }
 const scopeKey = (scope: Scope): string => JSON.stringify([scope.repository, scope.instance, scope.proposalId, scope.taskId]);
@@ -40,7 +45,7 @@ export function buildInboxDismissalAudit(input: InboxDismissalAuditInput) {
   let unqualified = 0, foreign = 0, duplicates = 0, conflicting = 0;
   const records = new Map<string, Receipt>(), conflicted = new Set<string>();
   for (const raw of input.receipts) {
-    const receipt = receiptOf(raw);
+    const receipt = inboxDismissalReceipt(raw);
     if (!receipt) { unqualified++; continue; }
     if (receipt.scope.repository !== input.scope?.repository || receipt.scope.instance !== input.scope?.instance) { foreign++; continue; }
     const key = JSON.stringify([receipt.scope.repository, receipt.scope.instance, receipt.id]);

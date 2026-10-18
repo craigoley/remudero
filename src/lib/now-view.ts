@@ -31,6 +31,7 @@ import {
   type BoardSnapshot,
   type PrQueueRow,
   type RecentActivityCache,
+  type RecentActivityEntry,
 } from "./board.js";
 import { boardSweepRepeat, createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type BoardProjectionOptions, type Row } from "./board-projection.js";
 import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
@@ -89,6 +90,7 @@ import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
+import { createViewHoldBook } from "./worker-heaps.js";
 import { currentVerifyHumanRulings, VERIFY_HUMAN_JUDGED_STEP } from "./verify-human-judge.js";
 import { judgeSource } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
@@ -137,7 +139,7 @@ export interface NowTask {
   needsHuman?: true;
   verifyHumanPending?: true;
   escalation?: { title?: string; issueUrl?: string; unverified?: true; openedAt?: string };
-  worker?: { servedModel?: string; requestedModel?: string };
+  worker?: Pick<NonNullable<BoardRow["workerTelemetry"]>, "runId" | "role" | "provider" | "servedModel" | "requestedModel">;
   /** The run's worker liveness, carried from {@link BoardRow.workerState}: the console's fleet map evidences a
    *  worker process only from it (a phase or a model is task context, not process evidence). It moves only on a
    *  `worker.state` transition, so it does not churn the ETag the way per-event activity would. */
@@ -199,7 +201,7 @@ export interface NowViewData {
   };
   prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean; reviewState: PrQueueRow["reviewState"] }> };
   actions: NowAction[];
-  recent: { entries: Array<{ ts: string; verb: string; taskId: string; title: string; detail?: string; costUsd?: number; prUrl?: string }>; mergedToday: { count: number; day: string } };
+  recent: { entries: RecentActivityEntry[]; mergedToday: { count: number; day: string } };
   health: NowHealth;
   decisions: NowDecision[];
   /** How many open decisions past the cap `decisions` leaves out. */
@@ -428,7 +430,12 @@ function nowTask(row: BoardRow): NowTask {
     ...(row.startedAt ? { startedAt: row.startedAt } : {}),
     ...(row.needsHuman ? { needsHuman: row.needsHuman } : {}), ...(row.verifyHumanPending ? { verifyHumanPending: row.verifyHumanPending } : {}),
     ...(escalation ? { escalation } : {}),
-    ...(t?.servedModel || t?.requestedModel ? { worker: { ...(t.servedModel ? { servedModel: t.servedModel } : {}), ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}) } } : {}),
+    ...(t ? { worker: {
+      ...(t.runId ? { runId: t.runId } : {}), ...(t.role ? { role: t.role } : {}),
+      ...(t.provider ? { provider: t.provider } : {}),
+      ...(t.servedModel ? { servedModel: t.servedModel } : {}),
+      ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}),
+    } } : {}),
     ...(row.workerState ? { workerState: row.workerState } : {}),
     ...(row.workerState === "quiet" && row.workerStateSince ? { workerStateSince: row.workerStateSince } : {}),
     ...(row.processUnevidenced ? { processUnevidenced: true as const } : {}),
@@ -473,7 +480,22 @@ export function assembleNowView(input: {
     },
     actions: nowActions(snapshot, input.rows),
     recent: {
-      entries: input.recent.map((e) => ({ ts: e.ts, verb: e.verb, taskId: e.taskId, title: e.title, ...(e.detail ? { detail: e.detail } : {}), ...(e.costUsd !== undefined ? { costUsd: e.costUsd } : {}), ...(e.prUrl ? { prUrl: e.prUrl } : {}) })),
+      entries: input.recent.map((e) => ({
+        ts: e.ts, verb: e.verb, taskId: e.taskId, title: e.title,
+        ...(e.runId ? { runId: e.runId } : {}), ...(e.detail ? { detail: e.detail } : {}),
+        ...(e.costUsd !== undefined ? { costUsd: e.costUsd } : {}),
+        ...(e.numTurns !== undefined ? { numTurns: e.numTurns } : {}),
+        ...(e.prUrl ? { prUrl: e.prUrl } : {}), ...(e.prNumber !== undefined ? { prNumber: e.prNumber } : {}),
+        ...(e.eventKind ? { eventKind: e.eventKind } : {}), ...(e.eventAt ? { eventAt: e.eventAt } : {}),
+        ...(e.workerRole ? { workerRole: e.workerRole } : {}), ...(e.provider ? { provider: e.provider } : {}),
+        ...(e.requestedModel ? { requestedModel: e.requestedModel } : {}), ...(e.servedModel ? { servedModel: e.servedModel } : {}),
+        ...(e.turnsSoFar !== undefined ? { turnsSoFar: e.turnsSoFar } : {}),
+        ...(e.toolName ? { toolName: e.toolName } : {}), ...(e.toolReason ? { toolReason: e.toolReason } : {}),
+        ...(e.toolStartedAt ? { toolStartedAt: e.toolStartedAt } : {}), ...(e.toolCompletedAt ? { toolCompletedAt: e.toolCompletedAt } : {}),
+        ...(e.toolDurationMs !== undefined ? { toolDurationMs: e.toolDurationMs } : {}),
+        ...(e.toolOutcome ? { toolOutcome: e.toolOutcome } : {}),
+        ...(e.prTitle ? { prTitle: e.prTitle } : {}), ...(e.githubUnavailable ? { githubUnavailable: true as const } : {}),
+      })),
       mergedToday: mergedTodayCount(input.rows, input.plan, input.nowMs),
     },
     health: input.health,
@@ -909,11 +931,12 @@ export function createNowView(opts: NowViewOptions): {
   stages(ctx: NowViewContext): Record<string, number> | undefined;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
   /** W1-T9403: each held board projection, by instance: the rows it keeps and their source bytes. */
-  heldSizes(): Record<string, { rows: number; keptBytes: number }>;
+  heldSizes(): Record<string, { rows: number; keptBytes?: number; entries?: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
   perInstance: true;
   readPaced: true;
 } {
   const clock = opts.clock ?? systemClock;
+  const holds = createViewHoldBook();
   const log = opts.log ?? (() => {});
   const core = opts.coreInstance ?? opts.instances[0]?.name;
   const byName = new Map(opts.instances.map((i) => [i.name, i]));
@@ -987,7 +1010,10 @@ export function createNowView(opts: NowViewOptions): {
     pass.complete();
     if (read.archiveCount > 0) log("read_model.now_gate_digests", { instance: instance.name, ...digests.counts() });
     const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
-    if (complete) gateRows.set(instance.name, read.rows);
+    if (complete) {
+      gateRows.set(instance.name, read.rows);
+      holds.account(`now:gate-rows@${instance.name}`, read.rows, read.rows.length, "rows");
+    }
     return { complete, rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows };
   };
   const pinReviewerSources = (instance: NowInstance, nowMs: number, ledger: { complete: boolean; rows: Array<Record<string, unknown>> }): HumanGateSource[] => {
@@ -1190,6 +1216,7 @@ export function createNowView(opts: NowViewOptions): {
       const cachedPlan = planCache.get(instance.name);
       b.plan = cachedPlan?.key === b.keys.plan ? cachedPlan.plan : readPlan(instance);
       planCache.set(instance.name, { key: b.keys.plan, plan: b.plan });
+      if (cachedPlan?.plan !== b.plan) holds.account(`now:plan@${instance.name}`, b.plan.tasks, b.plan.tasks.length, "tasks");
     }],
     ["github", (instance, b) => {
       const h = held.get(instance.name);
@@ -1353,6 +1380,8 @@ export function createNowView(opts: NowViewOptions): {
       memo.rows.reportRetention(instance.ledgerDir, name, log);
       memo.costs.reportRetention(instance.ledgerDir, name, log);
       const retention = { rows: memo.rows.retention(), costs: memo.costs.retention() };
+      holds.known(`now:legacy-rows@${name}`, retention.rows.rows, memo.rows.approxBytes());
+      holds.known(`now:legacy-costs@${name}`, retention.costs.rows, memo.costs.approxBytes());
       const retentionKey = JSON.stringify(retention);
       if (retentionReported.get(name) !== retentionKey) {
         retentionReported.set(name, retentionKey);
@@ -1416,7 +1445,17 @@ export function createNowView(opts: NowViewOptions): {
       return Object.keys(out).length > 0 ? out : undefined;
     },
     heldSizes() {
-      return Object.fromEntries([...held].map(([instance, h]) => [instance, h.board.size()]));
+      const maps = { instances: byName, "held-state": held, "legacy-memo-index": legacyMemos, "retention-signatures": retentionReported,
+        "plan-index": planCache, "feedback-listings": feedbackListings, "reconciled-feedback": reconciledFeedback,
+        "dependency-sources": dependencySources, "gate-memo-index": gateMemos, "gate-row-index": gateRows, "behind-memo": behindMemo, builds, stages: ran };
+      for (const [name, map] of Object.entries(maps)) if (map.size) holds.unsized(`now:${name}`, map.size,
+        "map values include shared inputs, handles or separately named payloads; exclusive bytes unavailable", "keys");
+      else holds.forget(`now:${name}`);
+      if (held.size || builds.size) holds.unsized("now:shown", 1, "one WeakMap of paired bodies; live key count and retained bytes unavailable", "container");
+      if (feedbackAge) holds.unsized("now:feedback-age", 1, "shared feedback evidence; exclusive bytes unavailable", "container");
+      // `rows` remains a count alias for old board readers; `unit` distinguishes keys/containers from fact rows.
+      const named = Object.fromEntries(Object.entries(holds.read()).map(([name, size]) => [name, { ...size, rows: size.entries }]));
+      return { ...named, ...Object.fromEntries([...held].map(([instance, h]) => [instance, h.board.size()])) };
     },
     /** Takes each finished build's body; an instance with none in flight is built here in one go, as a caller with no `prepare` expects. */
     materialize(ctx) {

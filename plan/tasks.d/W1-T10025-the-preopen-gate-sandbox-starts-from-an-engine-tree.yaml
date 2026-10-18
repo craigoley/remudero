@@ -1,0 +1,74 @@
+- id: W1-T10025
+  title: "THE PRE-OPEN GATE STARTS ITS SANDBOX WHEN THE HARNESS IS AN ENGINE TREE — since 2026-10-17T03:43Z every build run child's `implement.preopen_gate` (22 of 22) ended `unmeasured` in under a second with 'bwrap cannot start here (bwrap: Can't bind mount /oldroot/home/node/Remudero/remudero/node_modules on /newroot/home/node/Remudero/state/engines/<hash>…)', so no build PR has had its fast gate run since, and #12575 opened importing a module its commit did not contain"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 7.00
+  risk: high  # Rule 19: one concern, the bubblewrap argv the pre-open gate builds when its harness root is a precompiled engine tree whose node_modules is a link. What the gate runs, its allowlisted environment, its deadline and the `unmeasured` classification are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 PR-queue triage, agent D40's core-ledger read of #12575 (W1-T9877) and #12582 (W1-T9043)"
+  plan_refs: [W1-T9619, W1-T9556, W1-T9739, W1-T9738, W1-T9838, W1-T9906, W1-T8778]
+  files:
+    - src/lib/preopen-gate.ts
+    - src/lib/review.ts
+    - test/the-preopen-gate-sandbox-starts-from-an-engine-tree.test.ts
+  status: merged
+  priority: 1  # the gate is the last local check before a build PR spends ~16 min of CI; with it unmeasured on every run child, own reds (a missing module, a missing test) reach CI and the fix lane instead
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 ~13:45Z on the core ledger (all nine 2026-10-17 archives plus the live file on the Azure host,
+    read-only, niced, streamed to the Mac; every form opened). 28 `implement.preopen_gate` rows today:
+    - 00:18Z–03:14:35Z: 4 fail, 2 pass, all `containment: sandboxed`, actor run_child (W1-T9872, W1-T9871, W1-T9860,
+      W1-T9869, W1-T9862).
+    - 03:43:07Z (W1-T9969) to 13:18:04Z (W1-T9043): 22 of 22 `result: unmeasured`, `containment: unmeasured`,
+      duration 53–603 ms, reason "the gate could not be contained: bwrap cannot start here (bwrap: Can't bind mount
+      /oldroot/home/node/Remudero/remudero/node_modules on /newroot/home/node/Remudero/state/engines/<hash>" (the
+      ledger's 160-char cut ends inside the engine path), across eight engine hashes (e6640c01…, 2435721…, 7124d6a…,
+      3b5862f…, cd43521…, 5a91bd4…, 8a17220…, 498b142…). Each run then went on to push and open its PR.
+    - #12575 (W1-T9877, 11:46:14Z unmeasured) opened with all three declared callers importing src/lib/rule-suites.js,
+      which its commit did not contain; every CI shard went red. #12582 (W1-T9043, 13:18:04Z unmeasured) opened
+      without the test file its three grep proofs name; acceptance-author-gate went red.
+    READ at origin/main d83fece77 (symbols, not lines):
+    - src/lib/preopen-gate.ts `HARNESS_ROOT` is this module's own tree (`new URL("../../", import.meta.url)`), which for
+      a run child started from a precompiled engine is state/engines/<hash>/.
+    - `preopenGateSandboxArgv` ro-binds that harness root and `proofLinkedModuleRoots(harness)`, on top of
+      `proofSandboxArgv` for the worktree; `defaultGateContainment` probes the argv once around `node -e ""` and maps
+      any failure to `mode: unavailable`, which `defaultRunGate` reports `unmeasured`.
+    - src/lib/review.ts `proofLinkedModuleRoots` / `intermediateModuleLinks` resolve a checkout's node_modules link
+      chain; since W1-T9738 an engine tree's node_modules is such a link to the daemon checkout's node_modules.
+    - NOT VERIFIED: which bind's destination bwrap refuses (the message names the checkout's node_modules as source and
+      a path under the engine tree as destination), and why the two 03:11Z/03:14Z run children were sandboxed (they may
+      have run from the checkout rather than an engine). The build reproduces it first.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9619 made an uncontainable gate `unmeasured`, never a pass (correct, and kept).
+    W1-T9556 is the gate's deadline. W1-T9739 measures the sandbox's tmp and compile cache. W1-T9738 and W1-T9838 are
+    the engine's own node_modules safety, not the gate's mounts. W1-T8920 is a consumer repo's missing bin/rmd. Swept
+    plan/tasks.d on origin/main for preopen_gate, "could not be contained", "bwrap cannot start", "bind mount" and
+    proofLinkedModuleRoots (positive control: the sweep finds W1-T9619's own unmeasured criterion), and the plan diffs
+    of the 7 open PR heads at 13:44Z: none names this.
+  design: |
+    1. REPRODUCE. A temp tree shaped like an engine (its node_modules a symlink to a directory outside it) and a temp
+       worktree; build `preopenGateSandboxArgv` for them and, where bwrap is installed, start it around `node -e ""`.
+       Record which bind fails.
+    2. FIX THE ARGV, not the classification. Every bind destination the gate argv adds is a real directory in the
+       sandbox when its turn comes: a node_modules link under the harness root is bound at its resolved target, and no
+       bind lands on a symlink inside an already read-only bound tree. The worktree's own proof binds are unchanged.
+    3. An uncontainable gate stays `unmeasured` with its reason (W1-T9619's criterion stands); nothing here makes an
+       unmeasured gate pass or skips it.
+    4. TESTS in test/the-preopen-gate-sandbox-starts-from-an-engine-tree.test.ts, `test(` titles verbatim as in the
+       proofs. The argv test is pure (temp dirs, no bwrap needed). The start test runs the real `defaultGateContainment`
+       when bwrap is present and records the skip by name when it is not.
+  acceptance:
+    - claim: "the gate argv for an engine-tree harness binds no destination onto a node_modules link"
+      proof: 'grep: test("W1-T10025: an engine-tree harness argv binds nothing onto a node_modules link" in test/the-preopen-gate-sandbox-starts-from-an-engine-tree.test.ts'
+    - claim: "the real containment starts for an engine-tree harness where bubblewrap is installed"
+      proof: 'grep: test("W1-T10025: the gate sandbox starts for an engine-tree harness" in test/the-preopen-gate-sandbox-starts-from-an-engine-tree.test.ts'
+  falsifier: |
+    At origin/main, an engine-shaped harness (node_modules -> outside dir) yields an argv whose bwrap start fails with
+    "Can't bind mount … node_modules", so the start test reads `mode: unavailable` and fails, and the argv test finds
+    a bind whose destination is the link. With the fix both pass. Making `defaultGateContainment` swallow the failure
+    into `sandboxed` fails W1-T9619's existing "a gate that cannot be contained is unmeasured, never a pass" test.
+  note: |
+    EFFECT, measured after merge from the core ledger: `implement.preopen_gate` rows from run children with
+    `containment: unmeasured` and reason "bwrap cannot start here". Healthy shape: none; results are pass or fail.

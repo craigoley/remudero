@@ -5,10 +5,55 @@ script and installs both guards and the cache helper beside `~/bin/remudero-jani
 change schedules. Existing Craig launchd and agent cron jobs can use the same
 binary: account paths are derived from the account running it.
 
+For the shared cron entry point, run `bash deploy/mac/install-janitor.sh --shared`
+as an account allowed to write `/Users/Shared/remudero-mac`. This installs the
+same maintained janitor, both safety guards and cache helper there, and installs
+`/Users/Shared/remudero-mac-janitor.sh` beside it. The launcher never reaches into
+another user's private home. It preserves the caller's HOME and UID, existing
+six-hour guards, per-account locks and schedules. Do not widen home-directory
+permissions to make a cross-account launcher work. `--shared-root PATH` installs
+the identical layout under an alternate absolute root for testing.
+
 Run `~/bin/remudero-janitor.sh --dry-run` before `--apply`.
 
+## Preventing new validation growth
+
+The `scripts/preflight-author.mjs` CLI checks Mac workspace and TMPDIR capacity
+before starting author work, then checks freshly after slot waiting and before
+each static/test phase. Both volumes must retain the existing 20-GiB local
+coverage reserve, and a bounded native pressure read must report normal. Warning,
+critical, unknown or unavailable readings return **NOT_RUN / exit 3**, not a test
+pass. Help and dry-run remain available. Linux/hosted admission is unchanged.
+This is a fresh pre-start observation, not a cross-account capacity reservation
+or a guarantee against other jobs starting concurrently. It never kills jobs,
+changes Janitor retention, deletes swap or dependencies, or weakens hosted gates.
+Older author receipts are not proof of a refused invocation. Existing running
+jobs and older checkouts are not modified; use the updated checkout for new runs.
+
+Apple's public XNU source maps its internal pressure enum to userspace dispatch
+flags for `kern.memorystatus_vm_pressure_level`: 1 is normal, 2 warning and 4
+critical. Do not confuse these with the internal 0-through-4 enum:
+<https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus_notify.c>.
+RSS alone also omits compressed memory; use Activity Monitor's pressure and swap
+observations when investigating a capacity refusal:
+<https://support.apple.com/guide/activity-monitor/view-memory-usage-actmntr1004/mac>.
+
+The installer also installs `cache-reclaim.py` and `retire-legacy-sweeper.py` in
+both layouts. `--retire-legacy-sweeper` is an explicit additional installer option,
+composable with `--shared`. It disables future launch admission only for the
+known `com.craigoley.disk-sweep` job after verifying its exact plist arguments
+and executable (an explicit `Program` must equal `/bin/zsh`), ownership and
+historical script hash. The plist is retained with a disabled
+suffix. It never stops a running process, changes cron entries, or retires an
+unknown/replaced job. Ordinary code-only installation does not change schedules.
+
 The scan includes `~/Remudero`, nested disposable checkouts below the protected
-operator checkout `~/Remudero/remudero`, `~/rmd-work`, and temporary roots. Git
+operator checkout `~/Remudero/remudero`, `~/rmd-work`, and temporary roots.
+On macOS it also includes each running account's
+`~/Developer/remudero-operator-worktrees`, including non-Git scratch children.
+That container itself remains in place; young descendants, active/open paths,
+dirty or unpublished Git state, evidence and unknown visibility still retain a
+child. No other Developer directory becomes a whole-directory cleanup root. Git
 discovery is bounded to eight levels and reports incomplete scans. It never
 deletes tracked source directories merely because they are old. Empty or unknown
 non-repository containers remain classified as data, not silently ignored.
@@ -25,6 +70,10 @@ that child through a relative path. PID/command visibility failures hold the
 candidate. Artifact cleanup uses its enclosing Git checkout as the activity
 scope, so an active repository retains its dependencies. Git-tracked nested directories and
 submodule/gitlink sources are never retired.
+An ancestor CWD record missing from the earlier process snapshot gets a fresh
+PID-specific read. Only an empty no-selected-PID result releases that stale
+record; live relative commands, unreadable probes, warnings and malformed
+output still hold the candidate. Direct CWDs inside a candidate remain holds.
 
 Every scheduled janitor pass also calls the installed helper in cache-only
 mode for its configured temporary roots, `~/Remudero` and `~/rmd-work`.
@@ -37,6 +86,99 @@ unrecognized contents stay protected. Each file needs six hours of both mtime
 and ctime inactivity, with fresh process/CWD/open-file checks before removal.
 Cache roots and sibling fixtures/source/state stay in place. Delegated cache
 counts are logged separately from workspace-removal counts.
+Owned numeric `<pid>.pipe` Unix sockets are recognized as TSX IPC endpoints and
+retained, not deleted or treated as cache files. Their mere presence does not
+hide otherwise eligible old regular cache entries. The existing whole-cache
+live/open checks still hold a cache with a live endpoint. Foreign, linked,
+non-socket `.pipe` entries and all other unknown data retain the whole cache.
+
+The regular janitor additionally inspects this account's `.codex/work-artifacts`
+for exact ignored package duplicates and `.next/cache/turbopack` compiler data.
+Each invocation uses one account lock and serial probes. Inspection is bounded
+to 45 seconds, 500,000 entries and 2 GiB of content reads; budget exhaustion is
+a typed keep decision. Already admitted staging finishes or restores safely.
+Discovery and reference traversal stream physical directory entries with
+no-follow, parent-fd-bound descent and directory identity checks. Every child
+enumerated for inspection consumes the entry budget, including ordinary files
+in a single flat directory; wall checks occur between children. This is an
+honest inspection ceiling, not a directory-only counter. A corpus larger than
+500,000 inspected entries can still yield no reclaim in this bounded pass.
+Discovery retains known candidates when interrupted. Incomplete discovery or
+any incomplete/unreadable reference root never clears a candidate for removal.
+All original reference roots and depth limits remain in scope. A cheap root
+observation can only KEEP a recent, foreign or flagged target; only when every
+candidate is already kept can the reference phase be unnecessary.
+Completed directory namespaces are authenticated in a private checkpoint capped
+at 16 MiB. Prefix-coded paths and implicit LRU order avoid repeating long absolute
+paths. Loading bounds expanded path text as well as encoded bytes; eviction
+rebases the first remaining record. Old writer/format scopes cold-reset. Only
+namespace observations are reused: current directories/symlinks, age, activity,
+payload identity and deletion guards are checked again. No scan limit increases.
+An authenticated candidate cursor resumes at a budget-interrupted candidate
+instead of repeatedly spending the pass on the same prefix. It only rotates
+inspection order after a fresh complete reference census; it never caches
+eligibility, KEEP conclusions or dependency anchors. Every resumed attempt
+rechecks the six-hour and activity guards, and a completed round clears the hint.
+
+An inaccessible physical reference subtree can be inspected by an explicitly
+configured, read-only peer account. The optional file
+`~/.local/state/remudero/cache-reference-peers.json` must be an owner-private
+0600 regular file below physical, same-owner, non-writable-by-others parents.
+It is a JSON array of `{ "uid": <subtree owner UID>, "argv": [<absolute program>, ...] }`.
+An operator may use an existing authorized SSH connection whose fixed remote
+command is `python3 '<installed helper path>/cache-reclaim.py' --reference-probe`.
+Arguments are executed without a local shell; requests go over stdin, never into
+the remote command string. Installation does not create credentials, authorize
+SSH keys, configure sudo, widen filesystem permissions or assume reciprocal
+account access. Missing configuration/authentication remains a typed hold.
+
+The peer endpoint accepts only owned physical subtrees in its existing reference
+roots and bounded request limits. It reads metadata and symlinks, not source or
+package contents, and creates no locks, checkpoints or cleanup stages. A nonce,
+request digest, exact writer generation, UID and sealed root identity bind its
+reply; entry/read/time costs consume the caller's remaining budget. Unknown,
+incomplete, oversized, changed or failed replies never clear a candidate.
+Permission errors while resolving a symlink's referent are not treated as an
+unresolved non-reference: the peer returns that link for strict resolution by
+the caller using its own access. If neither account can resolve it, cleanup
+still holds. Resolving a known link pins and revalidates each physical path
+edge (inode, type, permissions and ownership), without treating unrelated
+sibling creation in an ancestor as a changed link. Enumerating a reference
+namespace still seals its complete directory identity, and every symlink edge
+is revalidated. This supplements the full census; it does not bypass process,
+CWD/open-file, six-hour, Git, duplicate-payload or retained-evidence protections.
+Duplicate package removal requires equal complete byte/mode/symlink namespaces
+and an unchanged full payload anchor retained in place. Unique `.vite` results
+and `.rmd-dependency-seed.json` receipts remain at their original paths. Source,
+Git, dirty/unpublished changes, coverage evidence, compiled Next.js outputs and
+preview/action metadata never enter this cache-only removal set. Broken Git,
+warnings about missing object lenders, shared references, recent activity,
+unknown ownership and incomplete probes retain the candidate. The helper does
+not repair or infer lost Git metadata and makes no publication claim.
+
+The temporary cleaner delegates recognized `node-compile-cache` directories to
+the same helper. Only single-link, owned files with the observed Node cache
+header, hexadecimal name and version/architecture directory layout qualify.
+Old files need six hours of both mtime and ctime; fresh files and the cache root
+remain. Whole-cache process/CWD/open-file probes run before the bounded batch,
+and file/parent identities are rechecked before fd-bound staged unlinks. Unknown
+data or an absent helper has no generic deletion fallback.
+
+`cache-reclaim:` JSON receipts include inspection duration, bytes/entries read,
+per-target removal/retention reasons and filesystem free bytes before/after.
+The `inspection` object reports stage/root, each root's elapsed time, inspected
+entries, enumerated children/directories, symlinks, completeness and errors,
+plus the exhausted limit. An enumerated child rejected at the entry boundary
+is counted as enumerated but not inspected. Discovery/reference/evaluation
+completeness are separate; `referencesRequired: false` is not a successful
+reference scan. Known unprocessed targets have explicit `deferred` KEEP rows
+and a deferred count. Incomplete discovery reports an unknown (`null`)
+undiscovered-candidate count, not zero. These receipts show bounded progress,
+not proof of real-world reclaim effectiveness or cross-account visibility.
+Listed path allocation and net free-space change are separate measurements.
+Staging races restore data; a completed deletion whose final source verification
+is unavailable is reported as `removed-unverified` with a nonzero exit, never as
+a successful retention or certified removal.
 
 Fresh `git ls-remote` advertisements establish recoverability. Current heads/tags
 can prove ancestry when their commit objects are available locally; PR head refs
@@ -49,15 +191,24 @@ older Git without that control holds promisor repositories before reading their
 objects. The janitor does not fetch objects or update remote-tracking refs.
 
 Protected operator clones, seed stores, dirty/unpublished work, unknown ignored
-data, broken Git pointers and unreadable safety probes stay put. Mac standalone
-object stores remain conservatively held because borrowers can live in another
+data, broken Git pointers and unreadable safety probes stay put.
+Patch/diff files, rejected hunks and original-file backups are retained evidence,
+not generic data-only scratch, even when they are outside a Git checkout.
+Mac standalone object stores remain conservatively held because borrowers can live in another
 account. Azure also checks configured-root alternates and linked registrations;
 all local refs and reflog-only commits must be published before clone removal.
 
 Each account writes human logs plus a tab-separated decision receipt at
 `~/.local/state/remudero/janitor-decisions.tsv`. Columns are timestamp/PID pass ID, UTC time,
-action, reason code and escaped complete message. Tabs/newlines/percent signs in
-messages are escaped. Each pass summarizes skip counts by reason. A Git-unknown
+action, reason code and escaped complete message. These first five columns keep
+their existing positions; appended columns contain observed allocated bytes (or
+`unknown`) and the measurement scope. Existing successful size probes are reused;
+reporting never walks a directory to obtain missing sizes. Tabs/newlines/percent
+signs in messages are escaped. Each pass summarizes skip counts, known observed
+bytes and unknown-size counts by reason. These observations can overlap and do
+not prove a unique skipped-byte total or complete discovery. Cache-helper
+decisions also enter the receipt; partial/unverified removals remain informational
+with an explicit uncertainty reason, not completed removals. A Git-unknown
 hold needs its original object store restored or an operator-reviewed recovery;
 an unpublished hold needs its work deliberately published, not forced cleanup.
 

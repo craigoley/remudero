@@ -1,0 +1,65 @@
+- id: W1-T9935
+  title: "THE WIPE-TEST EVIDENCE READER WARMS ITS ROTATION DIGESTS OFF THE LOOP — after PR 12406 the first cadence check with no digests (each deploy that bumps its reducer version, and the first after it merges) parses every rotation in full on the daemon loop through ledgerRotationDigests, 2.8 s on the 377-rotation fixture against 1.1 s for one whole-union pass before it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, where the wipe-test evidence reader's cold rotation load runs; the evidence it answers is unchanged
+  band_meaning: blast-radius
+  origin: 'wipe-test hand-fix PR 12406 (head 48ef3814f) builder report, follow-up; coordinator brief batch1016b item 6'
+  plan_refs: [W1-T9390, W1-T9406, W1-T9710, W1-T7391]
+  files:
+    - src/lib/measurement-cadence.ts
+    - src/run-task.ts
+    - test/the-wipe-test-evidence-reader-warms-its-digests-off-the-loop.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    DEPENDS ON PR 12406 (the wipe-test cadence hand-fix, head 48ef3814f, no task id). Build only after it merges; if
+    createWipeTestEvidenceReader is not on origin/main, stop and say so.
+    READ at PR 12406's head 48ef3814f (symbols, not lines):
+    - src/lib/measurement-cadence.ts createWipeTestEvidenceReader builds createIncrementalLedgerUnion with holder
+      "wipetest.cadence-evidence", reducerVersion "1", and a counting fs. buildWipeTestCadenceDaemonHooks
+      (src/run-task.ts) builds one per hooks build and calls it synchronously from the cadence check.
+    - At origin/main, src/lib/ledger-union.ts: createIncrementalLedgerUnion answers a rotation it has not kept
+      through ledgerRotationDigests. That function's doc says the rotation "is parsed here in full, never through the
+      union's `parse`, whose `pattern` ... would make the digest depend on that one read's options". So a rotation
+      with no digest is gunzipped and every row JSON-parsed, synchronously, on the loop.
+    - That cold pass happens once per rotation per digest version: on the first check after PR 12406 deploys, after
+      any reducerVersion change, and for each newly rotated file.
+    OBSERVED offline (logs-8864/wipetest-bench.log, PR 12406's bench, fixture of 377 rotations, 35.4 MB gzipped, live
+    file 5.5 MB): check 1 took 2847 ms at head against 1094 ms for main's whole-union read. Checks 2-4 took 16-23 ms
+    and read 0 rotations. A restarted reader with digests on disk took 112 ms and read 0 rotations (5.9 MB of
+    digests).
+    INFERRED: on the fleet host (290 of 377 rotations, 260.6 MB, per PR 12406's commit message) the cold pass is a
+    multi-second loop stall once per deploy that changes the digest version.
+    createEscalationTriageHistoryReader (src/lib/sweep.ts, W1-T9390) already avoids this: it loads unseen rotations
+    off the loop through createLedgerRotationMemo's async `load`, with a step pattern, and writes the same durable
+    digests before its synchronous union pass. W1-T9710 (queued) makes that pass reuse the load instead of
+    re-reading the digests. It also edits src/lib/ledger-union.ts, so this task does not.
+  design: |
+    1. Warm off the loop. The wipe-test evidence reader gains an async warm step, the same shape as
+       createEscalationTriageHistoryReader: stat the rotations, load the unseen ones through createLedgerRotationMemo's
+       async `load` with a pattern built from WIPE_TEST_EVIDENCE_STEPS, and write the digests the incremental union
+       reads (same holder, the reducerVersion the union's rotation hook reads).
+    2. The daemon hook awaits the warm before the synchronous evidence read. If the warm has not finished, or failed,
+       the check skips that pulse with a reason naming the unfinished warm (a wipetest.cadence.skipped row). It
+       never runs a cold synchronous parse on the loop.
+    3. The wipetest.cadence rows (PR 12406's evidence_bytes_read, evidence_rotations_read, evidence_rotations) gain
+       evidence_rotations_warmed, so the fleet sees the cold pass leave the loop.
+    4. No new constant, no change to ledger-union.ts. A pattern prefilter inside ledgerRotationDigests is the
+       alternative, but it edits a BAKED path shared with W1-T9710. Leave it to a later task that names W1-T9710.
+    Tests go in test/the-wipe-test-evidence-reader-warms-its-digests-off-the-loop.test.ts, titled verbatim as in the
+    proofs, over a temp state dir with real gzipped rotations and a counting fs seam.
+  acceptance:
+    - claim: "after the warm, the first synchronous evidence read with no prior digests reads no rotation archive"
+      proof: 'grep: test("W1-T9935: a warmed wipe-test evidence read opens no rotation archive" in test/the-wipe-test-evidence-reader-warms-its-digests-off-the-loop.test.ts'
+    - claim: "a cadence check whose warm has not finished skips without a synchronous rotation parse"
+      proof: 'grep: test("W1-T9935: an unwarmed cadence check skips rather than parse on the loop" in test/the-wipe-test-evidence-reader-warms-its-digests-off-the-loop.test.ts'
+  falsifier: |
+    At PR 12406's head, the first createWipeTestEvidenceReader call over rotations with no digests reads every
+    rotation archive synchronously (its own evidence_rotations_read equals the rotation count), so the first test
+    fails. The hook has no warm step and parses inline, so the second fails.

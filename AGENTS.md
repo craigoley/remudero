@@ -45,10 +45,11 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **ZERO A `DA:` VALUE INSIDE THE TARGET's OWN `SF:` BLOCK — a whole-file replace hits another
   file's identical line number and returns a FALSE `OK`.**
 - **Every builder, reviewer and worker must clean up its own disposable workspace artifacts before
-  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave harness-owned
+  finishing; preserve active/shared paths, unpublished work and durable evidence, and leave
   worktree retirement to the harness.**
 - **Derive "which tasks are merged" from merged PRs' `Remudero-Task:` trailer UNIONED with their
-  `run-<taskId>-*` branch — never from ledger verdict lines.**
+  `run-<taskId>-*` branch, and a PR's merge state from the API — never ledger verdict lines, a
+  shard's `status:` or main's log.**
 - **Before building a filed task, check `git ls-remote origin 'refs/rmd-dispatch/<id>' 'refs/heads/run-<id>-*'`
   (claimed or in flight?) and merged PRs for an exact `^Remudero-Task: <id>$` trailer (shipped?), never commit subjects.**
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
@@ -61,8 +62,6 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **File a plan task from the OPERATOR CHECKOUT — a session that cannot reserve mints on hope.**
 - **`rule15-filing` refuses a plan record in `files:` only when an OUT-OF-PLAN path rides along —
   the record ALONE passes at `verify: auto`.**
-- **A shard's `status:` field is not a completion signal — it stays `queued` on tasks that
-  shipped.**
 - **Decode citations: "Rule N" = MASTER-PLAN §12; "G-N" = §14 "Grill RESOLVED"; "P48"/"DR-N" =
   its retro ledger; `rule15-*` names an artifact, not a rule.**
 - **Take the cheap candidate beside a costly one, and name what the costly one now waits for.**
@@ -70,22 +69,20 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
   ~16 min of CI and voids the review.**
 - **Leave a red fleet PR to the fix lane while a round is due or in flight — hand pushes out-race it
   and hide its defects.**
-- **Do NOT push a fresh sha to clear a stale-red `ci-gate` — it self-clears.**
 - **Space `gh` reads 180 s apart, never poll — `deny-floor.sh` refuses a closer read; GitHub's
-  SECONDARY limit 403s on RATE while `rate_limit` reads full.**
-- **`gh pr create` may die on API quota; git push is unaffected.**
+  SECONDARY limit 403s on RATE while `rate_limit` reads full; `gh pr create` may die, git push won't.**
 - **A CONFLICTING PR registers ZERO check runs. `total: 0` reads as "still queued" but means
   `mergeable_state: dirty` — check mergeability before waiting on CI.**
 - **Two PRs appending tests to one file's TAIL can conflict before a SHARED closing `});` — close
   the ours-side block yourself; esbuild says only `Unexpected end of file`.**
-- **A corrected PR title is observed by a RE-RUN, not only by a new sha — but `edited` still fires
-  nothing.**
+- **A RETITLE ALONE re-runs the title lint — `pr-title-lint.yml` fires on `edited`; push no sha to
+  clear a title red, nor a stale-red `ci-gate` (it self-clears).**
+- **Never add an advisory ignore, scanner exclusion or gate loosening without the operator's explicit
+  yes; read ALL comments on another session's PR before pushing to it.**
 - **A BAKED-path merge (`deploy/Dockerfile`, `deploy/entrypoint.sh`) ships itself by auto ACR build +
   recycle, not at merge — confirm with `docker inspect` before calling it shipped.**
 - **PRs green on their own bases can cross a ceiling together: a `# fail 0` main red is a ratchet
   collision, and main records it (#10724).**
-- **Main push runs are cancelled while PENDING, so most main commits never get a CI verdict — never
-  read CANCELLED as red.**
 - **Compare a base-red PR's failing check to main's FULL check census, not ci-gate's aggregates, or
   every shard red is held.**
 - **Grep the ledger with `rmd ledger-grep <pat>`; by hand, `zgrep` THREE globs —
@@ -125,8 +122,10 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **A clock-shifted run failing ENOENT on its own fixture is the boot temp sweep, not a time bomb —
   use a private TMPDIR.**
 - **Judge main from its newest commit with genuine evidence — its head alone reads undetermined
-  forever under steady merges.**
-- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair (#3030/#3039/#3043).**
+  forever under steady merges, and a push run CANCELLED while pending is not red.**
+- **recurrence is a class signal, not a root-cause diagnosis; preserve the per-PR disposition and file a bounded observation proposal before class-wide repair.**
+- **Replay a projected effect on the ledger before building for it; audit a shipped mechanism's
+  first live rows for contradictions.**
 - **Read re-entrancy from `process.env`, not an injected `env` argument — a spawn writes a child's
   environment and cannot reach a parameter.**
 - **A fixed date constant compared against rows stamped at REAL time is a time bomb; the signature

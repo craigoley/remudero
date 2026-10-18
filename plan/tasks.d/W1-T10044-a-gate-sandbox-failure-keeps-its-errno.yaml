@@ -1,0 +1,64 @@
+- id: W1-T10044
+  title: "A SANDBOX THAT CANNOT START KEEPS THE TAIL OF ITS ERROR — sandboxFailureText cuts bwrap's line to its first 160 characters, so all 22 unmeasured implement.preopen_gate reasons on 2026-10-17 end inside the engine hash and drop the destination and the errno ('…: Unable to mount source on destination: No such file or directory'), the one part that names the fault"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern, how a too-long sandbox start failure line is bounded; the bound itself (160) and every caller are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 7 (2026-10-17), from the gatebind diagnosis behind hand-fix PR 12595'
+  plan_refs: [W1-T9619, W1-T10025]
+  files:
+    - src/lib/preopen-gate.ts
+    - test/a-gate-sandbox-failure-keeps-its-errno.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 (core ledger, every gz archive plus the live file, read-only): 22 consecutive
+    implement.preopen_gate rows from 03:43:07Z to 13:18:04Z carry reason "the gate could not be contained: bwrap
+    cannot start here (bwrap: Can't bind mount /oldroot/home/node/Remudero/remudero/node_modules on
+    /newroot/home/node/Remudero/state/engines/<hash>". The parenthesised bwrap text is exactly 160 characters in all
+    22 and ends mid-hash (the real hash is 64 hex characters).
+    OBSERVED (logs-8864/gatebind-pr-body.md, a bwrap 0.9.0 repro): the full line is 262 characters and ends
+    "…/state/engines/<hash>/node_modules: Unable to mount source on destination: No such file or directory". Its first
+    160 characters are byte-identical to the ledger text. gatebind-repro-main.log shows the same cut on the fixture.
+    INFERRED: the destination and the errno were the clues the diagnosis needed; the hand diagnosis had to re-run bwrap
+    to recover them.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/lib/preopen-gate.ts `sandboxFailureText(error, binary)` (not exported): first non-empty stderr line, else
+      the error message, then `line.trim().slice(0, 160)`; ENOENT becomes "<binary> is not installed".
+    - Its only caller is `defaultGateContainment`, whose `unavailable` reason reaches `defaultRunGate` ("the gate
+      could not be contained: …"), then `classifyGateRun`, then run-task.ts writes it as implement.preopen_gate.reason.
+    - The same file has two more head-only `.slice(0, 160)` cuts ("the sandbox argv could not be built", "the gate
+      could not start"), and src/lib/review.ts `spawnFailureText` has the same cut for the review proof sandbox.
+    WHY THIS IS NOT ANOTHER TASK: W1-T10025 (queued) restores the sandbox start itself and only cites the cut. W1-T9619
+    (merged) built the gate. No shard names sandboxFailureText or a head-and-tail bound (swept origin/main plan/tasks.d
+    and the plan diffs of every open PR head, 2026-10-17 ~15:40Z).
+  design: |
+    1. Export `SANDBOX_FAILURE_TEXT_MAX = 160` (the bound, unchanged) and a pure `boundFailureLine(line, max)` from
+       src/lib/preopen-gate.ts. A line within `max` is returned whole. A longer line keeps its head and its tail joined by
+       a single "…", and the result is exactly `max` characters (for example an 80-character head and a 79-character
+       tail; the split is an implementation choice, not a new bound).
+    2. `sandboxFailureText` calls it in place of `.slice(0, 160)`. The two sibling cuts in the same file use it too.
+       src/lib/review.ts `spawnFailureText` is left alone (out of scope; named here as a follow-up).
+    3. TESTS in test/a-gate-sandbox-failure-keeps-its-errno.test.ts, `test(` titles verbatim as in the proofs: the
+       observed 262-character bwrap line, fed through a fake bwrap to `defaultGateContainment`, yields a reason that ends
+       with "No such file or directory" and still starts with "bwrap: Can't bind mount"; a short line is unchanged; no
+       output exceeds 160 characters. The W1-T9619 short-message assertion stays green.
+  acceptance:
+    - claim: "a sandbox failure longer than the bound keeps its head, an ellipsis and its errno tail"
+      proof: 'grep: test("W1-T10044: a sandbox failure longer than the bound keeps its errno tail" in test/a-gate-sandbox-failure-keeps-its-errno.test.ts'
+    - claim: "a sandbox failure within the bound is kept whole"
+      proof: 'grep: test("W1-T10044: a sandbox failure within the bound is kept whole" in test/a-gate-sandbox-failure-keeps-its-errno.test.ts'
+    - claim: "the bound stays 160 characters, now named"
+      proof: 'grep: SANDBOX_FAILURE_TEXT_MAX = 160 in src/lib/preopen-gate.ts'
+  falsifier: |
+    At origin/main `sandboxFailureText` returns `line.trim().slice(0, 160)`: the observed 262-character line comes back
+    ending in the engine hash, so the first test (errno tail present) fails. Returning the whole line passes the first
+    test and fails the bound assertion. Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    EFFECT, measured after merge from the core ledger: an implement.preopen_gate `unmeasured` reason longer than 160
+    characters at source ends with its errno text. Healthy shape: every such reason names its errno.

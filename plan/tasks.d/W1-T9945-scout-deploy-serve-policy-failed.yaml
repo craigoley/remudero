@@ -1,0 +1,30 @@
+- id: W1-T9945
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — deploy.serve_policy_failed landed 3 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3.4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:deploy.serve_policy_failed"
+  files:
+    - test/scout-deploy-serve-policy-failed.test.ts
+  acceptance:
+    - claim: "deploy.serve_policy_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9945: deploy.serve_policy_failed no longer recurs\" in test/scout-deploy-serve-policy-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step deploy.serve_policy_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The supplied record reports three recurring ledger rows but provides no row details or diagnosed cause; the finding cannot be verified from what is shown, an explicit escalation condition.; on the change's description/files alone, no diff was read — The task requires fixing an unidentified cause while declaring only a new test file. Its acceptance proof checks for test-title text, which does not establish that the cause is fixed or recurrence stops."
+    judged_at: "2026-10-16T23:23:39.376Z"
+    pin: "adcd98a61ef6c7a57e2b2b3520d7be8a0cef5e6ee7c2cf761444b33590c7282d"

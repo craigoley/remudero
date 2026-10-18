@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { fixedClock } from "../src/lib/clock.js";
 import type { Config } from "../src/lib/config.js";
 import {
@@ -135,19 +136,61 @@ test("an unreadable disk reading never authorises a reclaim", () => {
   assert.equal(summary.kept[0]?.reason, "unreadable");
 });
 
-test("an unreadable candidate root is a no-op, never a partial reclaim", () => {
+test("an unreadable candidate root is reported without attempting a reclaim", () => {
+  const removed: string[] = [];
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const summary = sweepReclaimableArtifacts(
     config,
-    () => {},
+    (step, extra) => { events.push({ step, extra }); },
     baseOpts({
+      filesystemDevice: () => 1,
       listEntries: () => {
         throw new Error("root unreadable");
       },
+      removeDir: (path) => { removed.push(path); },
     }),
   );
 
-  assert.deepEqual(summary.reclaimed, []);
-  assert.deepEqual(summary.kept, []);
+  assert.deepEqual(summary, {
+    reclaimed: [], kept: [{ path: SCAN_ROOT, reason: "unreadable" }], bytesReclaimed: 0,
+  });
+  assert.deepEqual(removed, []);
+  assert.deepEqual(events, [{
+    step: "disk_artifact.sweep.kept",
+    extra: { path: SCAN_ROOT, reason: "unreadable", what: "readdir" },
+  }]);
+});
+
+test("a readable empty candidate root stays distinct from an unreadable root", () => {
+  const events: string[] = [];
+  const summary = sweepReclaimableArtifacts(config, (step) => { events.push(step); }, baseOpts({
+    filesystemDevice: () => 1,
+    listEntries: () => [],
+    removeDir: () => { assert.fail("an empty root has nothing to remove"); },
+  }));
+
+  assert.deepEqual(summary, { reclaimed: [], kept: [], bytesReclaimed: 0 });
+  assert.deepEqual(events, []);
+});
+
+test("the default candidate-root reader reports a non-directory without attempting a reclaim", () => {
+  // Exercise real readdirSync's ENOTDIR catch without a scratch tree or permission assumptions.
+  const scanRoot = fileURLToPath(import.meta.url);
+  const events: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const summary = sweepReclaimableArtifacts(config, (step, extra) => { events.push({ step, extra }); }, {
+    scanRoot: () => scanRoot,
+    watchedRoots: () => [scanRoot],
+    freeBytes: () => 1,
+    removeDir: () => { assert.fail("an unreadable root must never reach removal"); },
+  });
+
+  assert.deepEqual(summary, {
+    reclaimed: [], kept: [{ path: scanRoot, reason: "unreadable" }], bytesReclaimed: 0,
+  });
+  assert.deepEqual(events, [{
+    step: "disk_artifact.sweep.kept",
+    extra: { path: scanRoot, reason: "unreadable", what: "readdir" },
+  }]);
 });
 
 test("an unreadable checkout status refuses every artifact in that checkout", () => {

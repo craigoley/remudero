@@ -979,6 +979,42 @@ watchdog_unchanged_tick() {
 WATCHDOG_TICK_SNAPSHOT
 }
 
+# W1-T9800: the step must end even when deploy-run wrote its decision and then hung. These
+# proposed bounds exceed the measured longest legitimate tick (3,158s): 3,600s step, 75min unit.
+# The unit leaves 900s for surrounding work, the 30s kill grace and recording the named failure.
+render_watchdog_deploy_deadline() {
+  cat <<'WATCHDOG_DEPLOY_DEADLINE'
+WATCHDOG_DEPLOY_DEADLINE_S=3600
+watchdog_deploy_run() (
+  local observer="" root="${BASHPID:-$$}"
+  local tmo=()
+  if command -v timeout >/dev/null 2>&1; then
+    tmo=(timeout -k 30 "$WATCHDOG_DEPLOY_DEADLINE_S")
+    # Snapshot BEFORE timeout signals the process group, so a normally TERM-responsive child is
+    # still visible. Only this owned observer/sleeper is stopped when the command returns early.
+    (
+      local sleeper=""
+      trap '[ -z "$sleeper" ] || { kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; }; exit 0' TERM
+      sleep "$((WATCHDOG_DEPLOY_DEADLINE_S - 1))" & sleeper=$!
+      wait "$sleeper" || exit 0
+      echo "rmd-relaunch: deploy-run process tree before deadline: PID PPID STAT COMM" >&2
+      ps -eo pid=,ppid=,stat=,comm= | awk -v root="$root" '
+        function tree(p, q) {
+          if (seen[p]++) return
+          if (p in line) print line[p]
+          for (q in parent) if (parent[q] == p) tree(q)
+        }
+        { line[$1] = $0; parent[$1] = $2 }
+        END { tree(root) }
+      ' >&2 || true
+    ) & observer=$!
+  fi
+  trap '[ -z "$observer" ] || { kill "$observer" 2>/dev/null || true; wait "$observer" 2>/dev/null || true; }' EXIT
+  ${tmo[@]+"${tmo[@]}"} "$@"
+)
+WATCHDOG_DEPLOY_DEADLINE
+}
+
 # Core only: recreate an ABSENT remudero-serve/cloudflared (deploy/edge-heal.sh). On EXIT, so every
 # clean tick path reaches it and serve-container.sh can read the App env off a just-revived daemon.
 render_edge_heal() {
@@ -994,6 +1030,17 @@ edge_heal_on_exit() {
 }
 trap edge_heal_on_exit EXIT
 EDGE_HEAL
+}
+
+# Serve has no daemon watchdog of its own. Give its existing guarded controller one
+# owner: the core watchdog, including legacy core installs. Satellites must not race
+# the same sample/learned ceiling. This runs inside the normal non-boot tuning guard.
+render_serve_memory_tuning() {
+  case "${INSTANCE_NAME:-core}" in core) : ;; *) return 0 ;; esac
+  cat <<'SERVE_MEMORY_TUNING'
+    ${MHT_TMO[@]+"${MHT_TMO[@]}"} bash "$CHECKOUT/deploy/memory-high-tuner.sh" \
+      --container 'remudero-serve' --state-dir "$STATE_DIR" || true
+SERVE_MEMORY_TUNING
 }
 
 # 2026-10-11 -- THE WATCHDOG'S OWN ALARMS REACH THE ESCALATION SPOOL. The crash-loop marker had no
@@ -1287,6 +1334,8 @@ $(render_progress_watchdog_ladder)
 
 $(render_watchdog_tick_snapshot)
 
+$(render_watchdog_deploy_deadline)
+
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
   echo "rmd-relaunch: state/STOP present -- refusing to start. rm it to resume."
@@ -1332,6 +1381,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     MHT_TMO=(); command -v timeout >/dev/null 2>&1 && MHT_TMO=(timeout 60)
     \${MHT_TMO[@]+"\${MHT_TMO[@]}"} bash "\$CHECKOUT/deploy/memory-high-tuner.sh" \\
       --container '${CONTAINER_NAME}' --state-dir "\$STATE_DIR" || true
+$(render_serve_memory_tuning)
   fi
   # W1-T9409 -- A RECYCLE PAUSE WHOSE WRITER DIED BEFORE IT STOPPED THE CONTAINER IS RELEASED. On
   # 2026-10-14 the recycle this tick ran died in its wait (rc=2) and its PAUSE held core dispatch for
@@ -1373,7 +1423,7 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
     if watchdog_deploy_out="\$(cd "\$DAEMON_CODE" && \\
       RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
+      watchdog_deploy_run "\$DAEMON_CODE/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR")"; then
       printf '%s\\n' "\$watchdog_deploy_out"
       host_alert_clear deploy-run-problem
       # Exit zero also means deferred: cache only the supervisor's confirmed up-to-date result.
@@ -1383,9 +1433,18 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
         ;;
       esac
     else
+      watchdog_deploy_rc=\$?
       printf '%s\\n' "\$watchdog_deploy_out"
-      echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
-      host_alert_raise deploy-run-problem "rmd deploy-run --image-drift-only exited non-zero: \$(host_alert_last_line "\$watchdog_deploy_out")"
+      if [ "\$watchdog_deploy_rc" -eq 124 ] || [ "\$watchdog_deploy_rc" -eq 137 ]; then
+        watchdog_deploy_problem="deploy-run -- no exit after \${WATCHDOG_DEPLOY_DEADLINE_S}s; killed"
+        echo "rmd-relaunch: \$watchdog_deploy_problem" >&2
+        printf '%s watchdog-step-timeout step=deploy-run deadline_s=%s\\n' \
+          "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$WATCHDOG_DEPLOY_DEADLINE_S" >> "\$REVIVAL_LOG" 2>/dev/null || true
+        host_alert_raise deploy-run-problem "\$watchdog_deploy_problem"
+      else
+        echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
+        host_alert_raise deploy-run-problem "rmd deploy-run --image-drift-only exited non-zero: \$(host_alert_last_line "\$watchdog_deploy_out")"
+      fi
     fi
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
@@ -1566,6 +1625,9 @@ After=docker.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=75min
+KillMode=control-group
+SendSIGKILL=yes
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
 ExecStart=${LAUNCHER}

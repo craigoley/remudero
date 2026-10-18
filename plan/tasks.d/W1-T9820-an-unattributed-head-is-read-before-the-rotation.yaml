@@ -1,0 +1,75 @@
+- id: W1-T9820
+  title: "AN UNATTRIBUTED PR'S HEAD IS READ BEFORE THE ROTATION — the light pass reads at most 3 uncached PR file lists per pass, in GitHub's newest-first order, so on 2026-10-16 plan filings #12299 and #12301 stayed unreadable from 12:53Z, queued in the semantic review lane behind four reviews waiting for memory, and were admitted at 13:35Z, 38 min after turning green"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the ORDER the per-pass file-read budget is spent in; no bound changes
+  band_meaning: span
+  origin: "operator session 2026-10-16: agent Q1, the review-bound PR queue at 14:08Z, read-only on the host"
+  plan_refs: [W1-T2864, W1-T2439, W1-T526, W1-T9780, W1-T5931]
+  files: [src/lib/open-prs-rest.ts, src/run-task.ts, test/an-unattributed-head-is-read-before-the-rotation.test.ts, test/plan-filing-admission-bound.test.ts]
+  status: merged
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16 on the core ledger union, 10-15T14:12Z to 10-16T14:12Z: 11 rotated archives and the live
+    ledger.ndjson, each opened (12 of 12 forms read), rows deduplicated and rotation carry-overs dropped.
+    - 116 reviews ended `review.reviewer.skipped` reason plan-only. None of them wrote a memory_budget row, so a
+      plan-only review is never charged to memory admission. Each one runs p50 0.9 min.
+    - When a plan filing is admitted, its `sweep.plan_filing_classified` source decides its lane. With source
+      github-files (n=68) it takes the plan-filing lane: green-to-admitted p50 0.2 min, p90 1.9 min. With source
+      unreadable (n=20) it takes the spawning lane under the semantic bound: p50 38.4 min, p90 89.1 min,
+      max 105.3 min. In all 20 cases that head was never read complete in any daemon process before admission.
+    - Of 309 heads classified, 132 were first classified unreadable. 90 were still unreadable at the end of the
+      window, and the 42 that resolved took p50 21.4 min. 13 daemon processes ran in the window, and each starts
+      with an empty cache.
+    - THE MECHANISM, READ at origin/main 9bc44f320: openPrViewSteps (src/run-task.ts) passes every PR without an
+      emitter receipt to hydratePlanFilingFilesSteps (src/lib/open-prs-rest.ts), with
+      missCap = DEFAULT_SWEEP_POLICY.planFilingAdmissionBound (3). The hydrator spends those misses in GitHub's
+      newest-first list order, rotated from a cursor that resets whenever the head it names gets cached. At the
+      12:53:20Z light pass, nine heads were uncached. #12305, #12304 and #12303 were read. #12302, #12301, #12299,
+      #12296, #12294 and #12043 got per-pass-cap. The next light pass ran at 13:34:58Z (W1-T9780's gap). It read
+      #12310 and #12313 (github-files, admitted 13 s later), while #12299 and #12301 were admitted in the spawning
+      lane at 13:35:15Z.
+    - In the 12:56Z to 13:35Z window, that spawning lane read `semantic post-review admission bound 0, in-flight 4`.
+      The four reviews holding it were waiting in memory admission (code reviews' memory waits: n=78, p50 5.4 min,
+      p90 19.4 min, max 60.9 min).
+    - THE SIGNAL, MEASURED over the same window's 269 review-eligible heads. A head naming no task, by trailer or
+      run-<id> branch, was a plan filing in 92 of 103 cases. 92 of the 93 plan-only heads named no task; the one
+      exception was a run-unfiled feedback filing. Of the 19 PRs admitted while unreadable, 18 name no task. Head-ref
+      shapes (plan-file-*, *-garden-*, *-landing, run-APPROVE-*) cover only 14, because codex/* and file-* heads
+      also file plans.
+    OVERLAP CHECKED: plan/ on origin/main and the 9 open PR heads grepped for nominat, per-pass-cap and
+    hydratePlanFilingFiles; no head exceeds main's count (199, the positive control). W1-T2864 built the bounded
+    reader and allowed metadata to order reads ("candidate metadata ... may reduce which PRs are structurally
+    checked, but it must never be sufficient to grant the fast lane"). W1-T9780 (#12309, merged 14:27Z) closes the
+    light-pass gaps; it does not change which heads a pass reads.
+  design: |
+    Operator rulings: no new fixed threshold, and the per-pass read bound stays as it is.
+    1. PlanFilingFileCandidate gains `nominated`. openPrViewSteps sets it when resolveOpenPrTaskId(pr, false) is
+       undefined, so the PR names no task by trailer or run branch.
+    2. hydratePlanFilingFilesSteps spends the pass's misses on nominated uncached heads first, then on the
+       rotation as today. A nominated head buys ONE priority read per head, recorded in the cache's bounded
+       `nominatedReads` set. A head whose read fails rejoins the rotation, so it cannot starve other heads.
+    3. Classification is unchanged. Only a complete, plan-scoped, non-enforcement file list grants the
+       plan-filing lane; a nomination never does. Total reads are unchanged too, because each head is read once
+       either way. Only the order moves.
+    The hydrator tests go in a new file that imports only src/lib/open-prs-rest.ts. The board-build test joins
+    test/plan-filing-admission-bound.test.ts, which already imports src/run-task.ts, so the-affected-suite-reach
+    ratchet's importer count does not grow. `test(` titles are verbatim as in the proofs below.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/an-unattributed-head-is-read-before-the-rotation.test.ts"
+    - claim: "a nominated head is read in its first pass, ahead of older uncached heads, and the per-pass bound is unchanged"
+      proof: "grep: W1-T9820: a nominated head is read in its first pass, ahead of older uncached heads in test/an-unattributed-head-is-read-before-the-rotation.test.ts"
+    - claim: "a nominated head's priority is one read, so an unreadable one cannot starve the rotation"
+      proof: "grep: W1-T9820: a nominated head's priority is one read in test/an-unattributed-head-is-read-before-the-rotation.test.ts"
+    - claim: "an unattributed filing beyond the per-pass bound reaches the plan-filing lane in its first board build"
+      proof: "grep: W1-T9820: an unattributed filing beyond the per-pass bound reaches the plan-filing lane in test/plan-filing-admission-bound.test.ts"
+  falsifier: |
+    At origin/main, the hydrator reads the three newest uncached heads, so the nominated oldest head comes back
+    per-pass-cap, and all three W1-T9820 tests fail
+    (measured: # fail 3 at base, # fail 0 with the change).

@@ -985,6 +985,18 @@ sweep:
     mode:
       value: "auto"
       origin: "proposal"
+  # W1-T9097 — ADR 0007 decision C ("Parallelism adapts"): the build lane count follows the memory governor
+  # (src/lib/lane-governor.ts `laneTarget`), not the fixed dispatchLanes above. mode accepts shadow or enforce, and an
+  # absent block reads as shadow. "shadow" (shipped) ledgers `dispatch.lane_target` {target, fixed, binding,
+  # projection_mib, onset_mib} once per reading and changes nothing. "enforce" lets the target cap new admissions (a
+  # tick's dispatch set and each lane refill); a running lane is never stopped by a lower target. Switching to enforce
+  # is an operator ruling made by editing this row. Until dispatchLanes is retired (design step 4, a later change once
+  # enforce has run) it still sizes the pool, so enforce can only lower it. Read by src/lib/policy.ts
+  # (loadLaneGovernorMode), never by validatePolicy.
+  laneGovernor:
+    mode:
+      value: "shadow"
+      origin: "proposal"
 
 drain:
   max:

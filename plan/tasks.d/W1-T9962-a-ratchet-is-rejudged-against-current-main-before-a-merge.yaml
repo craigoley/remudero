@@ -1,0 +1,167 @@
+- id: W1-T9962
+  title: "A RATCHET IS RE-JUDGED AGAINST CURRENT MAIN BEFORE THE SWEEP ARMS OR MERGES — each PR's ceiling gates ran on its own stale base, so on 2026-10-16 #12428, #12388 (which lowered the run-task.ts row on a stale base) and #12437 each passed comment-load alone and together took src/run-task.ts to 18,253 comment lines over a recorded 18,250; main was red about 22:11-23:11Z at 77f68d26a until main-repair's #12454"
+  repo: remudero
+  depends_on: [W1-T9536, W1-T7735]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — whether a static ceiling count on main plus the PR holds the arm or merge; it decides merges unattended
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-16: main red on comment-load-signal (ratchet collision of #12428, #12388 and #12437), repaired by main-repair #12454; root-caused while filing"
+  plan_refs: [W1-T9536, W1-T7214, W1-T7735, W1-T5696, W1-T4004, W1-T5615, W1-T5748, W1-T2855, W1-T5921, W1-T5522, W1-T9665, W1-T5658, W1-T5617, W1-T3694, W1-T6022, W1-T9595, W1-T5737, W1-T100, W1-T9748]
+  files:
+    - src/lib/merged-ratchet-verdict.ts
+    - scripts/lib/affected-reach.mjs
+    - test/the-affected-suite-reach-ratchet.test.ts
+    - src/lib/arm-auto-merge.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - src/lib/ledger.ts
+    - test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-16. Sources: git on origin/main caafe8c04, PR heads fetched as refs/pull/N/head, and the core
+    ledger archives ledger.2026-10-16T19-27-09-852Z, T21-23-19-707Z and T23-33-42-155Z (read only, zgrep on the host).
+    Comment lines in src/run-task.ts, against the scripts/comment-load-baseline.json row, from countCommentLines:
+    - #12428 (W1-T9092), head 3be341a75 on base 0c5b35d6d (20:07Z): base 18250, head 18251, row 18251. Green on its base.
+      `automerge.armed` (outcome armed) at 21:16:51Z; GitHub's native auto-merge merged it as 32a76279e at 21:19:02Z,
+      16 behind. main at d50367256 (21:03Z, #12402, also in src/run-task.ts) already read 18251, so main became 18252
+      against a row of 18251. Main was over its ceiling from this merge on.
+    - #12388 (W1-T5378), head dedf16472 on base 2d27304fc (20:45Z): a worker commit trimmed comments and the ratchet
+      rewrote the shrunk row DOWN to 18250, then "Merge branch 'main'" carried main's lines back. Head 18250, row 18250.
+      Green on its base. Armed 21:15:43Z, merged by GitHub as b95491eac at 21:26:27Z, 11 behind. The lowered row 18250
+      was derived on a base that lacked d50367256 and #12428; main became 18252 against 18250.
+    - #12437 (unfiled), head 1de331f17 on base ad43c7f4c (20:11Z): base 18250, head 18251, row 18251. Armed 21:35:51Z,
+      merged as 6fb8ee06f at 21:35:49Z (GitHub merged it as the arm landed), 22 behind. Main became 18253 against 18250.
+    - Main's push runs before 77f68d26a were cancelled while pending, so the first red verdict came at 22:11Z on
+      77f68d26a. main-repair-ratchet-258cecf480e3 (#12454, a2a192383, 22:45Z) recorded 18253.
+    - The ledger has no `sweep.refresh.decided`, `branch.update_requested` or `automerge.direct_merge_*` row for any of
+      the three PRs in that window. Each one's last rows are `sweep.disposed` then `automerge.armed`.
+    THROWAWAY REPLAY (scratchpad script, not committed): `git merge-tree --write-tree <main> <head>`, then census-precheck's
+    pure `evaluateCensusPrecheck` with readHead from the merged tree and readBase from that main tip. It flags every
+    merge, in 0.4 to 3.2 s each:
+    - #12428 onto 602813f32 (main at its arm): "src/run-task.ts has 18252 comment lines > ceiling 18251".
+    - #12388 onto 602813f32: "18251 comment lines > ceiling 18250". This is the stale lowering: main's row was still 18251.
+    - #12437 onto d7c598b2c (main at its arm): "18253 comment lines > ceiling 18250".
+    - Control: #12437 onto its own base ad43c7f4c reads clean, as its CI did.
+    WHY THE EXISTING GUARDS MISSED IT (read on origin/main caafe8c04, symbols not lines):
+    - `attemptArmSteps` (src/lib/arm-auto-merge.ts) calls `deps.armAuto` (`gh pr merge --auto`) for any non-plan PR,
+      with no base check. W1-T5615's own comment says GitHub merges an armed PR the moment its checks go green, behind
+      or not. All three merged that way, so no rmd code ran between the arm and the merge.
+    - `directMergePreflightSteps` (W1-T2855, W1-T9536's overlap check) guards only the REST fallback, "Pull request is in
+      clean status" or quota. It never ran for these PRs. And its signal is file overlap, not the count.
+    - W1-T6022/W1-T7214's ready-overlap refresh (`readyRefreshCause`, `runLightPassReadyRefresh`) takes only PRs within
+      `reviewWaitingBranchRefreshThreshold` (10) behind. These were 11, 16 and 22 behind.
+    - The W1-T528 distance rung (`openPrsBehindMain`, `distanceRefreshCause`) refreshes one target per full sweep and
+      wrote no row for any of them.
+    - W1-T7735's `decideRefresh` sends a baseline-path overlap to an LLM judge. At 21:30:16Z it ruled `independent` on
+      #12451's overlap on scripts/comment-load-baseline.json. A ceiling is a count, which can be measured instead.
+    - Branch protection is not strict (doctrine/ci-and-merging/ratchet-collision.md), and the merge queue that would
+      test the combination stays off until a canary proves it (operator ruling 2026-10-09). This task does not
+      propose turning it on. W1-T5522's merge-group gates stay inert while it is off.
+    - census-precheck (scripts/census-precheck.mjs) already counts these ceilings statically. Its pure
+      `evaluateCensusPrecheck` covers comment-load, clock-signature, fixture-copy, house-layout and deps-interface. Its
+      `caused(head, headCeiling, base, baseCeiling)` is the right rule with main as the base: a crossing main already
+      carried is main's, and growth past it is the PR's. Nothing in src/ calls it: zero hits in arm-auto-merge.ts,
+      merge-probe.ts, refresh-value.ts and plan-pr-merge-safety.ts.
+    - `probeMerge` (src/lib/merge-probe.ts) already writes the merged tree with merge-tree for each (head, main) pair, but
+      only as an observation (`sweep.merge_probe`). `planMergeSafetyInClone` (W1-T5748) does the same for plan paths only.
+    EARLIER THE SAME DAY: plan PR #12389 (6841dac49, 18:17Z) merged 17 commits behind main, and the doctrine-citation
+    census went red on main. #12437's lint is the follow-up for that class. It is the same stale-base shape on a
+    different gate.
+  design: |
+    1. ONE PURE VERDICT. Add `judgeMergedRatchets` (src/lib/merged-ratchet-verdict.ts). It takes readers for the merged
+       tree and for main's tip, and the changed paths (the merge-tree tree diffed against main). It returns `clean`,
+       `crossing`, `stale-lowering` or `unread`. Each counted row carries the gate, path, merged count, main's
+       ceiling, the PR's ceiling and a `rederived` value. Counting reuses the gates' own counters, never a copy:
+       - `evaluateCensusPrecheck` from scripts/census-precheck.mjs, with readHead from the merged tree and readBase
+         from main. That gives comment-load, clock-signature, fixture-copy, house-layout and deps-interface.
+       - `evaluateRatchet` from learnings-budget-ratchet.mjs and claude-md-budget-ratchet.mjs, read off the trees.
+       - affected-reach: move `measureReach` and `reachVerdict` from test/the-affected-suite-reach-ratchet.test.ts
+         into scripts/lib/affected-reach.mjs, so the census test and the judge import one counter. Its importer count
+         is a board-wide total that two PRs can each raise by one.
+       Gates it does not count are named on the row, never read as clean:
+       - `run-derived`: coverage and mutation ceilings, which need an instrumented run. W1-T5696's baseline-path
+         refresh still covers them.
+       - `delta-only`: source-size. Its CI form, `source-size-signal`, reports each PR's own delta and exits 0 on
+         growth, so it has no shared ceiling to cross.
+    2. A CEILING LOWERED ON A STALE BASE IS RE-DERIVED ON MAIN. Take a row the PR lowered, where the merged count is
+       above the PR's value but at or under main's ceiling (#12388: PR row 18250, main row 18251, merged 18251). That
+       is `stale-lowering`, and `rederived` is the merged count: the value the ratchet's own shrink-record writes on
+       that tree. A tightening from main never reads as a raise. A merged count above main's own ceiling is
+       `crossing`, and `rederived` is the gate's printed record value. The verdict never edits a branch itself.
+    3. JUDGED AT THE ARM AND AT THE MERGE. Add the dep `readMergedRatchets` (optional, like `readOwnFiles`).
+       - In `attemptArmSteps`, call it before `deps.armAuto`, on both passes (W1-T5922 arms on the light pass).
+       - In `directMergePreflightSteps`, call it before each merge-as-is return: the W1-T3694 untouched arm and the
+         W1-T5748 plan-safe arm. W1-T9536's overlap check stays beside it.
+       A PR at behind_by 0 is skipped: its merged tree is its head, and its CI already counted it.
+       On `crossing` or `stale-lowering`, do not arm and do not merge. Take the existing update-branch effect under
+       W1-T5921's one update per (PR, head), and record `reason: ratchet_collision` with the rows on the evidence.
+       The refreshed head re-runs CI on current main. Its ratchet red then goes to the PR's own W1-T4004 ratified
+       baseline repair (`ratifiedBaselineRatchetRepairFor`), which writes `rederived`, or to the fix lane.
+    4. AN ARMED PR IS RE-JUDGED WHEN MAIN MOVES. GitHub merges an armed PR whenever its checks finish, so a verdict at
+       arm time goes stale as main advances.
+       - Each sweep pass, full or light, judges every auto-merge-armed, non-draft PR whose (head, main tip) pair has
+         no judge row yet. The memo is that pair, so a quiet main costs nothing.
+       - A `crossing` or `stale-lowering` verdict refreshes that PR through `updateBranch`, as a repair path:
+         `forced_by: ratchet-collision` on W1-T7735's `sweep.refresh.decided` row. Each refresh is once per (PR, head),
+         under W1-T5939's incident hold, oldest arm first.
+       - Never disarm. `--disable-auto` has itself fired a merge (synthwatch #340). The new head is enough: GitHub
+         cannot merge it until its required checks pass on current main.
+       - A `clean` verdict lets W1-T7735's ambiguous-overlap judge skip the LLM call for a baseline-path overlap,
+         because the count already answered it.
+    5. CHEAP AND BOUNDED BY THE WORK, NOT A NUMBER.
+       - One `git merge-tree --write-tree --no-messages <main> <head>` runs in the managed clone, after fetching main
+         and refs/pull/N/head as `probeOpenPrMerges` does. Use the fetched FETCH_HEAD sha, never a local branch.
+       - Reuse `probeMerge`'s tree when that pair was probed this pass.
+       - Read blobs with `git show <tree>:<path>`, off the loop through `execFileLoopBounded`. There is no worktree,
+         no npm and no CI run.
+       - Only measured paths that the PR or main changed since the merge base are counted, plus every baseline the
+         merge touched.
+       - No count cap and no new constant: the armed set is the bound, and each pair is judged once.
+       - A merge-tree conflict is left to GitHub's mergeability (a dirty PR is never armed). A failed read or a
+         counter throw is `unread`: the arm or merge proceeds as today, with the reason on the row. That is a third
+         value the outcome join can score, never a silent clean.
+    6. SELF-TUNING ROWS.
+       - `sweep.ratchet_judge.decided` records: PR, head, main_sha, verdict, the counted gates, the uncounted gates
+         and their class, the rows (capped list plus count), the remedy and elapsed ms.
+       - `sweep.ratchet_judge.outcome` joins a later main red on a ceiling gate (the `main.health.observed` and
+         main-repair-ratchet rows) to the last `clean` verdict of the merge that reddened it. That catches a miss, e.g.
+         two PRs that main had not joined when each was judged, so the hit rate is observed rather than assumed.
+       - Add both steps to the rotation-retained list in src/lib/ledger.ts.
+    SHARED SURFACE ONLY: W1-T100 (blocked_ci routing to the ci-log fix) and W1-T9748 (a recon tracing declared files to
+    the staging refusal) also name src/lib/sweep.ts and src/run-task.ts. Neither judges a ceiling or holds an arm or
+    merge. Here sweep.ts gains only the armed re-judge selection, and run-task.ts only the merge-tree I/O wiring.
+    COMPOSITION. W1-T9536's overlap refresh, W1-T5748's plan load, W1-T7214's ready-light pass, W1-T7735's value test,
+    W1-T4351's base-red slot and the #10390 main-health rung are unchanged. This task adds a measured count before the
+    arm or merge, and a re-judge while armed. A crossing that slips through the window between a main advance and the
+    next pass is still recorded by main-repair's ratchet lane, and the outcome row counts it.
+    TESTS. Build the incident with gitRepo() and a local identity, never raw `git init` (fixture-copy census; the CI
+    runner has no git identity):
+    - main starts at a baseline row of N with N comment lines;
+    - a main commit adds one line;
+    - PR A adds one line on the old base;
+    - PR B trims, records N-1, then merges an older main;
+    - PR C adds one line.
+  acceptance:
+    - claim: "replaying the 2026-10-16 incident, the judge refuses #12428 and #12437 as crossing and #12388 as a stale lowering against the main each would have merged onto, and reads each clean on its own base"
+      proof: 'grep: test("W1-T9962: the 2026-10-16 replay refuses each of the three merges against the main it would have landed on" in test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts'
+    - claim: "a PR green on its own base whose merge onto current main crosses a ceiling is refreshed with reason ratchet_collision, not armed and not direct-merged"
+      proof: 'grep: test("W1-T9962: a PR that crosses a ceiling only on current main is refreshed, not armed or merged" in test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts'
+    - claim: "a ceiling a PR lowered on a stale base is re-derived as the merged count, never read as a raise"
+      proof: 'grep: test("W1-T9962: a ceiling lowered on a stale base is re-derived against current main" in test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts'
+    - claim: "an armed PR is judged once per main tip and refreshed when a main advance takes it over a ceiling, never disarmed"
+      proof: 'grep: test("W1-T9962: an armed PR is re-judged once per main tip and refreshed when main moved it over a ceiling" in test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts'
+    - claim: "a PR under every ceiling on current main arms as today; an unreadable merge records unread; a run-derived gate is named as uncounted"
+      proof: 'grep: test("W1-T9962: a clean merge arms as today, an unreadable merge records unread, and a run-derived gate is named" in test/a-ceiling-is-rejudged-against-current-main-before-a-merge.test.ts'
+    - claim: "the arm path consults the merged-tree ratchet verdict"
+      proof: "grep: readMergedRatchets in src/lib/arm-auto-merge.ts"
+    - claim: "the real arm deps call the new pure verdict, so the module has a production caller"
+      proof: "grep: judgeMergedRatchets( in src/lib/arm-auto-merge.ts"
+  falsifier: |
+    Drop the `readMergedRatchets` call from `attemptArmSteps`. Then the replay's #12428 fixture, which is green on its
+    base and crosses on main, is armed, and the refresh test fails. Drop the stale-lowering arm. Then #12388's fixture
+    reads clean, because its merged count sits under main's row, and the re-derivation test fails.

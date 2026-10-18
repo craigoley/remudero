@@ -49,7 +49,7 @@ export const createPrePushSandboxRunner = (cwd) => p.createPrePushSandboxRunner(
   probe: () => (${mode === "unavailable" ? "{ mode: 'unsandboxed', reason: 'fixture: user namespaces unavailable' }" : `{ mode: 'bwrap', binary: ${JSON.stringify(runner)} }`})
 });\n`);
   put(join(harness, "scripts/census-precheck.mjs"), `export { main, runCensusSuitesViaChild } from ${url("scripts/census-precheck.mjs")};
-export const listAdmittedCensusMembers = () => [{ testFile: 'test/fixture-census.test.ts', script: 'census:fixture', walks: ['src/'] }];\n`);
+export const listAdmittedCensusMembers = () => [{ testFile: 'test/fixture-census.test.ts', script: 'census:fixture', walks: ['src/']${failure === "runtime-calibration" ? ", structural: true, readerRuntimePolicy: { floorMs: 1000, multiple: 4 }" : ""} }];\n`);
   for (const name of ["ci-control-plane-precheck", "lint-plan-precheck"]) {
     put(join(harness, `scripts/${name}.mjs`), `export * from ${url(`scripts/${name}.mjs`)};\n`);
   }
@@ -113,6 +113,15 @@ async function runPush(f: ReturnType<typeof fixture>, asyncPush = false) {
 }
 
 describe("test/the-pre-push-gate-runs-the-branch-s-own-checks-in-the-proof-sandbox.test.ts", () => {
+  test("managed pre-push preserves advisory refusal when source-reader calibration is unavailable", async () => {
+    const f = fixture("available", "runtime-calibration");
+    const result = await runPush(f);
+    assert.equal(result.error, undefined, result.stderr);
+    assert.match(result.stderr, /source-reader runtime calibration is unavailable in the managed-worktree proof sandbox/);
+    assert.match(result.stderr, /could not measure.*not blocking on an unreadable check/);
+    assert(!f.runs().some(row => row.argv.includes("test/fixture-census.test.ts")), "no uncalibrated reader may run");
+    assert.doesNotMatch(result.stderr, /census-precheck: OK/);
+  });
   test("the host gate runs all three branch checks through the runner with readonly binds and a credential-free throwaway HOME", async () => {
     const f = fixture();
     const result = await runPush(f);

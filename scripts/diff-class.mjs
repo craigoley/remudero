@@ -33,11 +33,12 @@ import { readFileSync, readdirSync } from "node:fs";
 // arm below a real, driven fixture (test/a-census-suite-is-unreachable-from-the-symbols-a-diff-
 // changes.test.ts) instead of an untested comment.
 import fs from "node:fs";
-import { join, normalize, relative, sep } from "node:path";
+import { dirname, join, normalize, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 // `plan-scope.ts` is the canonical predicate's dependency-free leaf. Node 22.22.3 can strip its
 // type annotations without `tsx`, so coverage-ratchet can classify before installing dependencies.
 import { isInPlanScope, outOfPlanScopeFiles } from "../src/lib/plan-scope.ts";
+import { isRuleSuitePath } from "../src/lib/rule-suites.ts";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 
@@ -281,6 +282,15 @@ export function readsChangedPlanOrDocs(content, changedFiles) {
   });
 }
 
+function* suiteFiles(testDir, fixtures = join(testDir, "fixtures")) {
+  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
+    const abs = join(testDir, entry.name);
+    if (abs === fixtures) continue;
+    if (entry.isDirectory()) yield* suiteFiles(abs, fixtures);
+    else if (entry.isFile() && entry.name.endsWith(".test.ts")) yield abs;
+  }
+}
+
 /**
  * Enumerate readers of changed plan/docs paths, plus the census floor. Without a changed list,
  * preserve the broad set for older callers and for the CLI's previous-count comparison.
@@ -289,9 +299,7 @@ export function readsChangedPlanOrDocs(content, changedFiles) {
 export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
   const testDir = join(root, "test");
   const out = new Set(changedFiles.length > 0 ? censusSuiteFiles(changedFiles, root) : []);
-  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
-    const abs = join(testDir, entry.name);
+  for (const abs of suiteFiles(testDir)) {
     const content = readFileSync(abs, "utf8");
     if ((changedFiles.length > 0 ? readsChangedPlanOrDocs(content, changedFiles) : namesPlanOrDocsPath(content)) ||
         readsChangedProse(content, changedFiles)) {
@@ -309,9 +317,7 @@ export function planReadingSuiteFiles(root = REPO_ROOT, changedFiles = []) {
 export function planOnlySuiteFiles(root = REPO_ROOT, changedFiles = []) {
   const testDir = join(root, "test");
   const out = [];
-  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
-    const abs = join(testDir, entry.name);
+  for (const abs of suiteFiles(testDir)) {
     const content = readFileSync(abs, "utf8");
     if (readsChangedShard(content, changedFiles) || isPlanIntegritySuite(content)) {
       out.push(relative(root, abs).split(sep).join("/"));
@@ -532,7 +538,7 @@ export function importedWalkerWalksArea(content, testDir, root, areas) {
 /**
  * The suites a diff joins that name none of its symbols — enumerated from the tree at run time,
  * never a registry. Listed when relevant to the changed areas: enumerates a population and names
- * a touched area, or reads a specific changed file as text. The first arm is deliberately loose
+ * a touched area, declares itself a rule suite (source diffs only), or reads a specific changed file as text. The first arm is deliberately loose
  * (over-listing costs one suite; under-listing is the silent miss this verb exists to end); the
  * second is exact. An empty changed-file set yields an empty list, unlike `classify()`'s SOURCE.
  */
@@ -542,15 +548,15 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
   if (files.length === 0) return [];
   const areas = changedAreas(files);
   const changed = new Set(files);
+  const rulesJoin = classify(files).class === CLASSES.SOURCE;
   const testDir = join(root, "test");
   const out = [];
-  for (const entry of readdirSync(testDir, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".test.ts")) continue;
-    const rel = relative(root, join(testDir, entry.name)).split(sep).join("/");
+  for (const abs of suiteFiles(testDir)) {
+    const rel = relative(root, abs).split(sep).join("/");
     if (changed.has(rel)) continue; // a suite the diff itself edits is already in hand
     let content;
     try {
-      content = fs.readFileSync(join(testDir, entry.name), "utf8");
+      content = fs.readFileSync(abs, "utf8");
     } catch (err) {
       // W1-T3602: `readdirSync` above is a SNAPSHOT; a concurrently-run suite (e.g.
       // test/a-ci-skip-guard-can-fire-unconditionally.test.ts's "UNSTAGED suite" probe) can write
@@ -566,12 +572,13 @@ export function censusSuiteFiles(changedFiles, root = REPO_ROOT) {
       if ((err && /** @type {{code?: string}} */ (err).code) === "ENOENT") continue;
       throw err;
     }
-    const bare = withoutRelativePathLiterals(content);
+    // A suite walking its own roots names them as bare segments as often as an imported walker does:
+    // `["plan", "docs"].map((d) => join(REPO_ROOT, d))` went unselected for #12389 and turned main red.
     const walksAnArea =
-      (enumeratesPopulation(content) && [...areas].some((a) => bare.includes(a))) ||
-      importedWalkerWalksArea(content, testDir, root, areas);
+      (enumeratesPopulation(content) && namesAreaLoosely(content, areas)) ||
+      importedWalkerWalksArea(content, dirname(abs), root, areas);
     const readsAChangedFile = [...sourceTextPathsRead(content)].some((p) => changed.has(p));
-    if (walksAnArea || readsAChangedFile) out.push(rel);
+    if ((rulesJoin && isRuleSuitePath(rel, content)) || walksAnArea || readsAChangedFile) out.push(rel);
   }
   out.sort();
   return out;

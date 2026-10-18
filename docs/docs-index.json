@@ -626,6 +626,12 @@
       "grepHint": "Staged private ownership / peer capacity protocol"
     },
     {
+      "path": "docs/forensics/tick-read-worker.md",
+      "title": "Forensics: src/lib/tick-read-worker.ts",
+      "summary": "Every measured fact, incident and design argument the longest comment blocks in `src/lib/tick-read-worker.ts`",
+      "grepHint": "Forensics: src/lib/tick-read-worker.ts"
+    },
+    {
       "path": "docs/forensics/triage.md",
       "title": "Forensics: src/lib/triage.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/triage.ts` used to",
@@ -826,7 +832,7 @@
     {
       "path": "docs/semgrep-native-ce.md",
       "title": "Native hash-locked Semgrep Community Edition",
-      "summary": "Scan avoids Docker Hub container initialization with an isolated, fully hash-locked native installation.",
+      "summary": "Scan uses an independently audited source closure, isolated native engine and bounded disposable MCP controls.",
       "grepHint": "Native hash-locked Semgrep Community Edition"
     },
     {

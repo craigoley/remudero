@@ -15,7 +15,7 @@
     - src/lib/tick-read-worker.ts
     - scripts/build-child-entries.mjs
     - test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

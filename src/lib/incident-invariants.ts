@@ -355,3 +355,10 @@ export function eventLoopLagLedgerLine(lag: EventLoopLag, nowMs: number): Ledger
     windowMs: lag.windowMs,
   };
 }
+
+/** W1-T10074: one row of serve's loop-stall profiler (loop-stall-profiler.ts) — its profile or its failure — on the
+ *  SAME run and task as the {@link eventLoopLagLedgerLine} row it explains, so one grep reads a stalled minute's lag
+ *  beside the frames that held it. `step` comes after the fields, so no field can rename the row. */
+export function loopStallLedgerLine(step: string, fields: Record<string, unknown> | undefined, nowMs: number): LedgerLine {
+  return { ...fields, run_id: `RUNTIME-${nowMs}`, task_id: "INCIDENT", step };
+}

@@ -1,0 +1,72 @@
+- id: W1-T10052
+  title: "THE QUIET-BOUND ROW NAMES THE DIGEST BYTES ITS FIRST PASS READ, NOT THE ARCHIVES' SIZE — worker.quiet_bound's history_rotation_bytes_unseen adds the stat size of every rotation the fresh process had not loaded (276,580,680 B on each of 37 first passes on 2026-10-17), while memo.load actually served those rotations from 389 durable digests totalling 15.4 MB, so the row overstates the read about 18 times and names no digest at all"
+  repo: remudero
+  depends_on: [W1-T9710]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern, the quiet-bound row reports the bytes its slice reader actually read; the read itself is unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 10 (rootio2 capture, 2026-10-17); follow-up of W1-T9710 (PR 12506)'
+  plan_refs: [W1-T9710, W1-T9527, W1-T9980, W1-T6263]
+  files:
+    - src/lib/ledger-union.ts
+    - src/lib/sweep.ts
+    - src/lib/quiet-worker-watchdog.ts
+    - test/the-quiet-bound-row-names-the-digest-bytes-it-read.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger 2026-10-17, every rotation plus live; `du -sb` of the digest store, ~15:40Z):
+    - 64 worker.quiet_bound rows from 36 worker pids; 37 first passes with history_rotation_bytes_unseen up to
+      276,580,680 and history_loop_read_bytes 8,860,422–29,835,847.
+    - Newest first pass 13:03:55.728Z: rotations 389, unseen 389, bytes_unseen 276,580,680, loop_read_bytes 9,801,349,
+      seeded_rotations 389; its next pass at 13:05:50.989Z: unseen 0, loop bytes 213,858.
+    - state/cache/rotation-digests/run-task%2Equiet-worker-bound holds 389 files, 15,382,120 B.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - quiet-worker-watchdog.ts `createQuietBoundHistory` sums `statSync` size for each rotation whose size:mtime key is
+      missing from the per-process `dir.seen` into history_rotation_bytes_unseen; `runQuietWorkerWatchdog` spreads it
+      into the QUIET_BASIS_LEDGER_STEP row.
+    - sweep.ts `createEscalationTriageHistoryReader` builds a fresh `createLedgerRotationMemo` per call, calls
+      `memo.load(fresh)` (which reads durable digests through `readDigest`), and discards the memo: its `retention()`
+      (digestHits, digestMisses …) is never read, and it has no byte counter.
+    - Consumers of history_rotation_bytes_unseen: the producer and three tests; nothing in scripts/ or the console.
+    INFERRED: a first pass reads about 15.4 MB of digests off the loop plus the live ledger on the loop, not 277 MB;
+    the field is a stat size, not a read.
+    WHY THIS IS NOT ANOTHER TASK: W1-T9980 (queued) puts lastPass() loop fields for the two triage holders on the
+    daemon.memory census; no shared file, and this task's load counts are what that census would also want.
+    W1-T9710/W1-T9527 (merged) built the reader and the field. Swept origin/main plan/tasks.d and the plan diffs of
+    every open PR head for history_rotation_bytes_unseen, quiet_bound, memo.retention and retention()
+    (2026-10-17 ~15:40Z).
+  design: |
+    1. ledger-union.ts `createLedgerRotationMemo`: with `durableDigest` set, `retention()` gains `digestBytes` (bytes
+       of digests loaded on a hit) and `archiveBytes` (bytes of rotations read from the archive on a miss).
+    2. sweep.ts `createEscalationTriageHistoryReader` keeps the last call's load counts and exposes
+       `lastLoad()`: { loadedRotations, digestHits, digestMisses, digestBytes, archiveBytes }, zeros when nothing was
+       fresh.
+    3. quiet-worker-watchdog.ts: the row gains history_digest_hits, history_digest_misses, history_digest_bytes and
+       history_archive_bytes_read. history_rotation_bytes_unseen and _reused stay for continuity with three days of
+       rows and the box plan, with their doc rewritten to "stat size of rotations this process had not loaded, not
+       bytes read".
+    4. No constant is added.
+    5. TESTS in test/the-quiet-bound-row-names-the-digest-bytes-it-read.test.ts, `test(` titles verbatim as in the
+       proofs: process A writes digests; a fresh createQuietBoundHistory reads them (hits N, digest bytes = the digest
+       files' sizes, archive bytes 0, while bytes_unseen = the archives' sizes); with the digest directory removed,
+       misses N and archive bytes = the archives' sizes.
+  acceptance:
+    - claim: "a fresh worker's first quiet-bound pass names the digest bytes it read, not the archives' size"
+      proof: 'grep: test("W1-T10052: a first quiet-bound pass names the digest bytes it read" in test/the-quiet-bound-row-names-the-digest-bytes-it-read.test.ts'
+    - claim: "a digest miss names the archive bytes it read"
+      proof: 'grep: test("W1-T10052: a digest miss names the archive bytes it read" in test/the-quiet-bound-row-names-the-digest-bytes-it-read.test.ts'
+    - claim: "the row field exists"
+      proof: 'grep: history_digest_bytes in src/lib/quiet-worker-watchdog.ts'
+  falsifier: |
+    At origin/main the quiet-bound row has no history_digest_bytes and the memo no byte counter, so the first test
+    fails; counting archive stat sizes as digest bytes fails its equality with the digest files' sizes. Deleting the
+    fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISION named here: keep the old field beside the new ones (default) or rename it. EFFECT, measured
+    after merge: first-pass worker.quiet_bound rows show history_digest_bytes near the digest store's size and
+    history_archive_bytes_read 0 in steady state.

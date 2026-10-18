@@ -1,0 +1,65 @@
+- id: W1-T9821
+  title: "A WORKER SPAWN NAMES ITS SITE WITHOUT PARSING SOURCE MAPS — worker-heaps.ts trackWorkerThreads formats Error.captureStackTrace into spawnSite(site.stack) on every worker spawn in the daemon and in serve, and under tsx's source maps a formatted stack parses and keeps the map of every module on it for the life of the isolate: the leak class W1-T9720 removed from the sync-spawn meter (main +17.0 MiB and 5 maps for 90 metered spawns, the fix +0.2 MiB and 0 maps)"
+  repo: remudero
+  depends_on: [W1-T9720]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, how a worker spawn's site is captured; the kind text and which threads are tracked are unchanged
+  band_meaning: blast-radius
+  origin: 'W1-T9720 builder report (PR 12326), follow-up 1; coordinator brief batch1016 item 5'
+  plan_refs: [W1-T9720, W1-T9647, W1-T9091, W1-T7092, W1-T5480]
+  files:
+    - src/lib/worker-heaps.ts
+    - src/lib/read-plane.ts
+    - src/lib/raw-call-sites.ts
+    - test/a-worker-spawn-names-its-site-without-source-maps.test.ts
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED offline by the W1-T9720 builder (PR 12326, commit 56a9b76dd on base ec0eb2ce2; logs-8864/9720-bench.log,
+    script 9720-bench/bench.mjs). Method: a process it started under tsx with --expose-gc --expose-internals loads
+    the daemon's graph, meters 90 real sync spawns, reads heapUsed after two forced GCs, and counts maps parsed by
+    wrapping Node's internal SourceMap class. 3 interleaved rounds per variant:
+    - main's read-plane callerFrame (formatted `.stack`): 5 maps parsed, heapUsed +17.0 MiB (99.3 -> 116.3 MiB).
+    - W1-T9720's rawCallSites (scoped Error.prepareStackTrace and stackTraceLimit, restored in finally): 0 maps,
+      +0.2 MiB.
+    - W1-T9647's census bound for the whole cache: 587 maps x 240,549 B = 134.7 MiB. The W1-T9091 builder measured
+      +134.5 MiB for all maps.
+    READ at origin/main (src/lib/worker-heaps.ts; symbols, not lines):
+    - trackWorkerThreads subscribes to the worker_threads diagnostics channel. On every spawn it runs
+      `Error.captureStackTrace(site)` and then `spawnSite(site.stack)`. Reading `.stack` formats it, and with source
+      maps on (tsx calls process.setSourceMapsEnabled(true), per W1-T9647) Node parses each frame's map and keeps it.
+    - The daemon (run-task.ts calls workerThreads() at boot), serve (serve.ts, serve-memory.ts) and the read-model
+      worker (read-model-worker.ts) all track spawns this way.
+    - daemon-memory-census.ts sourceMapCacheHolder's comment already names "worker-heaps.ts spawnSite" as one of the
+      two formatters that fill the cache.
+    INFERRED, not measured for this site: each worker spawn parses the maps of the modules on its spawn stack that are
+    not parsed yet, so this adds to the source-map cache in the same way. The size depends on which modules spawn
+    workers; the builder measures it with the same bench shape.
+  design: |
+    1. trackWorkerThreads captures the spawn stack as raw V8 call sites, never as a formatted `.stack` while maps are
+       on. Use the scoped capture W1-T9720 built in read-plane.ts (rawCallSites / siteText), extracted to one shared
+       helper, `rawCallSites` in src/lib/raw-call-sites.ts, that both modules import, not a second copy.
+    2. spawnSite keeps its output: `<module>:<function>`, with the same skipping of node:, this module and the spawn
+       helper, and the same bundle-header lookup (bundledModule reads raw bundle lines, which raw call sites keep). So
+       every `kind` on daemon.memory, serve-memory and worker-heaps rows reads as before.
+    3. Measure the saving offline with the 9720 bench shape: N real worker spawns under tsx with maps on, maps parsed
+       and heapUsed, main against head. Report it in the PR, OBSERVED with the method named.
+    4. No new constant.
+    Tests go in test/a-worker-spawn-names-its-site-without-source-maps.test.ts, titled verbatim as in the proofs. One
+    test runs a real child node with --enable-source-maps and --import tsx, spawning a Worker from a module that
+    ships a map. A formatted `.stack` in the same module is the positive control, so a zero is a measurement.
+  acceptance:
+    - claim: "tracking a worker spawn parses no source map, and a formatted stack in the same child does (positive control)"
+      proof: 'grep: test("W1-T9821: a tracked worker spawn parses no source map" in test/a-worker-spawn-names-its-site-without-source-maps.test.ts'
+    - claim: "the tracked kind still names the spawning module and function, including from a bundle frame"
+      proof: 'grep: test("W1-T9821: the spawn site still names its module and function" in test/a-worker-spawn-names-its-site-without-source-maps.test.ts'
+    - claim: "trackWorkerThreads captures its spawn stack through the shared rawCallSites helper in src/lib/raw-call-sites.ts"
+      proof: 'grep: rawCallSites( in src/lib/worker-heaps.ts'
+  falsifier: |
+    On origin/main, run the child: trackWorkerThreads formats `site.stack`, Node parses the spawning module's map,
+    and the first test fails on a non-zero count. The second test passes on main and at head. It guards against a
+    capture that loses the function name or the bundle module.

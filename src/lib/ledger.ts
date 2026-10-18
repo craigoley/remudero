@@ -799,6 +799,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  "sweep.review_requeued", // W1-T9970: sweep and review read this per-head image request after rotation.
   "review.skipped_stale_reviewer_code", // W1-T3691: preserve the daemon's freshness restart history across boots.
   // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
   PLAN_ONLY_REVIEW_MARKER_STEP,
@@ -902,6 +903,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
   // it on rotation would re-log the same stand-down every pass.
   "sweep.update_branch.skipped_queue",
+  // W1-T7735: the refresh value test reads its own decision rows back. Judge rulings are spent once
+  // per head, a repeated skip writes no second row, and a request is consumed once. Outcomes join
+  // decisions to derive the benefit weight. Each row dropped on rotation would re-spend a judge call
+  // or re-consume a request.
+  "sweep.refresh.decided",
+  "sweep.refresh.outcome",
+  "sweep.refresh.requested",
   // W1-T1235: `latestGhRateLimitRefusalsFromLedger` (run-task.ts) reads the newest row per bucket
   // for `rmd status`'s GITHUB BUCKETS section. Kept here, not in the render set, because GitHub's
   // resets outlast RENDER_STEP_RETENTION_WINDOW_MS and an operator needs the LAST refusal however

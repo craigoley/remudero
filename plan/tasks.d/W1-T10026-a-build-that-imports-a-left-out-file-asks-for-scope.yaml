@@ -1,0 +1,74 @@
+- id: W1-T10026
+  title: "A BUILD WHOSE COMMITTED FILES IMPORT A FILE THE HARNESS LEFT OUT NEVER OPENS AS A BARE PR — on 2026-10-17 W1-T9877's run auto-chose a design that 'adds a file outside the task's declared scope', the harness commit kept only declared paths (`undeclared: [src/lib/rule-suites.ts]`), and #12575 opened with all three declared callers importing a module its tree lacks: every CI shard red, a fix round whose NEEDS_SCOPE was refused path-not-changed, and needs-human #12577"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, what the implement lane does when its harness commit leaves out an undeclared path that a committed file imports. The scope fence, which paths are committed, the fix lane's scope amendment and the review are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 PR-queue triage, agent D40's core-ledger read of #12575 (W1-T9877)"
+  plan_refs: [W1-T401, W1-T504, W1-T5534, W1-T8008, W1-T4207, W1-T10025]
+  files:
+    - src/run-task.ts
+    - test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts
+  status: merged
+  priority: 1  # the PR it produces cannot go green by any in-scope repair, so it parks behind a person; the fix lane's NEEDS_SCOPE path refuses it because the fix worker never wrote the file
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 ~13:40Z on the core ledger (the 11:00Z and 12:49Z archives plus the live file on the Azure
+    host, read-only, niced, streamed to the Mac). Run W1-T9877-1792236504713:
+    - 11:37:57Z `decision.autochoose` chosen ": Allow a dependency-free shared module for the predicate and roster,
+      re-exported from ci-parity.ts. This adds a file outside the task's declared scope.", landed true.
+    - 11:46:14Z `implement.preopen_gate` unmeasured (bwrap could not start; W1-T10025), so no local check ran.
+    - 11:46:16Z `implement.harness_commit` sha e7a261d2b, `undeclared: ["src/lib/rule-suites.ts"]`.
+    - 11:53:05Z `pr.opened` #12575 at 4d0d5bbff. At that head src/lib/ci-parity.ts, src/lib/task-linter.ts and
+      scripts/diff-class.mjs import `./rule-suites.js` / `../src/lib/rule-suites.ts`; `git ls-tree` finds no such path.
+      CI: all eight ci-shards and all eight coverage-shards red; the acceptance-author-gate log the fix round received
+      ends ERR_MODULE_NOT_FOUND for src/lib/rule-suites.js.
+    - 12:37:15Z the fix round reported NEEDS_SCOPE src/lib/rule-suites.ts; 12:37:16Z `fix.scope_amendment` refused
+      `path-not-changed` (the fix worker had not written the file); 12:37:57Z needs-human #12577. No later round.
+    - Across 2026-10-16 and 10-17, this is the only build-lane harness commit that left out a src/ or scripts/ path
+      (rows with `undeclared` from actor run_child); every other `undeclared` row is a fix-lane merge.
+    READ at origin/main d83fece77 (symbols, not lines):
+    - src/run-task.ts `commitWorkerEdits` stages `declaredPaths` and returns the rest as `undeclared`; the harness-commit
+      helper logs them on `implement.harness_commit` and returns, and the run goes on to push and open the PR.
+    - The fix lane already has a scope route (`requestScopeAmendment`, src/lib/proof-amendment.ts, via run-task.ts
+      `amendScope`), admitted only for paths the worker changed. The implement lane has none: its left-out paths are
+      only logged.
+    WHY THIS IS NOT ANOTHER TASK: W1-T401/W1-T504 enforce declared files (kept). W1-T5534 is the FIX round's own
+    amendment. W1-T8008 keeps undeclared work in a restart CHECKPOINT. W1-T10025 (filed beside this) restores the
+    pre-open gate, which runs in the worktree where the left-out file still exists, so it would not see this. Swept
+    plan/tasks.d on origin/main for commitWorkerEdits, "undeclared", harness_commit and "outside the task's declared
+    scope" (positive control: the sweep finds W1-T8008's undeclared-checkpoint rationale), and the plan diffs of the
+    7 open PR heads at 13:44Z: none names this.
+  design: |
+    1. After the harness commit, when `undeclared` is non-empty, resolve each committed declared file's static
+       relative import specifiers (`.js` mapped to `.ts`, as the repo's resolver does) against the committed tree and
+       the left-out set. A left-out path that a committed file imports is a REQUIRED companion.
+    2. A run with no required companion behaves exactly as today (left-out paths logged and dropped).
+    3. A run with a required companion does not open the PR bare. It writes `implement.scope_needed` (task_id, paths,
+       importers, head_sha) and routes to the existing scope-amendment workflow for exactly those paths, which the
+       worker DID change, so the amendment's `changedPaths` admits them. If the amendment is refused, the run ends with
+       a named outcome carrying the refusal reason, never a PR whose tree cannot load its own imports.
+    4. No count or fixed bound is added. Which design the worker or autochoose picked is unchanged.
+    5. TESTS in test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts, `test(` titles verbatim as in the
+       proofs: a temp git worktree with a declared file importing an undeclared new file, driven through the harness
+       commit path with fakes for push, PR open and amendment; no network.
+  acceptance:
+    - claim: "a harness commit that leaves out a file its committed files import asks for scope instead of opening a bare PR"
+      proof: 'grep: test("W1-T10026: a left-out file a committed file imports asks for scope, not a bare PR" in test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts'
+    - claim: "a left-out file that nothing committed imports is still dropped as today"
+      proof: 'grep: test("W1-T10026: a left-out file nothing committed imports is still dropped" in test/a-build-that-imports-a-left-out-file-asks-for-scope.test.ts'
+    - claim: "the required companion is ledgered by name"
+      proof: "grep: implement\\.scope_needed in src/run-task.ts"
+  falsifier: |
+    The #12575 shape in miniature: declared a.ts imports ./b.js, b.ts is new and undeclared. At origin/main the fake PR
+    opener is called with a commit that holds a.ts and not b.ts, so the first test fails. With the fix the opener is
+    not called bare and the amendment fake receives [b.ts]. Treating every left-out path as required fails the second
+    test.
+  note: |
+    EFFECT, measured after merge from the core ledger: `pr.opened` rows whose run's `implement.harness_commit` listed an
+    `undeclared` path that the committed tree imports. Healthy shape: none; each such run has an
+    `implement.scope_needed` row instead.

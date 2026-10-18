@@ -38,6 +38,9 @@ import { functionBody, widenedGitSites, WIDENED_SITE_EXCEPTIONS } from "./every-
 
 const FILE = "src/run-task.ts";
 const SOURCE = fileURLToPath(new URL(`../${FILE}`, import.meta.url));
+/** W1-T9722: the tick-read producer's declarations moved here; this table still classes their sites. */
+const MOVED_FILE = "src/lib/tick-read-worker.ts";
+const MOVED_SOURCE = fileURLToPath(new URL(`../${MOVED_FILE}`, import.meta.url));
 
 type SiteClass = "CHECKOUT";
 
@@ -118,7 +121,7 @@ const sorted = (r: Record<string, number>): Record<string, number> =>
   Object.fromEntries(Object.entries(r).sort(([a], [b]) => a.localeCompare(b)));
 
 describe("W1-T6135: every widened git site left in run-task.ts is a classed CHECKOUT site", () => {
-  const text = readFileSync(SOURCE, "utf8");
+  const text = `${readFileSync(SOURCE, "utf8")}\n${readFileSync(MOVED_SOURCE, "utf8")}`;
   const actual = widenedByFunction(text);
 
   it("the census sees the file: a positive control on the widened pattern", () => {
@@ -140,8 +143,10 @@ describe("W1-T6135: every widened git site left in run-task.ts is a classed CHEC
   it("the file's WIDENED_SITE_EXCEPTIONS count is this table's sum and names this table, not a lump", () => {
     const sum = Object.values(RUN_TASK_WIDENED_SITES).reduce((a, s) => a + s.count, 0);
     const entry = WIDENED_SITE_EXCEPTIONS[FILE];
-    assert.ok(entry, `${FILE} has a widened exception`);
-    assert.equal(entry.count, sum);
+    const moved = WIDENED_SITE_EXCEPTIONS[MOVED_FILE];
+    assert.ok(entry && moved, `${FILE} and ${MOVED_FILE} have widened exceptions`);
+    assert.equal(entry.count + moved.count, sum);
+    assert.match(moved.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(entry.reason, /^CHECKOUT\b/);
     assert.match(entry.reason, /RUN_TASK_WIDENED_SITES/);
     assert.match(entry.reason, /run-task-s-widened-git-sites-are-classified-and-converted\.test\.ts/);

@@ -1,0 +1,140 @@
+- id: W1-T9967
+  title: "A LOWER TIER OVERTAKES ONLY AFTER THE HIGHER TIER'S OWN MEASURED WAIT — `costOfDelayContext` turns age into urgency with ONE global survivor median wait (10.09 h at the daemon's HEAD 2d27304fc), so any P2 older than about 10 h outranks a fresh P1; the censoring-aware median is 23.7 h, and today's P1 queue fixes ranked 125-277 of 769 eligible tasks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, the time unit that closes a tier gap. The 2^-tierGap weight, the log aging shape, the fan-out term (W1-T9968), the validity share, the stride and compareDispatch are unchanged
+  band_meaning: span
+  origin: "operator ruling 2026-10-17 ~01:00Z on the dispatch-order finding: Craig chose BOTH options, (1) \"a lower tier overtakes only after the higher tier's own measured wait\" and (2) \"downstream fan-out reorders within a tier, never across one\". This task is option (1); W1-T9968 is option (2). Standing rule: no hard fixed thresholds"
+  plan_refs: [W1-T9323, W1-T9925, W1-T9968, W1-T9325, W1-T8166, W1-T4064, W1-T7534]
+  files:
+    - src/lib/dispatch-value.ts
+    - test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts
+    - test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts
+  status: merged
+  priority: 1  # operator-2026-10-17: chose both dispatch-order options; P1 queue fixes ranked 125-277 of 769
+  attempts: 0
+  rationale: |
+    MEASURED by agent Q-DISPATCH, 2026-10-16 evening, running src/lib/dispatch-value.ts `costOfDelayContext`,
+    `compareDispatch` and `dispatchUrgency` in-process at the daemon's HEAD 2d27304fc against a core-ledger evidence
+    slice (session scratchpad: qdispatch-repro.ts, qdispatch-cod.txt, qdispatch-evidence.ndjson.gz).
+    - `dispatchUrgency(tierGap, waits) = 2^-tierGap * (1 + log2(1 + waits))`, and `waits = age / medianWaitMs`. The
+      measured global `medianWaitMs` was 10.09 h. Against a fresh P1 (urgency 1), a P2 (gap 1) reaches urgency 1 at
+      waits = 1, so ANY P2 older than about 10 h outranks a fresh P1.
+    - W1-T9323's own acceptance pins exactly this: "a lower-priority task that has waited past the median wait outranks
+      a fresh higher-priority task".
+    - Today's P1 queue fixes ranked 125-277 of 769 eligible tasks: W1-T9907 at 125, W1-T9918 at 248, W1-T9926 at 260,
+      W1-T9928 at 261 and W1-T9932 at 272. Five of the last eight starts were the 42-task test-restructure chain.
+    - The censoring-aware median wait is 23.7 h, against the 10.09 h survivor median. The survivor median counts only
+      tasks that DID start, so the tasks still waiting, the long tail, never enter it.
+    READ on origin/main 0209f6837 (symbols, not lines), confirming the path:
+    - `costOfDelayContext` builds `firstStartByTask` from `run.start` / `dispatch.refused_already_merged` rows, pushes
+      `at - filedAt` for each started task into `waits`, and takes the plain median as `medianWaitMs`. A dated open task
+      that never started contributes nothing.
+    - That one `medianWaitMs` divides every task's age, whatever its tier: `dispatchUrgency(tierOf(task), age / medianWaitMs)`.
+    - `priorityTiers` measures the gap from the smallest declared priority; an absent priority sits one tier below the
+      lowest declared one.
+    - `dispatchUrgency`'s doc comment states the consequence: "against a fresh task a 1-tier gap closes after 1 median wait".
+    HOW THIS DIVIDES WITH THE NEIGHBOURS.
+    - W1-T9323 (merged, #11584's urgency shape) made age cross tiers. This task KEEPS that aging. It changes only the
+      unit: a gap closes in the higher tier's own measured, censoring-aware wait instead of one survivor median.
+    - W1-T9968 (option 2 of the same ruling) depends on this task: it keeps fan-out inside a tier, and its falsifier
+      is only clean once a ~10 h-old P2 no longer outranks a fresh P1 on age alone.
+    - W1-T9925 (queued, the LLM queue judge) rewrites what priority a task carries. This task decides how long a
+      tier's priority holds against age. They compose; neither edits the other's file.
+    - W1-T9325 (queued, P1) and W1-T8166 (queued, P2) also list src/lib/dispatch-value.ts. Overlap packing serializes them.
+    NOT COVERED ELSEWHERE: swept plan/tasks.d on origin/main 0209f6837 for censor, per-tier wait and tier wait. The hits
+    (W1-T4636, W1-T8707 and others) measure other latencies. Also swept the added lines of all 430 open origin heads
+    (fetched 2026-10-17 01:20Z) for censor, tier wait, dispatchUrgency and medianWaitMs: no head changes dispatch
+    urgency, and no head touches src/lib/dispatch-value.ts.
+  design: |
+    No fixed count, interval or cap (standing operator rule). Every wait is measured, and the ready row reports it.
+    1. A TIER'S OWN WAIT, CENSORING-AWARE (`costOfDelayContext`, src/lib/dispatch-value.ts).
+       - A tier is one declared priority value among the plan's tasks. An absent priority is its own tier, as in
+         `priorityTiers`. A historical task's tier is its shard's current priority.
+       - Per tier, build a Kaplan-Meier sample over the evidence window:
+         - an EVENT for each task with a first start: `firstStart - filedAt`, exactly the pairs `waits` uses today;
+         - a CENSORED observation for each dated, open, never-started task: `nowMs - filedAt`.
+       - A task filed before the window's earliest row is left out of the sample. A start the window cannot see must
+         never read as a wait still running.
+       - The tier's wait is the smallest event time at which its survival falls to one half or below
+         (`censoredMedianWaitMs`).
+       - A tier whose curve never crosses one half borrows the POOLED curve over every tier, built the same way.
+       - If the pooled curve never crosses one half either, its longest event time is used as a lower bound, and the row
+         says `bound: lower`.
+       - With no event at all, the context is refused `no-wait-evidence`, as today.
+    2. THE UNIT THAT CLOSES A GAP. A task in tier t ages in `unit(t)`: the largest tier wait at t or at any higher tier
+       (any smaller declared priority).
+       - So the envelope never shortens going down the tiers.
+       - Against a fresh higher-tier task, a 1-tier gap closes only once the lower task's age passes `unit(t)`. That is
+         at least the higher tier's own wait.
+       - `urgency = dispatchUrgency(tierOf(task), age / unit(tier(task)))`. `dispatchUrgency` itself, `priorityTiers`,
+         the validity share, the fan-out term, the stride pass and `compareDispatch` are unchanged.
+       - Update `dispatchUrgency`'s doc comment to say the wait is the tier's own unit.
+    3. VISIBLE. `costOfDelayReadyRow` gains `tier_waits`, deduped per plan tree as `imputed` is. Each entry holds
+       `{priority, wait_ms, events, censored, source}`, where `source` is `own`, `pooled` or `pooled-lower-bound`.
+    4. W1-T9323'S ACCEPTANCE TEST IS AMENDED, NOT DELETED.
+       - In test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts, the test
+         "W1-T9323: a lower-priority task that has waited past the median wait outranks a fresh higher-priority task"
+         keeps its title byte for byte. W1-T9323's merged grep proof reads that title, and Rule 21 leaves a merged
+         shard to its follow-up, which is this task.
+       - Its body keeps the existing case. There the P1 and P2 tiers have no events of their own, so both borrow the
+         pooled 2 h wait and the 5 h P2 still leads.
+       - It ADDS the case the ruling is about. Give the P1 tier its own history with a measured wait longer than 5 h:
+         the same 5 h P2 no longer outranks the fresh P1, with the assertion message
+         "W1-T9967: inside the higher tier measured wait the fresh task still leads". Then age the P2 past that wait
+         and assert it leads again.
+       - The comment above it changes from the additive `1 + 5h/2h` arithmetic to the tier-unit arithmetic.
+       - Every other test in that file, and in test/priority-weights-dispatch-urgency-so-age-cannot-swamp-intent.test.ts,
+         passes UNCHANGED. Their history tasks are outside `tasks`, so they are pooled, and their open tasks have no
+         events. If one does not pass, the PR body names it and why.
+    5. TESTS. New tests go in test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts, with
+       `test(` titles verbatim as in the proofs. Build injected plans and evidence rows with fixed timestamps, using
+       `buildDispatchValueContext` and `dispatchOrder` exactly as the W1-T9323 file does. No live ledger, no git and no network.
+       - The falsifier pair: W1-T9926 (P1, fresh) against an old P2. The fixture's pooled survivor median is about 10 h,
+         and the P1 tier's censoring-aware wait is about 24 h. A 12 h P2 sorts AFTER W1-T9926, and a 30 h P2 sorts before it.
+       - A tier with three started tasks (2 h, 3 h, 4 h) and three still waiting at 20 h reads its wait as 4 h, not
+         3 h: the censored tasks hold the curve up. A survivor-only median gives 3 h.
+       - A tier with no crossing borrows the pooled wait, and the ready row names `source: pooled`.
+       - The envelope: a P2 tier whose own wait is SHORTER than P1's still closes its gap on P1's wait.
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts"
+    - claim: "an old P2 that has waited past the pooled survivor median but not the P1 tier's own measured wait does not outrank a fresh P1 (W1-T9926)"
+      proof: 'grep: test("W1-T9967: an old P2 inside the P1 tier measured wait does not outrank a fresh P1" in test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts'
+    - claim: "W1-T9323's aging is kept: past the P1 tier's measured wait the old P2 outranks the fresh P1"
+      proof: 'grep: test("W1-T9967: past the P1 tier measured wait the old P2 still rises" in test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts'
+    - claim: "a tier's wait counts its never-started open tasks as censored observations"
+      proof: 'grep: test("W1-T9967: a tier wait counts its still-waiting tasks as censored" in test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts'
+    - claim: "a tier with no wait crossing of its own borrows the pooled wait, and the ready row names the source"
+      proof: 'grep: test("W1-T9967: a tier with no crossing of its own borrows the pooled wait and the ready row names it" in test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts'
+    - claim: "a lower tier never closes its gap in less than a higher tier's measured wait"
+      proof: 'grep: test("W1-T9967: a lower tier never closes its gap faster than a higher tier wait" in test/a-lower-tier-overtakes-only-after-the-higher-tiers-own-measured-wait.test.ts'
+    - claim: "W1-T9323's acceptance test is amended in place with the higher tier's own wait case"
+      proof: 'grep: W1-T9967: inside the higher tier measured wait the fresh task still leads in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts'
+    - claim: "W1-T9323's acceptance test keeps its title, so its merged proof still resolves"
+      proof: 'grep: test("W1-T9323: a lower-priority task that has waited past the median wait outranks a fresh higher-priority task" in test/dispatch-orders-by-a-cost-of-delay-score-with-priority-as-one-input.test.ts'
+      kind: guard
+    - claim: "the tier wait is a censoring-aware median"
+      proof: "grep: censoredMedianWaitMs in src/lib/dispatch-value.ts"
+    - claim: "the ready row reports each tier's wait"
+      proof: "grep: tier_waits in src/lib/dispatch-value.ts"
+  falsifier: |
+    At origin/main, the fixture's pooled survivor median of about 10 h divides every age. A 12 h P2 has urgency
+    0.5 * (1 + log2(2.2)) = 1.07 against the fresh W1-T9926's 1, so the P2 sorts first and the first test fails.
+    With the fix, the P2 ages in the P1 tier's own wait of about 24 h: 0.5 * (1 + log2(1.5)) = 0.79 < 1, so W1-T9926
+    leads, and at 30 h, 0.5 * (1 + log2(2.25)) = 1.08, the P2 leads again.
+    Ways to break it, and the test that catches each:
+    - Drop the censored observations: the 2/3/4 h + three-at-20 h tier reads 3 h, and the censoring test fails.
+    - Use each tier's own wait without the envelope: the short-wait P2 tier closes on P1 early, and the envelope test fails.
+    - Delete the amended W1-T9323 case: the grep on its message reads 0.
+  note: |
+    EFFECT, measured after merge from the core ledger union, with no numeric pass mark:
+    - For each `run.start`, compare the started task's tier and age with the runnable frontier's.
+    - Healthy shape: a fresh P1 is no longer passed by P2s younger than the P1 tier's `tier_waits` entry.
+    - P1 queue fixes no longer rank in the hundreds the hour they are filed.
+    - Rows to watch: `dispatch.cost_of_delay.ready` `tier_waits` (each `source`), and
+      `dispatch.cost_of_delay.fallback` with reason `no-wait-evidence`.

@@ -29,7 +29,7 @@ test("an advance that changes the install inputs is released from the quiet wind
   assert.equal(judge.changesInstallInputs([{ sha: "nested", files: ["apps/console/package.json"] }]), false, "only the root install inputs");
 
   const decision = judge.decideFreshnessRestart({ changes: LOCKFILE, busy: false, staleSinceMs: 0, nowMs: MINUTE, state: { total: 0, scoredShas: [] } });
-  const input = { decision, newSha: "lock", lastAdvanceAtMs: MINUTE, staleSinceMs: 0, nowMs: MINUTE, window };
+  const input = { decision, newSha: "lock", lastAdvanceAtMs: MINUTE, staleSinceMs: 0, nowMs: MINUTE, window, lifetimeStartedAtMs: -24 * 60 * MINUTE };
   assert.equal(judge.coalesceFreshnessRestart(input).action, "hold", "the control: without the flag the window holds it");
   assert.deepEqual(judge.coalesceFreshnessRestart({ ...input, installInputsChanged: true }), {
     action: "restart", reason: judge.INSTALL_INPUTS_RELEASE, heldMs: MINUTE, windowEndsAtMs: 11 * MINUTE,
@@ -62,7 +62,7 @@ async function daemonRun(changesAt: (minute: number) => { sha: string; files: st
     },
     readLedgerLines: () => [],
     log: (step, extra = {}) => rows.push({ step, atMs: nowMs, extra }),
-  }, { sweepWallClockBoundMs: 60 * MINUTE });
+  }, { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 60 * MINUTE });
   assert.equal(summary.stopReason, "stale");
   return rows;
 }

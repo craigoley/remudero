@@ -1,4 +1,5 @@
 import type { Task } from "./plan.js";
+import { sameTestFile } from "./test-path-resolver.js";
 
 /**
  * Pre-dispatch overlap check (P19 rung 1, W1-T171): a pure predicate that partitions candidate
@@ -124,7 +125,7 @@ function intersectingEntries(filesA: readonly string[], filesB: readonly string[
   const hits = new Set<string>();
   for (const fa of filesA) {
     for (const fb of filesB) {
-      if (globsIntersect(fa, fb)) {
+      if (sameTestFile(normalizePath(fa), normalizePath(fb)) || globsIntersect(fa, fb)) {
         hits.add(fa);
         hits.add(fb);
       }

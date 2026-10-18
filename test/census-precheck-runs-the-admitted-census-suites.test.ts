@@ -18,7 +18,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { CENSUS_ADMITTED_MEMBERS } from "../src/lib/ci-parity.js";
+import { CENSUS_ADMITTED_MEMBERS, FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, FAST_GATE_CENSUS_RUNAWAY_MULTIPLE } from "../src/lib/ci-parity.js";
+import { discoverSourceTextReaders } from "../src/lib/source-text-readers.js";
 import { censusPushRefusal } from "../src/run-task.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { unwrapLowPriority } from "../src/lib/test-slot.js";
@@ -240,7 +241,13 @@ test("W1-T5617: the default listing reads this repository's admission table, and
   const listed = precheck.listAdmittedCensusMembers(ROOT) as Member[];
   assert.deepEqual(
     listed,
-    CENSUS_ADMITTED_MEMBERS.map((m) => ({ testFile: m.testFile, script: m.script, walks: [...(m.walks ?? [])] })),
+    [
+      ...CENSUS_ADMITTED_MEMBERS.map((m) => ({ testFile: m.testFile, script: m.script, walks: [...(m.walks ?? [])] })),
+      ...discoverSourceTextReaders(ROOT).filter((r) => r.censusShaped && r.walks.length > 0).map((r) => ({
+        testFile: r.testFile, script: "", walks: [...r.walks], structural: true,
+        readerRuntimePolicy: { floorMs: FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: FAST_GATE_CENSUS_RUNAWAY_MULTIPLE },
+      })),
+    ],
   );
   assert.ok(listed.length >= 7, `the table must be read, saw ${listed.length}`);
   const bare = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}admitted-census-no-table-`));

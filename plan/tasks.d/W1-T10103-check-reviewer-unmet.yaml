@@ -1,0 +1,41 @@
+- id: W1-T10103
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:reviewer-unmet cost 178.6 PR minute(s) across 166 round(s) on 119 pull request(s), and rung 1's remedy did not move it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.06
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:reviewer-unmet#r2"
+  files:
+    - src/lib/prompt-render.ts
+    - test/check-reviewer-unmet.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:reviewer-unmet"
+      proof: "grep: test(\"W1-T10103: check:reviewer-unmet is prevented, not retried\" in test/check-reviewer-unmet.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 2. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:reviewer-unmet's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 3."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:reviewer-unmet cost 178.6 PR minute(s) (seven-day half-life) across 166 fix round(s) on 119 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/prompt-render.ts: names "reviewer-unmet" (15 line(s))
+    - src/run-task.ts: names "reviewer-unmet" (9 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #12411 at 2026-10-17T03:40:32.521Z: reviewer-unmet round
+    - PR #12409 at 2026-10-16T20:37:13.052Z: reviewer-unmet round
+    - PR #12043 (https://github.com/craigoley/remudero/pull/12043) at 2026-10-16T01:42:22.941Z: reviewer-unmet round
+        failing tests: W1-T9503: a cause owned by a test alone escalates as no-owner; W1-T9503: a source-owned cause still drafts a record lint-plan admits
+    - PR #11515 at 2026-10-14T00:31:43.367Z: reviewer-unmet round
+    - PR #11255 (https://github.com/craigoley/remudero/pull/11255) at 2026-10-13T18:18:18.946Z: reviewer-unmet round
+        failing tests: W1-T9153: two concurrent approves on one path and neither loses its cwd; W1-T9153: an approve whose add threw removes nothing
+
+    WHAT THE LAST RUNG TRIED: W1-T6166 (files src/lib/prompt-render.ts, test/check-reviewer-unmet.test.ts) — did not fall: share of fix rounds 3.1% (6/194) before, 4.0% (8/199) after, over 3 day(s) each side.
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

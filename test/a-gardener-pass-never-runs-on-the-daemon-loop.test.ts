@@ -93,7 +93,10 @@ test("gardener lifecycle measures admission separately from execution and preser
   let now = start;
   const observed: GardenerRuntimeEvent[] = [];
   const releases: Array<(exit: number | null) => void> = [];
-  const spawn = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
+  const spawn = boundedGardenPassSpawn((_name, _args, signal) => {
+    signal.admitted?.(); // This controlled producer explicitly models a successful process start.
+    return new Promise<number | null>((resolve) => releases.push(resolve));
+  }, 1);
   const wiring = { spawnPass: spawn, log: () => {}, clock: clockFromMillisFn(() => now), observe: (row: GardenerRuntimeEvent) => observed.push(row) };
   const a = startGardenOffLoop("plan", 60_000, wiring), b = startGardenOffLoop("gate", 60_000, wiring);
   t.after(() => { a.stop(); b.stop(); });
@@ -192,7 +195,10 @@ test("gardener completion rows retain the runtime pass id and separate admission
   };
   const observe = (event: GardenerRuntimeEvent) => writer.record(event);
   const releases: Array<(exit: number | null) => void> = [];
-  const spawnPass = boundedGardenPassSpawn(() => new Promise<number | null>((resolve) => releases.push(resolve)), 1);
+  const spawnPass = boundedGardenPassSpawn((_name, _args, signal) => {
+    signal.admitted?.(); // Preserve the fixture's execution clock at its simulated process start.
+    return new Promise<number | null>((resolve) => releases.push(resolve));
+  }, 1);
   const plan = startGardenOffLoop("plan", 60_000, { spawnPass, clock, log, observe });
   const gate = startGardenOffLoop("gate", 60_000, { spawnPass, clock, log, observe });
   t.after(() => { plan.stop(); gate.stop(); });
@@ -297,6 +303,9 @@ function rows() {
 }
 
 test("an admitted daemon records its gardener inventory while dry runs and telemetry failures preserve authority", async (t) => {
+  const oldInboxMode = process.env.RMD_INBOX_GARDENER_MODE;
+  delete process.env.RMD_INBOX_GARDENER_MODE;
+  t.after(() => { if (oldInboxMode === undefined) delete process.env.RMD_INBOX_GARDENER_MODE; else process.env.RMD_INBOX_GARDENER_MODE = oldInboxMode; });
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-inventory-home-`));
   const root = join(home, "Remudero"), state = join(root, "state");
   // Review deliberately masks the checkout's credential-bearing Git config.
@@ -322,7 +331,8 @@ test("an admitted daemon records its gardener inventory while dry runs and telem
   const manifest = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.equal(manifest.version, 1);
   assert.deepEqual(manifest.gardens.map((g: { name: string }) => g.name), REGISTERED_GARDEN_NAMES);
-  assert.ok(manifest.gardens.every((g: { enabled: boolean }) => g.enabled));
+  assert.ok(manifest.gardens.every((g: { name: string; enabled: boolean }) => g.enabled === (g.name !== "inbox")));
+  assert.equal(manifest.gardens.find((g: { name: string }) => g.name === "inbox")?.enabled, false, "unactivated Inbox garden is explicit in the real daemon inventory");
   assert.match(manifest.codeSha, /^[a-f0-9]{40}$/);
   const saved = JSON.stringify({ ...manifest, testSentinel: "preserve this recorded authority" });
   writeFileSync(inventoryPath, saved);

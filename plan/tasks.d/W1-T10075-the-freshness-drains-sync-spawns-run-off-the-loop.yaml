@@ -1,0 +1,63 @@
+- id: W1-T10075
+  title: "THE CORE DAEMON'S FRESHNESS DRAIN HOLDS ITS LOOP 1.5 TO 6.7 S AT A TIME ON SYNC SPAWNS ITS OWN ROWS NAME: deployer.ts git, the escalation reconcile and escalate's file path through runStepsSync, buildBehindMainByPr and ghLiveState reads, readFixRoundCommitsViaGit and leafPlanCommitGit; each moves to the async form it already has or gains one"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern, the freshness drain's named synchronous spawns; what each call does and returns is unchanged
+  band_meaning: span
+  origin: "operator console end-to-end test 2026-10-17 fault (a): core's daemon.loop_lag rows in phase freshness_drain"
+  plan_refs: [W1-T5765, W1-T5283, W1-T9735, W1-T9651, W1-T7745, W1-T9577, W1-T5689, W1-T100, W1-T9748]
+  files:
+    - src/lib/deployer.ts
+    - src/lib/escalate.ts
+    - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
+    - src/lib/plan-architect.ts
+    - src/run-task.ts
+    - test/the-freshness-drains-sync-spawns-run-off-the-loop.test.ts
+  status: queued
+  priority: 1  # operator 2026-10-17: the drain's loop lag rides every freshness restart
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-17 on the fleet host, core live ledger: 61 daemon.loop_lag rows 18:21:06-18:35:49Z,
+    50 in phase freshness_drain (220.6 s of lag, 75.5 s of it synchronous spawn time by the rows' own
+    sync_spawn_by_caller), 11 in interphase. The freshness_drain callers, summed over those rows:
+    - deployer.ts:1 anonymous -> git: 15,616 ms, 12 calls
+    - escalate.ts runStepsSync > closeWithComment > runEscalationReconcile (ghExec): 7,938 ms, 4 calls
+    - Object.read (ghJson): 5,351 ms, 7 calls; buildBehindMainByPr (ghJson): 4,441 ms, 7 calls
+    - escalate.ts runStepsSync > ensureLabel > escalate > file (ghExec): 3,197 ms, 6; create > escalate > file:
+      2,777 ms, 2; listOpen > listRetirableEscalationIssues: 1,676 ms, 4; ensureLabel > runStepsAsync: 1,603 ms, 3
+    - ghLiveState (ghJson): 2,889 ms, 6; updateBranchViaGh (ghExec): 2,466 ms, 2
+    - run-task.ts readFixRoundCommitsViaGit (hostWorktreeGit): 2,482 ms, 66 calls; leafPlanCommitGit: 1,920 ms, 6
+    The remaining ~145 s of drain lag carries no sync spawn and needs the daemon's stall profiler
+    (loop-stall-profiler.ts): the live file had no daemon.loop_stall_profile row in that window.
+    W1-T5765 (merged) moved escalateWithJudge onto runStepsAsync; the rows show plain escalate and the
+    reconcile's closeWithComment still on runStepsSync from the daemon. W1-T9735 (queued) covers the landing
+    preflights, none of the callers above. W1-T100 (the blocked_ci fix route) and W1-T9748 (the staging-refusal
+    trace) share only the two large files sweep.ts and run-task.ts; neither touches these spawns.
+    This lag is in the core daemon; the console's inbox reads are answered by serve (W1-T10074), so this task is
+    the daemon's share of the host and of every freshness restart, not the inbox timeout itself.
+  design: |
+    1. Each caller above reaches its spawn through an async seam on the daemon path: deployer.ts's git reads,
+       sweep.ts runEscalationReconcile and escalate's file/ensureLabel/create/listOpen steps (runStepsAsync over the
+       AsyncIssueGateway W1-T5283 built), tick-read-worker.ts buildBehindMainByPr, run-task.ts ghLiveState and the Object.read ghJson reader,
+       updateBranchViaGh and readFixRoundCommitsViaGit, and plan-architect.ts leafPlanCommitGit. The CLI paths may keep the sync form.
+    2. Async calls keep the bounded concurrency the daemon's async gh layer already applies; no new limit.
+    3. TESTS in test/the-freshness-drains-sync-spawns-run-off-the-loop.test.ts: a daemon-path call of each converted
+       function records no sync spawn in the read-plane sampler (the same sampler that writes sync_spawn_by_caller).
+  acceptance:
+    - claim: "the escalation reconcile closes issues without a sync spawn on the daemon path"
+      proof: 'grep: W1-T10075: the escalation reconcile closes issues without a sync spawn on the daemon path in test/the-freshness-drains-sync-spawns-run-off-the-loop.test.ts'
+    - claim: "the deployer's git reads record no sync spawn on the daemon path"
+      proof: 'grep: W1-T10075: the deployer\.s git reads record no sync spawn on the daemon path in test/the-freshness-drains-sync-spawns-run-off-the-loop.test.ts'
+    - claim: "the fix-round commit read records no sync spawn on the daemon path"
+      proof: 'grep: W1-T10075: the fix-round commit read records no sync spawn on the daemon path in test/the-freshness-drains-sync-spawns-run-off-the-loop.test.ts'
+  falsifier: |
+    At origin/main each named function spawns synchronously, so the sampler records a sync spawn for it and the
+    test fails; restoring a sync call reddens it again.
+  note: |
+    EFFECT, measured after merge: daemon.loop_lag rows in phase freshness_drain no longer name these callers in
+    sync_spawn_by_caller, and the drain's summed sync_spawn_ms falls from the 75.5 s measured above.

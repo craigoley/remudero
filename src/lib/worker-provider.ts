@@ -32,6 +32,7 @@ import { detectUsageLimitRefusal, type UsageLimitRefusal } from "./classify.js";
 import { fixedClock, loopAvailableDeadline, systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { hostWorktreeGit, recordedWorktreeGitDir } from "./worktree-git.js";
+import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite } from "./added-test-alias-rewrite.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
@@ -2545,7 +2546,7 @@ export function codexCommitSubject(text: string): string {
 }
 
 export type CodexHarnessCommit =
-  | { outcome: "committed"; sha: string }
+  | { outcome: "committed"; sha: string; aliasRewrite?: AddedTestAliasRewrite }
   | { outcome: "nothing-to-commit" | "not-a-harness-worktree" }
   | { outcome: "refused"; reason: string };
 
@@ -2554,10 +2555,14 @@ export type CodexHarnessCommit =
 export function commitCodexWriterEdits(cwd: string, text: string): CodexHarnessCommit {
   if (recordedWorktreeGitDir(cwd) === null) return { outcome: "not-a-harness-worktree" };
   try {
-    if (hostWorktreeGit(cwd, ["status", "--porcelain"]).trim() === "") return { outcome: "nothing-to-commit" };
+    const status = hostWorktreeGit(cwd, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+    if (status.trim() === "") return { outcome: "nothing-to-commit" };
+    const changed = status.split("\0").filter((entry) => entry.length > 3).map((entry) => entry.slice(3));
+    const aliasRewrite = rewriteAddedTestImports(cwd, status, changed, (args) => hostWorktreeGit(cwd, args));
     hostWorktreeGit(cwd, ["add", "-A"]);
     hostWorktreeGit(cwd, ["commit", "-q", "-m", codexCommitSubject(text)]);
-    return { outcome: "committed", sha: hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim() };
+    const sha = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
+    return Object.keys(aliasRewriteFields(aliasRewrite)).length > 0 ? { outcome: "committed", sha, aliasRewrite } : { outcome: "committed", sha };
   } catch (error) {
     // Not a success: the edits stay uncommitted and the reason is the row the caller's no-commit verdict cites.
     const reason = error instanceof Error ? error.message : String(error);
@@ -3485,11 +3490,9 @@ export interface OpenWeightSpawnArgs {
   requestTimeoutMs?: number;
   /** Test-only override; production reads the daemon process environment. */
   env?: NodeJS.ProcessEnv;
-  /**
-   * Test-only port around the bubblewrap check runner. Production always starts the fixed argv
-   * in a fresh user and network namespace; tests use this port to exercise child-env handling on
-   * hosts where bubblewrap is intentionally unavailable.
-   */
+  /** Caller-supplied check-child extras, never the daemon credential environment (W1-T10024). */
+  workerEnv?: Record<string, string>;
+  /** Test-only check port for hosts without bubblewrap; production runs fixed argv in fresh user/network namespaces. */
   runCheck?: (input: OpenWeightCheckInput) => string | Promise<string>;
   /** Test-only clock port; production records duration from the system clock. `iso` rides beside
    *  `now` because the daily allowance keys on a UTC calendar day, which is read off the ISO
@@ -3649,7 +3652,13 @@ export interface OpenWeightCheckInput {
  * variable here only with a demonstrated fixed-check need; copying `process.env` would turn the
  * adapter boundary into a claim rather than a control.
  */
-export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = process.env,
+  extra: Record<string, string> = {}): Record<string, string> {
+  for (const key of Object.keys(extra)) {
+    if (/^(ANTHROPIC_|RMD_(OPENWEIGHT|FOUNDRY_CLAUDE)_API_KEY$|CLAUDE_CODE_OAUTH_TOKEN$|GH_TOKEN$)/i.test(key)) {
+      throw new Error(`openWeightCheckEnv: credential/billing-boundary violation: ${key}`);
+    }
+  }
   const tmp = join(workerHome, "tmp");
   mkdirSync(tmp, { recursive: true });
   const out: Record<string, string> = {
@@ -3661,6 +3670,7 @@ export function openWeightCheckEnv(workerHome: string, env: NodeJS.ProcessEnv = 
     const value = env[key];
     if (value !== undefined) out[key] = value;
   }
+  Object.assign(out, extra, { HOME: workerHome, TMPDIR: tmp });
   return out;
 }
 
@@ -4515,7 +4525,7 @@ export async function spawnFoundryClaudeWorker(
       return { name: fn.name, description: fn.description, input_schema: fn.parameters };
     });
     const declaredNames = new Set(tools.map((tool) => tool.name));
-    const checkEnv = openWeightCheckEnv(args.workerHome, env);
+    const checkEnv = openWeightCheckEnv(args.workerHome, env, args.workerEnv);
     const maxTurns = args.maxTurns ?? 1;
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error(`cash ${label} maxTurns must be a positive integer`);
     const messages: Array<{ role: string; content: unknown }> = [{ role: "user", content: args.prompt }];
@@ -4716,7 +4726,7 @@ export async function spawnOpenWeightWorker(
     const env = args.env ?? process.env;
     // Built once, before any model tool call.  The Azure key stays in `env` for the HTTPS request
     // below, but never crosses this distinct process boundary into `run_check`.
-    const checkEnv = openWeightCheckEnv(args.workerHome, env);
+    const checkEnv = openWeightCheckEnv(args.workerHome, env, args.workerEnv);
     const webSearchConsented = cashWebSearchEnabled(config);
     const tools = openWeightTools(args.tools, webSearchConsented);
     const key = env[OPENWEIGHT_API_KEY_ENV];
@@ -5156,6 +5166,14 @@ async function spawnCodexWorkerInPrivateTemp(
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
+    if (harnessCommit && args.runId) appendLedger(ledgerPathFor(config), {
+      run_id: args.runId,
+      task_id: args.taskId ?? "unattributed",
+      step: "codex.harness_commit",
+      outcome: harnessCommit.outcome,
+      ...(harnessCommit.outcome === "committed" ? { sha: harnessCommit.sha, ...aliasRewriteFields(harnessCommit.aliasRewrite) } : {}),
+      ...(harnessCommit.outcome === "refused" ? { reason: harnessCommit.reason } : {}),
+    });
     return {
       ...(harnessCommit === undefined ? {} : { harnessCommit }),
       sessionId: parsed.sessionId || args.resumeSessionId || "",

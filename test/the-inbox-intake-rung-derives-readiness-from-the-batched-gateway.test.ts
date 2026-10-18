@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadPlan } from "../src/lib/plan.js";
+import { classifyProposal } from "../src/lib/inbox.js";
 import { buildBatchedGithub, ghGateway } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildDepsReadinessAccessors, buildIntakeRungsDaemonHooks, inboxCommand, ledgerPathFor } from "../src/run-task.js";
@@ -22,8 +23,15 @@ test(`${PROOF} — 50 tasks use one fetch and the same gateway on the next intak
     mkdirSync(join(root, "state"), { recursive: true });
     writeFileSync(ledgerPathFor(config), "");
     const plan = loadPlan(new URL("../plan/tasks.yaml", import.meta.url).pathname);
-    const tasks = [...plan.byId.values()].filter((t) => t.status === "queued" && !t.retirement).slice(0, 50);
+    const tasks = [...plan.byId.values()].filter((t) => t.status === "queued" && !t.retirement && !t.dispatch_hold && t.id !== "W1-T216").slice(0, 50);
     assert.equal(tasks.length, 50);
+    assert.ok(plan.byId.has("W1-T216"), "the protected task remains in the source plan");
+    const held = classifyProposal({ id: "proof-debt:W1-T216", summary: "held control", evidenceAnchors: [] }, undefined, {
+      plan, isMerged: () => assert.fail("held asks cannot reach the readiness gateway"),
+      grepAnchorTrue: () => assert.fail("held asks cannot reach anchor work"), openProposalIds: new Set(), isRatified: () => false,
+    });
+    assert.equal(held.state, "not_ready");
+    assert.match(held.needsTriageReason ?? "", /hold/);
     const control = buildDepsReadinessAccessors(plan, { ledgerPath: ledgerPathFor(config), github: ghGateway("o", "r") });
     for (const task of tasks) control.isMerged(task);
     assert.ok(shim.calls().filter((call) => call.includes("search")).length >= 50);

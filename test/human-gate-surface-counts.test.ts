@@ -85,7 +85,7 @@ function inboxEntry(root: string, proposals: ReadonlyArray<[string, InboxState]>
   const lanes = inboxLanes({ proposals: rows.map((r) => r.proposal), classifications: rows.map((r) => r.classification),
     ledgerLines: Object.assign([], { torn: 0, present: true }) }, root);
   const source: ViewSource = { name: "inbox-store:core", instance: "core", asOf: CLOCK.iso(), state: "fresh" };
-  const page = inboxViewBodies(lanes, source).find((b) => b.key === "section=needsYou")!;
+  const page = inboxViewBodies(lanes, source, "a".repeat(64)).find((b) => b.key === "section=needsYou")!;
   return { view: "inbox", key: page.key, version: 1, generation: 1, etag: "inbox",
     body: { view: "inbox", version: 1, generatedAt: CLOCK.iso(), asOf: CLOCK.iso(), stale: false, sources: page.sources, data: page.data } };
 }

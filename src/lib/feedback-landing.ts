@@ -638,9 +638,9 @@ function ciLearningShardRelDir(checkoutRoot: string): string {
   return relative(checkoutRoot, join(resolveRepoLayout(checkoutRoot).planDir, "tasks.d"));
 }
 
-function ciLearningLandingKind(checkoutRoot: string, opts: LandFeedbackOpts, git: GitExec): LandingKind {
+function* ciLearningLandingKindSteps(checkoutRoot: string, opts: LandFeedbackOpts, net: LandingNet): Generator<LandingAsk, LandingKind, AskReply> {
   const identity = {
-    ...driveLanding(landingIdentitySteps("ci-learning", opts, landingNet(git, opts.gh ?? defaultGh())), syncPreflightOf(checkoutRoot, opts)),
+    ...(yield* landingIdentitySteps("ci-learning", opts, net)),
     ownedDir: ciLearningShardRelDir(checkoutRoot),
   };
   return {
@@ -849,7 +849,7 @@ export interface LandingCarry {
   inheritedSkipped: number;
 }
 
-function lsTreeBlobs(out: string): Map<string, string> {
+export function lsTreeBlobs(out: string): Map<string, string> {
   const blobs = new Map<string, string>();
   for (const entry of out.split("\0")) {
     const tab = entry.indexOf("\t");
@@ -859,7 +859,7 @@ function lsTreeBlobs(out: string): Map<string, string> {
   return blobs;
 }
 
-function rawDiffBases(out: string): Map<string, string | null> {
+export function rawDiffBases(out: string): Map<string, string | null> {
   const fields = out.split("\0");
   const bases = new Map<string, string | null>();
   for (let i = 0; i + 1 < fields.length; i += 2) {
@@ -1060,6 +1060,35 @@ function* ensurePrOpen(
   return { prUrl };
 }
 
+function* closeRedundantLandingPr(
+  kind: LandingKind,
+  net: LandingNet,
+  build: LandingTreeBuild,
+): Generator<LandingAsk, void, AskReply> {
+  if (!build.branchTipSha || (yield* net.git(["rev-parse", `${build.branchTipSha}^{tree}`])).trim() !== build.treeSha) return;
+  const repoArgs = landingRepoArgs(kind);
+  const open = (JSON.parse(yield* net.gh([
+    "pr", "list", "--head", kind.prHead, "--base", "main", "--state", "open", "--json", "url,headRefOid", ...repoArgs,
+  ])) as Array<{ url: string; headRefOid: string }>)[0];
+  if (!open || open.headRefOid !== build.branchTipSha) return;
+  const existing = open.url;
+  const merged = JSON.parse(yield* net.gh([
+    "pr", "list", "--head", kind.prHead, "--base", "main", "--state", "merged",
+    "--json", "url,mergeCommit", "--limit", "100", ...repoArgs,
+  ])) as Array<{ url: string; mergeCommit?: { oid: string } }>;
+  for (const pr of merged) {
+    const sha = pr.mergeCommit?.oid;
+    if (!sha || (yield* net.git(["merge-base", sha, build.mainSha])).trim() !== sha) continue;
+    const paths = (yield* net.git(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--first-parent", "-m", sha, "--", kind.ownedDir]))
+      .trim().split("\n").filter(Boolean);
+    if (paths.length === 0 || (yield* net.git(["diff", "--name-only", sha, build.mainSha, "--", ...paths])).trim() !== "") continue;
+    assertLiveWriteAllowed("gh-transport", `closing the redundant landing PR ${existing}`);
+    yield* net.gh(["pr", "close", existing, "--comment", `Content already landed in ${pr.url}; nothing remains to land against main.`, ...repoArgs]);
+    return;
+  }
+  throw new Error(`cannot identify the merged PR carrying ${existing}'s content on main`);
+}
+
 /**
  * The commit/push/open-or-reuse-PR/arm tail every landing call shares, regardless of how its
  * tree was built ({@link landPending}'s disk scan or {@link landContent}'s in-memory content).
@@ -1088,6 +1117,20 @@ function* finishLanding(
     ...(b.refused.length > 0 ? { refused: b.refused } : {}),
     ...(b.carry ? { carry: b.carry } : {}),
   });
+  const nothingToLand = function* (b: LandingTreeBuild): Generator<LandingAsk, LandFeedbackResult | undefined, AskReply> {
+    if (b.treeSha !== (yield* net.git(["rev-parse", `${b.mainSha}^{tree}`])).trim()) return undefined;
+    opts.log?.("landing.nothing_to_land", { family: kind.family, branch: kind.branch, mainSha: b.mainSha });
+    const result: LandFeedbackResult = { landed: false, files: [], ...(b.refused.length > 0 ? { refused: b.refused } : {}) };
+    if (b.refused.length > 0 && b.unlanded.length === 0) return result;
+    try {
+      yield* closeRedundantLandingPr(kind, net, b);
+      return result;
+    } catch (e) {
+      return { ...result, error: `redundant landing PR cleanup failed: ${String((e as Error)?.message ?? e)}` };
+    }
+  };
+  const initialNoop = yield* nothingToLand(build);
+  if (initialNoop) return initialNoop;
 
   // Push only when the tree differs from what's already on the branch: the tree is deterministic
   // for unchanged content but `commit-tree` stamps the time, so comparing commits instead
@@ -1097,7 +1140,9 @@ function* finishLanding(
   const bodyOf = function* (b: LandingTreeBuild): Generator<LandingAsk, string, AskReply> {
     const known = bodies.get(b);
     if (known !== undefined) return known;
-    const body = kind.prBody(b.unlanded, yield* landingTreeContent(net, b, b.unlanded));
+    const paths = b.unlanded.length > 0 ? b.unlanded :
+      (yield* net.git(["diff", "--name-only", b.mainSha, b.treeSha, "--", kind.ownedDir])).trim().split("\n").filter(Boolean);
+    const body = kind.prBody(paths, yield* landingTreeContent(net, b, paths));
     bodies.set(b, body);
     return body;
   };
@@ -1181,6 +1226,8 @@ function* finishLanding(
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
     leaseMoved = { expected: build.branchTipSha, observed: retried.branchTipSha, by: yield* tipAuthor(net, retried.branchTipSha) };
+    const retryNoop = yield* nothingToLand(retried);
+    if (retryNoop) return moved(retryNoop);
     yield* observePublication(retried);
     if ((yield* remoteBranchTree(net, kind.branch)) === retried.treeSha) {
       const { prUrl, error } = yield* ensurePrOpen(kind, net, yield* bodyOf(retried), requestReview);
@@ -1348,15 +1395,6 @@ function* landPendingSteps(root: string, landing: LandingKind | DeferredLandingK
       }
       return { files, sources, contents, refused };
     };
-    const initialScan = yield* scanLocalUnlanded();
-    if (initialScan.files.length === 0) {
-      return withAcknowledgement(
-        initialScan.refused.length > 0
-          ? { landed: false, files: [], refused: initialScan.refused }
-          : { landed: false, files: [] },
-      );
-    }
-
     // Commit built against a SCRATCH index, never the caller's real one — the acknowledgement
     // above is the sole narrow working-tree mutation; this stays under W1-T60's isolation.
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
@@ -1555,7 +1593,7 @@ export interface LandContentInput {
  */
 function landContent(
   root: string,
-  kind: LandingKind,
+  kind: LandingKindSource,
   inputs: LandContentInput[],
   opts: LandFeedbackOpts,
 ): LandFeedbackResult {
@@ -1568,20 +1606,23 @@ export interface LandFeedbackAsyncOpts extends Omit<LandFeedbackOpts, "planPrPre
   ghAsync?: GhExecAsync;
 }
 
-async function landContentAsync(root: string, kind: LandingKind, inputs: LandContentInput[], opts: LandFeedbackAsyncOpts): Promise<LandFeedbackResult> {
+async function landContentAsync(root: string, kind: LandingKindSource, inputs: LandContentInput[], opts: LandFeedbackAsyncOpts): Promise<LandFeedbackResult> {
   const { planPrPreflight, ...landOpts } = opts;
   const preflight = planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr, { log: opts.log }));
   return driveLandingAsync(landContentSteps(root, kind, inputs, { ...landOpts, ...asyncSeamsOf(root, landOpts) }), preflight);
 }
 
+type LandingKindSource = LandingKind | ((net: LandingNet) => Generator<LandingAsk, LandingKind, AskReply>);
+
 function* landContentSteps(
   root: string,
-  kind: LandingKind,
+  kindSource: LandingKindSource,
   inputs: LandContentInput[],
   opts: LandFeedbackOpts & { gitAsync?: GitExecAsync; ghAsync?: GhExecAsync },
 ): LandingSteps {
   const git = opts.git ?? defaultGit(root);
   const net = landingNet(git, opts.gh ?? defaultGh(), opts);
+  const kind = typeof kindSource === "function" ? yield* kindSource(net) : kindSource;
   let scratchDir: string | undefined;
 
   try {
@@ -1654,11 +1695,6 @@ function* landContentSteps(
 
     yield* net.git(["fetch", "origin", "--quiet"]);
     const initialBuild = yield* buildTree((yield* net.git(["rev-parse", "origin/main"])).trim());
-    if (initialBuild.unlanded.length === 0) {
-      return initialBuild.refused.length > 0
-        ? { landed: false, files: [], refused: initialBuild.refused }
-        : { landed: false, files: [] };
-    }
 
     const rebuild = function* (): Generator<LandingAsk, LandingTreeBuild, AskReply> {
       yield* net.git(["fetch", "origin", "--quiet"]);
@@ -1684,11 +1720,11 @@ export function landPlanReconcileShardsAsync(
   inputs: readonly LandContentInput[],
   opts: LandFeedbackAsyncOpts = {},
 ): Promise<LandFeedbackResult> {
-  return landContentAsync(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+  return landContentAsync(root, (net) => planReconcileLandingKindSteps(root, opts, net), [...inputs], opts);
 }
 
 export function landPlanReconcileShards(root: string, inputs: readonly LandContentInput[], opts: LandFeedbackOpts = {}): LandFeedbackResult {
-  return landContent(root, planReconcileLandingKind(root, opts), [...inputs], opts);
+  return landContent(root, (net) => planReconcileLandingKindSteps(root, opts, net), [...inputs], opts);
 }
 
 export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
@@ -1713,8 +1749,12 @@ export function planReconcileLanding(
   };
 }
 
-function planReconcileLandingKind(root: string, opts: Omit<LandFeedbackOpts, "planPrPreflight">): LandingKind {
-  return landingKind(
+function planReconcileLandingKindSteps(
+  root: string,
+  opts: Omit<LandFeedbackOpts, "planPrPreflight">,
+  net: LandingNet,
+): Generator<LandingAsk, LandingKind, AskReply> {
+  return landingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
@@ -1722,7 +1762,7 @@ function planReconcileLandingKind(root: string, opts: Omit<LandFeedbackOpts, "pl
     },
     root,
     opts,
-    opts.git ?? defaultGit(root),
+    net,
   );
 }
 
@@ -2018,23 +2058,28 @@ function ciLearningOriginsOf(output: string): Set<string> {
   return origins;
 }
 
-function acknowledgeMergedCiLearningShards(stateRoot: string, shardRelDir: string, git: GitExec, mainOrigins: Set<string>): void {
+/** W1-T9755: drop queued shards main holds, by origin or bytes, in two driver-awaited asks; a failed read keeps all. */
+function* acknowledgeMergedCiLearningShardsSteps(
+  stateRoot: string,
+  shardRelDir: string,
+  net: LandingNet,
+  mainOrigins: Set<string>,
+): Generator<LandingAsk, void, AskReply> {
+  const byBytes: string[] = [];
   for (const relPath of ciLearningPendingRelPaths(stateRoot, shardRelDir)) {
-    try {
-      const queuedPath = ciLearningPendingAbsPath(stateRoot, relPath);
-      const queued = readFileSync(queuedPath, "utf8");
-      const parsed = ciLearningOriginRead(queued, `pending-ci-learning:${relPath}`);
-      if (parsed.ok && parsed.origin && mainOrigins.has(parsed.origin)) {
-        unlinkSync(queuedPath);
-        continue;
-      }
-      const remoteSha = git(["rev-parse", `origin/main:${relPath}`]).trim();
-      const localSha = git(["hash-object", queuedPath]).trim();
-      if (remoteSha === localSha) unlinkSync(ciLearningPendingAbsPath(stateRoot, relPath));
-    } catch {
-      // The queue is durable by default: remove only when fetched origin/main proves the same blob.
-    }
+    const queuedPath = ciLearningPendingAbsPath(stateRoot, relPath);
+    const parsed = ciLearningOriginRead(readFileSync(queuedPath, "utf8"), `pending-ci-learning:${relPath}`);
+    if (parsed.ok && parsed.origin && mainOrigins.has(parsed.origin)) unlinkSync(queuedPath);
+    else byBytes.push(relPath);
   }
+  if (byBytes.length === 0) return;
+  const onMain = lsTreeBlobs(yield* net.git(["ls-tree", "-z", "origin/main", "--", ...byBytes]));
+  const listed = byBytes.filter((relPath) => onMain.has(relPath));
+  if (listed.length === 0) return;
+  const local = (yield* net.git(["hash-object", "--", ...listed.map((relPath) => ciLearningPendingAbsPath(stateRoot, relPath))])).trim().split("\n");
+  listed.forEach((relPath, at) => {
+    if (local[at]?.trim() === onMain.get(relPath)) unlinkSync(ciLearningPendingAbsPath(stateRoot, relPath));
+  });
 }
 
 export interface LandCiLearningShardsOptions extends LandFeedbackOpts {
@@ -2100,7 +2145,7 @@ function* ciLearningLandingSteps(
 ): PreflightSteps<CiLearningFilingResult> {
   const git = deps.git ?? defaultGit(checkoutRoot);
   const net = landingNet(git, deps.gh ?? defaultGh(), deps);
-  const kind = ciLearningLandingKind(checkoutRoot, deps, git);
+  const kind = yield* ciLearningLandingKindSteps(checkoutRoot, deps, net);
   const shardRelDir = ciLearningShardRelDir(checkoutRoot);
   const held = new Set([...deps.planOrigins, ...ciLearningPendingOrigins(deps.stateRoot, checkoutRoot)]);
   const skipped: string[] = [];
@@ -2110,7 +2155,7 @@ function* ciLearningLandingSteps(
   try {
     yield* net.git(["fetch", "origin", "--quiet"]);
     mainOrigins = yield* ciLearningMainOriginsSteps(shardRelDir, net);
-    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git, mainOrigins);
+    yield* acknowledgeMergedCiLearningShardsSteps(deps.stateRoot, shardRelDir, net, mainOrigins);
   } catch {
     // Fetch/ack failure must not discard staged bytes or prevent a new durable staging write.
   }
@@ -2148,7 +2193,7 @@ function* ciLearningLandingSteps(
 
   const landing = yield* landContentSteps(checkoutRoot, kind, inputs, deps);
   try {
-    acknowledgeMergedCiLearningShards(deps.stateRoot, shardRelDir, git, yield* ciLearningMainOriginsSteps(shardRelDir, net));
+    yield* acknowledgeMergedCiLearningShardsSteps(deps.stateRoot, shardRelDir, net, yield* ciLearningMainOriginsSteps(shardRelDir, net));
   } catch {
     // Best-effort acknowledgement only; pending bytes remain retryable.
   }

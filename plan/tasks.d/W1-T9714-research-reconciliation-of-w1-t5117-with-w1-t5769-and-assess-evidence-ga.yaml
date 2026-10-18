@@ -6,7 +6,9 @@
   verify: human
   risk: high
   band_meaning: span
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=567c13e1edf56a3b
   attempts: 0
   files:
     - MASTER-PLAN.md
@@ -23,3 +25,15 @@
     follow-up harvest [research]: Reconcile W1-T5117 with W1-T5769, because the incident appears
     covered while stricter evidence requirements remain open. — from W1-T5117 (run
     W1-T5117-1791436776050)
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.85
+    reasons:
+      - "The task is a recon-type reconciliation of two incident records (W1-T5117 and W1-T5769) with a grep-based acceptance check, so it is read and analysis work rather than an action."
+      - "The declared files (MASTER-PLAN.md, LEARNINGS.md, plan/tasks.yaml) are documentation and plan records. Nothing in the description or files list touches secrets, credentials, auth, permissions, deploy, merge or review policy, or any deletion."
+      - "The gates state is clean: the author is the operator, the filing-time gate passed, all 3 declared files exist at the base, and the family track record is 3 merged against 1 declined. The task was ratified through rmd approve."
+      - "The acceptance is verifiable automatically by grep, and no operator-only decision is requested. The record cites no PR references, but that is a minor evidence gap that the task itself is meant to assess."
+      - "the judge said proceed, but W1-T9714: at verify: auto it fails lint (rule15-filing)"
+    judged_at: "2026-10-16T17:02:43.861Z"
+    pin: "0a10699876dadac05336f9cbf3393d5f7382c4199e726e08b571351d89de5b91"

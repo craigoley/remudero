@@ -203,10 +203,17 @@ test('author static admission holds one real slot from static preflight through 
     import { test } from 'node:test';
     import assert from 'node:assert/strict';
     import { existsSync, readFileSync } from 'node:fs';
+    import { dirname } from 'node:path';
+    import { acquireTestSlot } from ${JSON.stringify(slotModule)};
     test('affected child retains the admitted owner',()=>{
       const claim=JSON.parse(readFileSync('coverage/slot-owner.json','utf8'));
       assert.ok(existsSync(claim.path),'the same owner remains held during affected execution');
-      assert.equal(process.env.RMD_TEST_SLOT_PARENT,undefined,'native fixtures do not inherit the production admission claim');
+      assert.equal(process.env.RMD_TEST_SLOT_PARENT, JSON.stringify(claim),
+        'the covered child carries the owner marker for quiescence checks');
+      const nested=acquireTestSlot('affected-test-child',{dir:dirname(claim.path),slots:1,waitBoundMs:0,
+        load:()=>({cores:8,load1:0}),log:()=>{}});
+      assert.equal(nested.outcome,'wait_bound_exceeded',
+        'a native test child may carry the marker but cannot borrow the author slot');
     });
   `);
   f.git('add', '.'); f.git('commit', '-m', 'test: real static and affected admission');
@@ -632,7 +639,7 @@ test('author preflight leaves a running receipt and live private logs when its w
   f.git('add', '.'); f.git('commit', '-m', 'test: hold native static step');
   const parent = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
     `import {main} from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; process.exit(main([], {root:${JSON.stringify(f.root)}}));`],
-  { cwd: ROOT, stdio: 'ignore' });
+  { cwd: ROOT, stdio: 'ignore', env: { ...process.env, RMD_TEST_SLOT_DIR: join(f.root, 'coverage/test-slots') } });
   const closed = new Promise<string | null>((resolve) => parent.once('close', (_code, signal) => resolve(signal)));
   const waitFor = async (predicate: () => boolean) => {
     for (let turn = 0; turn < 1000 && !predicate(); turn++) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -657,10 +664,16 @@ test('author preflight leaves a running receipt and live private logs when its w
     assert.equal(statSync(logRoot).mode & 0o077, 0);
     assert.equal(parent.kill('SIGKILL'), true);
     assert.equal(await closed, 'SIGKILL');
-    writeFileSync(release, 'release');
+    // No release: the held step can only end because its parent-tracked capture cancels it.
     const native = join(logRoot, 'static-preflight.native-result.json');
     await waitFor(() => existsSync(native));
-    assert.equal(JSON.parse(readFileSync(native, 'utf8')).status, 7);
+    const result = JSON.parse(readFileSync(native, 'utf8'));
+    assert.equal(result.error.code, 'ERR_AUTHOR_CAPTURE_PARENT_EXITED');
+    assert.equal(result.parentTracking.ownerLost, true);
+    assert.equal(result.status, null);
+    assert.equal(result.signal, 'SIGTERM');
+    assert.equal(result.outputComplete, false);
+    assert.throws(() => process.kill(result.parentTracking.childPid, 0), { code: 'ESRCH' });
     assert.equal(JSON.parse(readFileSync(join(logRoot, 'progress.json'), 'utf8')).verdict, 'running');
     assert.equal(existsSync(join(logRoot, 'receipt.json')), false, 'loss of the author cannot certify a completed gate');
     assert.match(readFileSync(join(logRoot, 'static-preflight.stderr.log'), 'utf8'), /live static stderr/);

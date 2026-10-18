@@ -1,7 +1,7 @@
 - id: W1-T9286
   title: "Let the operator correct why an Inbox ask needs them without implying approval"
   repo: remudero
-  depends_on: ["W1-T9282"]
+  depends_on: ["W1-T9282", "W1-T9288"]
   priority: 1.75
   type: implement
   verify: auto
@@ -11,8 +11,8 @@
   band_meaning: blast-radius
   origin: "2026-10-13 operator-approved follow-up; issue #7708"
   plan_refs: ["W1-T4742","W1-T4853","W1-T5339"]
-  files: ["src/lib/inbox-responder.ts","src/lib/panel-graph.ts","src/lib/instance-inbox-contract.ts","src/lib/fleet-lane.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/an-operator-can-correct-why-an-inbox-ask-needs-them.test.ts"]
-  status: queued
+  files: ["src/lib/inbox-freshness.ts","src/lib/nav-badge-view.ts","src/run-task.ts","src/lib/verify-human-judge.ts","src/lib/inbox-why-me.ts","src/lib/inbox-view.ts","src/lib/inbox-responder.ts","src/lib/panel-graph.ts","src/lib/instance-inbox-contract.ts","src/lib/fleet-lane.ts","openapi/daemon.yaml","packages/api-client/src/schema.d.ts","test/an-operator-can-correct-why-an-inbox-ask-needs-them.test.ts","test/a-verify-human-shard-is-judged.test.ts","test/helpers/why-me-world.ts","scripts/generate-api-client.mjs","test/api-client-drift-check.test.ts","test/every-served-route-is-in-the-contract.test.ts"]
+  status: merged
   attempts: 0
   rationale: |
     The source-qualified census already emits whyMe and sourceFacts, but issue #7708 still needs a reversible operator correction. The operator approved fleet-can-handle and still-need-me feedback as a distinct task, preserving security and approval authority.
@@ -25,3 +25,34 @@
       proof: "grep: test(\"a why-me correction refuses a changed snapshot and replays one receipt\" in test/an-operator-can-correct-why-an-inbox-ask-needs-them.test.ts"
   falsifier: |
     Join corrections by task id alone, infer release from fleet-can-handle, or remove snapshot/idempotence checks. The held-security, foreign-instance and changed-replay fixtures must fail.
+  note: |
+    Implementation scope clarification: inbox-why-me.ts owns typed advisory receipt/projection data;
+    inbox-view.ts materializes that projection off-loop with its own identity. The classification
+    census/pages retain W1-T9288's immutable key. The existing contract mounts the scoped action
+    wherever the owned census source exists, so instance-gateway source changes are unnecessary.
+    A correction's settled receipt is its authoritative durable audit, not a secondary ledger claim.
+    Existing verify-human intake and judge seams receive bounded, receipt-verified advisory input.
+    Exact receipt IDs reopen their existing observed-state cache once; historical global keys
+    retain matching per-ask facts. Advisory reassessments stage ordinary candidates without
+    invoking a release hook, and joined verdict evidence names the original source tuples.
+    A bounded durable presence marker precedes settlement, distinguishing lost/corrupt maintained
+    feedback from never-configured or observed-empty history without scanning receipts on intake.
+    Deterministic per-proposal presence is scoped by repository/instance/proposal, so truncated
+    public history cannot erase a corrected target or hold an unrelated task. Intake labels
+    any supplied subset as truncated rather than claiming all accepted feedback was consumed.
+    Production intake requires independent repository and instance identity. An unset instance
+    environment is explicit unknown for nonempty feedback; no source-derived instance fallback
+    is trusted, while positively empty/never-corrected history keeps ordinary behavior.
+    The existing unchanged Inbox freshness constant moves to a data-only leaf, with its old
+    nav-badge-view export preserved, preventing fleet feedback from importing a view/daemon cycle.
+    Settled correction acknowledgements are validated before replay with the same scope/payload
+    and fixed authority/audit/status validator used by projection/intake. Corruption stays unknown,
+    never retried or silently replaced; ordinary legacy intent replay is unchanged.
+    The scoped census declares its already-served required contract mode. The maintained client
+    generator now renders the four existing allOf shapes as parenthesized intersections instead
+    of unknown, including the new advisory feedback item; its regression covers nested union and
+    array precedence. Permission-failure fixtures use uid-independent filesystem shape denials,
+    and the production intake fixture uses the maintained gitRepo helper without a census waiver.
+    The assembled-route census includes the newly mounted scoped advisory write in its explicit
+    instance Inbox family. A real default-registry POST control and parameter-alias regression
+    preserve both contract directions without changing the public API or shrink-only baseline.

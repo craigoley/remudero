@@ -45,3 +45,13 @@ test("triageNeedsModel is not exported from escalation-triage", async () => {
   const module = await import("../src/lib/escalation-triage.js");
   assert.equal(Object.hasOwn(module, "triageNeedsModel"), false);
 });
+
+test("addLifetimeDispatchTallies is not exported from status", async () => {
+  const module = await import("../src/lib/status.js");
+  assert.equal(Object.hasOwn(module, "addLifetimeDispatchTallies"), false);
+});
+
+test("INBOX_GARDENER_INTERVAL_MS is not exported from inbox-gardener", async () => {
+  const module = await import("../src/lib/inbox-gardener.js");
+  assert.equal(Object.hasOwn(module, "INBOX_GARDENER_INTERVAL_MS"), false);
+});

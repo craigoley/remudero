@@ -20,9 +20,9 @@
  * resident), summed, plus ONE tail allowance: the largest single remaining spike above a typical, max over trees of
  * (remaining to the p90 - remaining to the median). Both quantiles are learned (host-memory-learning.ts); a class with
  * no samples has its median equal to its estimate, so its whole claim counts and it adds no tail.
- * The daemon is one more such tail: its growth back to its peak (VmHWM - VmRSS) splits into a TYPICAL part, its median
- * rss+swap over the last hour less its latest sample, and the rest, which competes with the trees' tails for the one
- * allowance. Too few samples: its whole growth is typical. The HOST check applies the same rule across every live tree
+ * The daemon is one more such tail: its growth back to its LAST-HOUR peak rss+swap (W1-T9972: never its boot-time VmHWM)
+ * splits into a TYPICAL part, its median rss+swap over the last hour, each less its current rss+swap, and the rest,
+ * which competes with the trees' tails for the one allowance. Too few samples: VmHWM - VmRSS, all of it typical. The HOST check applies the same rule across every live tree
  * and every measured daemon: all typical parts, plus the one largest tail. An unseen start carries its class median
  * too (W1-T9762), and a live tree's typical part and tail are scaled by its class's measured survival at its age: the
  * share of the class's trees that peaked later than that (host-memory-learning.ts `survivalAt`).
@@ -45,6 +45,11 @@
  * instance's verdicts over {@link SWAP_STALL_HISTORY_MS} with such a rate were followed by host PSI past its thresholds
  * within {@link SWAP_STALL_WINDOW_MS} more often than all verdicts, by over twice the sampling noise; too few of them,
  * the rate alone. Over the same rows that ratio was 0.95-1.02 (PSI some10 median 0.9 at ~1,245 pages/s): churn.
+ *
+ * THE PSI START BOUND IS LEARNED LIKE SWAP-IN (W1-T10085). Host PSI full avg10 names "psi" past a bound learned from
+ * the instance's own admitted starts over the same windows, minimum and noise: the prior `psiFullAvg10Max` rises only
+ * to a level whose admitted starts were followed by harm (an oom_kill rise, or full avg60 past the PRIOR) no more often
+ * than every verdict in their band, and by no OOM kill. Unread or thin: the prior.
  *
  * NEVER WAITS. No lock is taken; a ledger reader that reports a held lock (EWOULDBLOCK/EAGAIN/EBUSY), an errno, or a
  * missing/unreadable/reset store yields a verdict naming that state as an uncertainty that WIDENS the margin. It is
@@ -294,7 +299,9 @@ export interface ShadowInputs {
    *  part of `growthMib` its median footprint accounts for; absent, the whole growth is typical and it adds no tail. */
   daemonGrowth: Array<{
     instance: string; samples: number; growthMib?: number; typicalMib?: number; reason?: string; basis?: string;
-    typicalBasis?: string; own?: boolean;
+    typicalBasis?: string; own?: boolean; currentBasis?: string;
+    /** W1-T9972: the proc's VmHWM - VmRSS and its basis, for comparison only (it sizes the growth only on too few samples). */
+    lifetimePeakGrowthMib?: number; lifetimePeakBasis?: string;
     /** What the daemon's persisted footprint held for this verdict (daemon-footprint.ts), or why it was unread. */
     footprint?: string;
   }>;
@@ -307,6 +314,10 @@ export interface ShadowInputs {
   swapStall?: SwapStallRelation;
   /** Whether projection flags predict this container's own pressure. Absent: the projection alone decides. */
   containerLift?: ContainerLift;
+  /** W1-T10085: the learned PSI full avg10 bound. Absent: the prior. */
+  psiBound?: PsiFullAvg10Bound;
+  /** W1-T10085: this verdict's stamp in the PSI record, so an admission can mark its start admitted. */
+  psiRecordAt?: number;
   /** The learned review estimate, for the counterfactual review (W1-T7095). Absent: the class default. */
   reviewEstimateMib?: number;
 }
@@ -324,6 +335,21 @@ export type SwapStallRelation =
     noise: number;
   }
   | { unlearned: string };
+
+/** W1-T10085: the level host PSI full avg10 must pass before a verdict names "psi", with the record behind it. */
+export interface PsiFullAvg10Bound {
+  bound: number;
+  prior: number;
+  basis: string;
+  /** Admitted starts above the prior with a closed window. */
+  samples: number;
+  /** At the bound's band: the share of its admitted starts followed by harm, of all its verdicts, and twice the noise. */
+  afterAdmitted: number | null;
+  afterBand: number | null;
+  noise: number | null;
+  /** Admitted starts above the prior followed by an oom_kill rise; null when oom_kill was unread on every one. */
+  ooms: number | null;
+}
 
 /** Projection flags followed by own pressure, compared with all closed verdicts. */
 export type ContainerLift =
@@ -403,6 +429,10 @@ export interface ShadowVerdict {
     daemonGrowthTypicalMib: number;
     /** The largest single daemon tail: growth above its typical. */
     daemonGrowthTailMib: number;
+    /** W1-T9972: every daemon's VmHWM - VmRSS summed (null: none read), for comparison only. */
+    daemonGrowthLifetimePeakMib: number | null;
+    /** Whose tail `hostTailMib` is: "daemon:<instance>", the claim's worker class, "start", or null with no tail. */
+    hostTailOwner: string | null;
     coldStartReserveMib: number;
     marginMib: number;
     projectedAvailableMib: number | null;
@@ -412,6 +442,7 @@ export interface ShadowVerdict {
     swapInPagesPerSec: number | null;
     /** Whether swap-in past the threshold counts: its learned relation to stall, or the rate alone while unlearned. */
     swapInBasis: string | null;
+    psiFullAvg10Bound: PsiFullAvg10Bound;
     psi: { someAvg10: number; someAvg60: number; fullAvg10?: number; fullAvg60?: number } | null;
     containerCurrentMib: number | null;
     containerMaxMib: number | null;
@@ -471,6 +502,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let tailOwn = 0;
   let typicalAll = 0;
   let tailAll = 0;
+  let tailAllOwner: string | null = null;
   let typicalUndecayed = 0;
   let tailUndecayed = 0;
   const claims: ShadowClaim[] = [];
@@ -495,7 +527,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     const { share, typical, charged, chargedTail } = claim(entry.estimateMib, entry.typicalMib, resident, released, decay.factor ?? 1);
     unrealized += share;
     typicalAll += charged;
-    tailAll = Math.max(tailAll, chargedTail);
+    if (chargedTail > tailAll) {
+      tailAll = chargedTail;
+      tailAllOwner = entry.id === inputs.start.reservationId ? "start" : entry.workerClass;
+    }
     typicalUndecayed += typical;
     tailUndecayed = Math.max(tailUndecayed, share - typical);
     const own = entry.status === "owned";
@@ -522,7 +557,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     const own = claim(inputs.start.estimateMib, inputs.start.typicalMib, 0, false);
     unrealized += own.share;
     typicalAll += own.typical;
-    tailAll = Math.max(tailAll, own.share - own.typical);
+    if (own.share - own.typical > tailAll) {
+      tailAll = own.share - own.typical;
+      tailAllOwner = "start";
+    }
     typicalUndecayed += own.typical;
     tailUndecayed = Math.max(tailUndecayed, own.share - own.typical);
     unrealizedOwn += own.share;
@@ -541,15 +579,21 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let daemonGrowth = 0;
   let daemonTypical = 0;
   let daemonTail = 0;
+  let daemonTailOwner: string | null = null;
+  let lifetimePeak: number | null = null;
   let ownDaemonGrowth = 0;
   let ownDaemonTypical = 0;
   let ownDaemonTail = 0;
   for (const growth of inputs.daemonGrowth) {
+    if (growth.lifetimePeakGrowthMib !== undefined) lifetimePeak = (lifetimePeak ?? 0) + growth.lifetimePeakGrowthMib;
     if (growth.growthMib !== undefined) {
       const typical = Math.max(0, Math.min(growth.typicalMib ?? growth.growthMib, growth.growthMib));
       daemonGrowth += growth.growthMib;
       daemonTypical += typical;
-      daemonTail = Math.max(daemonTail, growth.growthMib - typical);
+      if (growth.growthMib - typical > daemonTail) {
+        daemonTail = growth.growthMib - typical;
+        daemonTailOwner = `daemon:${growth.instance}`;
+      }
       if (growth.own) {
         ownDaemonGrowth += growth.growthMib;
         ownDaemonTypical += typical;
@@ -561,6 +605,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   const containerTail = Math.max(tailOwn, ownDaemonTail);
   const containerClaim = inputs.jointClaim ? inputs.jointClaim.ownMib + ownDaemonTail : typicalOwn + containerTail;
   const hostTail = Math.max(tailAll, daemonTail);
+  const hostTailOwner = inputs.jointClaim || daemonTail > tailAll ? daemonTailOwner : tailAllOwner;
   const hostClaim = inputs.jointClaim ? inputs.jointClaim.hostMib + daemonTail : typicalAll + hostTail;
   const hostClaimUndecayed = inputs.jointClaim ? hostClaim : typicalUndecayed + Math.max(tailUndecayed, daemonTail);
 
@@ -579,8 +624,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     if (swapIn > policy.swapInPagesPerSecMax && relation.counts) reasons.add("swap-in");
   }
   const psi = "unread" in inputs.psi ? null : inputs.psi;
+  const psiBound = psiBoundFor(inputs.psiBound, policy);
   if (psi === null) widen("psi-unread", margin, (inputs.psi as { unread: string }).unread);
-  else if (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > policy.psiFullAvg10Max) reasons.add("psi");
+  else if (psi.someAvg10 > policy.psiSomeAvg10Max || (psi.fullAvg10 ?? 0) > psiBound.bound) reasons.add("psi");
 
   let containerCurrent: number | null = null;
   let containerMax: number | null = null;
@@ -650,6 +696,8 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       daemonGrowthMib: daemonGrowth,
       daemonGrowthTypicalMib: daemonTypical,
       daemonGrowthTailMib: daemonTail,
+      daemonGrowthLifetimePeakMib: lifetimePeak,
+      hostTailOwner,
       coldStartReserveMib: coldStartReserve,
       marginMib,
       projectedAvailableMib: projected,
@@ -657,6 +705,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       hostReserveMib: policy.hostReserveMib,
       swapInPagesPerSec: swapIn,
       swapInBasis,
+      psiFullAvg10Bound: psiBound,
       psi,
       containerCurrentMib: containerCurrent,
       containerMaxMib: containerMax,
@@ -815,6 +864,114 @@ function swapInPredictsStall(relation: SwapStallRelation | undefined): { counts:
     basis: `swap-in ${counts ? "predicts" : "does not predict"} stall: ${pct(relation.afterSwapIn)} of ${relation.samples} ` +
       `swap-in verdicts were followed by one, against ${pct(relation.afterAny)} of all (noise ${pct(relation.noise)})`,
   };
+}
+
+/** One verdict in the PSI record: host full avg10 and avg60 (null: unread), whether its start was admitted, and the
+ *  cumulative /proc/vmstat oom_kill (null: unread). */
+export interface PsiStartSample {
+  at: number;
+  fullAvg10: number | null;
+  fullAvg60: number | null;
+  admitted: boolean;
+  oomKill: number | null;
+}
+
+/** The bound a verdict applies: the record's, never below the prior; no record read, the prior. */
+function psiBoundFor(learned: PsiFullAvg10Bound | undefined, policy: HostMemoryBudgetPolicy): PsiFullAvg10Bound {
+  const prior = policy.psiFullAvg10Max;
+  if (learned === undefined) return priorBound(prior, "no PSI record read", 0);
+  return { ...learned, prior, bound: Math.max(prior, learned.bound) };
+}
+
+function priorBound(prior: number, why: string, samples: number, at?: Partial<PsiFullAvg10Bound>): PsiFullAvg10Bound {
+  return { bound: prior, prior, basis: `the prior ${prior}: ${why}`, samples, afterAdmitted: null, afterBand: null,
+    noise: null, ooms: null, ...at };
+}
+
+/**
+ * W1-T10085: the PSI full avg10 bound learned from the record. A verdict is HARMED when, within SWAP_STALL_WINDOW_MS,
+ * oom_kill changed from its last reading or a later verdict read full avg60 past the PRIOR: the outcome never reads the
+ * learned bound. For each admitted level v above the prior, the admitted starts with closed windows in (prior, v] are
+ * compared with every verdict in that band; the bound is the largest v with SWAP_STALL_MIN_SAMPLES such starts, a lift
+ * within twice the noise, no OOM kill after one, and oom_kill read in the band. Otherwise the prior, and why.
+ */
+export function psiStartBoundOf(history: PsiStartSample[], now: number, policy: HostMemoryBudgetPolicy, unread?: string): PsiFullAvg10Bound {
+  const prior = policy.psiFullAvg10Max;
+  if (unread !== undefined) return priorBound(prior, unread, 0);
+  const sorted = history.filter((s) => s.at <= now).sort((x, y) => x.at - y.at);
+  const outcome = (i: number): { harmed: boolean; oom: boolean } => {
+    const s = sorted[i]!;
+    let read = s.oomKill;
+    for (let j = i - 1; read === null && j >= 0; j--) read = sorted[j]!.oomKill;
+    let stall = false;
+    let oom = false;
+    for (let j = i + 1; j < sorted.length && sorted[j]!.at <= s.at + SWAP_STALL_WINDOW_MS; j++) {
+      const later = sorted[j]!;
+      if (later.at === s.at) continue;
+      if ((later.fullAvg60 ?? 0) > prior) stall = true;
+      // A count that went down is a reboot: harm too.
+      if (later.oomKill !== null && read !== null && later.oomKill !== read) oom = true;
+    }
+    return { harmed: stall || oom, oom };
+  };
+  const band = sorted.map((s, i) => ({ s, i })).filter(({ s }) => s.fullAvg10 !== null && s.fullAvg10 > prior &&
+    now - s.at >= SWAP_STALL_WINDOW_MS && now - s.at <= SWAP_STALL_HISTORY_MS)
+    .map(({ s, i }) => ({ ...s, level: s.fullAvg10!, ...outcome(i) })).sort((x, y) => x.level - y.level);
+  const admitted = band.filter((s) => s.admitted);
+  const allOomUnread = admitted.every((s) => s.oomKill === null);
+  const ooms = allOomUnread ? null : admitted.filter((s) => s.oom).length;
+  if (admitted.length < SWAP_STALL_MIN_SAMPLES) {
+    return priorBound(prior, `${admitted.length} of ${SWAP_STALL_MIN_SAMPLES} admitted starts above it with a closed window`,
+      admitted.length, { ooms });
+  }
+  const pct = (v: number): string => `${Math.round(v * 100)}%`;
+  let learned: PsiFullAvg10Bound | undefined;
+  let refused = "";
+  let judged: Partial<PsiFullAvg10Bound> = {};
+  let inBand = 0;
+  let harmedInBand = 0;
+  let inAdmitted = 0;
+  let harmedAdmitted = 0;
+  let oomsAdmitted = 0;
+  let oomRead = false;
+  let levelAdmitted = false;
+  for (let k = 0; k < band.length; k++) {
+    const s = band[k]!;
+    inBand += 1;
+    if (s.harmed) harmedInBand += 1;
+    if (s.oomKill !== null) oomRead = true;
+    if (s.admitted) {
+      levelAdmitted = true;
+      inAdmitted += 1;
+      if (s.harmed) harmedAdmitted += 1;
+      if (s.oom) oomsAdmitted += 1;
+    }
+    // Judged once per admitted level, with every verdict at that level in the band.
+    if (k + 1 < band.length && band[k + 1]!.level === s.level) continue;
+    if (!levelAdmitted) continue;
+    levelAdmitted = false;
+    if (oomsAdmitted > 0) {
+      refused = `${oomsAdmitted} admitted start(s) at full avg10 ${prior}-${s.level} followed by an OOM kill`;
+      break;
+    }
+    if (inAdmitted < SWAP_STALL_MIN_SAMPLES) continue;
+    if (!oomRead) {
+      refused = `oom_kill unread on every verdict at full avg10 ${prior}-${s.level}`;
+      continue;
+    }
+    const afterAdmitted = harmedAdmitted / inAdmitted;
+    const afterBand = harmedInBand / inBand;
+    const noise = 2 * Math.sqrt(afterBand * (1 - afterBand) / inAdmitted);
+    const line = `${pct(afterAdmitted)} of ${inAdmitted} admitted starts at full avg10 ${prior}-${s.level} were followed by ` +
+      `stall or an OOM kill, against ${pct(afterBand)} of all ${inBand} verdicts in that band (noise ${pct(noise)})`;
+    if (afterAdmitted - afterBand > noise) {
+      refused = line;
+      judged = { afterAdmitted, afterBand, noise };
+      continue;
+    }
+    learned = { bound: s.level, prior, basis: `learned ${s.level}: ${line}`, samples: inAdmitted, afterAdmitted, afterBand, noise, ooms };
+  }
+  return learned ?? priorBound(prior, refused, admitted.length, { ooms, ...judged });
 }
 
 // ── the counterfactual review (pure, W1-T7095) ──────────────────────────────────────────────────────────────────
@@ -1090,15 +1247,21 @@ interface PressureStore {
   swap: Array<[number, number | null, 0 | 1]>;
   /** [at, 1 when projection exceeds onset, 1 when under own pressure]. */
   container: Array<[number, 0 | 1, 0 | 1]>;
+  /** W1-T10085: [at, host full avg10, 1 when its start was admitted, cumulative oom_kill, host full avg60]. */
+  psi: PsiEntry[];
+  /** Why the store could not be read; the PSI bound then keeps the prior. */
+  unread?: string;
 }
+
+type PsiEntry = [number, number | null, 0 | 1, number | null, number | null];
 
 function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): PressureStore {
   let parsed: Partial<PressureStore>;
   try {
     parsed = JSON.parse(read(path)) as Partial<PressureStore>;
   } catch (error) {
-    void error; // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
-    return { swap: [], container: [] };
+    // No store yet, or a torn one: no prior sample and no history, so the rate reads unmeasured.
+    return { swap: [], container: [], psi: [], unread: error instanceof SyntaxError ? "unparseable" : reasonOf(error) };
   }
   const finite = (...n: unknown[]): boolean => n.every((v) => typeof v === "number" && Number.isFinite(v));
   const prior = parsed.prior && finite(parsed.prior.at) ? parsed.prior : undefined;
@@ -1108,7 +1271,38 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
   const container = Array.isArray(parsed.container)
     ? parsed.container.filter((s) => Array.isArray(s) && finite(s[0]) && (s[1] === 0 || s[1] === 1) && (s[2] === 0 || s[2] === 1))
     : [];
-  return { ...(prior ? { prior } : {}), swap, container };
+  const nullable = (v: unknown): boolean => v === null || finite(v);
+  const psi = Array.isArray(parsed.psi)
+    ? parsed.psi.filter((s) => Array.isArray(s) && finite(s[0]) && nullable(s[1]) && (s[2] === 0 || s[2] === 1) &&
+      nullable(s[3]) && nullable(s[4]))
+    : [];
+  return { ...(prior ? { prior } : {}), swap, container, psi };
+}
+
+function readOomKill(read: ShadowMemoryPorts["readFile"]): number | null {
+  try {
+    const raw = /^oom_kill (\d+)$/m.exec(read("/proc/vmstat"))?.[1];
+    return raw === undefined ? null : Number(raw);
+  } catch (error) {
+    void error; // Unread: this verdict carries no OOM reading, and a band with none keeps the prior.
+    return null;
+  }
+}
+
+/** W1-T10085: mark the start of the verdict stamped `at` admitted in the PSI record. Never throws; false when unmarked. */
+export function markPsiStartAdmitted(ports: Pick<ShadowMemoryPorts, "readFile" | "writeFile">, root: string, at: number): boolean {
+  try {
+    const path = join(root, "state", CONTAINER_PRESSURE_FILE);
+    const { unread, ...store } = readPressureStore(ports.readFile, path);
+    const entry = unread === undefined ? store.psi.find(([stamp]) => stamp === at) : undefined;
+    if (entry === undefined) return false;
+    entry[2] = 1;
+    ports.writeFile(path, `${JSON.stringify(store)}\n`);
+    return true;
+  } catch (error) {
+    void error; // Unwritable: the record holds one admitted start fewer, so the bound learns more slowly.
+    return false;
+  }
 }
 
 /**
@@ -1118,8 +1312,8 @@ function readPressureStore(read: ShadowMemoryPorts["readFile"], path: string): P
  */
 function readContainerPressure(
   ports: ShadowMemoryPorts, root: string, now: number, policy: HostMemoryBudgetPolicy,
-  snapshot: ShadowInputs,
-): { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
+  snapshot: ShadowInputs, admitted: boolean,
+): Pick<ShadowInputs, "psiBound" | "psiRecordAt"> & { containerPressure: ContainerPressureInput; swapStall: SwapStallRelation; containerLift: ContainerLift } {
   const path = join(root, "state", CONTAINER_PRESSURE_FILE);
   const store = readPressureStore(ports.readFile, path);
   const psi = readPsi(ports.readFile, "/sys/fs/cgroup/memory.pressure");
@@ -1166,19 +1360,25 @@ function readContainerPressure(
   const rate = "pagesPerSec" in snapshot.swapIn ? Math.round(snapshot.swapIn.pagesPerSec) : null;
   const swap = [...store.swap, [now, rate, stalled ? 1 : 0] as [number, number | null, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
+  const psiBound = psiStartBoundOf(store.psi.map(([at, fullAvg10, admit, oomKill, fullAvg60]) => ({
+    at, fullAvg10, fullAvg60, admitted: admit === 1, oomKill,
+  })), now, policy, store.unread === undefined ? undefined : `pressure store unread (${store.unread})`);
+  const psiSeries = [...store.psi, [now, hostPsi?.fullAvg10 ?? null, admitted ? 1 : 0, readOomKill(ports.readFile),
+    hostPsi?.fullAvg60 ?? null] as PsiEntry].filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
   // Evaluate the same pure projection as the caller, before storing this outcome; this row cannot train its own lift.
   const numbers = evaluateShadowMemory({ ...snapshot, containerPressure, swapStall, containerLift }, policy).numbers;
   const flagged = numbers.containerProjectedMib !== null && numbers.containerOnsetMib !== null &&
     numbers.containerProjectedMib > numbers.containerOnsetMib;
   const container = [...store.container, [now, flagged ? 1 : 0, numbers.containerPressed ? 1 : 0] as [number, 0 | 1, 0 | 1]]
     .filter(([at]) => now - at <= SWAP_STALL_HISTORY_MS).slice(-SWAP_HISTORY_CAP);
-  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container };
+  const next = { prior: { at: now, ...(pswpin !== undefined ? { pswpin } : {}), ...(high !== undefined ? { high } : {}) }, swap, container,
+    psi: psiSeries };
   try {
     ports.writeFile(path, `${JSON.stringify(next)}\n`);
   } catch (error) {
     void error; // Unwritable: this verdict still judges from its reading; the next one measures no rate and learns less.
   }
-  return { containerPressure, swapStall, containerLift };
+  return { containerPressure, swapStall, containerLift, psiBound, psiRecordAt: now };
 }
 
 function readContainer(read: ShadowMemoryPorts["readFile"]): ShadowInputs["container"] {
@@ -1417,7 +1617,7 @@ export function daemonGrowthFromStatus(status: string): { growthMib: number; pea
  */
 export function daemonGrowthOf(
   rows: readonly TailRow[], now: number, minSamples: number, pid?: number,
-): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+): SeriesGrowth {
   const recent = rows.filter((r) => DAEMON_SAMPLE_STEPS.has(r.step) && r.bytes !== undefined && now - r.at <= HOUR_MS &&
     (pid === undefined || r.pid === undefined || r.pid === pid));
   return seriesGrowth(recent.map((r) => r.bytes!), minSamples, "daemon sample row(s)");
@@ -1427,21 +1627,21 @@ export function daemonGrowthOf(
  *  daemon climbs back toward the instance's footprint, so a prior pid's samples still say what is typical). */
 export function footprintGrowthOf(
   samples: readonly FootprintSample[], now: number, minSamples: number,
-): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+): SeriesGrowth {
   const recent = samples.filter((s) => s.at <= now && now - s.at <= HOUR_MS);
   return seriesGrowth(recent.map((s) => s.bytes), minSamples, "daemon footprint sample(s)");
 }
 
-function seriesGrowth(
-  bytes: readonly number[], minSamples: number, unit: string,
-): { samples: number; growthMib?: number; typicalMib?: number; reason?: string } {
+function seriesGrowth(bytes: readonly number[], minSamples: number, unit: string): SeriesGrowth {
   if (bytes.length < minSamples) return { samples: bytes.length, reason: `${bytes.length} ${unit} in the last hour` };
   const latest = bytes.at(-1)!;
   const sorted = [...bytes].sort((a, b) => a - b);
   const mid = sorted.length >> 1;
   const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
-  const growthMib = Math.max(0, Math.max(...bytes) - latest) / MIB;
-  return { samples: bytes.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - latest) / MIB) };
+  const peak = Math.max(...bytes);
+  const growthMib = Math.max(0, peak - latest) / MIB;
+  return { samples: bytes.length, growthMib, typicalMib: Math.min(growthMib, Math.max(0, median - latest) / MIB),
+    peakMib: peak / MIB, medianMib: median / MIB, latestMib: latest / MIB };
 }
 
 /**
@@ -1470,8 +1670,9 @@ export function serveScenarioOf(rows: readonly TailRow[], now: number, coverageM
   return { scenario: "serve-stopped", basis: `serve silent ${Math.round(age / 1000)}s` };
 }
 
-/** One bounded snapshot for one start. */
-export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy): ShadowInputs {
+/** One bounded snapshot for one start. `admitted`: its start runs whatever the verdict (a shadow-mode class). */
+export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts, policy: HostMemoryBudgetPolicy,
+  options: { admitted?: boolean } = {}): ShadowInputs {
   const now = ports.clock.now();
   const ledger = readLedgerState(ports, start.root);
   const recorded = ledger.reading?.entries ?? [];
@@ -1517,7 +1718,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     serve: serveOf(ports, tail, now, start.root),
     reviewEstimateMib: estimateOf(ports, "review"),
   };
-  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs) };
+  const gathered = { ...inputs, ...readContainerPressure(ports, start.root, now, policy, inputs, options.admitted === true) };
   if (policy.claimModel !== JOINT_MODEL) return gathered;
   if (hostMemoryBudgetModeFor(policy, start.workerClass) === "enforce") {
     if (policy.jointQualification === undefined) throw new Error("joint enforce unavailable: qualification evidence is missing");
@@ -1625,7 +1826,9 @@ function rotationOf(ports: ShadowMemoryPorts, root: string): number | undefined 
   }
 }
 
-type SeriesGrowth = { samples: number; growthMib?: number; typicalMib?: number; reason?: string };
+export type SeriesGrowth = {
+  samples: number; growthMib?: number; typicalMib?: number; reason?: string; peakMib?: number; medianMib?: number; latestMib?: number;
+};
 
 /**
  * The daemon's rss+swap series for this instance: its persisted footprint (daemon-footprint.ts), unless the ledger tail
@@ -1645,40 +1848,54 @@ function daemonSeries(
   return { series: { samples: 0, reason: `ledger tail unreadable: ${(tail as { unread: string }).unread}` }, basis: "none", footprint };
 }
 
-/** This instance's daemon growth: measured from the daemon's /proc status when its pid is known and readable, else from
- *  its sample series (above), else unmeasured with the reasons for both. */
+/** This instance's daemon growth (W1-T9972): its last-hour series' peak less its current rss+swap (the proc's VmRSS +
+ *  VmSwap when readable, else the latest sample); too few samples, the proc's VmHWM - VmRSS; else unmeasured with the
+ *  reasons for both. The proc's lifetime figure rides along for comparison. */
 function ownDaemonGrowth(
   ports: ShadowMemoryPorts,
   tail: ReturnType<typeof readTailRows>,
   now: number,
   policy: HostMemoryBudgetPolicy,
   root: string,
-): SeriesGrowth & { basis?: string; typicalBasis?: string; footprint?: string } {
-  let procReason: string;
+): Omit<ShadowInputs["daemonGrowth"][number], "instance"> {
+  let procReason = "";
   const pid = ports.daemonPid();
   const { series, basis, footprint } = daemonSeries(ports, tail, now, policy.daemonGrowthMinSamples, root, pid);
+  let proc: { growthMib: number; peakMib: number; residentMib: number; swapMib: number } | undefined;
   if (pid === undefined) procReason = "no daemon pid in this process";
   else {
     try {
-      const measured = daemonGrowthFromStatus(ports.readFile(`/proc/${pid}/status`));
-      if (measured) {
-        // The peak is the proc's; how much of the climb back to it is typical comes from the sample series.
-        const typical = series.typicalMib === undefined ? undefined : Math.min(measured.growthMib, series.typicalMib);
-        const unit = basis === "daemon footprint" ? "footprint sample(s)" : "sample row(s)";
-        return {
-          samples: 1, growthMib: measured.growthMib, ...(typical !== undefined ? { typicalMib: typical } : {}),
-          basis: `proc ${pid}: VmHWM ${Math.round(measured.peakMib)} MiB - VmRSS ${Math.round(measured.residentMib)} MiB`,
-          typicalBasis: typical !== undefined ? `median of ${series.samples} ${unit}` : `all typical: ${series.reason}`,
-          footprint,
-        };
-      }
-      procReason = `proc ${pid}: no VmHWM/VmRSS`;
+      const status = ports.readFile(`/proc/${pid}/status`);
+      const measured = daemonGrowthFromStatus(status);
+      if (measured) proc = { ...measured, swapMib: Number(/^VmSwap:\s+(\d+)\s+kB/m.exec(status)?.[1] ?? 0) / 1024 };
+      else procReason = `proc ${pid}: no VmHWM/VmRSS`;
     } catch (error) {
       // The pid exited or /proc is unreadable: named below, and the sample series is tried instead.
       procReason = `proc ${pid}: ${reasonOf(error)}`;
     }
   }
-  if (series.growthMib !== undefined) return { ...series, basis, footprint };
+  const lifetimeBasis = proc && `proc ${pid}: VmHWM ${Math.round(proc.peakMib)} MiB - VmRSS ${Math.round(proc.residentMib)} MiB`;
+  const lifetime = proc ? { lifetimePeakGrowthMib: proc.growthMib, lifetimePeakBasis: lifetimeBasis! } : {};
+  if (series.peakMib !== undefined && series.medianMib !== undefined && series.latestMib !== undefined) {
+    // The series is rss+swap, so the current reading is too: a swapped-out daemon does not raise its own tail.
+    const current = proc ? proc.residentMib + proc.swapMib : series.latestMib;
+    const growthMib = Math.max(0, series.peakMib - current);
+    const typicalMib = Math.min(growthMib, Math.max(0, series.medianMib - current));
+    const unit = basis === "daemon footprint" ? "footprint sample(s)" : "sample row(s)";
+    return {
+      samples: series.samples, growthMib, typicalMib, basis, footprint, ...lifetime,
+      currentBasis: proc
+        ? `proc ${pid}: VmRSS ${Math.round(proc.residentMib)} MiB + VmSwap ${Math.round(proc.swapMib)} MiB`
+        : "the latest sample",
+      ...(proc ? { typicalBasis: `median of ${series.samples} ${unit}` } : {}),
+    };
+  }
+  if (proc) {
+    return {
+      samples: 1, growthMib: proc.growthMib, basis: `${lifetimeBasis} (the lifetime peak: ${series.reason})`,
+      typicalBasis: `all typical: ${series.reason}`, footprint, ...lifetime,
+    };
+  }
   return { ...series, reason: `${procReason}; ${series.reason}`, footprint };
 }
 
@@ -1781,7 +1998,7 @@ function recordDiagnostics(
       workersResidentMib,
       daemonGrowthChargedMib: verdict.numbers.daemonGrowthTypicalMib,
       daemonGrowthBasis: daemonGrowthBasisOf(inputs.daemonGrowth),
-      daemonGrowthPeakMib: verdict.numbers.daemonGrowthMib,
+      daemonGrowthPeakMib: verdict.numbers.daemonGrowthLifetimePeakMib ?? verdict.numbers.daemonGrowthMib,
       coldStartReserveMib: verdict.numbers.coldStartReserveMib,
       hostReserveMib: policy.hostReserveMib,
     }, ports.priorityPolicy());
@@ -1812,7 +2029,7 @@ export function recordShadowMemoryVerdict(start: ShadowStart, overrides: Partial
     const policy = ports.policy();
     const mode = hostMemoryBudgetModeFor(policy, start.workerClass);
     if (mode === "off") return { kind: "off" };
-    const inputs = gatherShadowInputs(start, ports, policy);
+    const inputs = gatherShadowInputs(start, ports, policy, { admitted: mode === "shadow" });
     const instance = instanceOf(ports, start.root);
     const now = ports.clock.now();
     const waitKey = `${instance}\u0000${start.workerClass}`;

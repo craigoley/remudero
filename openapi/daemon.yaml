@@ -390,6 +390,9 @@ components:
             Bounded worker observability. It names the active role/provider/model and the
             current or last tool, but never carries prompts, tool arguments, or tool output.
           properties:
+            runId:
+              type: string
+              description: Proven by this task's current run start, never inferred from task id or another event.
             role:
               type: string
               enum: [recon, implementer, reviewer, fixer, triage, retro, unknown]
@@ -1737,6 +1740,10 @@ components:
         array), plus `counts` and, for a list section, `page`.
       required: [counts]
       properties:
+        snapshotKey:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Completed maintained classification shared by sections, pages and the attention census; absent from older unqualified bodies.
         planSource:
           $ref: "#/components/schemas/PlanSource"
         ready:
@@ -7797,6 +7804,103 @@ components:
         value: {type: [number, "null"]}
         notCollectedReason: {type: string}
 
+    GardenerWorkerCallCounts:
+      type: object
+      additionalProperties: false
+      required: [assignments, matched, missing, orphan, conflicting, invalid]
+      properties:
+        assignments: {type: [integer, "null"], minimum: 0}
+        matched: {type: [integer, "null"], minimum: 0}
+        missing: {type: [integer, "null"], minimum: 0}
+        orphan: {type: [integer, "null"], minimum: 0}
+        conflicting: {type: [integer, "null"], minimum: 0}
+        invalid: {type: [integer, "null"], minimum: 0}
+
+    GardenerWorkerBillingModes:
+      type: object
+      additionalProperties: false
+      required: [api, subscription, unknown]
+      properties:
+        api: {type: [integer, "null"], minimum: 0}
+        subscription: {type: [integer, "null"], minimum: 0}
+        unknown: {type: [integer, "null"], minimum: 0}
+
+    GardenerWorkerPriceCoverage:
+      type: object
+      additionalProperties: false
+      required: [reported, unreported]
+      properties:
+        reported: {type: [integer, "null"], minimum: 0}
+        unreported: {type: [integer, "null"], minimum: 0}
+
+    GardenerWorkerCalls:
+      type: object
+      additionalProperties: false
+      description: >
+        Optional gardener-worker-calls-v1 evidence from the existing off-loop ledger union
+        capture, served from cached Analytics without a GET-time ledger scan. Global counters
+        aggregate only repository-scoped gardens; host and fleet gardens are excluded.
+        A match requires the exact validated origin, gardener name and parent pass in the
+        same repository and daemon generation, the same immutable assignment ID, and the
+        same nonempty run and task. Optional raw repository/generation fields must agree.
+        Identical semantic assignment/attempt replays count once even when timestamps differ;
+        conflicting restatements quarantine the identity and cannot create a matched call.
+        Missing parents, assignments or terminal attempts, unobserved assignments, malformed
+        attributed rows and incomplete retained evidence remain gaps. Call observation is
+        neither task success nor proof that a running or interrupted parent completed.
+        These counters never sum dollars or make worker.attempt a canonical monetary producer.
+        Null means unknown. A complete newly captured empty corpus can observe zero; an old
+        source without worker-call capture reports not_collected/missing_capture with null
+        counters and clocks. Optional evidence failure or overflow preserves independent
+        monetary subtotals and ordinary Analytics while refusing complete usage coverage.
+        No raw identities, prompts, tokens, worker envelopes or credentials are public.
+      required: [version, state, reason, observedAt, window, counts, billingModes, priceCoverage, gardens]
+      properties:
+        version: {type: string, enum: [gardener-worker-calls-v1]}
+        state: {type: string, enum: [not_collected, partial, complete]}
+        reason:
+          type: string
+          enum: [missing_capture, invalid_capture, scope_mismatch, over_budget, incomplete_evidence, observed]
+        observedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Source capture clock, independent of the evidence window and GardenerSpend.materializedAt.
+        window:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [from, through]
+          properties:
+            from: {type: string, format: date-time}
+            through: {type: string, format: date-time}
+        counts:
+          $ref: "#/components/schemas/GardenerWorkerCallCounts"
+        billingModes:
+          description: Matched calls with exactly api or subscription billing_mode; every other value is unknown. These are not billed amounts.
+          $ref: "#/components/schemas/GardenerWorkerBillingModes"
+        priceCoverage:
+          description: >
+            Matched attempts with their own explicit finite nonnegative numeric total_cost_usd
+            are reported, including an explicit zero. Absent, invalid, inherited or differently
+            named prices are unreported. Field presence is neither billed spend nor an invoice;
+            API reported estimates and subscription notional prices remain distinct concepts.
+          $ref: "#/components/schemas/GardenerWorkerPriceCoverage"
+        gardens:
+          type: array
+          maxItems: 32
+          description: Only repository-scoped registered gardens, with bounded public names and no raw join identities.
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, counts, billingModes, priceCoverage]
+            properties:
+              name: {type: string, maxLength: 64}
+              counts:
+                $ref: "#/components/schemas/GardenerWorkerCallCounts"
+              billingModes:
+                $ref: "#/components/schemas/GardenerWorkerBillingModes"
+              priceCoverage:
+                $ref: "#/components/schemas/GardenerWorkerPriceCoverage"
+
     GardenerSpend:
       type: object
       description: >
@@ -7846,6 +7950,8 @@ components:
               scope: {type: string, enum: [repository, host, fleet]}
               totalUsd: {type: [number, "null"], minimum: 0}
               pricedSubtotalUsd: {type: [number, "null"], minimum: 0}
+        workerCalls:
+          $ref: "#/components/schemas/GardenerWorkerCalls"
     RepositoryFlowBucket:
       type: object
       additionalProperties: false
@@ -8815,7 +8921,7 @@ components:
     InboxView:
       type: object
       description: >
-        GET /v1/views/inbox?section=<s>[&cursor=<n>] (docs/views.md, src/lib/inbox-view.ts): one page
+        GET /v1/views/inbox?section=<s>[&cursor=<opaque>] (docs/views.md, src/lib/inbox-view.ts): one page
         of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a
         read answers from memory. Every page carries every lane's counts. Dark until
         state/read-model/switches.json sets `inbox` to `serve`.
@@ -8839,6 +8945,10 @@ components:
           type: object
           required: [section, items, counts, page]
           properties:
+            snapshotKey:
+              type: string
+              pattern: '^[a-f0-9]{64}$'
+              description: One completed classification, reused by every section, continuation and attention census.
             section:
               type: string
               enum: [needsYou, ready, drafting, notReady, declined, fleet, archived, snoozed]
@@ -9462,18 +9572,7 @@ components:
                 entries:
                   type: array
                   items:
-                    type: object
-                    required: [ts, verb, taskId, title]
-                    properties:
-                      ts: {type: string}
-                      verb:
-                        type: string
-                        description: A RecentActivityEntry verb; a consumer renders an unknown one.
-                      taskId: {type: string}
-                      title: {type: string}
-                      detail: {type: string}
-                      costUsd: {type: number}
-                      prUrl: {type: string}
+                    $ref: "#/components/schemas/RecentActivityEntry"
                 mergedToday:
                   type: object
                   description: Exact merges today (UTC), one per task and pull request, over full history.
@@ -9769,8 +9868,18 @@ components:
             openedAt: {type: string}
         worker:
           type: object
+          description: Stable current-dispatch identity; event timing and tool activity stay on recent entries.
           properties:
-            servedModel: {type: string}
+            runId:
+              type: string
+              description: Proven by this instance task's current run start; absent when no dispatch identity is evidenced.
+            role:
+              type: string
+              enum: [recon, implementer, reviewer, fixer, triage, retro, unknown]
+            provider: {type: string}
+            servedModel:
+              type: string
+              description: Only an explicit receipt from this run, never an assignment or requested model.
             requestedModel: {type: string}
         workerState:
           type: string
@@ -10609,6 +10718,11 @@ components:
         - plain
         - reasons
       properties:
+        retirement:
+          $ref: '#/components/schemas/InboxRetirement'
+        needsTriageReason:
+          type: string
+
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10784,6 +10898,10 @@ components:
         - drafting
         - notReady
       properties:
+        snapshotKey:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Completed maintained classification shared by sections, pages and the attention census; absent from older unqualified bodies.
         planSource:
           $ref: "#/components/schemas/PlanSource"
         ready:
@@ -10885,6 +11003,13 @@ components:
       type: object
       description: A stored thread message's structured extras (src/lib/inbox-thread.ts's `ThreadMessageExtra`).
       properties:
+        event:
+          type: object
+          required: [key, kind]
+          properties:
+            key: {type: string}
+            kind: {type: string, enum: [reframed, declined, restored, approved, released, redrafted, task_filed, released_to_fleet, refused, retired, retirement_outcome]}
+
         did:
           $ref: "#/components/schemas/InboxThreadActionTaken"
         suggestedAction:
@@ -11019,6 +11144,11 @@ components:
       type: object
       required: [threadId, proposalId, kind, waitingOn, attention, classification, whyMe, sourceFacts]
       properties:
+        retirement:
+          $ref: '#/components/schemas/InboxRetirement'
+        needsTriageReason:
+          type: string
+
         threadId:
           type: string
         proposalId:
@@ -11064,6 +11194,10 @@ components:
           enum: [needs_operator, automate, backlog]
         at:
           type: [string, "null"]
+        whyMeReceiptIds:
+          type: array
+          description: Exact advisory correction receipts supplied to this judgment; no execution authority.
+          items: {type: string, pattern: '^[a-f0-9]{64}$'}
 
     InboxDismissalAudit:
       type: object
@@ -11302,6 +11436,15 @@ components:
         source is missing; verifiedCounts are conservative lower bounds. No proposal is changed.
       required: [scope, state, countSemantics, snapshotKey, sources, counts, decisionReadiness, verifiedCounts, kinds, items]
       properties:
+        retirements:
+          type: array
+          description: At most 16 KiB of serialized retirement views; completeness is retirementHistory.
+          items: {$ref: '#/components/schemas/InboxRetirement'}
+        retirementHistory:
+          $ref: '#/components/schemas/InboxRetirementHistory'
+
+        whyMeFeedback:
+          $ref: "#/components/schemas/InboxWhyMeFeedback"
         dismissalAudit:
           $ref: "#/components/schemas/InboxDismissalAudit"
         planSource:
@@ -11599,6 +11742,189 @@ components:
               tier: {type: string, enum: [low]}
               path: {type: string}
 
+    InboxRetirementScope:
+      type: object
+      required: [repository, instance, proposalId, taskId]
+      properties:
+        repository: {type: string, minLength: 1, maxLength: 512}
+        instance: {type: string, minLength: 1, maxLength: 512}
+        proposalId: {type: string, minLength: 1, maxLength: 512}
+        taskId: {type: [string, 'null'], maxLength: 160, pattern: '^W[0-9]+-T[A-Za-z0-9]+$'}
+    InboxRetirement:
+      type: object
+      required: [retirementId, snapshotKey, scope, proofId, proofKind, reason, state]
+      properties:
+        retirementId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$', description: Immutable original retirement snapshot anchor.}
+        scope: {$ref: '#/components/schemas/InboxRetirementScope'}
+        proofId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        proofKind: {type: string, enum: [merged-task, plan-retirement, handoff, successor]}
+        reason: {type: string, maxLength: 300}
+        state: {type: string, enum: [retired, restored_for_review]}
+    InboxRetirementHistory:
+      type: object
+      description: Byte-bounded maintained classification projection, separate from the full audit denominator.
+      required: [state, total, returned, truncated, countSemantics]
+      properties:
+        state: {type: string, enum: [observed, absent, unavailable]}
+        total: {type: [integer, 'null'], minimum: 0, description: Null when absent or unavailable; observed empty is zero.}
+        returned: {type: integer, minimum: 0}
+        truncated: {type: boolean}
+        countSemantics: {type: string, enum: [maintained_classification_retirements]}
+    InboxRetirementRestoreRequest:
+      type: object
+      additionalProperties: false
+      required: [repository, instance, proposalId, threadId, intentId, retirementId, snapshotKey, taskId, reason]
+      properties:
+        repository: {type: string, minLength: 1, maxLength: 512}
+        instance: {type: string, minLength: 1, maxLength: 512}
+        proposalId: {type: string, minLength: 1, maxLength: 512}
+        threadId: {type: string, description: 'Exactly thread:<proposalId>::inbox::-::-.'}
+        intentId: {type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$'}
+        retirementId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+        taskId: {type: [string, 'null'], maxLength: 160, pattern: '^W[0-9]+-T[A-Za-z0-9]+$'}
+        reason: {type: string, minLength: 1, maxLength: 2000, description: Nonblank, preserved verbatim.}
+    InboxRetirementRestoreReceipt:
+      type: object
+      required: [id, kind, scope, snapshotKey, retirementId, at, authority, operator, intentId]
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        kind: {type: string, enum: [restore]}
+        scope: {$ref: '#/components/schemas/InboxRetirementScope'}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+        retirementId: {type: string, pattern: '^[a-f0-9]{64}$'}
+        at: {type: string, format: date-time}
+        authority: {type: string, enum: [operator]}
+        operator: {type: string, minLength: 1}
+        intentId: {type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$'}
+    InboxRetirementRestoreResult:
+      type: object
+      required: [repository, instance, ok, accepted, delivery, audit, materialization, receipt]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        ok: {type: boolean, enum: [true]}
+        accepted: {type: boolean, enum: [true]}
+        delivery: {type: string, enum: [delivered]}
+        audit: {type: string, enum: [journal_recorded]}
+        materialization: {type: string, enum: [pending_refresh]}
+        replayed: {type: boolean, enum: [true]}
+        receipt: {$ref: '#/components/schemas/InboxRetirementRestoreReceipt'}
+
+    InboxWhyMeCorrectionRequest:
+      type: object
+      additionalProperties: false
+      required: [repository, instance, threadId, proposalId, snapshotKey, intentId, correction]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        threadId: {type: string}
+        proposalId: {type: string}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+        intentId: {type: string, minLength: 8, maxLength: 128}
+        correction: {type: string, enum: [fleet_can_handle, still_need_me]}
+        note: {type: string, maxLength: 2000}
+        supersedes: {type: string, pattern: '^[a-f0-9]{64}$'}
+
+    InboxWhyMeCorrection:
+      type: object
+      required: [repository, instance, threadId, proposalId, snapshotKey, intentId, correction, receiptId, operator, recordedAt, note, original]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        threadId: {type: string}
+        proposalId: {type: string}
+        snapshotKey: {type: string}
+        intentId: {type: string}
+        correction: {type: string, enum: [fleet_can_handle, still_need_me]}
+        note: {type: string}
+        supersedes: {type: string}
+        receiptId: {type: string}
+        operator: {type: string, description: Service-verified actor; never a client-supplied identity.}
+        recordedAt: {type: string, format: date-time}
+        original:
+          type: object
+          required: [whyMe, sourceFacts]
+          properties:
+            whyMe: {type: string}
+            sourceFacts: {type: array, items: {$ref: '#/components/schemas/InboxAttentionCensusFact'}}
+            judgment: {$ref: '#/components/schemas/InboxAttentionJudgment'}
+
+    InboxWhyMeOutcome:
+      type: object
+      required: [observedAt, assessmentAt, snapshotKey, state, authority, assessmentRelation]
+      description: Fleet observation of advisory feedback against its maintained assessment; never execution or release authority.
+      properties:
+        observedAt: {type: string, format: date-time}
+        assessmentAt: {type: string, format: date-time, description: As-of time of the maintained assessment, separate from observation time.}
+        snapshotKey: {type: string}
+        state: {type: string, enum: [held, awaiting_assessment, assessment_observed, item_absent, superseded, snapshot_changed]}
+        authority: {type: string, enum: [unchanged]}
+        classification: {type: string}
+        assessmentRelation: {type: string, enum: [receipt_joined, unjoined], description: Receipt-joined means the existing judge received this advisory input; it does not claim a causal benefit.}
+        judgment: {$ref: '#/components/schemas/InboxAttentionJudgment'}
+
+    InboxWhyMeFeedback:
+      type: object
+      description: >
+        Separate maintained advisory receipt projection. Its identity/generatedAt qualify its own history;
+        classificationSnapshotKey names the unchanged frozen census. It never changes census items,
+        authority or page keys. Missing outcomes are pending; partial history is not verified absence.
+        Public items are bounded to 16KiB; every original settled receipt remains durable.
+      required: [contract, identity, generatedAt, scope, classificationSnapshotKey, state, total, truncated, items]
+      properties:
+        contract: {type: string, enum: [inbox-why-me-v1]}
+        identity: {type: string}
+        generatedAt: {type: string, format: date-time}
+        scope:
+          type: object
+          required: [repository, instance]
+          properties:
+            repository: {type: string}
+            instance: {type: string}
+        classificationSnapshotKey: {type: string}
+        state: {type: string, enum: [observed, partial, unavailable]}
+        reason: {type: string}
+        total: {type: integer, minimum: 0}
+        truncated: {type: boolean}
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/InboxWhyMeCorrection'
+              - type: object
+                required: [mismatch, active, latest, sameAskFacts, currentSnapshot]
+                properties:
+                  mismatch: {type: boolean}
+                  active: {type: boolean}
+                  latest: {type: boolean, description: Latest non-superseded correction for this operator/ask; historical snapshot context remains explicit.}
+                  sameAskFacts: {type: boolean, description: Current non-judge source facts still match the original ask.}
+                  currentSnapshot: {type: boolean}
+                  outcome: {$ref: '#/components/schemas/InboxWhyMeOutcome'}
+
+    InboxWhyMeCorrectionResult:
+      type: object
+      required: [repository, instance, ok, delivery, authority, audit, correction, receipt]
+      properties:
+        repository: {type: string}
+        instance: {type: string}
+        ok: {type: boolean, enum: [true]}
+        delivery: {type: string, enum: [delivered]}
+        authority: {type: string, enum: [feedback_only]}
+        audit: {type: string, enum: [receipt_recorded]}
+        correction: {$ref: '#/components/schemas/InboxWhyMeCorrection'}
+        replayed: {type: boolean}
+        receipt:
+          type: object
+          required: [intentId, key, status, action, threadId]
+          properties:
+            intentId: {type: string}
+            key: {type: string}
+            status: {type: string, enum: [settled]}
+            action: {type: string, enum: [why-me-correction]}
+            threadId: {type: string}
+
     InstanceInboxReframeRequest:
       allOf:
         - $ref: '#/components/schemas/InboxReframeRequest'
@@ -11747,6 +12073,17 @@ components:
           type: string
         restored:
           type: boolean
+
+    InboxSnapshotRefusal:
+      type: object
+      required: [error, detail]
+      properties:
+        error:
+          type: string
+          enum: [invalid_cursor, inbox_snapshot_changed, inbox_snapshot_pending, inbox_snapshot_stale, plan_source_unavailable]
+        detail: {type: string}
+        restartRequired: {type: boolean, enum: [true]}
+        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
 
     InboxRefusal:
       type: object
@@ -16564,7 +16901,7 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: The previous page's `page.next`.
+          description: The previous page's opaque `page.next`, bound to its classification and section. Old or changed snapshots require restarting.
           schema:
             type: string
       responses:
@@ -16578,12 +16915,24 @@ paths:
           description: The request's `If-None-Match` matched the view's ETag; no body.
         "400":
           $ref: "#/components/responses/InvalidRequest"
+        "409":
+          description: The cursor belongs to another or an unbound classification; restart the section from page one using the current snapshotKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxSnapshotRefusal"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is shadowed (`view_shadow`) or not materialized yet (`view_not_ready`).
+        "503":
+          description: No qualified classification snapshot is available; no unkeyed page is substituted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxSnapshotRefusal"
 
   /v1/views/feedback:
     get:
@@ -17674,7 +18023,7 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: The previous page's `page.nextCursor`.
+          description: The previous page's opaque `page.nextCursor`, bound to its classification and section. Old or changed snapshots require restarting.
           schema:
             type: string
       responses:
@@ -17690,6 +18039,12 @@ paths:
           $ref: "#/components/responses/InvalidRequest"
         "304":
           description: The cached snapshot matches the request's `If-None-Match`; no body.
+        "409":
+          description: The cursor belongs to another or an unbound classification; restart the section from page one using the current snapshotKey.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxSnapshotRefusal"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -18017,7 +18372,12 @@ paths:
               schema:
                 allOf:
                   - $ref: '#/components/schemas/InboxAttentionCensusResult'
-                  - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
+                  - type: object
+                    required: [repository, instance, contract]
+                    properties:
+                      repository: {type: string}
+                      instance: {type: string}
+                      contract: {type: string, enum: [read-write, read-only]}
         '503': {description: Instance or maintained classification unavailable.}
 
   /v1/i/{instance}/inbox/proposal:
@@ -18037,6 +18397,67 @@ paths:
         '404': {description: Proposal absent from this instance's active registry.}
         '409': {description: Requested repository or instance does not match the route.}
         '503': {description: Instance proposal source unavailable.}
+
+  /v1/i/{instance}/inbox/retirement-restore:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    post:
+      summary: Restore one automatically retired ask for review under verified operator authority.
+      description: >
+        Exact original retirement scope and snapshot anchor are required. New admission requires a
+        fresh owned maintained source. Exact same-operator, same-intent, same-payload settled replay
+        precedes source checks and returns the immutable acknowledgement. Acceptance records an
+        authoritative journal event; materialization happens on the next completed slow-lane refresh.
+        A different new intent after restoration is refused and is not accepted as a replay.
+      x-rmd-write-tier: low
+      security: [{bearerWrite: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InboxRetirementRestoreRequest'}
+      responses:
+        '200':
+          description: Durable restoration acknowledgement; publication is pending a completed refresh.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InboxRetirementRestoreResult'}
+        '400': {description: Malformed payload or unsupported fields.}
+        '403': {description: Verified operator identity required.}
+        '409': {description: Foreign scope, mismatched original anchor, changed intent or already restored.}
+        '503': {description: Source, journal, lock or delivery unavailable; uncertainty remains explicit.}
+
+  /v1/i/{instance}/inbox/why-me-correction:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    post:
+      summary: Correct why an ask needs this verified operator, without granting authority.
+      description: >
+        LOW-tier advisory feedback bound to the exact operator, repository/instance, proposal/thread,
+        observed maintained classification snapshot and durable intent. A new stale/foreign request
+        writes no correction. Exact settled replay returns its immutable receipt before rechecking
+        the current snapshot. A shared bearer cannot impersonate an operator. Opposite new-intent
+        feedback reverses the advisory position while preserving original evidence/history and holds.
+        The settled receipt is the authoritative audit; uncertain receipt durability returns unknown.
+        The slow lane exposes history later under its separate projection identity; GET never scans it.
+      x-rmd-write-tier: low
+      security: [{bearerWrite: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/InboxWhyMeCorrectionRequest'}
+      responses:
+        '200':
+          description: One durable advisory correction receipt, or its exact replay.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InboxWhyMeCorrectionResult'}
+        '400': {description: Malformed or client-forged operator/authority fields.}
+        '403': {description: A verified operator identity is required.}
+        '404': {description: The observed source does not contain this actionable item.}
+        '409': {description: Foreign scope, changed snapshot, changed replay or uncertain prior intent.}
+        '503': {description: Source or receipt durability unavailable; delivery remains explicit.}
 
   /v1/i/{instance}/inbox/reframe:
     parameters:

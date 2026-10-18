@@ -1,0 +1,59 @@
+- id: W1-T10012
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/next-task-id-waits-for-the-shared-read-floor.test.ts cost 23 PR minute(s) across 3 round(s) on 3 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.24
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/next-task-id-waits-for-the-shared-read-floor.test.ts"
+  files:
+    - src/lib/github-transport.ts
+    - test/check-test-test-next-task-id-waits-for-the-shared-read-floor-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/next-task-id-waits-for-the-shared-read-floor.test.ts"
+      proof: "grep: test(\"W1-T10012: check:test:test/next-task-id-waits-for-the-shared-read-floor.test.ts is prevented, not retried\" in test/check-test-test-next-task-id-waits-for-the-shared-read-floor-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/next-task-id-waits-for-the-shared-read-floor.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/next-task-id-waits-for-the-shared-read-floor.test.ts cost 23 PR minute(s) (seven-day half-life) across 3 fix round(s) on 3 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/github-transport.ts: test/next-task-id-waits-for-the-shared-read-floor.test.ts imports it
+    - test/next-task-id-waits-for-the-shared-read-floor.test.ts: named by the failing check
+    - the rounds name a failing test: test/next-task-id-waits-for-the-shared-read-floor.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12163 at 2026-10-15T23:11:51Z: hand fix PR #12163: src/lib/github-transport.ts, src/lib/loop-bounded-child.ts; minutes are the pass median proxy (6.050783333333333), not measured repair time
+    - PR #11949 (https://github.com/craigoley/remudero/pull/11949) at 2026-10-15T07:36:54.593Z: ci-log round — ci-shard (1/8): test/next-task-id-waits-for-the-shared-read-floor.test.ts
+        failing tests: W1-T7957: next-task-id waits for a read the hook stamped; W1-T7957: an inherited advisory floor does not wait
+        log excerpt:
+          | grep -E '^FLAKE-RETRY:' test-shard-output.log > "$FLAKE_RETRY_DIR/shard-1.log" || : > "$FLAKE_RETRY_DIR/shard-1.log"
+          | not ok 9 - W1-T7957: next-task-id waits for a read the hook stamped
+          |   ---
+          |   duration_ms: 17317.86054
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/next-task-id-waits-for-the-shared-read-floor.test.ts:1:9828'
+          |   failureType: 'testCodeFailure'
+          |   error: ''
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: true
+          |   actual: false
+          |   operator: '=='
+          |   stack: |-
+    - PR #9896 at 2026-10-07T16:38:28Z: hand fix PR #9896: src/lib/github-transport.ts; minutes are the pass median proxy (6.050783333333333), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.92
+    reasons:
+      - "high-risk verdict at confidence 0.92 — on the change's description/files alone, no diff was read — The filing documents recurring failures but supplies no root-cause diagnosis or concrete preventive mechanism; the proposed remedy cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration, which establishes textual presence rather than demonstrating that the failing behavior is prevented.; on the change's description/files alone, no diff was read — Two rounds explicitly use pass-median proxies rather than measured repair time, limiting verification of the claimed cost."
+    judged_at: "2026-10-17T23:50:11.868Z"
+    pin: "c723245a79fabcf4265579c54a34329f282cb4a389aed5a18b8b8a1a7d2789d6"

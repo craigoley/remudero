@@ -1,0 +1,84 @@
+- id: W1-T9973
+  title: A self-committed fix is scoped before its first parent-owned push
+  repo: remudero
+  depends_on: [W1-T1227]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator instruction 2026-10-17: reconcile W9793 repair publication and prevent the measured first-push scope gap"
+  plan_refs: [W1-T1227, W1-T2651, W1-T2653, W1-T5534, W1-T6465, W1-T9793]
+  files: [src/run-task.ts, test/a-self-committed-fix-is-scoped-before-its-parent-push.test.ts, test/fix-rung-scope-standdown.test.ts, test/a-fix-round-that-did-the-work-lands-it.test.ts, test/helpers/run-task-test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED on clean current-main source 0209f6837, independently unchanged through
+    main 2dc7a5aa8: a disposable runFixRung whose worker commits src/allowed.ts and
+    src/undeclared.ts reaches its parent push once and returns fixed when the first
+    review succeeds. The in-scope positive control also pushes once. Complete TAP:
+    two tests, one pass, one intentional failure on expected pushes0/actual1. Every
+    worker, GitHub, push, review and issue effect is recorded, never live.
+    W1-T1227 tests refusal BEFORE ROUND TWO, not before round one's publication.
+    harnessCommitForShellLessWorker returns an existing nonzero commit count without
+    passing those already-committed paths through commitWorkerEdits. No second strike
+    means no second pre-strike comparison. This source behavior explains a publication
+    opportunity; it does NOT prove the exact historical route taken by every fleet
+    repair. W9793/#12457 supplies the concrete outcome to reconcile: producer-identity.ts
+    was added outside its21declared paths, while its stored body still described the
+    original author tree. The comment baseline is separately an EXISTING registered
+    artifact and18500is the maintained250-comment bucket for18254, not an inherently
+    invalid scope edit. Do not repair this by removing the legitimate artifact exception.
+    Existing W5534/W6465 already own normal files-only scope amendments; reuse them.
+    W5115 owns worker Git credentials; this task must not duplicate or activate it.
+  design: |
+    1. In maintained runFixRung, immediately before the first parent-owned push of a
+       changed repair, compare the actual local committed head/diff against its pinned
+       round start, original inherited diff and current task contract. Reuse the existing
+       scope regime, registered artifacts, bounded declared gate remedies and admissible
+       test/registration predicates; introduce no second allowlist or broader exception.
+       Apply the check to worker-owned commits as well as harness-owned staging.
+    2. A newly undeclared path refuses that parent push and names the actual head, base,
+       path and regime. Preserve the local checkpoint. Reuse the existing typed scope
+       amendment/disposition flow; never auto-amend canonical acceptance or authority.
+       An unreadable or moved local comparison is explicit unknown/refusal, not clean.
+       Preserve explicit head-bound human owner/admin authority and healthy ordinary
+       in-scope repair flow; no extra reviewer or global trusted-PR hold.
+    3. A worker may already have pushed using existing credentials. Detect/report that
+       outcome truthfully when observed; do not claim this parent guard prevented it,
+       delete/rewrite its branch, force-push, revert history or silently bless its scope.
+       Keep the separate worker-credential task with its owner. A local-only refused
+       checkpoint is not a public push, and an already-public checkpoint is not local-only.
+    4. Drive the REAL runFixRung publication seam with disposable Git commits and
+       forbidden push/issue/review recorders. Cover first-round green review, ci-log and
+       conflict paths, worker/harness commits, inherited out-of-scope bytes, legitimate
+       generated artifacts and bounded remedies, plan-only filings, absent/malformed
+       scope evidence, changed HEAD and explicit owner decisions. Show healthy controls
+       still reach their original effects. Delete final scope forwarding to fail and
+       restore to pass; do not merely assert the helper or rendered prompt.
+    5. Check both merged trailer/run-branch credit and claims, ALL open-head subjects,
+       the actual package selector and ordinary ownership before build/publication.
+       Commit before verified-path TAP and mapped coverage of every changed source SF.
+       Use shipped host slots, one native per distinct committed repair, actual pinned
+       base comparison for every new failure and normal stored-body/CI/review/merge.
+       No baseline widening, detector exemption, private material in public receipts,
+       live credential/configuration change, worker stop, schedule or deployment.
+       Registry/admission source behavior stays opt-in SHADOW ONLY and owner-controlled.
+  acceptance:
+    - claim: The maintained fix rung checks actual self-committed scope before its first parent push
+      proof: 'unit test: self-committed undeclared repair is refused before the first parent push'
+    - claim: Healthy in-scope and admitted artifact repairs retain normal parent publication
+      proof: 'unit test: final fix scope check preserves healthy and admitted repair publication'
+    - claim: Unknown or moved publication inputs cannot be certified as clean scope
+      proof: 'unit test: unknown or moved fix publication scope is an explicit refusal'
+    - claim: Already-published worker work is preserved and never reported as a prevented push
+      proof: 'unit test: already-published worker scope is reported without destructive recovery'
+    - claim: Removing real final forwarding fails the forbidden-effect case and restoration passes
+      proof: 'unit test: actual fix publication scope forwarding is load-bearing'
+  falsifier: |
+    Reproduce the first-round green-review fixture before repairing it: actual parent
+    pushes1 must contradict expected0 while its in-scope control pushes1. Afterwards
+    delete the real final check/forwarding and require that semantic failure to return.
+    A test of pre-strike round-two refusal or commitWorkerEdits alone cannot qualify it.

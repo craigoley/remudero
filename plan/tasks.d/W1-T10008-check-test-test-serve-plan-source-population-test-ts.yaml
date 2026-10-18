@@ -1,0 +1,61 @@
+- id: W1-T10008
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:test:test/serve-plan-source-population.test.ts cost 57 PR minute(s) across 9 round(s) on 9 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.13
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:test:test/serve-plan-source-population.test.ts"
+  files:
+    - src/lib/panel-graph.ts
+    - test/check-test-test-serve-plan-source-population-test-ts.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:test:test/serve-plan-source-population.test.ts"
+      proof: "grep: test(\"W1-T10008: check:test:test/serve-plan-source-population.test.ts is prevented, not retried\" in test/check-test-test-serve-plan-source-population-test-ts.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:test:test/serve-plan-source-population.test.ts's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:test:test/serve-plan-source-population.test.ts cost 57 PR minute(s) (seven-day half-life) across 9 fix round(s) on 9 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/panel-graph.ts: test/serve-plan-source-population.test.ts imports it
+    - test/serve-plan-source-population.test.ts: named by the failing check
+    - the rounds name a failing test: test/serve-plan-source-population.test.ts
+
+    RECENT ROUNDS (newest first):
+    - PR #12507 (https://github.com/craigoley/remudero/pull/12507) at 2026-10-17T04:44:35.534Z: ci-log round — coverage-shard (1/8): test/serve-plan-source-population.test.ts
+        failing tests: ["a nonempty plan keeps its counts, its retirement history and a genuine human task","a board that carries no outcome is served exactly as before, with no planSource field"]; a nonempty plan keeps its counts, its retirement history and a genuine human task; a board that carries no outcome is served exactly as before, with no planSource field
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — ["a nonempty plan keeps its counts, its retirement history and a genuine human task","a board that carries no outcome is served exactly as before, with no planSource field"]
+          | not ok 2 - a nonempty plan keeps its counts, its retirement history and a genuine human task
+          |   ---
+          |   duration_ms: 15.558765
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/serve-plan-source-population.test.ts:98:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     the genuine human task is still an operator decision
+          | 
+          |     2 !== 1
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'Asser
+    - PR #12248 at 2026-10-16T03:31:13Z: hand fix PR #12248: src/lib/inbox-board-referents.ts, src/lib/inbox.ts, src/lib/panel-graph.ts; minutes are the pass median proxy (6.098166666666667), not measured repair time
+    - PR #11436 at 2026-10-13T17:57:13Z: hand fix PR #11436: src/lib/inbox.ts, src/lib/panel-graph.ts; minutes are the pass median proxy (6.098166666666667), not measured repair time
+    - PR #10939 at 2026-10-11T20:44:39Z: hand fix PR #10939: src/lib/fleet-lane.ts, src/lib/inbox-view.ts, src/lib/panel-graph.ts; minutes are the pass median proxy (6.098166666666667), not measured repair time
+    - PR #10926 at 2026-10-11T18:09:03Z: hand fix PR #10926: src/lib/panel-graph.ts; minutes are the pass median proxy (6.098166666666667), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.89
+    reasons:
+      - "high-risk verdict at confidence 0.89 — on the change's description/files alone, no diff was read — The filing establishes recurring failures and repair costs, but supplies no shared root-cause diagnosis or specific preventive mechanism; its proposed finding cannot be verified from the supplied evidence.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration claiming prevention. That text match does not establish that the failure is prevented or self-healed, as the stated remedy requires."
+    judged_at: "2026-10-17T23:48:55.201Z"
+    pin: "a1d2c544e9316aaffa3803406ec6e060487df9a66dc3ca51af31f09a7ae1842c"

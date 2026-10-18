@@ -201,27 +201,31 @@ test("W1-T4092: the digest reports each factor's effect with its interval", () =
   assert.match(line!, /rules 1 pair\(s\): turns \+5\.00, landed \+0\.00, cost \+0\.50 \(no interval below 2 pairs\)/);
 });
 
-test("W1-T4092: ablation evidence counts answered use and ignores torn ledger rows", () => {
-  const evidence = readWipeTestAblationEvidence("/state", (stateDir, pattern) => {
+test("W1-T4092: ablation evidence counts answered use and ignores a pair row with no task", () => {
+  const evidence = readWipeTestAblationEvidence("/state", (stateDir, readOpts) => {
     assert.equal(stateDir, "/state");
-    assert.equal(pattern.test('{"step":"learnings.used"}'), true);
+    assert.deepEqual(readOpts.step, ["wipetest.pair", "learnings.used"], "the read is step-filtered to the evidence");
+    assert.equal(readOpts.refuseIncomplete, true, "an unread rotation refuses rather than undercounting");
     return {
       stateDir,
       archiveFiles: [],
       archiveCount: 1,
       liveFileRead: true,
       unread: [],
+      unclassified: [],
       ok: true,
-      matches: [
-        JSON.stringify({ step: "learnings.used", injected_ids: ["learn-1"], used_ids: ["learn-1"] }),
-        JSON.stringify({ step: "learnings.used", injected_ids: ["learn-2"], used_ids: [] }),
-        '{"step":"wipetest.pair"',
+      torn: 1,
+      filesRead: 2,
+      rows: [
+        { step: "learnings.used", injected_ids: ["learn-1"], used_ids: ["learn-1"] },
+        { step: "learnings.used", injected_ids: ["learn-2"], used_ids: [] },
+        { step: "wipetest.pair" },
       ],
     };
   });
 
   assert.equal(evidence.ok, true);
   if (!evidence.ok) return;
-  assert.equal(evidence.pairs.length, 0, "a torn pair row is not treated as measured evidence");
+  assert.equal(evidence.pairs.length, 0, "a pair row naming no task is not treated as measured evidence");
   assert.deepEqual(evidence.claimedUse, { learnings: 0.5 }, "both answered runs count in the claimed-use denominator");
 });

@@ -73,7 +73,7 @@ test("W1-T4945: an idle daemon takes a material advance at once", async () => {
         sweep: async () => ({}),
         checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
       },
-      { sweepWallClockBoundMs: 60_000 },
+      { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 60_000 },
     ),
     5_000,
   );
@@ -109,7 +109,7 @@ test("W1-T4945: a busy daemon defers a low-weight advance to the next idle momen
       },
       checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
     },
-    { sweepWallClockBoundMs: 60_000 },
+    { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 60_000 },
   );
   const summary = await within(daemon, 5_000);
   releaseSweep?.();
@@ -149,7 +149,7 @@ test("W1-T4945: a change to the daemon own loop still drains and restarts while 
       },
       checkFreshness: () => staleWith(["src/lib/daemon.ts"]),
     },
-    { sweepWallClockBoundMs: 24 * 60 * 60_000 },
+    { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * 60_000 },
   );
   const summary = await within(daemon, 5_000);
   releaseSweep?.();
@@ -194,7 +194,7 @@ test("W1-T4945: a deferred advance cannot wait indefinitely", async () => {
       },
       checkFreshness: () => staleWith(["src/lib/inbox.ts"]),
     },
-    { sweepWallClockBoundMs: 24 * 60 * 60_000 },
+    { freshnessMinLifetimeMs: 0, sweepWallClockBoundMs: 24 * 60 * 60_000 },
   );
   const summary = await within(daemon, 5_000);
   releaseSweep?.();

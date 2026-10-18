@@ -53,7 +53,7 @@ function badge(root: string) {
 }
 
 function composite(input: ReturnType<typeof lanes>) {
-  const page = inboxViewBodies(input, SOURCE).find((b) => b.key === "section=needsYou")!;
+  const page = inboxViewBodies(input, SOURCE, "a".repeat(64)).find((b) => b.key === "section=needsYou")!;
   const entry: ReadModelBodyEntry = {
     view: "inbox", key: page.key, version: 1, generation: 1, etag: "fixture",
     body: { view: "inbox", version: 1, generatedAt: CLOCK.iso(), asOf: CLOCK.iso(), stale: false, sources: page.sources, data: page.data },

@@ -9,6 +9,7 @@ import {
 import { loadPlanFromYaml, RETIREMENT_REASONS } from "../src/lib/plan.js";
 import { approveCommand } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { inboxSemanticDigest, inboxProposalRevision, inboxRetirementFor, proofDebtPopulationPermit, stampMechanicalAsk, writeInboxGardenerStore, readInboxGardenerStore } from "../src/lib/inbox-retirement.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 const proof = "test/a-retired-tasks-proposal-cannot-be-ratified.test.ts";
@@ -58,16 +59,26 @@ function fixture(id: string, fields: string) {
   return { proposal, draft, ctx };
 }
 
-for (const id of ids) test(`${proof}: ${id} retires and approve invokes no writer`, () => {
+for (const id of ids) test(`${proof}: ${id} needs a qualified receipt and approve invokes no writer`, () => {
   const root = gitRepo();
   try {
     for (const retirement of RETIREMENT_REASONS) {
       const { proposal, draft, ctx } = fixture(id, `status: blocked\n  retirement: ${retirement}`);
+      if (id.startsWith("proof-debt:")) {
+        const task = ctx.plan.byId.get(subject)!, scope = { repository: "owner/remudero", instance: "core", root: root.dir };
+        proposal.evidenceAnchors = [{ description: "mechanical criterion", path: "plan/tasks.yaml", pattern: "missing" }];
+        stampMechanicalAsk(proposal, task.id, proofDebtPopulationPermit([task]));
+        const terminal = { kind: "plan-retirement" as const, taskId: task.id, repository: scope.repository, instance: scope.instance, commit: "a".repeat(40), blob: "b".repeat(40), retirement };
+        writeInboxGardenerStore(root.dir, { version: 1, scope, entries: {}, events: [{ receipt: { id: "c".repeat(64), kind: "retire", scope: { repository: scope.repository, instance: scope.instance, proposalId: id, taskId: task.id }, snapshotKey: "d".repeat(64), at: new Date().toISOString(), authority: "automatic", heldAtRetirement: false },
+          reason: `${subject} was explicitly ${retirement} under a positive source receipt`, proof: terminal, proofId: inboxSemanticDigest(terminal), inputDigest: "e".repeat(64), proposalRevision: inboxProposalRevision(proposal), operatorIntent: inboxSemanticDigest([]), codeSha: "a".repeat(40), mirrored: true }] });
+        ctx.retirement = p => inboxRetirementFor(readInboxGardenerStore(root.dir, scope), p, inboxSemanticDigest([]));
+      }
       const before = JSON.stringify(proposal);
       const classification = classifyProposal(proposal, draft, ctx);
-      assert.equal(classification.state, "retired", `${id}: ${retirement}`);
+      assert.equal(classification.state, id.startsWith("proof-debt:") ? "retired" : "not_ready", `${id}: ${retirement}`);
       assert.equal(deriveTaskReferent(id), subject);
-      assert.match(classification.retiredReason!, new RegExp(`${subject} was explicitly ${retirement}`));
+      if (id.startsWith("proof-debt:")) assert.match(classification.retiredReason!, new RegExp(`${subject} was explicitly ${retirement}`));
+      else assert.match(classification.needsTriageReason ?? "", /terminal state alone/);
       let writes = 0;
       const result = approveProposal(classification, {
         createRatificationBranch() { writes++; throw new Error("retired proposal reached the writer"); },

@@ -1,0 +1,70 @@
+- id: W1-T9951
+  title: "AN AUTHOR PREFLIGHT'S STATIC STAGE RUNS WHILE ITS SUITE TICKET WAITS — preflight-author takes the host-wide test slot BEFORE static-preflight and holds it through the affected suites, so a short typecheck/lint-plan/commitlint check queues behind every long suite run on the host. Enqueue first, run the static stage on its own memory admission while the ticket waits, and admit the suites in queue order"
+  repo: remudero
+  depends_on: [W1-T9950]  # needs the FIFO ticket that can be held while static work runs; same test-slot.ts loop as W1-T9928 and W1-T9950
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one concern — which admission an author preflight's static stage waits on
+  band_meaning: blast-radius
+  origin: "operator brief 2026-10-16 (Craig, P1): agents waited 10-42 min for a test slot before their preflight ran even its static checks, killed the run and pushed with CI as the only check; today that let a bad plan PR out unchecked locally"
+  plan_refs: [W1-T7392, W1-T7809, W1-T9928, W1-T9950]
+  files:
+    - scripts/preflight-author.mjs
+    - src/lib/test-slot.ts
+    - src/lib/commit-message.ts
+    - test/an-author-preflight-checks-statically-while-its-suites-queue.test.ts
+  status: queued
+  priority: 1  # a plan-only or small diff must get its static verdict without queueing behind full suite runs
+  attempts: 0
+  rationale: |
+    READ 2026-10-16 on origin/main d50367256:
+    - scripts/preflight-author.mjs `main`: after census-precheck and the workflow/docs prechecks, it calls
+      `acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES })` once
+      (#10197, "admit static and affected checks under one shared owner"). Inside that one lease it runs
+      static-preflight (`src/run-task.ts preflight`: commitlint, typecheck, header/body checks), then
+      lint-plan-fast for a plan-only selection, then the affected suites. A plan-only diff, whose whole check is
+      static plus lint-plan, therefore waits for the same slot as a full-fallback suite run.
+    - The wait comes before ANY static output. An agent that kills the wait gets no typecheck, lint-plan or
+      commitlint verdict at all. That is how a bad plan PR reached CI unchecked locally on 2026-10-16.
+    - src/lib/commit-message.ts `typecheckStep` takes its own `typecheck:preflight` slot only on a cold build
+      (`hasUsableTypecheckBuildInfo` false), with memoryBytes TYPECHECK_COLD_PEAK_BYTES (2.5 GiB). Under
+      preflight-author it borrows the parent lease through RMD_TEST_SLOT_PARENT. Run bare (`rmd preflight
+      --fast`), a cold typecheck queues for a suite slot behind suite runs.
+    - The static stage is one niced process (tsc) plus short git/commitlint children. Its cost is memory (a cold
+      tsc), not suite fan-out, and `memoryShort` already judges a named `memoryBytes` peak against headroom and
+      the holders' named peaks.
+  design: |
+    No new fixed threshold. Static admission is judged by measured memory headroom against named peaks. Suite
+    admission keeps W1-T9950's FIFO order.
+    1. ENQUEUE FIRST. preflight-author takes its suite ticket (W1-T9950's queue) where it now calls
+       `acquireTestSlot`, before static-preflight. The ticket keeps its place, beats and reports position while
+       the static stage runs.
+    2. STATIC RUNS ON ITS OWN ADMISSION. static-preflight and lint-plan-fast run without the suite lease. A cold
+       typecheck inside them takes a STATIC admission. It opens when the memory headroom holds TYPECHECK_COLD_PEAK_BYTES
+       beside the live holders' named peaks (today's `memoryShort` rule). It never waits on suite tickets or a
+       suite slot count. Where no memory reading exists, static admission is open, and it says so in its note.
+       A warm typecheck takes no admission, as today.
+    3. SUITES IN ORDER. When the static stage passes and the selection names suites, preflight-author waits for
+       its ticket's admission and runs the suites under that lease, as today. When static fails or the selection
+       names no suite, it cancels the ticket and never takes a slot.
+    4. `rmd preflight` bare. `typecheckStep`'s cold typecheck uses the same static admission, so `rmd preflight
+       --fast` never queues for a suite slot.
+    5. RECEIPT. The receipt records `staticAdmission` (outcome, waitedMs, note) and `suiteQueue` (position at
+       enqueue, waitedMs after static ended, admitted or cancelled), so a later read can tell how much of a wait
+       the static stage absorbed.
+    6. Tests go in the new file, with injected spawn, slot and queue seams. The proofs below name the `test(` titles
+       verbatim.
+  acceptance:
+    - claim: "with every suite slot held and a ticket ahead, preflight-author runs and reports static-preflight before its suite ticket is admitted"
+      proof: 'grep: test("W1-T9951: static-preflight runs while the suite ticket waits" in test/an-author-preflight-checks-statically-while-its-suites-queue.test.ts'
+    - claim: "a failed static stage, or a selection with no suite, cancels the ticket and never takes a suite slot"
+      proof: 'grep: test("W1-T9951: a failed static stage cancels its suite ticket" in test/an-author-preflight-checks-statically-while-its-suites-queue.test.ts'
+    - claim: "a cold typecheck waits on memory headroom only, never on suite tickets or the suite slot count"
+      proof: 'grep: test("W1-T9951: a cold typecheck is admitted by memory, not by the suite queue" in test/an-author-preflight-checks-statically-while-its-suites-queue.test.ts'
+  falsifier: |
+    At origin/main d50367256: with both slots held by live `preflight-author:static-and-affected` records,
+    `node --import tsx scripts/preflight-author.mjs` on a plan-only commit prints `census-precheck` and then
+    nothing until a slot frees. static-preflight and lint-plan-fast have not started. With the fix,
+    static-preflight and lint-plan-fast report while `test_slot.queued` rows show the ticket still waiting.

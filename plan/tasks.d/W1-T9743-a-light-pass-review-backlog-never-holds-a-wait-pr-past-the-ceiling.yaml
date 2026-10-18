@@ -14,7 +14,7 @@
     - src/lib/sweep.ts
     - src/lib/daemon.ts
     - test/a-light-pass-review-backlog-never-holds-a-wait-pr-past-the-ceiling.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: stuck PRs and stalls must not happen
   attempts: 0
   rationale: |

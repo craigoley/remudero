@@ -1,0 +1,70 @@
+- id: W1-T9861
+  title: "TIER, COVERAGE, DURATION AND FLAKE HISTORY FOLLOW A MOVED TEST BY ITS BASENAME — a moved test keeps its slow-tier pin, shard weight and flake count instead of falling to the median or into the shared fast pool (test restructure, letter A, part 2)"
+  repo: remudero
+  depends_on: [W1-T9860]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, how a moved test keeps its measured history; spans the tier manifest script, its readers and test-gardener
+  band_meaning: span
+  origin: 'operator session 2026-10-16, test/ restructure rulings 1-7 (plan/seeds/test-restructure-2026-10-16/decisions.md), plan letter A (part 2 of 3)'
+  plan_refs: [W1-T9860, W1-T9879]
+  files:
+    - scripts/test-tier-manifest.mjs
+    - scripts/flake-screen.mjs
+    - scripts/preflight-author.mjs
+    - src/lib/test-gardener.ts
+    - test/a-moved-test-keeps-its-tier-and-flake-history.test.ts
+  status: merged
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED at a323d87ed (plan/seeds/test-restructure-2026-10-16/coupling-inventory.md section B, row 1):
+    - scripts/test-tier-manifest.json has 3,450 keys; 472 are >= 5 s, and 93 are pinned at 5000, which marks the flakers.
+    - scripts/test-tier-coverage-manifest.json has about 2,400 keys.
+    Citations re-verified at origin/main 889966ea5 (2026-10-16).
+    Readers keyed on the exact path:
+    - scripts/test-tier-manifest.mjs: `manifest.files[file]` at ~163, ~171, ~195 (`?? 0`) and ~688; mergeDurations (~615)
+      never prunes; findGhostRows (~983) makes --check LOUD.
+    - scripts/pure-test-pool.mjs (~104) takes the fast set derived from it.
+    - scripts/flake-screen.mjs (~54-55) loads both manifests.
+    - scripts/preflight-author.mjs (~393) feeds runtimeDeadlineFit.
+    - src/run-task.ts coveragePrecheck prices from it.
+    - src/lib/test-gardener.ts joins the ledger's test.flake_retry rows by exact file, for the duration observations
+      (~160-166) and the retier-flaker class (~288-295, RETIER_THRESHOLD).
+    INFERRED: a moved file reads as unmeasured. A flaker pinned slow drops into the fast tier and the shared-process
+    pool, shard weights fall to the median, and the flake count restarts. Deleting rows does the same, silently.
+  design: |
+    1. ONE LOOKUP. Add manifestEntryFor(manifest, file) to scripts/test-tier-manifest.mjs:
+       - it tries the exact key first;
+       - otherwise it takes the single key whose basename equals the file's basename, using an index built once per
+         manifest load;
+       - otherwise the file is unmeasured.
+       Every reader of either manifest goes through it. `git grep` finds the readers at build time; today they are the
+       lines above, plus the coverage manifest's readers in flake-screen and test-gardener.
+       Each run prints how many files matched by basename (`tier: N files matched by basename`), so a pending re-key
+       stays visible.
+    2. --check STAYS STRICT. A key whose exact path is absent is still a ghost row: the move tool (W1-T9879) re-keys
+       rows in the move PR, and the fallback only keeps tiering right in the meantime. A ghost whose basename resolves
+       is reported as `re-key: <old> -> <new>` rather than as a bare ghost, so the fix is named.
+    3. mergeDurations moves a measurement onto the existing row's new path instead of adding a second row for the same
+       basename.
+    4. test-gardener joins test.flake_retry rows to current files by basename, which W1-T9860's check keeps unique.
+       A move therefore does not restart the RETIER_THRESHOLD count, and duration observations keep their history.
+    Tests stay flat (phase 0). Delete each fix and confirm the matching test goes red.
+  acceptance:
+    - claim: 'a moved flaker keeps its slow-tier pin'
+      proof: 'grep: test("W1-T9861: a moved flaker keeps its slow-tier pin" in test/a-moved-test-keeps-its-tier-and-flake-history.test.ts'
+    - claim: 'a moved test keeps its measured shard weight'
+      proof: 'grep: test("W1-T9861: a moved test keeps its measured shard weight" in test/a-moved-test-keeps-its-tier-and-flake-history.test.ts'
+    - claim: 'a ghost row whose basename resolves is named as a re-key, and --check still fails on it'
+      proof: 'grep: test("W1-T9861: a ghost row whose basename resolves is named as a re-key" in test/a-moved-test-keeps-its-tier-and-flake-history.test.ts'
+    - claim: 'flake retries recorded under the old path count for the moved file'
+      proof: 'grep: test("W1-T9861: flake retries recorded under the old path count for the moved file" in test/a-moved-test-keeps-its-tier-and-flake-history.test.ts'
+    - claim: 'test-gardener reads the committed tiers through the shared lookup'
+      proof: 'grep: manifestEntryFor( in src/lib/test-gardener.ts'
+  falsifier: |
+    On origin/main `manifest.files[f] ?? 0` returns 0 for a moved file, so a 5000 ms flaker is tiered fast and the first
+    test fails. Shard weight falls to the median, so the second fails. findGhostRows reports a bare ghost, so the third
+    fails. test-gardener's `known.has(file)` drops the old-path retry rows, so the fourth fails.

@@ -223,6 +223,12 @@ function within(path: string, root: string): boolean {
  * runtime, git common dir with its config masked and node_modules targets read-only; no network) plus the
  * harness's code read-only with its `.git` masked (its config can carry a credential-bearing remote) and the
  * host test-slot dir writable. Extra binds go before the proof binds, so a deeper proof bind lands on top.
+ *
+ * A read-only proof bind of a path AT OR UNDER the harness is dropped: the harness bind already shows that path,
+ * read-only, as the host has it. Kept, it broke every gate from 2026-10-17 03:43Z: a worker worktree's
+ * `node_modules` links to the run's engine tree's (the harness), itself a link to the managed checkout's install
+ * (W1-T9738), and W1-T9860 binds that middle hop. bwrap resolves the hop's source to the install but mounts onto
+ * the hop's DESTINATION, which inside the sandbox is the harness's absolute symlink, so the mount fails ENOENT (PR 12595).
  */
 export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJS.ProcessEnv = process.env): string[] {
   const base = proofSandboxArgv({ cwd: input.cwd, home: input.home, env: parentEnv });
@@ -240,7 +246,12 @@ export function preopenGateSandboxArgv(input: GateContainInput, parentEnv: NodeJ
   let at = base.indexOf("--tmpfs") + 2;
   while (base[at] === "--dir") at += 2;
   const chdir = base.lastIndexOf("--chdir");
-  return [...base.slice(0, at), ...extra, ...base.slice(at, chdir), ...masks, ...base.slice(chdir)];
+  const proofBinds: string[] = [];
+  for (let i = at; i < chdir; i += 3) {
+    const [flag, from, to] = base.slice(i, i + 3) as [string, string, string];
+    if (!(flag === "--ro-bind" && from === to && within(to, harness))) proofBinds.push(flag, from, to);
+  }
+  return [...base.slice(0, at), ...extra, ...proofBinds, ...masks, ...base.slice(chdir)];
 }
 
 /** A spawn failure's first useful line, bounded for a ledger row. */

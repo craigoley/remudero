@@ -53,6 +53,7 @@ import {
   parseAcceptanceBlock,
   parseWhitelistedProof,
   resolvePlanCriteriaAtHead,
+  resolveTestPath,
   wrappedGrepPattern,
 } from "../src/lib/review.ts";
 import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
@@ -596,7 +597,9 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
     if (Array.isArray(declaredFiles)) {
       const violations = lintTask(
         { id: creditedTaskId, files: declaredFiles, acceptance: Array.isArray(declaredAcceptance) ? declaredAcceptance : [] },
-        { creditedBuild: true, moduleExists: (path) => existsSync(join(REPO_ROOT, path)) },
+        // W1-T9860: a declared or cited test that moved is found by its unique basename; an absent or ambiguous one
+        // still fails the check, so the BLOCK keeps firing on a test that never shipped.
+        { creditedBuild: true, moduleExists: (path) => existsSync(join(root, path)) || "path" in resolveTestPath(path, { root }) },
       ).violations.filter((violation) => violation.check === "credited-test-path");
       if (violations.length > 0) return { ok: false, defect: "credited-test-path", message: violations.map((v) => v.message).join(" ") };
     }

@@ -18,6 +18,8 @@ import { dirname, join } from "node:path";
 import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
 import { setLedgerMemoRetentionContext } from "./ledger-union.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { captureSelectedRegistryIntent, copySelectedRegistryIntent, selectedRegistryObserverFromIntent,
+  type SelectedRegistryConsumerOptions, type SelectedRegistryIntent } from "./selected-registry-consumers.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { AGENT_QUALIFICATION_GENERATION, AGENT_VIEW_NAME, createAgentView } from "./agent-view.js";
 import { ANALYTICS_VIEW_NAME, ANALYTICS_SOURCE_CONSOLE_V1, createAnalyticsView, type HostModelApprovalConfig } from "./analytics-view.js";
@@ -75,7 +77,7 @@ import {
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
-import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds } from "./worker-heaps.js";
+import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -250,9 +252,9 @@ export type ReadModelWorkerMessage =
   | { type: "shadow_prepared"; request: ShadowRequest }
   /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
   | ThreadHeapsAnswer
-  | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds };
+  | { type: "view_holds"; lane: "fast" | "heavy"; holds: ReadModelViewHolds; observedAt?: number };
 
-export type ReadModelViewHolds = Record<string, { rows: number; keptBytes: number }>;
+export type ReadModelViewHolds = Record<string, { rows?: number; keptBytes?: number; entries?: number; bytes?: number; unsized?: string; unit?: string; bytes_basis?: string }>;
 
 export interface ReadModelLaneMove {
   view?: string;
@@ -1356,7 +1358,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       letGo(unit);
       reportHeld(true);
     }
-    if (viewsOnly && opts.lane && ready && live?.heldSizes) reportHolds(opts.lane);
+    if (viewsOnly && opts.lane && ready) reportHolds(opts.lane);
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
@@ -1407,9 +1409,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const holds: ReadModelViewHolds = {};
     for (const unit of units) {
       const made = isViewFactory(unit.view) ? unit.made : unit.view;
-      if (made?.heldSizes) Object.assign(holds, made.heldSizes());
+      if (made?.heldSizes) for (const [name, size] of Object.entries(made.heldSizes())) {
+        const key = unit.slot && name.includes(":") && !name.includes("@") ? `${name}@${unit.slot.instance.name}` : name;
+        holds[key] = size;
+      }
     }
-    opts.post({ type: "view_holds", lane, holds });
+    holds[`lane:${lane}`] = { entries: units.length, unit: "units", unsized: "unit bookkeeping retains view objects, DB handles and shared scheduling state; exclusive bytes unavailable" };
+    opts.post({ type: "view_holds", lane, holds, observedAt: clock.now() });
   }
   function reportHeld(moved = false): void {
     if (!viewsOnly || !opts.lane) return;
@@ -1656,6 +1662,7 @@ const READ_MODEL_VIEWS_KIND = "remudero-read-model-views" as const;
 
 /** What the view thread needs, all serializable. */
 export interface ReadModelViewsData {
+  selectedRegistryIntent?: SelectedRegistryIntent;
   kind: typeof READ_MODEL_VIEWS_KIND;
   stateDir: string;
   instances: ReadModelInstance[];
@@ -1757,15 +1764,16 @@ export function runReadModelViewWorker(
 }
 
 export function readModelLaneViews(
-  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host" | "modelApprovalConfig">,
+  data: Pick<ReadModelViewsData, "instances" | "registry" | "inboxRoot" | "host" | "modelApprovalConfig" | "selectedRegistryIntent">,
   clock: Clock,
   log: (step: string, extra: Record<string, unknown>) => void,
   demand: DemandBook,
 ): Array<ReadModelView | ReadModelViewFactory> {
   const instances = data.instances;
+  const selectedRegistryObserver = selectedRegistryObserverFromIntent(data.selectedRegistryIntent, log);
   return [
     { name: NAV_BADGE_VIEW_NAME, create: () => createNavBadgeReadModelView(ledgerSource) },
-    { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource) },
+    { name: "repositories", create: () => createRepositoriesReadModelView(ledgerSource, selectedRegistryObserver) },
     { name: ANALYTICS_VIEW_NAME, snapshotSourced: true, create: () => createAnalyticsView({ modelApprovalConfig: data.modelApprovalConfig }) },
     readModelStatusView,
     { name: NOW_VIEW_NAME, perInstance: true, readPaced: true, create: () => createNowView({ instances, ledgerSource, clock, log }) },
@@ -1795,7 +1803,7 @@ export interface ReadModelViewLane {
   want(view: string, key: string): void;
   /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
   read(path: string): void;
-  holdsOf(threadId: number): ThreadHolds | undefined;
+  holdsOf(threadId: number): ThreadHoldsSnapshot | undefined;
   close(): void;
 }
 
@@ -1812,9 +1820,10 @@ export function threadViews(opts: {
   clock?: Clock;
   every?: (run: () => void, ms: number) => () => void;
 }): ReadModelViewLane {
+  const selectedRegistryIntent = copySelectedRegistryIntent(opts.data.selectedRegistryIntent);
   const clock = opts.clock ?? systemClock;
   let closed = false;
-  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHolds }
+  interface Lane { name: "fast" | "heavy"; worker?: Worker; deaths: number; respawn?: NodeJS.Timeout; building?: { view: string; instance?: string; since: number; reported: boolean }; holds?: ThreadHoldsSnapshot }
   const fast: Lane = { name: "fast", deaths: 0 };
   const heavy: Lane = { name: "heavy", deaths: 0 };
   const other = (lane: Lane): Lane => (lane === fast ? heavy : fast);
@@ -1829,7 +1838,8 @@ export function threadViews(opts: {
     opts.log("read_model.view_lane_reclaimed", { lane: survivor.name, from: lane.name, count, reason });
   };
   const spawnLane = (lane: Lane, restoreCosts = true): void => {
-    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND, lane: lane.name, restoreCosts };
+    const data: ReadModelViewsData = { ...opts.data, selectedRegistryIntent, kind: READ_MODEL_VIEWS_KIND, lane: lane.name, restoreCosts };
+    if (selectedRegistryIntent === undefined) delete data.selectedRegistryIntent;
     const spawned = lane === fast ? spawnViews(opts.workerUrl, data) : spawnHeavyViews(opts.workerUrl, data);
     lane.worker = spawned;
     lane.building = undefined;
@@ -1837,7 +1847,15 @@ export function threadViews(opts: {
     spawned.unref();
     spawned.on("message", (msg: ReadModelWorkerMessage) => {
       if (msg.type === "view_holds") {
-        lane.holds = Object.fromEntries(Object.entries(msg.holds).map(([instance, held]) => [`board:${instance}`, { entries: held.rows, bytes: held.keptBytes }]));
+        const holds: ThreadHolds = {};
+        for (const [name, held] of Object.entries(msg.holds)) {
+          const legacy = held.entries === undefined && held.rows !== undefined;
+          const key = legacy && !name.includes(":") ? `board:${name}` : name;
+          const bytes = legacy ? held.keptBytes : held.bytes;
+          holds[key] = { entries: held.entries ?? held.rows ?? 1, ...(bytes === undefined ? { unsized: held.unsized ?? "holder bytes not measured" } : { bytes }),
+            ...(held.unit ? { unit: held.unit } : {}), ...(held.bytes_basis ? { bytes_basis: held.bytes_basis } : {}) };
+        }
+        lane.holds = { holds, observedAt: msg.observedAt };
         return;
       }
       if (msg.type === "shadow_prepared") {
@@ -1922,6 +1940,7 @@ const spawnViews = (override: URL | undefined, data: ReadModelViewsData): Worker
 const spawnHeavyViews = (override: URL | undefined, data: ReadModelViewsData): Worker => startWorker(import.meta.url, { workerData: data, env: SHARE_ENV }, { override });
 
 export interface ReadModelWorkerData {
+  selectedRegistryIntent?: SelectedRegistryIntent;
   kind: typeof READ_MODEL_WORKER_KIND;
   stateDir: string;
   instances: ReadModelInstance[];
@@ -1960,7 +1979,7 @@ export function runReadModelWorker(
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {
@@ -2139,6 +2158,7 @@ export interface ReadModelWorkerHandle {
 }
 
 export interface ReadModelWorkerOptions {
+  selectedRegistryObservation?: SelectedRegistryConsumerOptions;
   stateDir: string;
   instances: readonly ReadModelInstance[];
   tickMs?: number;
@@ -2180,6 +2200,7 @@ export function readModelBodyKey(view: string, key = ""): string {
 
 /** Serve's side: warm bodies now, one worker on `start()`, respawned with back-off if it dies. */
 export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWorkerHandle {
+  const selectedRegistryIntent = captureSelectedRegistryIntent(opts.selectedRegistryObservation);
   const bodies = new Map<string, ReadModelBodyEntry>();
   const instances = new Map<string, ReadModelInstanceState>();
   const sourceClocks = new Map<string, ViewSource>();
@@ -2374,6 +2395,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     const shared = new SharedArrayBuffer(8);
     const data: ReadModelWorkerData = {
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
+      ...(selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent }),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),

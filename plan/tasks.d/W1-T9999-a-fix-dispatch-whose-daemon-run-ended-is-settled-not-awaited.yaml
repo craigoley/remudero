@@ -1,0 +1,109 @@
+- id: W1-T9999
+  title: "A FIX DISPATCH WHOSE DAEMON RUN ENDED IS SETTLED, NOT AWAITED, AND AN EARLIER RUNG'S HAND-OFF NEVER SPEAKS FOR IT — the conflicted/blocked-fixable dedup reads the TASK's newest fix rung, so on 2026-10-17 #12390's conflict dispatch at 03:14:38Z (head b15c181) died with its daemon process at ~03:18Z having written no fix row, and every pass after the 03:19Z boot read the PREVIOUS round's 02:26:51Z `fix.stood_down` handed_off/recycle_yield as a live wait: 'fix already dispatched for this head (b15c181) — awaiting its outcome' for 40+ minutes, past BACKSTOP 30"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern, which fix-rung rows the sweep's conflicted/blocked-fixable dedup reads for the dispatch that seeded its pr@head key. Strike caps, the progress judge, the in-process claim mutex and the hand-off itself are unchanged
+  band_meaning: span
+  origin: "operator session 2026-10-17 fix-lane triage, agent C38's core-ledger read of #12390 (run-W1-T9722-1792150906434)"
+  plan_refs: [W1-T1110, W1-T1210, W1-T1127, W1-T5957, W1-T2520, W1-T9969, W1-T9971, W1-T9955, W1-T9114]
+  files:
+    - src/lib/sweep.ts
+    - test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts
+  status: merged
+  priority: 1  # every restart that lands between a sweep's fix dispatch and its first fix row parks that PR's head forever under a false "awaiting its outcome"; restarts run ~17 a day (memory restarts-cost-a-quarter-of-capacity)
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-17 ~03:55Z on the core ledger (live ledger.ndjson plus the 01:34Z and 03:10Z archives on the Azure
+    host, read-only, niced, streamed to the Mac). #12390, task W1-T9722, head b15c1819e.
+    - 02:25:59Z `fix.dispatch` W1-T9722 (run DAEMON-1792196664607). 02:26:49Z `fix.done`. 02:26:51Z `run.freshness_handoff`,
+      `fix.ci_not_green` and `fix.stood_down` site rung.ci_handoff, outcome handed_off, reason recycle_yield, sha b15c181.
+    - The 02:33Z boot (DAEMON-1792204349717) RECEIVED that hand-off as designed: `sweep.disposed` post-review at
+      02:36:28Z and mergeable/armed at 03:12:05Z, both at b15c181. No boot path is meant to resume a ci_handoff rung:
+      its owner is "sweep" and "the next sweep re-derives this PR" (W1-T5957). That part worked.
+    - 03:14:38Z `sweep.disposed` conflicted, acted true, head b15c181: "dispatching the bounded merge-conflict fix
+      worker". 03:14:42Z `sweep.fix.parallel_attempts_plan` and `sweep.fix.strike_schedule_plan`. Nothing else for
+      W1-T9722 or #12390 follows from that process (pid 123): no `fix.dispatch`, `fix.census_snapshot`, `fix.done`,
+      `sweep.fix.error` or `daemon.detached_action_abandoned`.
+    - 03:18:35Z a new daemon process (pid 122, DAEMON-1792207115995) booted in the same container. `run_child.adoption_pass`
+      adopted 0. The detached dispatch died with its process.
+    - From 03:26:14Z on, every pass: conflicted, acted false, "NOT DISPATCHED this pass: fix already dispatched for this
+      head (b15c181) — awaiting its outcome before spending another strike". BACKSTOP 30 fired at 03:45Z.
+    READ at origin/main 733bb46f3 (symbols, not lines):
+    - `priorActionsFromLedger` adds `<pr>@<head>` to `fixed` for any `sweep.disposed` acted true conflicted or
+      blocked-fixable row. The 03:14:38Z row seeds 12390@b15c181. It records no seed time and no run id.
+    - The dedup arm computes `alreadyDone = dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, fixLedgerTaskIdFor(pr))`.
+    - `fixRungStalledWithoutNewHead` is TASK-keyed and walks every row of the task, so its answer is the newest rung of
+      the task, whichever dispatch started it. Here that is the 02:25:59Z rung, whose last row is the handed_off
+      stand-down, and `stalled = line.outcome !== "handed_off"` (added by #10375) reads it as a live wait.
+    - W1-T1210's "no owning fix.dispatch ⇒ stalled" exists for exactly a seed with no rung, but it cannot fire: the
+      task has an older dispatch row.
+    WHY THIS IS NOT ANOTHER TASK:
+    - W1-T9969 (queued) frees the IN-PROCESS `inFlightFixKeys` claim when the restart drain abandons a dispatch waiting
+      in memory admission. It does not touch the ledger-derived `prior.fixed` key or the stall read, and here no drain
+      row was written at all.
+    - W1-T9955 (queued) is the undefined key of a taskless PR. W1-T9722 has a task id.
+    - W1-T9971 (queued) makes reportStuckStage trust THIS SAME dedup read. Without this task, W1-T9971 would also
+      silence the backstop for an orphaned seed like this one, the only alarm that fired. This task must land with or
+      before it, or W1-T9971 must read the settled answer defined here.
+    - W1-T9114 (queued) moves detached actions into run children adopted across a restart. Until it lands, a detached
+      sweep action never survives its process. Once it lands, an adopted dispatch is live (design 3).
+    - W1-T1127 (merged) covers a dispatch that THROWS before its worker runs. A process death throws nothing.
+    Swept plan/tasks.d on origin/main and the added lines of all 435 open origin heads at 03:58Z for
+    fixRungStalledWithoutNewHead, handed_off with live, prior.fixed and "fix already dispatched for this head"
+    (positive control: the same scan finds 55 tick-read-worker lines on #12390's head). Only W1-T9955 and W1-T9971 name
+    them, and both are above.
+  design: |
+    No new fixed bound (standing operator rule). Liveness is decided by process identity and ledger order, not by time.
+    1. RECORD THE SEED. `priorActionsFromLedger` keeps, beside `fixed`, the newest seeding row per `<pr>@<head>`:
+       its `ts` and `run_id`.
+    2. READ ONLY THE SEED'S OWN RUNG. In the conflicted/blocked-fixable dedup, the stall read takes only rows of the
+       PR's fix key written at or after the seed's `ts`. Rows before the seed belong to an earlier rung and never speak
+       for this dispatch, so an earlier rung's handed_off stand-down cannot hold a later dispatch's head.
+       `fixRungStalledWithoutNewHead`'s semantics for the rows it is given are unchanged (its existing tests stand).
+    3. A SEED WITH NO RUNG ROW YET.
+       - Seeded by THIS daemon run (`run_id === deps.runId`): live. The in-process claim (W1-T2520) and the detached
+         registry (W1-T9969) own it, and the dedup is unchanged.
+       - Seeded by an EARLIER daemon run: its detached dispatch died with that process. The pass writes one
+         `sweep.fix.seed_orphaned` row (pr_number, head_sha, seed_ts, seed_run_id, run_id) and does not dedup, so the
+         existing claim, strike ladder and progress judge decide a fresh round from fresh evidence.
+       - When W1-T9114 lands, a seed whose dispatch a run child adopted is live, read from that adoption's row.
+    4. A SEED WHOSE OWN RUNG HANDED OFF. A handed_off stand-down after the seed stays a live wait only until the sweep,
+       its owner, has disposed that same head after the hand-off. Reaching this dedup arm (conflicted or blocked-fixable)
+       at the handed-off head on a later pass is that receipt: the CI wait it handed over has resolved, so the rung
+       reads ended and the pass may dispatch.
+    5. The stand-down text for a held seed names the seed: "fix dispatched at <ts> by <run_id> for this head (<sha>)",
+       so a reader can tell a live wait from an orphan.
+    6. TESTS. A new file, test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts, with the `test(` titles
+       verbatim as in the proofs. Drive `runSweep` with fakes and an in-memory ledger shaped like the #12390 timeline;
+       fixed timestamps, no network.
+  acceptance:
+    - claim: "an earlier rung's hand-off no longer holds a later dispatch's head"
+      proof: 'grep: test("W1-T9999: an earlier rung hand-off does not hold a later dispatch head" in test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts'
+    - claim: "a dispatch seeded by a daemon run that has ended is settled and the head is dispatched again"
+      proof: 'grep: test("W1-T9999: a seed from an ended daemon run is settled and re-dispatched" in test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts'
+    - claim: "a dispatch seeded by this daemon run with no rung row yet stays deduped"
+      proof: 'grep: test("W1-T9999: a seed from this daemon run with no rung row stays deduped" in test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts'
+    - claim: "a hand-off the sweep has since received at the same head no longer reads as a live wait"
+      proof: 'grep: test("W1-T9999: a received hand-off at the same head no longer reads live" in test/a-fix-dispatch-whose-daemon-run-ended-is-settled.test.ts'
+    - claim: "the orphaned seed is ledgered by name"
+      proof: "grep: sweep\\.fix\\.seed_orphaned in src/lib/sweep.ts"
+  falsifier: |
+    The #12390 timeline in miniature: fix.dispatch, fix.done and a rung.ci_handoff handed_off stand-down at head H by
+    run A; sweep.disposed post-review and mergeable at H by run B; sweep.disposed conflicted acted true at H by run B;
+    then a pass by run C with H conflicted. At origin/main that pass stands down "fix already dispatched for this head",
+    so the ended-run and earlier-hand-off tests fail. With the fix it writes sweep.fix.seed_orphaned and dispatches.
+    Ways to break it, and the test that catches each:
+    - Settle every seed with no rung row, whatever run wrote it: the this-run test fails (W1-T2520's double dispatch).
+    - Keep reading rows before the seed: the earlier-hand-off test fails.
+    - Drop the hand-off as a live wait outright, before the sweep has received it: the existing
+      test/a-stood-down-fix-rung-re-derives-its-remedy.test.ts title "a hand-off to the sweep is still a live wait,
+      not a stall" still holds for the bare stall read, and the received-hand-off test pins the receipt rule.
+  note: |
+    EFFECT, measured after merge from the core ledger: count heads with three or more consecutive "fix already
+    dispatched for this head" stand-downs whose seeding sweep.disposed row has a run_id other than the daemon run
+    writing them. Healthy shape: none, and each sweep.fix.seed_orphaned row is followed by a fix.dispatch for the
+    same task.

@@ -19,7 +19,7 @@
  * preflight` ran them, which no worker has run since W1-T464. A diff joining one's `walks` population
  * now RUNS those suites in a `node --test` child with every GIT_* variable stripped (the
  * W1-T3224 mechanism behind the damage W1-T3225 recorded), bounded, and read from its TAP. They run
- * on head; failing suites run again in a detached merge-base worktree borrowing node_modules.
+ * on head; failing suites run again in a private merge-base checkout borrowing node_modules.
  * Only head-red/base-green refuses; an unrunnable base is not measured (W1-T5663).
  *
  * ONLY GROWTH THIS BRANCH CAUSES REFUSES. Each count is taken twice, on this tree and on the merge
@@ -30,14 +30,17 @@
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix, resolve } from "node:path";
+import { delimiter, dirname, join, posix, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
+import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
@@ -103,7 +106,8 @@ export function censusSnapshotPaths(snapshot) {
 
 const CLOCK_FIELDS = ["legacy", "dateNow", "newDate"];
 const CLOCK_SCOPE_RE = /^src\/.+\.ts$/;
-const FIXTURE_SCOPE_RE = /^test\/[^/]+\.test\.ts$/;
+/** A test file at any depth under test/, except test/fixtures/** (data, never a suite). */
+const FIXTURE_SCOPE_RE = /^test\/(?!fixtures\/)(?:[^/]+\/)*[^/]+\.test\.ts$/;
 
 /** A count is this branch's to answer for when it is over its ceiling here, and the base was
  *  either under its own ceiling or carried a smaller count. */
@@ -479,14 +483,15 @@ function childEnv() {
   return Object.fromEntries(Object.entries(process.env).filter(([k]) => !CHILD_ENV_DROPPED.test(k)));
 }
 
-function childOptions(root) {
-  return { cwd: root, encoding: "utf8", env: childEnv(), timeout: CENSUS_SUITE_CHILD_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 };
+function childOptions(root, timeoutMs = CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+  return { cwd: root, encoding: "utf8", env: childEnv(), timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 };
 }
 
 /** Throws, naming why, when a child did not run to a status: a spawn error (the time bound included) or a signal. */
 function assertChildFinished(res, what) {
   if (res.error) throw new Error(`the ${what} child could not run to completion: ${res.error.message}`);
   if (res.signal) throw new Error(`the ${what} child was ended by ${res.signal}`);
+  if (res.outputComplete === false) throw new Error(`the ${what} child has incomplete captured output`);
 }
 
 function isMember(m) {
@@ -494,16 +499,25 @@ function isMember(m) {
 }
 
 /**
- * The tree's own `CENSUS_ADMITTED_MEMBERS` as `{ testFile, script, walks }`, read by a child under tsx because
- * the table is TypeScript. A tree that carries no table has no admitted suites; every failure to read one that
- * exists THROWS, and an empty list is a failed read, never a clean set.
+ * The tree's admission table and census-shaped source-text readers, read under tsx. Readers run
+ * separately, calibrated on that reader, never on unrelated historical census durations.
+ * A missing table admits nothing; a failed read or empty table is never a clean set.
  */
 export function listAdmittedCensusMembers(root, run = spawnSync) {
   const table = join(root, ADMISSION_TABLE);
   if (!existsSync(table)) return [];
+  const readers = join(root, "src/lib/source-text-readers.ts");
   const code =
     `const m = await import(${JSON.stringify(pathToFileURL(table).href)});` +
-    "console.log(JSON.stringify(m.CENSUS_ADMITTED_MEMBERS.map((x) => ({ testFile: x.testFile, script: x.script, walks: [...(x.walks ?? [])] }))));";
+    "const members = m.CENSUS_ADMITTED_MEMBERS.map((x) => ({ testFile: x.testFile, script: x.script, walks: [...(x.walks ?? [])] }));" +
+    (existsSync(readers) ?
+      'if (members.length === 0) throw new Error("the admission table lists no admitted member");' +
+      `const r = await import(${JSON.stringify(pathToFileURL(readers).href)});` +
+      "const readerRuntimePolicy = { floorMs: m.FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, multiple: m.FAST_GATE_CENSUS_RUNAWAY_MULTIPLE };" +
+      'if (![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((x) => Number.isFinite(x) && x > 0)) throw new Error("no measured census runtime policy");' +
+      `members.push(...r.discoverSourceTextReaders(${JSON.stringify(root)}).filter((x) => x.censusShaped && x.walks.length > 0)` +
+      '.map((x) => ({ testFile: x.testFile, script: "", walks: [...x.walks], structural: true, readerRuntimePolicy })));' : "") +
+    "console.log(JSON.stringify(members));";
   const res = run(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", code], childOptions(root));
   assertChildFinished(res, "admission table");
   if (res.status !== 0) {
@@ -577,27 +591,113 @@ const TEST_PRIORITY = await loadTestPriority();
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
  * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
  */
-export function runCensusSuitesViaChild({ root, files, run = spawnSync, priority = TEST_PRIORITY, snapshotPath }) {
+export function censusReaderBudget(measurement, context, policy, nowMs) {
+  if (!policy || ![policy.floorMs, policy.multiple].every((n) => Number.isFinite(n) && n > 0) ||
+      !measurement || measurement.context !== context || measurement.complete !== true || measurement.passed !== true ||
+      !Number.isFinite(measurement.elapsedMs) || measurement.elapsedMs <= 0 ||
+      !Number.isSafeInteger(measurement.tests) || measurement.tests <= 0 ||
+      !Number.isFinite(nowMs) || !Number.isFinite(measurement.finishedMs) || nowMs < measurement.finishedMs ||
+      nowMs - measurement.finishedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) {
+    throw new Error("source-reader runtime is UNKNOWN: missing, stale, mismatched or incomplete calibration");
+  }
+  if (measurement.elapsedMs > CENSUS_SUITE_CHILD_TIME_BOUND_MS) throw new Error("source-reader calibration exceeded the existing backstop");
+  const budgetMs = Math.ceil(Math.max(policy.floorMs, measurement.elapsedMs) * policy.multiple);
+  if (!Number.isSafeInteger(budgetMs)) throw new Error("source-reader runtime is UNKNOWN: invalid derived budget");
+  return Math.min(budgetMs, CENSUS_SUITE_CHILD_TIME_BOUND_MS);
+}
+
+function runCensusChild(file, args, options) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
+  const result = captureStepSync(file, args, { cwd: options.cwd, env: options.env, runtimeMs: options.timeout,
+    maxBytes: options.maxBuffer, trackParent: true,
+    stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), resultPath: join(dir, "native.json") });
+  if (result.outputComplete) rmSync(dir, { recursive: true, force: true });
+  else result.error = new Error(`${result.error?.message ?? "incomplete census capture"}; capture retained at ${dir}`);
+  return result;
+}
+
+function censusReaderContext(root, child, options) {
+  const env = { ...Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])), ...options.env };
+  const readGit = (args) => gitOut(root, args, { env, timeout: CENSUS_SUITE_CHILD_TIME_BOUND_MS });
+  const untracked = readGit(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
+  const dependencies = join(root, "node_modules");
+  const dependency = lstatSync(dependencies, { throwIfNoEntry: false }) ? statSync(dependencies) : null;
+  if (dependency && !dependency.isDirectory()) throw new Error("source-reader runtime is UNKNOWN: node_modules is not a directory donor");
+  const input = { root: resolve(root), head: readGit(["rev-parse", "HEAD"]).trim(),
+    tracked: readGit(["ls-files", "--stage", "-z"]), diff: readGit(["diff", "--binary", "HEAD"]),
+    untracked: untracked.filter((p) => p !== "node_modules" && p !== "node_modules/")
+      .map((p) => [p, readFileSync(join(root, p)).toString("base64")]),
+    dependency: dependency ? [realpathSync(dependencies), dependency.dev, dependency.ino,
+      ...["package-lock.json", "node_modules/tsx/package.json"].map((p) => existsSync(join(root, p)) ? readFileSync(join(root, p)).toString("base64") : null)] : null,
+    loader: readFileSync(fileURLToPath(import.meta.resolve("tsx"))).toString("base64"),
+    runtime: [process.execPath, process.version, process.versions.v8, process.platform, process.arch],
+    command: child, environment: Object.entries(options.env).sort(([a], [b]) => a.localeCompare(b)),
+    snapshot: options.env[CENSUS_SNAPSHOT_ENV] ? readFileSync(options.env[CENSUS_SNAPSHOT_ENV]).toString("base64") : null };
+  return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+
+export function runCensusSuitesViaChild({ root, files, run = runCensusChild, priority = TEST_PRIORITY, snapshotPath, pathOverride, timeoutMs,
+  readerRuntimePolicy, now = () => performance.now(), readContext = censusReaderContext }) {
   const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
   if (priority.reason) console.error(`census-precheck: census suites run at default priority - ${priority.reason}`);
   const child = priority.wrap(process.execPath, args);
-  const options = childOptions(root);
+  const options = childOptions(root, timeoutMs);
   if (snapshotPath) options.env[CENSUS_SNAPSHOT_ENV] = snapshotPath;
-  const res = run(child.file, child.args, options);
-  assertChildFinished(res, "census suite");
-  const stdout = String(res.stdout ?? "");
-  const total = stdout.match(/^# tests (\d+)$/m);
-  if (total === null) {
-    throw new Error(
-      `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,
-    );
+  if (pathOverride !== undefined) options.env.PATH = pathOverride;
+  const once = () => {
+    const startedMs = now();
+    const res = run(child.file, child.args, options);
+    const finishedMs = now();
+    assertChildFinished(res, "census suite");
+    const stdout = String(res.stdout ?? "");
+    const totals = [...stdout.matchAll(/^# tests (\d+)$/gm)];
+    const total = totals.length === 1 ? totals[0] : null;
+    if (total === null) {
+      throw new Error(
+        `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,
+      );
+    }
+    if (Number(total[1]) === 0) throw new Error("the census suite child ran 0 tests, which is a failed run, not a clean one");
+    const failing = failingSuitesFromTap(stdout, files);
+    if (res.status !== 0 && failing.length === 0) {
+      throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
+    }
+    const summary = Object.fromEntries(["pass", "fail", "cancelled", "skipped", "todo"].map((key) => {
+      const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
+      return [key, matches.length === 1 ? Number(matches[0][1]) : null];
+    }));
+    const passed = summary.pass === Number(total[1]) && ["fail", "cancelled", "skipped", "todo"].every((key) => summary[key] === 0);
+    const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
+      .map((match) => `${match[1].length}:${match[2]}`);
+    return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs };
+  };
+  if (readerRuntimePolicy === undefined) return once().failing;
+  if (files.length !== 1 || timeoutMs !== undefined) throw new Error("source-reader calibration requires one reader and no timeout override");
+  if (!lstatSync(join(root, files[0])).isFile()) throw new Error("source-reader calibration requires a physical test file");
+  if (!readerRuntimePolicy || ![readerRuntimePolicy.floorMs, readerRuntimePolicy.multiple].every((n) => Number.isFinite(n) && n > 0)) {
+    throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
   }
-  if (Number(total[1]) === 0) throw new Error("the census suite child ran 0 tests, which is a failed run, not a clean one");
-  const failing = failingSuitesFromTap(stdout, files);
-  if (res.status !== 0 && failing.length === 0) {
-    throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
+  const context = readContext(root, child, options);
+  const calibration = once();
+  if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during calibration");
+  if (calibration.failing.length > 0) return calibration.failing;
+  if (!calibration.passed) throw new Error("source-reader runtime is UNKNOWN: calibration has no complete unskipped pass");
+  console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.tests,
+    cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), assurance: "observation-not-qualification" })}`);
+  const measurement = { ...calibration, context, complete: true, passed: true };
+  options.timeout = censusReaderBudget(measurement, context, readerRuntimePolicy, now());
+  const measured = once();
+  if (readContext(root, child, options) !== context) throw new Error("source-reader inputs changed during qualification");
+  if (measured.tests !== calibration.tests || JSON.stringify(measured.identities) !== JSON.stringify(calibration.identities)) {
+    throw new Error("source-reader runtime is UNKNOWN: qualification case inventory differs from calibration");
   }
-  return failing;
+  if (!(measured.elapsedMs > 0 && Number.isFinite(measured.elapsedMs))) throw new Error("source-reader runtime is UNKNOWN: invalid native duration");
+  if (measured.elapsedMs > options.timeout) throw new Error(`source-reader runtime exceeded its ${options.timeout}ms measured budget`);
+  if (!measured.passed && measured.failing.length === 0) throw new Error("source-reader runtime is UNKNOWN: qualification has no complete unskipped result");
+  console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: measured.tests,
+    cases: measured.identities, calibrationMs: Math.ceil(calibration.elapsedMs), budgetMs: options.timeout,
+    measuredMs: Math.ceil(measured.elapsedMs), assurance: "fresh-timing-only-no-cached-verdict" })}`);
+  return measured.failing;
 }
 
 const STEP_LITERAL_RE = /(?:\bstep\s*===|\bcase|\blog\w*\s*\(|\bstep\s*:)\s*(["'`])([^"'`\r\n$]+)\1/g;
@@ -652,6 +752,11 @@ function node24RuntimeTrigger({ changed, readHead, readBase }) {
 
 const HOST_CAPABILITY_RE = /chmod|process\.platform|getuid|hostname|\/usr\/bin\//;
 const TEST_TS_SCOPE_RE = /^test\/.+\.ts$/;
+function changesTestText({ changed, readHead, readBase }, pattern) {
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  return changed.filter((path) => TEST_TS_SCOPE_RE.test(path)).some((path) =>
+    pattern.test(readHead(path) ?? "") || pattern.test(readBase(path) ?? ""));
+}
 const PRICE_RE = /\b(?:pr_url|cost_usd)\b/;
 const PRICED_WRITE_RE = /\blog\w*\(\s*(?:(["'])[A-Za-z0-9_.:-]+\1|[A-Z][A-Z0-9_]*)\s*,|\bstep:\s*(?:(["'])[A-Za-z0-9_.:-]+\2|[A-Z][A-Z0-9_]*\b)/g;
 
@@ -780,7 +885,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
     trigger: (input) => input.changed.includes("scripts/error-subclass-baseline.json") || addsLiteral(input, ERROR_CLASS_RE, 1),
     remedy: "adopt RmdError in src/lib/errors.ts or record the reviewed ceiling in scripts/error-subclass-baseline.json" },
   // W1-T5693: whole-tree structural censuses, 4-13 s each alone; `structural` runs each in its OWN child.
-  { testFile: "test/cycle-ratchet.test.ts", script: "census:cycle-ratchet", structural: true,
+  { testFile: "test/cycle-ratchet.test.ts", gitFree: true, script: "census:cycle-ratchet", structural: true,
     trigger: (input) => input.changed.some((p) => [".dependency-cruiser.cjs", "scripts/cycle-baseline.json", "scripts/cycle-ratchet.mjs"].includes(p)) ||
       addsImport(input, IMPORT_SCOPE_RE),
     remedy: "break the import ring or record the reviewed ceiling in scripts/cycle-baseline.json" },
@@ -788,7 +893,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
     trigger: (input) => input.changed.some((p) => ["scripts/source-size-ratchet.mjs", "src/lib/ci-parity.ts", ".dependency-cruiser.cjs"].includes(p)) ||
       addsImport(input, LIB_SCOPE_RE, importsLayerAboveLib),
     remedy: "src/lib must not import src/cli, src/spike.ts or src/run-task.ts (.dependency-cruiser.cjs)" },
-  { testFile: "test/citation-anchor-census.test.ts", script: "census:citation-anchor", structural: true,
+  { testFile: "test/citation-anchor-census.test.ts", gitFree: true, script: "census:citation-anchor", structural: true,
     trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
     remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
   // W1-T5702: a new test importing src/run-task.ts is the reach ratchet's own refusal.
@@ -799,7 +904,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
     remedy: "import the module the suite tests rather than src/run-task.ts, or record the tighter ceiling in scripts/affected-reach-baseline.json" },
   { testFile: "test/node-24-runtime-compatibility.test.ts", script: "census:node24-runtime", trigger: node24RuntimeTrigger,
     remedy: "name --test-reporter=tap on the spawn (or mark it `node-test-reporter: exempt`) and let the Worker inherit execArgv" },
-  { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", script: "census:every-priced-ledger-step",
+  { testFile: "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts", gitFree: true, script: "census:every-priced-ledger-step",
     trigger: (input) => input.changed.includes("src/lib/config-gardener.ts") || addsMatch(input, CLOCK_SCOPE_RE, pricedWrites),
     remedy: "register CONFIG_GARDEN_LEDGER_STEPS in src/lib/config-gardener.ts or a reasoned exemption in test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts" },
   { testFile: "test/host-capability-fixtures.test.ts", script: "census:host-capability-fixtures",
@@ -811,7 +916,7 @@ export const PRECHECK_TRIGGERED_SUITES = [
       addsMatch(input, TEST_TS_SCOPE_RE, (text) => text.split("\n").filter((line) => /\bpreflightCommand\(|["']preflight["']/.test(line))),
     remedy: "inject `spawn` into preflightCommand / `dispatch` into main, or prove the invariant through preflightSummaryTarget" },
   // W1-T7812: changes to the measured fixture-crossing runner or its proof rerun that proof before push.
-  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", script: "census:near-fixture-crossing",
+  { testFile: "test/a-near-fixture-crossing-blocks-only-once-a-shifted-run-proves-it-red.test.ts", gitFree: true, script: "census:near-fixture-crossing",
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/clock-shift.mjs",
       "src/lib/ci-parity.ts", "scripts/census-precheck.mjs",
@@ -819,22 +924,42 @@ export const PRECHECK_TRIGGERED_SUITES = [
     ].includes(p)),
     remedy: "preserve the 24 h control/shifted verdict and the private TMPDIR proof" },
   // W1-T6106: a host git spawn into a worker worktree must go through src/lib/worktree-git.ts.
-  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", script: "census:host-worktree-git",
+  { testFile: "test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts", gitFree: true, script: "census:host-worktree-git",
     trigger: (input) => gitSpawnTrigger(input),
     remedy: "route the spawn through hostWorktreeGit (src/lib/worktree-git.ts), or name it in that suite's RAW_SITE_EXCEPTIONS with its reason" },
-  { testFile: "test/worktree-creation-census.test.ts", script: "census:worktree-creation", trigger: worktreeCreationTrigger,
+  { testFile: "test/worktree-creation-census.test.ts", gitFree: true, script: "census:worktree-creation", trigger: worktreeCreationTrigger,
     remedy: "route the site through worktreeAdd (src/lib/worker.ts), or add a NAMED exempt row with its reason to WORKTREE_SITE_REGISTRY (src/lib/worktree-sites.ts)" },
 ];
 
 /** Suites a diff joins by path with no npm script of their own (W1-T9565): evaluateAdmittedCensusSuites runs each by
  *  testFile and models it in PRECHECK_PARITY as `modeled`. A row is `{ testFile, trigger, remedy }`. */
 export const PRECHECK_PATH_TRIGGERED_SUITES = [
-  { testFile: "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
+  // W1-T9872: these test/ censuses now join listRuleSuites through their recursive Git enumeration.
+  // Read both sides: removing a package scope or sweep lock can break a census without adding a token.
+  { testFile: "test/architecture-fitness.test.ts", structural: true,
+    trigger: (input) => input.changed.some((p) => ["test/architecture-fitness.test.ts", ".dependency-cruiser.cjs"].includes(p)) ||
+      changesTestText(input, /return\s+(?:await\s+)?page\.|\b(?:tmpdir|writeFileSync|writeFile|put)\s*\(|await\s+import\s*\(/),
+    remedy: "keep test module copies in an ESM scope under the project root and await page calls before teardown" },
+  { testFile: "test/orphan-sweep-names-the-third-party.test.ts",
+    trigger: (input) => input.changed.some((p) => ["test/orphan-sweep-names-the-third-party.test.ts", "src/lib/worker-containment.ts"].includes(p)) ||
+      changesTestText(input, /withRealSweepLock|\[RUN_ID_ENV\]/),
+    remedy: "hold withRealSweepLock in every fixture that sends an ended-run stray into a real sweep" },
+  { testFile: "test/the-mutant-loader-resolves-every-relative-import.test.ts",
+    trigger: (input) => input.changed.some((p) => ["test/the-mutant-loader-resolves-every-relative-import.test.ts", "test/helpers/mutant-module.ts", "scripts/satisfied-task-census.mjs"].includes(p)) ||
+      changesTestText(input, /\.replace\s*\(/),
+    remedy: "rewrite copied module imports through rewriteRelativeSpecifiers / writeMutantModule" },
+  { testFile: "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts", gitFree: true,
     trigger: ({ changed }) => changed.some((p) => [
       "scripts/expiring-fixture-census.mjs", "src/lib/gate-gardener.ts", "scripts/census-precheck.mjs",
       "test/a-near-crossing-check-loads-the-gate-gardener-as-esm.test.ts",
     ].includes(p)),
     remedy: "load src/lib/gate-gardener.ts through tsImport (ESM), never tsx/cjs/api" },
+  // W1-T9860: the basename-uniqueness check, asked when its rule (the resolver) or the check itself changes. A new
+  // test that takes a held basename is refused by the same suite in CI's rule-checks.
+  { testFile: "test/every-test-basename-is-unique.test.ts",
+    trigger: ({ changed }) => changed.some((p) =>
+      ["src/lib/test-path-resolver.ts", "test/every-test-basename-is-unique.test.ts"].includes(p)),
+    remedy: "rename one test of each pair: resolveTestPath (src/lib/test-path-resolver.ts) finds a moved test by its unique basename" },
 ];
 
 /**
@@ -860,7 +985,18 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
     return { violations: [], unmeasured: String(e?.message ?? e) };
   }
   const admitted = members.filter((m) => changed.some((p) => m.walks.some((w) => p.startsWith(w))));
-  const joined = [...new Map([...admitted, ...triggered].map((m) => [m.testFile, m])).values()];
+  const byFile = new Map();
+  for (const member of [...admitted, ...triggered]) {
+    const prior = byFile.get(member.testFile);
+    byFile.set(member.testFile, {
+      ...prior, ...member,
+      script: member.script || prior?.script || "",
+      structural: member.structural || prior?.structural,
+      timeoutMs: member.timeoutMs ?? prior?.timeoutMs,
+      readerRuntimePolicy: member.readerRuntimePolicy ?? prior?.readerRuntimePolicy,
+    });
+  }
+  const joined = [...byFile.values()];
   if (joined.length === 0) return { violations: [], unmeasured: null };
   // W1-T5693: the slow whole-tree suites each run in their OWN child, so one that exceeds its time bound reads
   // NOT MEASURED alone and cannot turn the others' verdicts into a silent pass.
@@ -871,9 +1007,12 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
   for (const group of groups) {
     let failing;
     try {
-      failing = new Set(runSuites([...new Set(group.map((m) => m.testFile))]));
+      const files = [...new Set(group.map((m) => m.testFile))];
+      failing = new Set(group[0].readerRuntimePolicy !== undefined ? runSuites(files, { readerRuntimePolicy: group[0].readerRuntimePolicy }) :
+        group[0].timeoutMs === undefined ? runSuites(files) : runSuites(files, { timeoutMs: group[0].timeoutMs }));
     } catch (e) {
-      unmeasured.push(String(e?.message ?? e));
+      const reason = String(e?.message ?? e);
+      unmeasured.push(!group[0].structural ? reason : `${group[0].testFile}: ${reason}`);
       continue;
     }
     violations.push(
@@ -909,6 +1048,8 @@ export const PRECHECK_PARITY = {
   // W1-T5737: the script gates ci.yml runs, read out of ci.yml whenever a push edits it or the parity baseline.
   "test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts": { modeled: scriptRatchetViolations },
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  "test/the-census-precheck-runs-the-source-text-censuses-a-diff-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  "test/census-reader-runtime-calibration.test.ts": { modeled: runCensusSuitesViaChild },
   "test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts": { modeled: runCausedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
   "test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
@@ -935,7 +1076,6 @@ export const PRECHECK_EXTRA_CI_CENSUSES = {
   "test/spend-is-counted-once-at-its-producer.test.ts": "SPEND_STEP_ROLES — #8988 #9041",
   "test/ledger-rotation.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
   "test/a-union-read-of-an-unretained-step-is-refused.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
-  "test/host-capability-fixtures.test.ts": "host-capability-fixtures — #8994",
   "test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts": "CONFIG_GARDEN_LEDGER_STEPS — #9179 #9181",
 };
 
@@ -1006,39 +1146,78 @@ function gitOut(root, args, options = {}) {
   return res.stdout;
 }
 
-function runCausedCensusSuites({ root, files, mergeBase, runSuites }) {
-  const failing = [...new Set(runSuites({ root, files }))];
+function runCausedCensusSuites({ root, files, mergeBase, runSuites, ...optionsForSuites }) {
+  const failing = [...new Set(runSuites({ root, files, ...optionsForSuites }))];
   if (failing.length === 0) return [];
   const temporary = mkdtempSync(join(tmpdir(), "rmd-census-base-"));
   const baseRoot = join(temporary, "tree");
-  // Hook GIT_* variables must not redirect worktree administration to the pushing checkout.
+  // Hook GIT_* variables must not redirect the private checkout into the pushing checkout.
   const options = { env: Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_")).map((k) => [k, undefined])) };
-  let added = false;
   try {
-    gitOut(root, ["worktree", "add", "--detach", baseRoot, mergeBase], options);
-    added = true;
+    mkdirSync(baseRoot);
+    gitOut(baseRoot, ["init", "--quiet"], options);
+    const objects = gitOut(root, ["rev-parse", "--path-format=absolute", "--git-path", "objects"], options).trim();
+    writeFileSync(join(baseRoot, ".git", "objects", "info", "alternates"), `${objects}\n`);
+    writeFileSync(join(baseRoot, ".git", "packed-refs"), gitOut(root, ["for-each-ref", "--format=%(objectname) %(refname)"], options));
+    writeFileSync(join(baseRoot, ".git", "HEAD"), `${mergeBase}\n`);
+    // Census children need the base index, HEAD and refs for baseline comparisons. checkout-index
+    // uses the source repo's checkout settings and keeps export-ignore/export-subst files intact.
+    options.env.GIT_INDEX_FILE = join(baseRoot, ".git", "index");
+    gitOut(root, ["-c", "core.sparseCheckout=false", "-c", "core.splitIndex=false", "read-tree", mergeBase], options);
+    gitOut(root, ["--work-tree", baseRoot, "checkout-index", "--all"], options);
     if (!existsSync(join(baseRoot, "node_modules"))) {
       symlinkSync(join(existsSync(join(root, "node_modules")) ? root : SCRIPT_REPO, "node_modules"), join(baseRoot, "node_modules"), "dir");
     }
     for (const file of failing) {
       if (!existsSync(join(baseRoot, file))) throw new Error(`merge-base suite ${file} is absent`);
     }
-    const baseFailing = new Set(runSuites({ root: baseRoot, files: failing }));
+    const baseFailing = new Set(runSuites({ root: baseRoot, files: failing, ...optionsForSuites }));
     return failing.filter((file) => !baseFailing.has(file));
   } catch (e) {
     throw new Error(`merge-base census run could not be measured: ${String(e?.message ?? e)}`);
   } finally {
-    try {
-      if (added) gitOut(root, ["worktree", "remove", "--force", baseRoot], options);
-    } finally {
-      rmSync(temporary, { recursive: true, force: true });
-    }
+    rmSync(temporary, { recursive: true, force: true });
   }
 }
 
+const SNAPSHOT_REACH = "test/the-affected-suite-reach-ratchet.test.ts";
+const GIT_NAME_RE = /^git(?:[-.]|$)/;
+
+/** W1-T9484: the suites a snapshot-mode round can run with no git, declared `gitFree: true` on their census row. */
+export function gitFreeCensusSuites() {
+  return [...PRECHECK_TRIGGERED_SUITES, ...PRECHECK_PATH_TRIGGERED_SUITES].filter((m) => m.gitFree === true).map((m) => m.testFile);
+}
+
+/**
+ * W1-T9484: a directory of symlinks to every executable on `pathValue` except git (and its `git-*` helpers), so a
+ * child run with it as PATH finds every tool but git and a git spawn dies ENOENT. Returns `{ bin, cleanup }`.
+ */
+export function makeGitAbsentBin(pathValue = process.env.PATH ?? "") {
+  const parent = mkdtempSync(join(tmpdir(), "rmd-census-nogit-"));
+  const bin = join(parent, "bin");
+  mkdirSync(bin);
+  const linked = new Set();
+  for (const dir of pathValue.split(delimiter).filter(Boolean)) {
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue; // a PATH entry that is not a readable directory contributes no tool
+    }
+    for (const name of names) {
+      if (GIT_NAME_RE.test(name) || linked.has(name)) continue;
+      linked.add(name);
+      try {
+        symlinkSync(join(dir, name), join(bin, name));
+      } catch {
+        linked.delete(name); // a later PATH entry may still supply this tool
+      }
+    }
+  }
+  return { bin, cleanup: () => rmSync(parent, { recursive: true, force: true }) };
+}
+
 function runSnapshotReach(snapshot, files) {
-  const reach = "test/the-affected-suite-reach-ratchet.test.ts";
-  if (files.some((file) => file !== reach)) throw new Error(`git-free snapshot reader unavailable for ${files.join(", ")}`);
   const run = (snapshotPath) => runCensusSuitesViaChild({ root: SCRIPT_REPO, files, snapshotPath,
     priority: { wrap: (file, args) => ({ file, args }) } });
   const failing = run();
@@ -1059,6 +1238,65 @@ function runSnapshotReach(snapshot, files) {
   }
 }
 
+/**
+ * W1-T9484: the `gitFree` suites run in ONE child over the round's own tree (`root`, not the harness's), with git
+ * absent from PATH. A red one re-runs over a base tree rebuilt from the snapshot's frozen base blobs, with every other
+ * top-level entry (node_modules, docs, .github) linked from `root`; only head-red/base-green is returned.
+ */
+function runSnapshotGitFree(snapshot, files, root) {
+  if (!existsSync(join(root, "node_modules"))) throw new Error(`${root} has no node_modules, so ${files.join(", ")} cannot run from it`);
+  const noGit = makeGitAbsentBin();
+  const identity = { wrap: (file, args) => ({ file, args }) };
+  try {
+    const run = (cwd) => runCensusSuitesViaChild({ root: cwd, files, priority: identity, pathOverride: noGit.bin });
+    const failing = run(root);
+    if (failing.length === 0) return [];
+    const temporary = mkdtempSync(join(tmpdir(), "rmd-census-snapshot-base-"));
+    try {
+      for (const path of snapshot.basePaths) {
+        if (typeof snapshot.baseBlobs[path] !== "string") throw new Error(`snapshot lacks base blob ${path}`);
+        mkdirSync(dirname(join(temporary, path)), { recursive: true });
+        writeFileSync(join(temporary, path), snapshot.baseBlobs[path]);
+      }
+      const owned = new Set([...snapshot.basePaths.map((path) => path.split("/")[0]), ".git", "state"]);
+      for (const entry of readdirSync(root)) {
+        if (!owned.has(entry)) symlinkSync(join(root, entry), join(temporary, entry));
+      }
+      for (const file of failing) {
+        if (!existsSync(join(temporary, file))) throw new Error(`merge-base suite ${file} is absent`);
+      }
+      const baseFailing = new Set(run(temporary));
+      return failing.filter((file) => !baseFailing.has(file));
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  } finally {
+    noGit.cleanup();
+  }
+}
+
+/**
+ * W1-T9484: what a snapshot-mode round measures of `files`. The reach ratchet reads the snapshot itself; a
+ * `gitFree` suite runs over `root` with git absent; any other suite needs git, so it is returned in `notMeasured`
+ * (a reason string naming it) and never as a pass. A gitFree run that cannot be measured is a reason too, so one
+ * unrunnable kind cannot drop the verdict of the other.
+ */
+function runSnapshotSuites(snapshot, files, root) {
+  const gitFree = new Set(gitFreeCensusSuites());
+  const free = files.filter((file) => file !== SNAPSHOT_REACH && gitFree.has(file));
+  const needGit = files.filter((file) => file !== SNAPSHOT_REACH && !gitFree.has(file));
+  const failing = files.includes(SNAPSHOT_REACH) ? runSnapshotReach(snapshot, [SNAPSHOT_REACH]) : [];
+  const notMeasured = needGit.length === 0 ? [] : [`git-free snapshot reader unavailable for ${needGit.join(", ")}`];
+  if (free.length > 0) {
+    try {
+      failing.push(...runSnapshotGitFree(snapshot, free, root));
+    } catch (e) {
+      notMeasured.push(String(e?.message ?? e));
+    }
+  }
+  return { failing, notMeasured };
+}
+
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
   let values;
   try {
@@ -1074,6 +1312,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   let violations;
   let changed;
   const unmeasured = [];
+  const snapshotUnmeasured = [];
   try {
     const snapshot = readCensusSnapshot();
     if (snapshot && resolve(snapshot.root) !== root) throw new Error("census snapshot belongs to another worktree");
@@ -1122,13 +1361,17 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       changed,
       ...readers,
       loadMembers: () => admitted(root),
-      runSuites: (files) => {
-        if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites });
-        return runSnapshotReach(snapshot, files);
+      runSuites: (files, options = {}) => {
+        if (!snapshot) return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options });
+        if (options.readerRuntimePolicy !== undefined) throw new Error("source-reader runtime calibration is unavailable in git-free snapshot mode");
+        const measured = runSnapshotSuites(snapshot, files, root);
+        snapshotUnmeasured.push(...measured.notMeasured);
+        return measured.failing;
       },
     });
     violations.push(...suites.violations);
-    if (suites.unmeasured !== null) unmeasured.push(`census suites NOT MEASURED - ${suites.unmeasured}`);
+    const suiteReasons = [...(suites.unmeasured === null ? [] : [suites.unmeasured]), ...snapshotUnmeasured];
+    if (suiteReasons.length > 0) unmeasured.push(`census suites NOT MEASURED - ${suiteReasons.join("; ")}`);
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;

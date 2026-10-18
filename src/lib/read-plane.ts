@@ -2,7 +2,7 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
-import { getCallSites } from "node:util";
+import { fileURLToPath } from "node:url";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { startLoopStallProfiler, type LoopLagReading, type LoopStallProfiler, type LoopStallProfilerOptions,
   type StallLog } from "./loop-stall-profiler.js";
@@ -112,16 +112,40 @@ function callerChain(callerLine: string, sites: readonly CallSite[]): string[] |
   return chain;
 }
 
+/** W1-T9720: this frame's callers as V8's raw call sites. A scoped `Error.prepareStackTrace` hands them over
+ *  unformatted, so Node never applies a source map: with maps on (tsx turns them on), formatting `.stack` parses
+ *  each frame's module map and keeps it for the life of the isolate (+134.5 MiB for 587 maps, W1-T9091). */
+function rawCallSites(): NodeJS.CallSite[] {
+  const prepare = Error.prepareStackTrace;
+  const limit = Error.stackTraceLimit;
+  Error.prepareStackTrace = (_error, sites) => sites;
+  Error.stackTraceLimit = 50;
+  let sites: NodeJS.CallSite[];
+  try { sites = new Error().stack as unknown as NodeJS.CallSite[]; }
+  finally { Error.prepareStackTrace = prepare; Error.stackTraceLimit = limit; }
+  return sites.slice(1); // this helper's own frame: the list begins at callerFrame, as `.stack` did
+}
+
+/** W1-T9720: one call site in the source-mapped formatter's shape (`Object.fn (/abs/path.ts:L:C)`, `<anonymous>`
+ *  for a nameless function) at the position node RUNS, not the TypeScript line: reading a mapped line would parse
+ *  the map. A site with no file (native, `Promise.all`) keeps V8's own text. */
+function siteText(site: NodeJS.CallSite): string {
+  const file = site.getFileName();
+  if (!file) return String(site);
+  const type = site.getTypeName();
+  const name = `${type !== null && type !== "global" ? `${type}.` : ""}${site.getFunctionName() ?? "<anonymous>"}`;
+  const path = file.startsWith("file:") ? fileURLToPath(file) : file;
+  return `${site.isAsync() ? "async " : ""}${site.isConstructor() ? "new " : ""}${name} `
+    + `(${path}:${site.getLineNumber()}:${site.getColumnNumber()})`;
+}
+
 /** The first frame outside read-plane, `node:` and the shared leaves; `leaf` is the OUTERMOST leaf frame, the one
  *  the caller called. With no frame outside the leaves the caller is that leaf and `callerIsLeaf` says so. */
 export function callerFrame(): { caller?: string; leaf?: string; callerIsLeaf?: true; chain?: string[] } {
-  const limit = Error.stackTraceLimit;
-  Error.stackTraceLimit = 50;
-  let stack: string;
-  try { stack = new Error().stack ?? ""; } finally { Error.stackTraceLimit = limit; }
-  const sites = getCallSites(50); // W1-T9577: index-aligned with `lines`: both begin at this frame
+  const raw = rawCallSites();
+  const sites = raw.map((site) => ({ functionName: site.getFunctionName() ?? "", scriptName: site.getFileName() ?? "" }));
   let leafLine: string | undefined;
-  const lines = stack.split("\n").slice(1);
+  const lines = raw.map((site) => `    at ${siteText(site)}`); // W1-T9577: index-aligned with `sites`: one capture
   for (const [index, line] of lines.entries()) {
     if (/read-plane\.[cm]?[jt]s/.test(line) || /node:/.test(line)) continue;
     if (SYNC_SPAWN_LEAF_FRAMES.some((leaf) => leaf.test(line))) { leafLine = line; continue; }
@@ -319,6 +343,44 @@ export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined,
     }
   }
   return undefined;
+}
+
+/** W1-T9763: what a revisioned read posts: the request, with its plan replaced by that plan's revision. */
+export type RevisionedRequest<I, R> = Omit<I, "plan"> & { planRevision: R };
+
+/**
+ * W1-T9763 — A TICK READ NEVER POSTS ITS PLAN. {@link startReadPlane} structured-clones every request and posts it,
+ * and the worker's answer is cloned back: with the plan in both, one read carried two whole copies (a clone is
+ * 37.7 MiB at 4,112 tasks, W1-T9647's census), and the answer's copy stayed published until the next tick. A plan that
+ * `revisionOf` names is posted as its revision, and the answer gets the caller's own instance back. Any other plan is
+ * posted as before.
+ */
+export function revisionedRead<P extends object, R, I extends { plan: P }, T extends { plan?: P }>(
+  read: (input: I | RevisionedRequest<I, R>) => Promise<ReadGeneration<T>>,
+  revisionOf: (plan: P) => R | undefined,
+): (input: I) => Promise<ReadGeneration<T>> {
+  return async (input) => {
+    const planRevision = revisionOf(input.plan);
+    if (planRevision === undefined) return read(input);
+    const { plan, ...rest } = input;
+    const answered = await read({ ...rest, planRevision });
+    return Object.freeze({ ...answered, facts: Object.freeze({ ...answered.facts, plan }) });
+  };
+}
+
+/** The worker's half of {@link revisionedRead}: a revision resolves to this side's own plan, and the answer never
+ *  carries a plan back. A request that carries its plan is produced as it always was. */
+export function revisionedProducer<P, R, I extends { plan: P }, O extends { plan?: P }>(
+  produce: (input: I) => O | Promise<O>,
+  resolve: (revision: R) => P | Promise<P>,
+): (input: I | RevisionedRequest<I, R>) => Promise<O> {
+  return async (input) => {
+    if (!("planRevision" in input)) return produce(input);
+    const { planRevision, ...rest } = input;
+    const answer = { ...await produce({ ...rest, plan: await resolve(planRevision) } as unknown as I) };
+    delete answer.plan;
+    return answer;
+  };
 }
 
 /** A published generation answers ONE consumer pass. The daemon publishes one only at the top of

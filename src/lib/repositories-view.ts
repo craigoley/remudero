@@ -13,6 +13,7 @@
  * `read-model/repositories-sources.json`, since the worker cannot resolve them from the registry itself.
  */
 import { readFileSync, statSync } from "node:fs";
+import { observeSelectedRegistrySync, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { dirname, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -34,6 +35,7 @@ import {
 import type { RepoLedgerWatermark } from "./repo-ledger-index.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
+import { createViewHoldBook, type ThreadHolds } from "./worker-heaps.js";
 
 /** 2: each summary's `generated_at` left `data` for its `repositories:<instance>` source's `asOf`, so the ETag moves only with content. */
 export const REPOSITORIES_VIEW_VERSION = 2;
@@ -302,13 +304,15 @@ function planReader(): { read: (path: string) => Plan; held: (path: string) => P
 }
 
 /** `repositories` materialized by the read-model worker; `ledgerSource` is the worker's own, passed in. */
-export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number; catchUp?: unknown }>(ledgerSource: (state: S, now: number) => ViewSource): {
+export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number; catchUp?: unknown }>(ledgerSource: (state: S, now: number) => ViewSource, selectedRegistryObserver?: SelectedRegistryObserver): {
   name: string;
   version: number;
   prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
+  heldSizes(): ThreadHolds;
 } {
+  const holds = createViewHoldBook();
   const sourcesFile = readOnMtimeChange(readSources);
   const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
@@ -358,6 +362,17 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   return {
     name: "repositories",
     version: REPOSITORIES_VIEW_VERSION,
+    heldSizes: () => {
+      if (computed.size) holds.unsized("repositories:computed", computed.size, "summaries alias plans, shadow facts and file reads; exclusive bytes unavailable", "keys");
+      if (sourcesPath) {
+        holds.unsized("repositories:sources-reader", 1, "mtime reader closure holds published source options", "container");
+        holds.unsized("repositories:registry-reader", 1, "mtime reader closure may retain the shared registry", "container");
+        holds.unsized("repositories:plan-reader", 1, "reader closure retains shared parsed plans", "container");
+        holds.unsized("repositories:parsed-repo-rows", 1, "module WeakMap of DB-keyed parsed row caches; live keys and exclusive bytes unavailable", "container");
+        holds.unsized("repositories:shown", 1, "one WeakMap of paired bodies; live key count and retained bytes unavailable", "container");
+      }
+      return holds.read();
+    },
     /** The shadow comparator's legacy side, its facts paired with this view's own summaries' facts. */
     legacy(_key, now, data) {
       const pair = shown.get(data as RepositoriesData);
@@ -393,7 +408,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       }
       return true;
     },
-    materialize: ({ now, instances }) => {
+    materialize: ({ now, instances }) => observeSelectedRegistrySync(selectedRegistryObserver, "repositories-view",
+      { instanceName: instances.length === 1 ? instances[0]!.state.instance : undefined }, () => {
       const at = published(instances);
       if (at === undefined) return [];
       if (at.sources === undefined) return [{ key: "", data: { instances: [], projects: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
@@ -417,7 +433,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       Object.assign(data, repositoriesPortfolio(at.sources, data, (path) => (pair.registry = { read: registryFile(path) }).read));
       shown.set(data, pair);
       return [{ key: "", data, sources }];
-    },
+    }),
   };
 }
 

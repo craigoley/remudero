@@ -1,0 +1,30 @@
+- id: W1-T9947
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — ci_judge.failed landed 2 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 4
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:ci_judge.failed"
+  files:
+    - test/scout-ci-judge-failed.test.ts
+  acceptance:
+    - claim: "ci_judge.failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T9947: ci_judge.failed no longer recurs\" in test/scout-ci-judge-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step ci_judge.failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 1 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The record supplies two recurrence counts but no underlying failure evidence or diagnosed cause; it explicitly leaves locating the emitter to the builder. The finding cannot be verified from what is shown, meeting the stated escalation condition.; on the change's description/files alone, no diff was read — Acceptance requires fixing the cause, but the only declared file is a new test and the only proof greps for its title; that proof does not establish a causal repair or stopped recurrence."
+    judged_at: "2026-10-16T23:29:33.435Z"
+    pin: "2222a6962dbd6872fe77b9d540adde5958b7442ac0c3a83bfaf3804b0ad4c4fd"

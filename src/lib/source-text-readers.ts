@@ -113,13 +113,34 @@ function walksFromArgs(args: string, roots: ReadonlySet<string>): string[] {
   return out;
 }
 
+const isExclusion = (lit: string): boolean => lit.startsWith(":!") || lit.startsWith(":^") || /^:\([^)]*exclude/.test(lit);
+
 /** The pathspecs of every `git ls-files`/`git grep` argv literal in the text. Exclusions (`:!`,
  *  `:(exclude)`) narrow a walk and are skipped; a grep pattern never names a tracked root. */
 function walksFromGitArgv(text: string, roots: ReadonlySet<string>): string[] {
   const out: string[] = [];
   for (const m of text.matchAll(/\[([^[\]]*["'`](?:ls-files|grep)["'`][^[\]]*)\]/g)) {
     for (const lit of literals(m[1])) {
-      if (lit.startsWith(":!") || lit.startsWith(":^") || /^:\([^)]*exclude/.test(lit)) continue;
+      if (isExclusion(lit)) continue;
+      const walk = toWalk(lit, roots);
+      if (walk) out.push(walk);
+    }
+  }
+  return out;
+}
+
+const GIT_SPAWN_ARGV = /\[[^[\]]*["'`](?:ls-files|grep|diff|status)["'`][^[\]]*\]/;
+
+/** W1-T10063: in a suite that spawns git, the literals after `"--"` in ANY array literal are a pathspec. A
+ *  helper (`gitGrepFiles(flags, [base, "--", "test"])`) takes its pathspec from the caller's array, so the
+ *  literal naming the subcommand and the pathspec sit in different arrays. */
+function walksFromPathspecArrays(text: string, roots: ReadonlySet<string>): string[] {
+  if (!GIT_SPAWN_ARGV.test(text)) return [];
+  const out: string[] = [];
+  for (const m of text.matchAll(/\[([^[\]]*["'`]--["'`][^[\]]*)\]/g)) {
+    const lits = literals(m[1]);
+    for (const lit of lits.slice(lits.indexOf("--") + 1)) {
+      if (isExclusion(lit)) continue;
       const walk = toWalk(lit, roots);
       if (walk) out.push(walk);
     }
@@ -196,7 +217,7 @@ export function sourceTextReaderOf(testFile: string, text: string, roots: Readon
     const args = withConstantsInlined(callArgs(text, m.index + m[0].length - 1), text);
     for (const walk of walksFromArgs(args, roots)) walks.add(walk);
   }
-  const gitWalks = walksFromGitArgv(text, roots);
+  const gitWalks = [...walksFromGitArgv(text, roots), ...walksFromPathspecArrays(text, roots)];
   for (const walk of gitWalks) walks.add(walk);
   const declared = declaredReads(text, roots);
   // A declaration is AUTHORITATIVE: it replaces what the text appears to read, so a suite whose
@@ -224,7 +245,7 @@ export const SOURCE_TEXT_READER_PROBE_ARGV: readonly string[] = [
   "grep",
   "--untracked",
   "-lE",
-  `readFile(Sync)?[[:space:]]*\\(|ls-files|["'\`]grep["'\`]|${SOURCE_TEXT_SUBJECT_MARKER}|${CENSUS_READS_MARKER}`,
+  `readFile(Sync)?[[:space:]]*\\(|ls-files|["'\`](grep|diff|status)["'\`]|${SOURCE_TEXT_SUBJECT_MARKER}|${CENSUS_READS_MARKER}`,
   "--",
   "test/*.test.ts",
 ];

@@ -1,0 +1,133 @@
+- id: W1-T9932
+  title: "A PLAN-ONLY PR RED ONLY ON A CI-INFRASTRUCTURE STEP IS RE-RUN, NOT SENT TO A PLAN REPAIR — #12415's ci-shard (7/8) passed 558 of 558 tests, then failed in an artifact upload with `Failed to FinalizeArtifact: Unable to make request: ECONNRESET`; the sweep disposed it three times as plan-proof-unrunnable (\"needs a plan repair\") and nothing re-ran it until a person did 36 minutes later"
+  repo: remudero
+  depends_on: []  # W1-T3194 (merged) owns the classifier and the PR re-run; W1-T9930 (open filing, plan-file-1792180401856) and W1-T9922 (on #12415 itself, a different concern) also name src/lib/sweep.ts
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19: one concern, which reds on a plan-only PR earn the existing single-job re-run; a too-wide signature re-runs a real failure, so the classifier fails closed
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-16 (P1): #12415 (plan-file-1792176840187, head f817c6c97) red only on an artifact-finalize ECONNRESET, hand re-run at 20:08Z"
+  plan_refs: [W1-T3194, W1-T1223, W1-T2403, W1-T5543, W1-T9250, W1-T7730, W1-T6353, W1-T100, W1-T9748]
+  files:
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts
+  status: queued
+  priority: 1  # every plan-only filing that meets one artifact-service transient sits red until a person re-runs it
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-16. PR #12415 is plan-only (plan-file-1792176840187, head f817c6c97, author cao825). CI run
+    38955270104, job ci-shard (7/8): the test step printed `# tests 558`, `# pass 558`, `# fail 0` and
+    "test-tier-manifest: rest run complete — 66/66 file(s) reported, # tests 558, # fail 0." at 19:32:22Z. The next
+    step, actions/upload-artifact for flake-retry-shard-7.zip, printed "Finished uploading artifact content to blob
+    storage!" and "Finalizing artifact upload", then `##[error]Failed to FinalizeArtifact: Unable to make request:
+    ECONNRESET` at 19:32:24Z. The following upload (test-duration-shard-7) finalized normally. The shard job failed,
+    so the `ci` collapse failed at 19:33:20Z and ci-gate failed at 19:46:36Z. The sweep then wrote sweep.disposed
+    three times (19:39, 19:44 and 19:54Z): blocker plan-proof-unrunnable, reason "plan-only PR is red on ci-shard
+    (7/8) — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs
+    a plan repair", stand_down "deferred to full sweep (light pass)". Nothing re-ran the job. The session re-ran the
+    failed jobs by hand at 20:08Z. The saved log is ~/Remudero-notes/f8-12415-ci.log on the operator Mac.
+    READ at origin/main 0c5b35d6d (symbols, not lines):
+    - WHERE THE RED IS DECIDED. In `runSweep` (src/lib/sweep.ts), the block headed "W1-T5543: fleet filings have their
+      own plan surface" rewrites a `blocked-fixable` disposition whenever `isBlockedCi(pr) && pr.isPlanFiling === true`.
+      It calls `tryPlanRepair` (`decidePlanRepair`), and for a fleet-App machine-lane head `dispatchPlanGateRound`.
+      Otherwise it sets `refused-escalate` with the reason above. The finalBlocker fact `planProofUnrunnable` is set for
+      every `isBlockedCi(pr) && pr.isPlanFiling === true` PR.
+    - WHAT CODE PRS GET INSTEAD. The act arm `case "blocked-fixable"` runs the W1-T3194 branch ("A POSITIVELY
+      IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE DIFF") before any fix claim:
+      `classifyCiInfrastructureFailure` per failure, then `requeueCheckJob` (the single-job
+      `POST /actions/jobs/{job_id}/rerun`), bounded by `requeuedCheckKeysFromLedger` (`<head_sha>@<check_name>`),
+      ledgered as `sweep.ci_infrastructure_requeue`, and a repeat goes to `escalateInfrastructureCheck`.
+      main-health-rung.ts uses the same classifier for main.
+    - WHY THE PLAN-ONLY ROUTE SKIPS IT, TWICE OVER.
+      (1) Routing. The plan-filing block changes the disposition away from `blocked-fixable` before the act switch,
+          so the W1-T3194 branch is never reached for a plan-only PR. `decidePlanRepair` knows only held-task-id,
+          title-length and base-red (main-red, stale-base, inherited). None of them reads a log.
+      (2) Signature. Even on a code PR, `classifyCiInfrastructureFailure` would return undefined for this log. Its
+          one registry entry, ARTIFACT_FINALIZE_INTERMEDIARY_403, needs "artifact upload completed successfully",
+          then "finalizing artifact upload", then `Failed to FinalizeArtifact` with a 403 Forbidden "Error from
+          intermediary". This log has "Finished uploading artifact content to blob storage!" and ECONNRESET.
+      (3) Evidence. `ciFailureRegionReducer` (src/run-task.ts) keeps only the `##[error]` step context once a step
+          error is seen: CI_STEP_ERROR_CONTEXT_LINES (8) back to the step's `##[group]` line. The tail therefore
+          holds the upload step but not the test step's `# tests`/`# fail 0` summary about 60 lines earlier. A
+          classifier cannot see that the tests passed.
+    - THE PLAN-REPAIR GAP (named here, not built here). For a plan-only head that is NOT a fleet-App machine-lane head
+      (plan-file-*, run-unfiled-*, codex/*), no plan repair is ever dispatched for a red that is not base-red. The
+      only fleet-side actor is `refused-escalate`, which asks a person. blockerFields already records blocker_owner
+      NONE for that case (planRepairCapable is false). So the reason "the plan violation needs a plan repair" names
+      an owner that does not exist for #12415's head. W1-T7730 was refused for exactly this ("a real fix would need a
+      new repair lane for non-machine-lane or non-fleet plan filings") and retired as superseded by W1-T9250, which
+      covers only the main-red case. A genuine lint-plan or test red on an operator filing still waits for its
+      author. This task fixes the infra case only. A plan-repair lane for operator filings is an operator decision
+      and a separate filing.
+    SURFACE OVERLAP (lint-plan duplicate-surface). W1-T100 routes a code PR's blocked_ci red to the ci-log fix path,
+    and W1-T9748 traces how a task's declared files reach staging. Both also name src/lib/sweep.ts and src/run-task.ts.
+    Neither touches the plan-filing block, the infrastructure registry or the log region's summary retention, so
+    this task is no superset of their work.
+    SWEEP 20:10Z: plan/tasks.d on origin/main for ECONNRESET, FinalizeArtifact, plan-proof-unrunnable,
+    classifyCiInfrastructureFailure, isPlanFiling and plan-only re-run (W1-T3194, W1-T5543, W1-T6048, W1-T6057,
+    W1-T7698, W1-T7730, W1-T9250). None routes a plan-only red to the infrastructure re-run or adds an ECONNRESET
+    finalize signature. 442 origin heads were fetched, and the 32 that add or change a plan shard were grepped for
+    the same terms (positive control: plan-file-1792176840187, #12415's head, was among them). No match.
+  design: |
+    No new effect, no new counter, no LLM. Reuse W1-T3194's classifier registry, single-job re-run, ledger bound and
+    escalation as they are.
+    1. RETAIN THE SUMMARY. `ciFailureRegionReducer` keeps the test runner's completed-summary evidence beside the
+       step-error region, with a retention like `gateVerdictRetention`: the last `# tests N`, `# pass N`, `# fail N`
+       lines and the "test-tier-manifest: ... run complete — K/K file(s) reported" line. It never displaces the
+       error region or a TAP failure block.
+    2. ONE NEW REGISTRY ENTRY. Add ARTIFACT_FINALIZE_TRANSPORT_RESET to `CiInfrastructureFailureSignature`. It
+       matches only this conjunction: conclusion FAILURE; a complete passing summary (`# tests N` with N > 0,
+       `# fail 0`, and where present "K/K file(s) reported" with both K equal); then the upload content finishing
+       ("Finished uploading artifact content to blob storage!" or the existing "artifact upload completed
+       successfully"); then "Finalizing artifact upload"; then `Failed to FinalizeArtifact: Unable to make request:`
+       with a transport code (ECONNRESET, ETIMEDOUT, ECONNREFUSED, EPIPE or socket hang up). It fails closed, as the
+       403 entry does: no summary, a partial "K/M file(s) reported", `# fail` above 0, a TAP `not ok`, an
+       AssertionError, a TS error, or permission wording all return undefined. The existing 403 entry is unchanged.
+       main-health-rung.ts gets the new entry through the same function, so main gets the same re-run.
+    3. CLASSIFY BEFORE THE PLAN ROUTE. In the plan-filing block, before `tryPlanRepair` and before
+       `dispatchPlanGateRound`, classify `withoutDownstreamGateFailure(pr.ciFailures)`. When EVERY remaining failure
+       has a signature and a job id, the PR takes the W1-T3194 branch, not the plan route. Extract that branch into
+       one function that both callers use. A copied loop is not acceptable. It calls `requeueCheckJob` once per
+       head and check, and writes `sweep.ci_infrastructure_requeue` with surface "pr", plan_only: true, check_name,
+       job_id, step (the step that failed, e.g. "Run actions/upload-artifact"), signature, matched_error (the
+       matched error line, at most 200 chars) and outcome. The disposition is `wait`, with a reason naming the
+       re-run. blocker is awaiting-ci, not plan-proof-unrunnable. If any failure is genuine (no signature), the PR
+       keeps today's plan route unchanged. Do not re-run its infra-only siblings either: a genuine red decides the
+       head anyway.
+    4. THE REPEAT BOUND COMES FROM THE LEDGER. The bound is the one W1-T3194 already ledgers:
+       `requeuedCheckKeysFromLedger` over `sweep.check_requeued` rows, keyed `<head_sha>@<check_name>`. A second
+       matching failure on a head that already holds that key goes to `escalateInfrastructureCheck` with the
+       signature. It is never re-run again and never sent to a plan repair. A new head starts clean. There is no
+       numeric constant: the ledger row is the bound.
+    5. PASS GATING. The re-run is admitted exactly as W1-T3194's PR re-run is admitted on that surface. When a pass
+       defers it (light pass, dry run, worker admission), the disposed reason says "infrastructure re-run deferred:
+       <why>". It never says "needs a plan repair", because no plan repair is due.
+    6. A GENUINE RED IS UNCHANGED. A plan-only PR whose failing job has a failing, missing or partial test summary,
+       or whose failure has no signature, keeps today's route: base-red wait/refresh, a plan-scoped round for a
+       fleet machine-lane head, otherwise refused-escalate with blocker plan-proof-unrunnable.
+    7. Tests go in the new file. They drive `runSweep` with an `isPlanFiling: true` plan-file-* view, injected
+       requeueCheck and escalateInfrastructureCheck seams, and a log tail built from the #12415 transcript lines.
+       One test runs the real `ciFailureRegionReducer` over those lines (doctrine
+       coverage-traps/cover-the-real-default). The proofs below name the `test(` titles verbatim.
+  acceptance:
+    - claim: "the log region keeps a passing test summary beside an artifact-finalize step error, and that region classifies as the transport-reset infrastructure signature"
+      proof: 'grep: test("W1-T9932: a FinalizeArtifact ECONNRESET after a complete passing summary classifies as infrastructure" in test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts'
+    - claim: "the same error beside a failing, missing or partial test summary, or a TAP not ok, is not infrastructure"
+      proof: 'grep: test("W1-T9932: a finalize reset beside a failing, missing or partial summary stays a genuine red" in test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts'
+    - claim: "a plan-only PR red only on that signature re-runs its failed job once and ledgers the job, the step and the matched error, with no plan-repair disposition"
+      proof: 'grep: test("W1-T9932: a plan-only PR red only on an infrastructure step is re-run, not sent to a plan repair" in test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts'
+    - claim: "a repeat infrastructure failure on the same head escalates through the existing infrastructure escalation and is not re-run again"
+      proof: 'grep: test("W1-T9932: a repeat infrastructure red on the same head escalates instead of re-running" in test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts'
+    - claim: "a plan-only PR with a genuine test failure keeps today's plan route and blocker"
+      proof: 'grep: test("W1-T9932: a plan-only PR with a genuine test red keeps its plan route" in test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts'
+  falsifier: |
+    At origin/main, an `isPlanFiling: true` plan-file-* view whose only failure is ci-shard (7/8), with a job id and the
+    #12415 tail lines ("# tests 558", "# fail 0", "66/66 file(s) reported", "Finished uploading artifact content to
+    blob storage!", "Finalizing artifact upload", "##[error]Failed to FinalizeArtifact: Unable to make request:
+    ECONNRESET"), is disposed refused-escalate with blocker plan-proof-unrunnable and "needs a plan repair". requeueCheck
+    is never called and no sweep.ci_infrastructure_requeue row is written. `classifyCiInfrastructureFailure` returns
+    undefined for that tail, and `ciFailureRegionReducer` over the full job log drops the summary lines. At head the
+    same view is re-run once and parked as awaiting-ci. A second pass with the same failure on the same head escalates.

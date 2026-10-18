@@ -8,7 +8,7 @@ import { affectedSelectionOrFull, changedSymbols, isPlanOnlyDiff, planOnlySelect
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
-import { listTestFiles, medianMeasuredDurationMs, weightedDurationMs } from './test-tier-manifest.mjs';
+import { listTestFiles, manifestEntryFor, medianMeasuredDurationMs, mergeDurations, reportManifestFallbacks, weightedDurationMs } from './test-tier-manifest.mjs';
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from './pure-test-pool.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
@@ -16,6 +16,9 @@ import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } fr
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
 import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
+import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
+import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
+import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -80,11 +83,18 @@ export function priceSelection(suites, manifest) {
   const median = medianMeasuredDurationMs(files);
   let unmeasured = 0, total = 0;
   for (const suite of suites) {
-    if (!(files.files[suite] > 0)) unmeasured += 1;
+    if (!(manifestEntryFor(files, suite) > 0)) unmeasured += 1;
     total += Math.max(AUTHOR_MIN_SUITE_COST_MS, weightedDurationMs(suite, files, median));
   }
   return { suites: suites.length, unmeasured, medianMs: median, rawMs: total,
     costMs: Math.ceil(total * AUTHOR_RUNTIME_SAFETY_FACTOR), safetyFactor: AUTHOR_RUNTIME_SAFETY_FACTOR };
+}
+
+export function runtimeSelectionFit(files, manifest, profile, options) {
+  reportManifestFallbacks(files, manifest);
+  const current = mergeDurations(manifest, Object.fromEntries(files.map(file =>
+    [file, manifestEntryFor(manifest, file)])));
+  return runtimeDeadlineFit(files, current, profile, options);
 }
 
 /** Whether the priced selection fits the host budget. */
@@ -176,13 +186,47 @@ export function authorSelection(root, changed, range, spawn = spawnSync) {
   });
 }
 
+/** Judge the publication destination, never the local branch name. Unknown is not a pass.
+ *  No automatic consumer supplies the target yet; measurement is scoped to explicit caller input.
+ *  `git` is the author's checked, environment-scrubbed runner, pinned to this worktree. */
+export function authorPublicationIdentity({ headRef, headSha, baseSha, publicationSha }, git) {
+  const scope = { headRef: headRef ?? null, headSha, baseSha };
+  const refuse = (message) => ({ ...scope, state: 'refused', message });
+  if (publicationSha !== undefined && publicationSha !== headSha) {
+    return refuse(`publication head ${publicationSha} is not the committed author HEAD ${headSha}; validate the tree that will be published`);
+  }
+  if (headRef === undefined) {
+    return { ...scope, state: 'unknown-target', message: 'publication target unknown; pass --head-ref <destination branch> before publication; identity NOT verified' };
+  }
+  const branch = headRef.replace(/^refs\/heads\//, '');
+  if (!branch || branch === 'HEAD' || (headRef.startsWith('refs/') && !headRef.startsWith('refs/heads/'))) {
+    return refuse('--head-ref must name the destination branch, optionally prefixed with refs/heads/');
+  }
+  scope.headRef = branch;
+  scope.targetRef = `refs/heads/${branch}`;
+  try {
+    git(['check-ref-format', scope.targetRef]);
+    // Match head-identity-gate's author-message walk and diff, at the EXACT committed SHA.
+    // No bare HEAD read: a refspec may publish another commit, which this author run cannot certify.
+    const headCommitMessage = git(['log', '-1', '--first-parent', '--no-merges', '--format=%B', headSha]);
+    if (!headCommitMessage.trim()) return refuse('cannot read the publication head author message');
+    const changedPaths = git(['diff', '--name-only', '-z', '--no-renames', `${baseSha}...${headSha}`]).split('\0').filter(Boolean);
+    const result = evaluateHeadIdentityGate({ headCommitMessage, headRef: branch, changedPaths });
+    return { ...scope, state: result.ok ? 'passed' : 'refused', message: result.message };
+  } catch (error) {
+    return refuse(`publication identity could not be measured: ${error.message}`);
+  }
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
-  select = (changed, range) => authorSelection(root, changed, range), host } = {}) {
+  select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
     'runtime-profile': { type: 'string' },
-  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; full hosted CI remains required.' });
+    'head-ref': { type: 'string' },
+    'head-sha': { type: 'string' },
+  }, { allowPositionals: false, helpText: 'preflight-author.mjs [--dry-run] [--head-ref <publication destination branch> [--head-sha <committed HEAD sha>]] [--deadline <ISO> --runtime-profile <path>]: fresh-base affected tests + default static preflight; unknown publication target is NOT identity assurance; full hosted CI remains required.' });
   if (helpRequested) return 0;
   const startedAt = Date.now();
   const receipt = { version: 1, assurance: 'author-only', hostedFullSuiteAndCoverage: 'required-pending',
@@ -207,7 +251,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     { mode: 0o600, flag: 'wx', flush: true });
     renameSync(path + '.next', path);
   };
-  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS) => {
+  const runStep = (name, args, file = process.execPath, childEnvironment = {}, phaseMaxMs = AUTHOR_STEP_RUNTIME_MS, heartbeat = undefined) => {
     const runtimeLimitMs = deadline === undefined ? phaseMaxMs :
       Math.min(phaseMaxMs, Math.max(1, deadline - Date.now() - AUTHOR_SHUTDOWN_RESERVE_MS));
     progress({ name, outputLimitBytes: AUTHOR_OUTPUT_LIMIT_BYTES, runtimeLimitMs });
@@ -216,8 +260,9 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     // Injected spawn outcomes remain an explicit diagnostic seam; production owns live pipes.
     if (spawn !== spawnSync) return run(file, args, { env: { ...authorEnvironment(process.env), ...childEnvironment } });
     const resultPath = join(diagnosticsRoot, `${name}.native-result.json`);
-    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment },
-      ...logs, resultPath, runtimeMs: runtimeLimitMs });
+    // W1-T9928: a slotted step's spooler beats the slot while this loop is blocked in spawnSync.
+    const result = captureStepSync(file, args, { cwd: root, env: { ...authorEnvironment(process.env), ...childEnvironment }, trackParent: true,
+      ...logs, resultPath, runtimeMs: runtimeLimitMs, ...(heartbeat ? { heartbeat } : {}) });
     return { ...result, capturedLogs: true, nativeResult: relative(root, resultPath) };
   };
   const git = (args) => {
@@ -239,7 +284,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     receipt.steps.push({ name, ok, ...metadata, exitCode: result.status, signal: result.signal ?? null,
       durationMs: result.durationMs ?? null, startedAt: result.startedAt ?? null, finishedAt: result.finishedAt ?? null,
       error: result.error ? { message: result.error.message, code: result.error.code ?? null } : null,
-      ...(name.startsWith('affected-tests') ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
+      ...(name.startsWith('affected-tests') || name === 'workflow-contract-precheck'
+        ? { testSummary: testSummary(`${stdout}\n${stderr}`) } : {}),
       diagnostics: { stdout: relative(root, logs.stdout), stderr: relative(root, logs.stderr),
         stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr),
         ...(result.nativeResult ? { nativeResult: result.nativeResult } : {}),
@@ -310,6 +356,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     }
     if (shallow !== 'false') throw new Error('Git history completeness is unavailable; author selection and expensive validation were not started');
     receipt.gitHistory.state = 'complete';
+    receipt.publicationIdentity = authorPublicationIdentity({ headRef: values['head-ref'],
+      publicationSha: values['head-sha'], headSha: receipt.headSha, baseSha: receipt.baseSha }, git);
+    console.log(`publication identity: ${receipt.publicationIdentity.state}; ${receipt.publicationIdentity.message}`);
+    if (receipt.publicationIdentity.state === 'refused') {
+      receipt.affectedTestsNotRunReason = 'publication identity refused; no selection, dependency, census, heavy slot, static or test phase was started';
+      throw new Error(receipt.publicationIdentity.message);
+    }
     receipt.changedFiles = git(['diff', '--name-only', '-z', `${receipt.baseSha}...${receipt.headSha}`]).split('\0').filter(Boolean);
     if (receipt.changedFiles.length === 0) throw new Error('empty author diff: nothing to verify');
     const selection = select(receipt.changedFiles, `${receipt.baseSha}...${receipt.headSha}`);
@@ -337,6 +390,30 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         throw new Error('census precheck could not measure the author tree; expensive validation was not started');
       }
       if (censusOk) {
+        const workflowInputs = authorWorkflowContractInputs(receipt.changedFiles);
+        receipt.workflowContractPrecheck = { required: workflowInputs.length > 0, inputs: workflowInputs, suites: [] };
+        if (workflowInputs.length > 0) {
+          const suites = verifiedSuites(root, AUTHOR_WORKFLOW_CONTRACT_SUITES);
+          receipt.workflowContractPrecheck.suites = suites;
+          // This fixed, cheap contract runs before any heavy admission or capacity truncation.
+          // R-50 walks all workflows, including new names with no literal reader hit.
+          const judged = prepareJudgedRun();
+          const command = lowPriorityCommand(process.execPath, judgedNodeTestArgs(['--test', '--test-reporter=tap',
+            '--test-concurrency=1', '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...suites], judged.args));
+          const result = runStep('workflow-contract-precheck', command.args, command.file, judged.env, AUTHOR_WORKFLOW_CONTRACT_MAX_MS);
+          const judge = closeJudgedRun(judged, suites, { status: result.status ?? 1, root,
+            role: 'workflow-contract-precheck', prefix: 'preflight-author' });
+          const ok = completeTestResult(result) && judge.verdict.complete;
+          report('workflow-contract-precheck', result, ok, { inputs: workflowInputs, suites,
+            priority: command.priority, runtimeBoundMs: AUTHOR_WORKFLOW_CONTRACT_MAX_MS,
+            judge: { complete: judge.verdict.complete, given: judge.verdict.given,
+              reported: judge.verdict.reported, unreported: judge.verdict.missing.slice(0, 20),
+              lastStarted: judge.verdict.lastStarted, exitSite: judge.verdict.exitSite } });
+          if (!ok) {
+            receipt.affectedTestsNotRunReason = 'workflow-contract-precheck did not succeed; no heavy slot/static/test phase was started';
+            throw new Error('changed workflow inputs failed the cache/timeout contracts; see workflow-contract-precheck');
+          }
+        }
         const docsInputs = authorDocsIndexInputs(receipt.changedFiles);
         receipt.docsIndexPrecheck = { required: docsInputs.length > 0, inputs: docsInputs };
         if (docsInputs.length > 0) {
@@ -354,7 +431,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
         }
         // The cheap census runs first. One owner then admits BOTH expensive phases;
         // nested production checks borrow only its actual live ancestor lease.
-        const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES });
+        const slot = acquireTestSlot('preflight-author:static-and-affected', { perFileBytes: TEST_FILE_PEAK_BYTES, maxConcurrency: 1 });
         try {
           receipt.testSlot = { outcome: slot.outcome, concurrency: slot.concurrency, waitedMs: slot.waitedMs, note: slot.note };
           if (!testSlotExecutionAllowed(slot)) throw new Error(`author preflight NOT_RUN (${slot.note})`);
@@ -365,7 +442,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
             runtimeManifest ??= JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8'));
-            const decision = runtimeDeadlineFit(files, runtimeManifest, runtimeProfile, {
+            const decision = runtimeSelectionFit(files, runtimeManifest, runtimeProfile, {
               workers, deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
             });
             receipt.runtimeAdmission = { stage, profile: relative(root, resolve(root, values['runtime-profile'])), ...decision };
@@ -373,10 +450,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
           };
           admitRuntime('before-static');
+          const staticCapacity = admitHost('static-preflight');
+          if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
             '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, slot.childEnvironment);
+          const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, slot.childEnvironment,
+            AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
           const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
           report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
           // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
@@ -385,7 +465,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           let lintOk = true;
           if (staticOk && receipt.selection === 'plan-only') {
             const lint = runStep('lint-plan-fast', ['--import', 'tsx', join(root, 'scripts/lint-plan-offline.mjs'),
-              '--base', 'origin/main', '--merge-base'], process.execPath, slot.childEnvironment);
+              '--base', 'origin/main', '--merge-base'], process.execPath, slot.childEnvironment, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
             lintOk = lint.status === 0 && !lint.signal && !lint.error;
             report('lint-plan-fast', lint, lintOk);
           }
@@ -403,6 +483,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const budget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
             const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot.concurrency);
             receipt.executionWorkers = executionWorkers;
+            reportManifestFallbacks(receipt.suites, manifest);
             const verdict = capacityVerdict(receipt.suites, manifest, budget);
             receipt.capacity = verdict;
             let ranSuites = receipt.suites;
@@ -429,6 +510,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
             admitRuntime('before-tests', 0, ranSuites, executionWorkers);
+            const testCapacity = admitHost('affected-tests');
+            if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
@@ -441,7 +524,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const judged = prepareJudgedRun();
             const child = lowPriorityCommand(process.execPath, testRunArgv(judgedNodeTestArgs(['--test', '--test-reporter=tap', ...durationArgs,
               '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...ranSuites], judged.args), executionWorkers));
-            const tests = runStep(testsName, child.args, child.file, judged.env);
+            const tests = runStep(testsName, child.args, child.file, judged.env, AUTHOR_STEP_RUNTIME_MS, slot.heartbeat);
             const judge = closeJudgedRun(judged, ranSuites, { status: tests.status ?? 1, root, role: testsName, prefix: 'preflight-author' });
             const testsOk = completeTestResult(tests) && judge.verdict.complete;
             report(testsName, tests, testsOk, { judge: { complete: judge.verdict.complete, given: judge.verdict.given,
@@ -481,9 +564,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
       : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
   } catch (error) {
-    receipt.verdict = 'refused';
+    receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
+    if (error instanceof MacAuthorCapacityRefusal) {
+      (receipt.hostCapacity ??= []).push({stage: error.stage, ...error.admission});
+      receipt.affectedTestsNotRunReason = error.message;
+    }
     receipt.error = error.message;
-    console.error(`author preflight REFUSED: ${error.message}`);
+    console.error(`author preflight ${error instanceof MacAuthorCapacityRefusal ? 'NOT_RUN' : 'REFUSED'}: ${error.message}`);
   }
   receipt.durationMs = Date.now() - startedAt;
   receipt.phaseAccounting = accountAuthorPhases(receipt);
@@ -508,4 +595,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   return ['passed', 'not-run'].includes(receipt.verdict) ? 0 : receipt.verdict === 'over-capacity' ? OVER_CAPACITY_EXIT : 1;
 }
 
-if (isMainModule(import.meta.url)) process.exit(main(process.argv.slice(2)));
+if (isMainModule(import.meta.url)) {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--low-footprint')) {
+    const {runLowFootprintAuthor} = await import('./lib/author-low-footprint.mjs');
+    process.exitCode = await runLowFootprintAuthor(argv, {
+      root: REPO_ROOT, publicationIdentity: authorPublicationIdentity, authorEnvironment, completeTestResult,
+    });
+  } else process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT, runAuthor: (args, deps) => main(args, deps)});
+}

@@ -24,7 +24,7 @@
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
 import { systemClock, type Clock } from "./clock.js";
-import { securityMergeHead, securityMergeHeadAsync } from "./security-merge-admission.js";
+import { securityMergeHead, securityMergeHeadAsync, securityMetadataGhArgs } from "./security-merge-admission.js";
 import { observeSelectedMode, type SelectedModeQualification } from "./instance-mode.js";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
@@ -34,6 +34,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadConfig, type Config } from "./config.js";
+import { PR_TERMINAL_STEP } from "./ledger-carry.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { recordBranchUpdate, type BranchUpdateRecorder } from "./branch-update.js";
 import {
@@ -437,7 +438,7 @@ export function mergeDirectViaRest(
   if (!target) {
     throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
   }
-  const head = securityMergeHead(prUrl, securityRead ?? (path => JSON.parse(String(exec("gh", ["api", path],
+  const head = securityMergeHead(prUrl, securityRead ?? (path => JSON.parse(String(exec("gh", securityMetadataGhArgs(path),
     { encoding: "utf8", stdio: "pipe", timeout: 15_000, maxBuffer: 2 << 20, killSignal: "SIGKILL" })))), expectedHead);
   const write = () => exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber, head ?? expectedHead), { encoding: "utf8", stdio: "pipe" });
   if (qualification) qualification.observeSync("direct-merge", write, prUrl);
@@ -625,7 +626,7 @@ export function realArmDeps(
   const runGh = ghExec;
   // The synchronous CLI owns this existing bounded transport; do not introduce an
   // independent sync default reader. Every daemon merge effector below uses the async port.
-  const readSecurity = (path: string): unknown => JSON.parse(runGh(["api", path], { encoding: "utf8", stdio: "pipe" }));
+  const readSecurity = (path: string): unknown => JSON.parse(runGh(securityMetadataGhArgs(path), { encoding: "utf8", stdio: "pipe" }));
   return {
     contributorAdmission: (prUrl, head) => runStepsSync(armAdmissionSteps(prUrl, head, loadConfigImpl,
       (path) => readAdmissionRest(path, runGh))),
@@ -1995,6 +1996,9 @@ export function logArmAttribution(
       lane,
       ...preflightFields,
     });
+    // The merge landed, so the terminal fact exists now; the sweep's closed-PR rung only dedups it later.
+    log(PR_TERMINAL_STEP, { task_id: "SWEEP", pr_url: prUrl, pr_number: prNumber, state: "merged",
+      merged_at: systemClock.iso(), source: "automerge.direct_merge" });
   }
   const preflightStep =
     directMergePreflight?.reason === "plan_pr_mergeability_unknown_bound"

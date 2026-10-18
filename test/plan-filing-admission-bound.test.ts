@@ -50,7 +50,8 @@ const build = (n: number, created: string) => pr({ prNumber: n, createdAt: creat
 // ── acceptance 1: the producer populates the signal ─────────────────────────────────────────
 
 test("W1-T2439 (acceptance 1): buildOpenPrViews assigns isPlanFiling from the ledger predicate", () => {
-  const src = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  // W1-T9722: buildOpenPrViews moved with the tick-read producer.
+  const src = readFileSync(new URL("../src/lib/tick-read-worker.ts", import.meta.url), "utf8");
   assert.match(src, /new Map\(raw\.map\(\(pr\) => \[pr\.number, isPlanOnlyFilingPr\(ledger, pr\.url\)\]\)\)/,
     "the producer must still derive the emitter fast path from the shared ledger predicate");
   assert.match(src, /isPlanFiling: planFiling\.isPlanFiling,/,
@@ -431,4 +432,24 @@ test("W1-T2864: the daemon owns one structural cache outside its recurring sweep
   const consumer = source.indexOf("planFilingFileCache,", callback);
   assert.ok(hook >= 0 && cache > hook && callback > cache, "the cache must be built once per daemon lifetime, before the poll callback");
   assert.ok(consumer > callback, "every recurring build uses that same cache instance");
+});
+
+test("W1-T9820: an unattributed filing beyond the per-pass bound reaches the plan-filing lane in its first board build", () => {
+  // GitHub lists newest first, and the filing is the OLDEST uncached head, as #12299 was at 12:53Z on 2026-10-16.
+  const codePr = (number: number) => ({ ...restPr(number, String(number).repeat(14).slice(0, 40)), head: {
+    ref: `run-W1-T9${number}-1792157600000`, sha: String(number).repeat(14).slice(0, 40) } });
+  const filing = restPr(903, "9".repeat(40));
+  const harness = viewHarness([codePr(305), codePr(304), codePr(303), filing], new Map<number, unknown>([
+    [305, [{ filename: "src/lib/a.ts" }]], [304, [{ filename: "src/lib/b.ts" }]], [303, [{ filename: "src/lib/c.ts" }]],
+    [903, [{ filename: "plan/tasks.d/W1-T9903-a-filing.yaml" }]],
+  ]));
+  try {
+    const { views } = buildClassifiedViews(harness, { missCap: 3 });
+    assert.equal(views.find((view) => view.prNumber === 903)?.planFilingSource, "github-files");
+    assert.equal(harness.fileCalls.size, 3, "the per-pass bound is unchanged");
+    const admitted = selectReviewAdmissions(views, DEFAULT_SWEEP_POLICY, NOW);
+    assert.deepEqual(admitted.planFilings.map((view) => view.prNumber), [903], "the filing takes the plan lane, not a semantic slot");
+  } finally {
+    harness.cleanup();
+  }
 });

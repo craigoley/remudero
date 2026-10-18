@@ -109,13 +109,16 @@
   lifecycle: active
   files: [scripts/lib/inherited-violation.mjs]
   fact: >-
-    source-size-ratchet was BLOCKED on src/run-task.ts on a clean origin/main checkout, so every open
-    PR inherited the failure regardless of its own diff — it surfaced on a branch touching only
-    src/lib/review.ts, with no relationship to the violation. Nobody's individual mistake: several
-    PRs each grew that file within their own recorded ceiling, and the sum crossed a bucket boundary
-    after they merged; six PRs were red on it at once and nothing said why. Re-run the ratchet's
-    measure against the merge base (contentAtRef/splitInheritedViolations) and label a violation that
-    already reproduces there INHERITED rather than blaming the diff.
+    A ratchet BLOCKED on a file the diff never touched may be inherited from main: PRs each within
+    their own ceiling can cross a bucket together. Re-run its measure against the merge base
+    (contentAtRef/splitInheritedViolations) and label a violation that reproduces there INHERITED
+    rather than blaming the diff.
+  evidence: >-
+    2026-09-07: source-size-ratchet was BLOCKED on src/run-task.ts on a clean origin/main checkout, so
+    every open PR inherited the failure regardless of its own diff; it surfaced on a branch touching
+    only src/lib/review.ts. Several PRs each grew that file within their own recorded ceiling, and the
+    sum crossed a bucket boundary after they merged; six PRs were red on it at once and nothing said
+    why. Folded 2026-10-17: the narrative moved here, the instruction stays in the fact.
   assertion: 'grep -q "splitInheritedViolations" scripts/lib/inherited-violation.mjs'
   src: measured 2026-09-07 — source-size-ratchet BLOCKED on origin/main across six unrelated open PRs
   cited: "2026-09-07"
@@ -239,7 +242,7 @@
     The commitlint gate checks the LIVE PR TITLE, which becomes the squash-merge subject, not the
     branch's commit history. Before spending another CI cycle, make the title `type(scope): subject`
     with an allowed lower-case type, lower-case subject, no final period, and at most 100 characters;
-    after correcting a title, rerun commitlint so it reads the current title.
+    a retitle alone re-runs it.
   evidence: >-
     The commitlint job reads `gh pr view --json title` at job time, and `commitlint.config.mjs`
     extends `@commitlint/config-conventional`. CI history includes 42 repaired commitlint refusals
@@ -286,7 +289,8 @@
 
 - id: claims-gate-lane
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire claims-gate-lane
+  lifecycle: superseded
   files: ["plan/claims.yaml", "plan/tasks.d/**", src/run-task.ts, "scripts/**", ".github/**"]
   fact: >-
     Before opening a PR from the task-authoring lane or changing the claims runner, scripts, or CI
@@ -378,7 +382,8 @@
 
 - id: hand-review-collides-with-the-daemon
   subsystem: ci
-  lifecycle: active
+  # retired 2026-10-17 by the session retro: W1-T5540 shipped in #9217, which honours shared pending claims
+  lifecycle: superseded
   files: [src/lib/review.ts]
   fact: >-
     The remudero-review pending claim is read from the LOCAL ledger only, so `rmd review` on one
@@ -701,3 +706,52 @@
     established. This guidance is limited to the evidence requirement before selecting a remedy.
   src: "ci-learning:10578:Analyze (actions)"
   cited: "2026-10-15"
+
+# ── clock-sweep-report refusal (ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver), PR #11896) ──
+- id: clock-sweep-report-refusal-needs-per-pr-cause
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/**", "package.json"]
+  fact: >-
+    When the clock-sweep-report (merge the shards, classify, deliver) gate refuses a pull request, read
+    that pull request's failed job step and its repair diff before choosing a remedy. A refusal that was
+    later repaired does not establish a shared cause, and no generic pre-push ritual is known to prevent
+    it. Record the observed failing step and the change that cleared it, so the next worker acts on the
+    actual failure.
+  evidence: >-
+    The ci-learning finding for PR #11896 records the gate going red and being repaired by a change that
+    touched many .github/workflows files, package.json and src/run-task.ts. The failing step and the
+    repair's causal link were NOT read from the CI log in this entry, so the trigger is not verified here.
+    The recorded recommended action is unclear, and guidance changes are parked for a person's decision.
+  src: "ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver)"
+  cited: "2026-10-16"
+
+- id: an-advisory-ignore-needs-the-operator-yes
+  subsystem: ci
+  lifecycle: active
+  files: [osv-scanner.toml, ".github/semgrep/**", ".github/workflows/osv-scanner*.yml", commitlint.config.mjs, .github/workflows/pr-title-lint.yml, src/lib/code-scanning-merge-policy.mjs]
+  fact: >-
+    Never add a security-advisory ignore, scanner exclusion or gate loosening without the operator's
+    explicit yes; a reachability argument is not a waiver. Read ALL comments on another session's PR
+    before pushing to it.
+  evidence: >-
+    #12305 merged a GHSA-84m7-p3x7-pcfv ignore in .github/semgrep/osv-scanner.toml, argued
+    unreachable, over the PR owner's comment asking for no security exception; #12342 reverted it.
+    #12322 exempted Dependabot titles from commitlint header-max-length; #12343 reverted it on the
+    operator's 2026-10-16 ruling of no gate loosening.
+  src: "PRs #12305/#12342, #12322/#12343"
+  cited: "2026-10-16"
+
+- id: a-lowered-ceiling-is-rederived-on-current-main
+  subsystem: ci
+  lifecycle: active
+  files: ["scripts/*-baseline.json"]
+  fact: >-
+    Ceiling ratchets judge each PR on its own base: re-derive a LOWERED baseline row against current
+    origin/main right before merge, or siblings that add lines red main (until W1-T9962).
+  evidence: >-
+    2026-10-16: #12428 and #12437 each added a comment line to src/run-task.ts while #12388 lowered
+    its comment-load row to 18250 on a base without them. All three were green alone; main read 18253
+    over 18250 from its first verdict at 22:11Z until main-repair #12454 recorded 18253.
+  src: "PRs #12428, #12388, #12437, #12454; W1-T9962"
+  cited: "2026-10-16"

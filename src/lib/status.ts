@@ -143,6 +143,8 @@ export type Phase = "recon" | "implement" | "review" | "fix-rung";
 export type WorkerRole = "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro" | "unknown";
 export type WorkerActivityKind = "working" | "tool-executing" | "message";
 export interface WorkerTelemetry {
+  /** Proven by this task's current run start, never inferred from task id or a later event. */
+  runId?: string;
   role?: WorkerRole;
   provider?: string;
   requestedModel?: string;
@@ -959,11 +961,13 @@ export function readLedgerUnionBounded(
     readFileBuffer?: (p: string) => Buffer;
     /** A memoizing rotation reader, e.g. {@link createLedgerRotationMemo}'s pass; omitted ⇒ every rotation is parsed. */
     rotationRecords?: LedgerRotationHook;
+    /** W1-T9981: parses only the raw lines this accepts, live and rotated alike; omitted, every line is parsed. */
+    keep?: (line: string) => boolean;
   } = {},
 ): LedgerLines {
   const ledgerFs = opts.ledgerFs ?? realLedgerFs;
   // ledger-read-intent: live — this function's own seed, extended with rotations below.
-  const live = readLedgerLines(path, ledgerFs, opts.onTorn);
+  const live = readLedgerLines(path, ledgerFs, opts.onTorn, opts.keep);
   const read = readLedgerUnionRecordsSync(
     dirname(path),
     {
@@ -977,6 +981,7 @@ export function readLedgerUnionBounded(
       satisfied: opts.satisfied,
       rotationRecords: opts.rotationRecords,
       onTorn: opts.onTorn,
+      keep: opts.keep,
     },
     statusLedgerUnionFsDeps(ledgerFs, opts),
   );
@@ -1010,20 +1015,22 @@ export async function readLedgerUnionMemoized(path: string, memo: LedgerRotation
  * or `ledger-read-intent: union` on the same line or the one above. A torn line is LOUD in TWO ways (W1-T206):
  * stderr for a human, and `.torn` for a consumer with no stderr, where the old fabricated-`{}` told neither.
  */
-export function readLedgerLines(path: string, ledgerFs: LedgerFsDeps = realLedgerFs, onTorn?: (raw: string) => void): LedgerLines {
+export function readLedgerLines(
+  path: string, ledgerFs: LedgerFsDeps = realLedgerFs, onTorn?: (raw: string) => void, keep?: (line: string) => boolean,
+): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
   // `present: false` is the whole point of this early return carrying metadata at all. The empty array itself
   // is unchanged, so no existing consumer moves.
   if (!ledgerFs.existsSync(path)) return withReadMeta(out, 0, false);
-  return parseLedgerContent(path, ledgerFs.readFileSync(path, "utf8"), onTorn);
+  return parseLedgerContent(path, ledgerFs.readFileSync(path, "utf8"), onTorn, keep);
 }
 
-function parseLedgerContent(path: string, content: string, onTorn?: (raw: string) => void): LedgerLines {
+function parseLedgerContent(path: string, content: string, onTorn?: (raw: string) => void, keep?: (line: string) => boolean): LedgerLines {
   const out: Array<Record<string, unknown>> = [];
   let torn = 0;
   for (const raw of content.split("\n")) {
     const l = raw.trim();
-    if (!l) continue;
+    if (!l || (keep && !keep(l))) continue;
     try {
       out.push(JSON.parse(l) as Record<string, unknown>);
     } catch {
@@ -1720,21 +1727,6 @@ export function lifetimeDispatchTally(
   for (const line of indexedTaskRows(lines, taskId, index)) {
     if (line.task_id === taskId && line.step === "run.start") starts += 1;
     if (line.task === taskId && line.step === "daemon.spawn_infra_blocked") capacityBlocked += 1;
-  }
-  return { starts, capacityBlocked };
-}
-
-/** Combine independently-read archive and live tallies without making the live file immutable at
- * daemon boot. Exported so the command layer can discard an incomplete archive projection rather
- * than guessing from a partial corpus. */
-export function addLifetimeDispatchTallies(
-  ...tallies: readonly LifetimeDispatchTally[]
-): LifetimeDispatchTally {
-  let starts = 0;
-  let capacityBlocked = 0;
-  for (const tally of tallies) {
-    starts += tally.starts;
-    capacityBlocked += tally.capacityBlocked;
   }
   return { starts, capacityBlocked };
 }
@@ -3189,7 +3181,7 @@ function deriveRunState(
     const step = typeof rawStep === "string" ? rawStep : undefined;
     if (step !== undefined && LANE_START_STEPS.has(step)) {
       inFlight = true;
-      activeRunId = typeof line.run_id === "string" ? line.run_id : undefined;
+      activeRunId = typeof line.run_id === "string" && line.run_id.trim() !== "" ? line.run_id : undefined;
       activeFixRunId = undefined;
       phase = "recon";
       startedAt = typeof line.ts === "string" ? line.ts : undefined;
@@ -3202,6 +3194,7 @@ function deriveRunState(
       const mountRecord = mount && typeof mount === "object" ? (mount as Record<string, unknown>) : undefined;
       const role = roleForRunStart(line);
       workerTelemetry = {
+        ...(activeRunId ? { runId: activeRunId } : {}),
         ...(role ? { role } : {}),
         ...(typeof line.provider === "string" ? { provider: line.provider } : {}),
         ...(typeof mountRecord?.model === "string" ? { requestedModel: mountRecord.model } : {}),
@@ -3227,6 +3220,7 @@ function deriveRunState(
     // W1-T944: a worker-state row is only appended ON A TRANSITION, so its own `ts` doubles as the transition
     // time. The comparison reads the bare local, for the harvesting reason above.
     if (step === WORKER_STATE_STEP) {
+      if (!isOwnRunActivity) continue;
       const rawState = line.state;
       if (isWorkerState(rawState)) {
         workerState = rawState;
@@ -3235,6 +3229,7 @@ function deriveRunState(
       continue;
     }
     if (step === "worker.activity" || step === WORKER_ACTIVITY_STAND_IN_STEP) {
+      if (!isOwnRunActivity) continue;
       const eventAt = typeof line.event_at === "string" ? line.event_at : typeof line.ts === "string" ? line.ts : undefined;
       const eventKind = isWorkerActivityKind(line.event_kind) ? line.event_kind : undefined;
       if (eventAt && eventKind) {
@@ -3382,6 +3377,8 @@ export const REFUSED_RUN_VERDICT_STAGE_LIST = ["dispatch.claim", "worktree.stale
 export type RefusedRunVerdictStage = (typeof REFUSED_RUN_VERDICT_STAGE_LIST)[number];
 /** Every run-ending stage above, thrown or returned: a reader excluding one excludes the other (W1-T4708). */
 export const THROWN_RUN_VERDICT_STAGES: ReadonlySet<string> = new Set([...THROWN_RUN_VERDICT_STAGE_LIST, ...REFUSED_RUN_VERDICT_STAGE_LIST]);
+/** Those that end a run before it can restore a pending checkpoint: all but `run.error`. Such a run consumed no receipt. */
+export const PRE_RESTORE_RUN_VERDICT_STAGES: ReadonlySet<string> = new Set([...THROWN_RUN_VERDICT_STAGES].filter((stage) => stage !== "run.error"));
 /** W1-T4597: an environmental block with no deploy since is re-offered after this long. */
 export const ENVIRONMENTAL_BLOCK_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 /** PRIMARY CONTROL (W1-T4597): consecutive environmental re-offers before the block stays durable. */
@@ -3471,6 +3468,12 @@ function firstMergeAfter(
 
 /** W1-T8676: the rows a worker writes when its call ends, each naming its `provider` and `subtype`. */
 const WORKER_RESULT_STEPS: ReadonlySet<string> = new Set(["recon.done", "implement.done", "implement.continued", "fix.done"]);
+/** W1-T9981: the steps {@link projectPlan} reads by step, not through a task's own rows; it also reads the newest
+ *  `ts` anywhere. A reader feeding it only plan tasks' rows must keep these too. */
+export const PROJECTION_STEP_READS: ReadonlySet<string> = new Set([
+  "pr.opened", "review.posted", PLAN_ONLY_REVIEW_MARKER_STEP, "daemon.boot", "verdict", "verdict.merged",
+  "escalation.issue_opened", ...WORKER_RESULT_STEPS,
+]);
 /** W1-T8676: the reasons `workerErrorVerdict` (src/run-task.ts) gives a non-budget worker error. */
 const WORKER_ERROR_REASON = /^worker (?:error at |ended by signal )/;
 

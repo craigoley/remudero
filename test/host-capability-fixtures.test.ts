@@ -78,11 +78,30 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * W1-T9872: every tracked test file under test/ at ANY depth (relative to test/, minus test/fixtures/)
+ * plus the absolute test/ directory, both resolved from the REPO ROOT that git reports for this file's
+ * own folder. A readdirSync of the folder holding the suite would silently drop every file that moved
+ * into a subfolder. Two independent pathspecs must agree on the count.
+ */
+function testCorpus(): { dir: string; files: string[] } {
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, { cwd: TEST_DIR, encoding: "utf8", maxBuffer: 64 << 20 });
+  const root = git("rev-parse", "--show-toplevel").trim();
+  const list = (spec: string): string[] =>
+    git("ls-files", "--full-name", "--", spec).split("\n").filter((f) => f.startsWith("test/") && !f.startsWith("test/fixtures/"));
+  const walked = list(":(top,glob)test/**/*.test.ts");
+  assert.ok(walked.length > 0, "the recursive test/ listing must find the test corpus");
+  assert.equal(walked.length, list(":(top)test/*.test.ts").length, "both pathspecs must see the same population");
+  return { dir: join(root, "test"), files: walked.map((f) => f.slice("test/".length)) };
+}
 
 /**
  * THIS FILE IS THE ONE EXCLUSION, because its own synthetic corpora contain every token it hunts
@@ -135,6 +154,14 @@ const CHMOD_REMEDY =
  *   unidentified-commit — a real-git file that commits with no `user.name`/`user.email`/`GIT_AUTHOR_*`
  */
 const DECLARED: readonly Declared[] = [
+  {
+    kind: "chmod", file: "mac-cache-scan-progress.test.ts", key: "0o644", count: 1,
+    reason: "Checkpoint admission rejects group/world-readable state by explicit stat mode, not an OS permission denial. The refusal holds for uid 0 as well as the ordinary account.",
+  },
+  {
+    kind: "platform-tool", file: "mac-janitor-dependency-health.test.ts", key: "/usr/bin/find", count: 1,
+    reason: "The private shell fixture delegates only inside its owned root to native find, available on both Darwin and Linux; all other roots fail closed. The health assertions do not depend on BSD/GNU enumeration order or output.",
+  },
   {
     kind: "chmod", file: "test-slot-private-capacity.test.ts", key: "0o644", count: 1,
     reason: "Publication rejects group/world-readable ownership by descriptor stat mode, independent of OS read privileges. This tests the explicit private-mode contract, not EACCES, so uid 0 cannot turn refusal into success.",
@@ -578,9 +605,10 @@ export function explainAudit(audit: Audit): string {
 
 /** The real corpus: every `test/*.ts`, read as TEXT, minus this file. */
 function realCorpus(): { file: string; text: string }[] {
-  return readdirSync(TEST_DIR)
-    .filter((f) => f.endsWith(".ts") && !EXCLUDED_FROM_WALK.includes(f))
-    .map((file) => ({ file, text: readFileSync(join(TEST_DIR, file), "utf8") }));
+  const { dir, files } = testCorpus();
+  return files
+    .filter((f) => !EXCLUDED_FROM_WALK.includes(f))
+    .map((file) => ({ file, text: readFileSync(join(dir, file), "utf8") }));
 }
 
 // ── THE WALK, AGAINST THE REAL TREE ───────────────────────────────────────────────────────────

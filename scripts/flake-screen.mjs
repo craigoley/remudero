@@ -37,6 +37,7 @@ import {
   loadManifest,
   packFilesByMakespan,
   predictMakespanMs,
+  reportManifestFallbacks,
 } from "./test-tier-manifest.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -54,7 +55,9 @@ export function screenBudgetMs(root = ROOT) {
     loadManifest(join(root, "scripts/test-tier-manifest.json")),
     loadManifest(join(root, "scripts/test-tier-coverage-manifest.json")),
   );
-  const shards = packFilesByMakespan(listTestFiles(root), manifest, DEFAULT_CI_SHARD_COUNT, COVERAGE_SHARD_WORKERS);
+  const testFiles = listTestFiles(root);
+  reportManifestFallbacks(testFiles, manifest);
+  const shards = packFilesByMakespan(testFiles, manifest, DEFAULT_CI_SHARD_COUNT, COVERAGE_SHARD_WORKERS);
   return Math.max(0, ...shards.map((files) => predictMakespanMs(files, manifest, COVERAGE_SHARD_WORKERS)));
 }
 

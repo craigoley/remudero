@@ -1,0 +1,73 @@
+- id: W1-T10043
+  title: "A FIX ROUND'S SCOPE AMENDMENT ADMITS A PATH THE PR'S FILES IMPORT BUT ITS TREE LACKS — on 2026-10-17 #12575's fix round asked for src/lib/rule-suites.ts, which three files in the PR import and the build had left out, and requestScopeAmendment refused it `path-not-changed` because that round's worker had not rewritten it; the PR sat on needs-human #12577 for 2 h 50 m until a later round happened to write the file (amendment #12599)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, which requested paths a fix-lane scope amendment admits; every other refusal, the amendment PR and the implement lane are unchanged
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 4, second half (the first half, refusing the bare commit, is W1-T10026)'
+  plan_refs: [W1-T10026, W1-T6465, W1-T5534, W1-T9561, W1-T9877]
+  files:
+    - src/lib/proof-amendment.ts
+    - src/run-task.ts
+    - test/a-scope-amendment-admits-a-path-the-head-imports-but-lacks.test.ts
+  status: queued
+  priority: 2  # one occurrence in 8 days; W1-T10026 removes the usual way a PR gets into this state
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger, read-only):
+    - 11:46:16Z implement.harness_commit sha e7a261d2, undeclared ["src/lib/rule-suites.ts"] (run W1-T9877).
+    - 12:37:15Z fix.scope_needed paths [src/lib/rule-suites.ts], attribution diff-reaches; 12:37:16Z
+      fix.scope_amendment outcome refused, reason path-not-changed, detail src/lib/rule-suites.ts, head 4d0d5bbf.
+    - 15:26:28Z fix.scope_needed again at head 125ad2aa; 15:27:03Z fix.scope_amendment outcome created, #12599, which
+      merged at 15:36:05Z (origin/main 4b640af44).
+    - 2026-10-10..17: fix.scope_amendment outcomes created 9, unfiled-escalated 4, main-owned 3, instrument-path 2,
+      branch_update_requested 2, amended-shard-lint 2, shard-not-found 1, no-task-trailer 1, path-not-changed 1.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/run-task.ts `amendScope` is called with `readWorkerChanged()`: the FIX worker's own changes (git status
+      plus roundStartSha..HEAD), not the PR's diff against main.
+    - src/lib/proof-amendment.ts `requestScopeAmendment` refuses `path-not-changed` for any requested path that is not
+      in `request.changedPaths`.
+    - So a path the build left out, and which the PR's own files import, is admitted only if the fix worker happens
+      to write it again in that round.
+    - src/lib/affected-suites.ts `buildAffectedSuitesGraph(files, extraTargets)` is a pure import-graph builder
+      (relative `.js` specifiers mapped to `.ts`) already used by run-task.ts `importClosureAt`.
+    WHY THIS IS NOT ANOTHER TASK: W1-T10026 (queued) stops the implement lane opening such a PR bare; it leaves the fix
+    lane's amendment unchanged ("the fix lane's scope amendment … unchanged"). W1-T6465 designed the path-not-changed
+    admission; W1-T5534 and W1-T9561 (merged) are the NEEDS_SCOPE route and its attribution. Swept origin/main
+    plan/tasks.d and the plan diffs of every open PR head for path-not-changed, scope_amendment, scope_needed and
+    harness_commit (2026-10-17 ~15:40Z): only W1-T10026, W1-T6465 and W1-T9561 name path-not-changed, none admits this.
+  design: |
+    1. `ScopeAmendmentRequest` gains `missingImports?: readonly string[]`. `requestScopeAmendment` admits a requested
+       path found in `changedPaths` or in `missingImports`, and the row records `admitted_as: "missing-import"` for the
+       latter. Every other refusal (plan, test and instrument paths, identity, trailer) keeps its order.
+    2. A pure helper in proof-amendment.ts, `missingHeadImports(files, requested, presentAtHead)`, returns the requested
+       paths that a file in the PR's diff imports (through `buildAffectedSuitesGraph` with the requested paths as extra
+       targets) and that are absent from the head tree.
+    3. run-task.ts `amendScope` supplies it from the PR's changed files against its merge base, their contents at the
+       head and a presence check at the head. A read error leaves `missingImports` undefined, which keeps today's
+       refusal.
+    4. No count or bound is added. Package `#src/*` subpath specifiers are resolved like the relative form only if the
+       builder chooses to; the relative form is the observed case.
+    5. TESTS in test/a-scope-amendment-admits-a-path-the-head-imports-but-lacks.test.ts, `test(` titles verbatim as in
+       the proofs, with fake ports and no network. test/a-fix-round-that-needs-scope-gets-it.test.ts (which asserts
+       path-not-changed) must stay green.
+  acceptance:
+    - claim: "a requested path the PR's files import but its head lacks is admitted to the scope amendment"
+      proof: 'grep: test("W1-T10043: a path the head imports but lacks is admitted to the scope amendment" in test/a-scope-amendment-admits-a-path-the-head-imports-but-lacks.test.ts'
+    - claim: "a requested path nothing in the PR imports, or one the head already holds, is still refused path-not-changed"
+      proof: 'grep: test("W1-T10043: an unimported or present path is still refused path-not-changed" in test/a-scope-amendment-admits-a-path-the-head-imports-but-lacks.test.ts'
+    - claim: "the admission input is named on the request"
+      proof: 'grep: missingImports in src/lib/proof-amendment.ts'
+  falsifier: |
+    The #12575 shape in miniature: the PR's diff holds src/lib/ci-parity.ts importing "./rule-suites.js" and
+    scripts/diff-class.mjs importing "../src/lib/rule-suites.ts"; the head tree lacks src/lib/rule-suites.ts and the
+    round's changedPaths is empty. At origin/main requestScopeAmendment returns refused path-not-changed, so the first
+    test fails. Admitting every unchanged path fails the second. Deleting the fix gives `# fail N`, restoring it
+    `# fail 0`.
+  note: |
+    EFFECT, measured after merge from the core ledger: fix.scope_amendment refused path-not-changed for a path the
+    PR's files import. Healthy shape: none; such a request is created with admitted_as missing-import.

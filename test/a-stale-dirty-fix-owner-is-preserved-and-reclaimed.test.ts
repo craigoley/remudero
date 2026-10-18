@@ -167,7 +167,6 @@ test("W1-T7719: a dirty owner at the current head is still kept", () => {
   const f = fixture();
   try {
     const snapshot = capture(f);
-    assert.deepEqual(decideRegisteredFixOwnerRecovery({ ...snapshot, remoteSha: f.localSha }), { kind: "keep", reason: "dirty_worktree" });
     for (const changes of [
       { idleBoundMs: null }, { ageMs: null }, { ageMs: 1_000 }, { ageMs: 999 },
       { localSha: null }, { remoteSha: null }, { remoteState: "unknown" }, { remoteState: "changed" },

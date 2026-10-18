@@ -1,0 +1,90 @@
+- id: W1-T10053
+  title: "MEASURE FIRST: HOW MUCH EACH CODEX RUN AND PROBE READS FROM THE SHARED ~/.codex SQLITE, AND WHAT EACH REMEDY WOULD COST — on 2026-10-17 codex children's random reads of state_5.sqlite (2.12 GB) and thread_history_1.sqlite (4.73 GB) on the nvme0n1 data disk were attributed 0.34 to 2.7 MB/s of core's reads depending on the method, and nothing measures them per run; this task measures, reads the pinned Codex's retention settings and hands the operator options, changing nothing in ~/.codex"
+  repo: remudero
+  depends_on: []
+  type: implement
+  # the capture needs the live host under the builder rules (per-task /proc io and stat, fd readlink only); a fleet worker cannot take it
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern, a per-run measurement and an options memo; no daemon code, no ledger step and no change to ~/.codex
+  band_meaning: span
+  origin: 'coordinator brief batch1017b item 11; OPERATOR RULING 2026-10-17 (coordinating session): the Codex sqlite item is MEASURE-FIRST only'
+  plan_refs: [W1-T3626, W1-T3676, W1-T9071, W1-T2800, W1-T3435, W1-T5710]
+  files:
+    - scripts/codex-home-read-attribution.mjs
+    - test/codex-home-reads-are-attributed-per-run.test.ts
+    - docs/research/codex-home-read-options.md
+    - docs/research/README.md
+    - docs/docs-index.json
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED (logs-8864/rootio2-*; per-second /proc/<pid>/io and stat of the core container's tree, fd readlink and
+    fdinfo at 40 Hz, cgroup io.stat; no cmdline or environ):
+    - Capture 2a, 14:45:23–14:53:50Z (506 s): core's cgroup read 4.10 MB/s on 259:1. Seconds with no codex sqlite
+      opener ran at 1.39 MB/s, seconds with 1, 2, 3 and 4+ at 5.43, 5.25, 9.22 and 7.88 MB/s: "codex excess ~2.7 MB/s
+      (66%)" (rootio2-analysis-1.txt).
+    - Other methods disagree: per-comm read_bytes share gives codex 2.16 MB/s (53%) in 2a and 2.32 MB/s in capture 1;
+      the per-open-file split gives .codex 3.10 MB/s (75%); the regression gives 0.34 MB/s (R² 0.20); 10-16 measured
+      about 0.4 MB/s. Every sqlite fd shows pos-advance 0 (pread), so per-file rates are open-time apportionment.
+    - 37 codex pids lived in 2a, but only 6 codex worker.attempt rows overlap it: most codex processes are not runs
+      (INFERRED: `codex app-server` capacity probes, which write no attempt row).
+    - 2026-10-17 had 623 codex worker.attempt rows; 61 run-task (median 103 s), the rest short judges and reviews.
+    - ~/.codex is a bind of /mnt/rmd/agent-codex on nvme0n1p1 (findmnt, 15:5xZ), the data disk, NOT the root disk
+      (nvme0n2p1). It holds 13 GB: thread_history_1.sqlite 4,725,731,328 B, state_5.sqlite 2,119,491,584 B,
+      sessions/ 6.0 GB in 8,270 rollouts, a 241 KB config.toml of project trust tables only, and auth.json (not
+      opened). The sqlite files grew from 1.99 GB and 1.80 GB on 09-16.
+    READ at origin/main 4b640af44 (symbols, not lines):
+    - src/lib/worker-provider.ts `codexHome()` = config.workerProviders.codexHome ?? CODEX_HOME ?? ~/.codex, one home
+      for every worker and probe; workers run `codex exec --json --ignore-user-config …` (so config.toml never reaches
+      them; a retention setting would have to be a `-c` argument); `readCodexRuntime` spawns
+      `codex app-server --listen stdio://` per process with a 60 s cache.
+    - deploy/install-host-units.sh binds `${CODEX_DIR}:/home/node/.codex` (also recycle-container.sh, host-update.sh);
+      deploy/package.json pins @openai/codex 0.162.1; deploy/codex-requirements.toml denies workers auth.json.
+    - deploy/host-update.sh's agent-history rung (W1-T3676: wal_checkpoint(TRUNCATE) + VACUUM) refuses on a live fleet.
+    WHY THIS IS NOT ANOTHER TASK: W1-T3626/W1-T3676 (merged) reclaim disk space; W1-T9071 (merged, dormant) moves
+    sessions; none measures read I/O per run. Swept origin/main plan/tasks.d and the plan diffs of every open PR head
+    for codex, .codex, thread_history, state_5, CODEX_HOME and sqlite (2026-10-17 ~15:40Z).
+  design: |
+    MEASURE FIRST (operator ruling): no change to ~/.codex, no daemon change, no new ledger step.
+    1. scripts/codex-home-read-attribution.mjs: a pure `attributeCodexHomeReads(samples, attempts, opts)` and a
+       `sample` subcommand with injected read ports. Per codex pid it records the read_bytes delta (/proc/<pid>/io),
+       start time (/proc/<pid>/stat), parent pid, NSpid (/proc/<pid>/status) and the seconds it held a ~/.codex
+       sqlite fd (fd readlink only). It never opens /proc/*/cmdline, environ or cwd.
+    2. Each pid is joined to a codex worker.attempt (⋈ worker.assignment) by start time within a tolerance, with its
+       lane; a pid with no match (a probe) is reported unjoined, never folded into a run. Bytes count as ~/.codex reads
+       only in seconds the pid held such an fd. Totals are lower bounds (read_bytes spans devices; short pids and the
+       last period are missed), and the report says so.
+    3. docs/research/codex-home-read-options.md: measured bytes per run by lane and per probe, with window and
+       method; the retention or relocation settings found in the pinned 0.162.1 docs (read from the image, e.g. a
+       `docker exec … cat` the operator approves, never by running codex); and, under "## What each option loses", what
+       pruning sessions, VACUUM, deleting or rebuilding state and thread_history, a per-instance CODEX_HOME and moving
+       the files would each lose, given that ~/.codex is shared by three containers and the host CLI and holds the
+       login. It ends with options for the operator, not a choice.
+  acceptance:
+    - claim: "a codex pid's read delta is attributed to the attempt whose start it matches"
+      proof: 'grep: test("W1-T10053: a codex pid read delta is attributed to the attempt whose start it matches" in test/codex-home-reads-are-attributed-per-run.test.ts'
+    - claim: "a codex pid with no matching attempt is reported unjoined, never folded into a run"
+      proof: 'grep: test("W1-T10053: a codex pid with no matching attempt is reported unjoined" in test/codex-home-reads-are-attributed-per-run.test.ts'
+    - claim: "the sampler never opens cmdline, environ or cwd"
+      proof: 'grep: test("W1-T10053: the sampler never opens cmdline, environ or cwd" in test/codex-home-reads-are-attributed-per-run.test.ts'
+    - claim: "the memo names what each option loses"
+      proof: 'grep: ## What each option loses in docs/research/codex-home-read-options.md'
+  falsifier: |
+    Removing the start-time join fails the first test; folding unjoined pids into the nearest run fails the second;
+    a sampler that reads cmdline (the injected read port records every path) fails the third. At origin/main none of
+    the files exist. Deleting the fix gives `# fail N`, restoring it `# fail 0`.
+  note: |
+    OPERATOR DECISIONS named here: the io and fd sampling rates (rootio2 used 1 Hz and 40 Hz), capture length and
+    count, the start-time match tolerance, which instances to sample (core only, or core, site and console), where
+    output goes (/mnt/scratch by default), and whether the image's Codex docs are read via docker exec.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.98
+    reasons:
+      - "high-risk verdict at confidence 0.98 — on the change's description/files alone, no diff was read — The filed note explicitly names unresolved OPERATOR DECISIONS: sampling rates, capture length/count, matching tolerance, instance scope, output location, and whether to use docker exec. The supplied escalation rule requires HIGH when a task asks for operator-only decisions.; on the change's description/files alone, no diff was read — The declared scope is measurement and an options memo, with no changes to ~/.codex; the escalation basis is the explicitly reserved decisions, not an inferred implementation defect."
+    judged_at: "2026-10-17T23:55:13.260Z"
+    pin: "bb9a22ecb915a0ed78ad627b67d5652e5c544f51b7f6e1667f5896067cb2a725"

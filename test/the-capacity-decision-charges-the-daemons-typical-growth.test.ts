@@ -130,7 +130,7 @@ test("W1-T9557: a lifetime-peak spike with a small typical growth raises no capa
     const rows = record(SUSTAINED * 3, 3000, FOOTPRINT_MIB);
     const shadow = rows.find((r) => r.step === "memory_budget.shadow")!;
     const numbers = shadow.numbers as Record<string, number>;
-    assert.equal(numbers.daemonGrowthMib, 5200, "the fixture's lifetime-peak growth");
+    assert.equal(numbers.daemonGrowthLifetimePeakMib, 5200, "the fixture's lifetime-peak growth (W1-T9972: compared only)");
     assert.equal(numbers.daemonGrowthTypicalMib, 342, "the fixture's typical growth");
     assert.equal(rows.filter((r) => r.step === DECISION).length, 0, "the lifetime peak is a transient, not standing demand");
     assert.deepEqual(takeCapacityDecisions(), [], "nothing is queued for the escalation path");

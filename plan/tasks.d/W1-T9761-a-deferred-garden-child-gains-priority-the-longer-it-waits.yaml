@@ -14,7 +14,7 @@
     - src/lib/host-memory-admission.ts
     - src/lib/garden-registry.ts
     - test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-15: gardens starved for 20 h under enforcement (ci-friction #11716 missed its retry)
   attempts: 0
   rationale: |
