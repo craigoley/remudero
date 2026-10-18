@@ -25141,8 +25141,13 @@ export function emissionsCommand(rest: string[], opts: { stateDir?: string } = {
   for (const { name } of measurable) {
     const fn = name.replace(/-([a-z])/g, (_m, c: string) => String(c).toUpperCase()) + "Command";
     let n = 0;
-    for (const text of sources) n += [...text.matchAll(new RegExp(`\\b${fn}\\s*\\(`, "g"))].length;
-    callSites.set(name, Math.max(0, n - 2));
+    let definitions = 0;
+    for (const text of sources) {
+      n += [...text.matchAll(new RegExp(`\\b${fn}\\s*\\(`, "g"))].length;
+      definitions += [...text.matchAll(new RegExp(`\\bfunction\\s+${fn}\\s*\\(`, "g"))].length;
+    }
+    // W1-T9333: a verb moved into src/cli/commands/ keeps a delegating function here, so it has TWO definitions.
+    callSites.set(name, Math.max(0, n - Math.max(1, definitions) - 1));
   }
 
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();

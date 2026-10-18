@@ -61,7 +61,7 @@ test("daemonCommand: a SELF-TARGET non-dry-run boot wires checkRetroTrigger + ru
     "function",
     "a self-target daemon wires the automated-retro runner",
   );
-  const source = readFileSync(fileURLToPath(new URL("../src/run-task.ts", import.meta.url)), "utf8");
+  const source = readFileSync(fileURLToPath(new URL("../src/cli/commands/daemon.ts", import.meta.url)), "utf8");
   // `buildRetroDaemonHooks()` itself stays a bare, zero-arg construction call (byte-identical
   // to before W1-T2870) so test/owner-self-host-gating.test.ts's isSelf source-grep still
   // matches; the daemon's per-boot ledger sink is instead handed to `runRetroTrigger` at

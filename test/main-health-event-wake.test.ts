@@ -274,7 +274,7 @@ test("W1-T2787: a failed observation is not cached and does not escape", async (
 });
 
 test("W1-T2787: production composes one observer into both the event and full-sweep paths", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../src/cli/commands/daemon.ts", import.meta.url), "utf8");
   const observer = source.indexOf("const mainHealthRung = buildMainHealthRung(");
   const wake = source.indexOf("const githubEventWake =", observer);
   const daemon = source.indexOf("runDaemon(", wake);
