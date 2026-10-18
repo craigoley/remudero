@@ -324,6 +324,7 @@ test("scope recovery deletes through a pinned parent after an ancestor replaceme
 test("scope recovery refuses a hard-linked save rather than reading an outside file", (t) => {
   const f = fixture(t);
   const outside = join(f.opts.config.root, "outside-hardlink");
+  mkdirSync(dirname(outside), { recursive: true });
   writeFileSync(outside, "OUTSIDE_SENTINEL");
   linkSync(outside, join(f.repo.dir, path));
   const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
