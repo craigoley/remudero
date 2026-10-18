@@ -469,7 +469,7 @@ test("six-hour session scratch cleanup removes only wholly old, unheld, non-Git 
 });
 
 test("whole temporary entries are requalified after sizing before removal", () => {
-  for (const activation of ["cwd", "recent-content"]) {
+  for (const activation of ["cwd", "recent-content", "ctime-only"]) {
     const fx = fixture();
     try {
       const tree = join(realpathSync(fx.root), "whole-candidate");
@@ -477,14 +477,33 @@ test("whole temporary entries are requalified after sizing before removal", () =
       writeFileSync(join(tree, "old-output.txt"), "retain when activity starts during sizing\n");
       age(tree, HOURS_AGO(8));
       const du = sh(fx.base, "sh", "-c", "command -v du").trim();
+      const stamp = join(fx.base, "old-stamp");
+      const sized = join(fx.base, "sizing-finished");
+      const oldFile = join(tree, "old-output.txt");
+      const oldMtime = lstatSync(oldFile).mtimeMs;
+      if (activation === "ctime-only") {
+        writeFileSync(stamp, "reference mtime\n"); age(stamp, HOURS_AGO(8));
+        const nativeFind = sh(fx.base, "sh", "-c", "command -v find").trim();
+        // Only initial old metadata is simulated. After du mutates and restores
+        // mtime, the final boundary uses the real kernel ctime via native find.
+        const shim = readFileSync(join(fx.bin, "find"), "utf8");
+        writeFileSync(join(fx.bin, "find"), shim.replace("#!/bin/bash\n",
+          `#!/bin/bash\nif [ -f ${JSON.stringify(sized)} ]; then exec '${nativeFind}' "$@"; fi\n`));
+      }
       const activate = activation === "cwd"
         ? `printf '%s\\n' ${JSON.stringify(tree)} > ${JSON.stringify(fx.cwds)}`
-        : `printf 'new work\\n' > ${JSON.stringify(join(tree, "fresh.txt"))}`;
+        : activation === "recent-content"
+          ? `printf 'new work\\n' > ${JSON.stringify(join(tree, "fresh.txt"))}`
+          : `printf 'changed during sizing\\n' > ${JSON.stringify(oldFile)}; /usr/bin/touch -r ${JSON.stringify(stamp)} ${JSON.stringify(oldFile)} ${JSON.stringify(tree)}; /usr/bin/touch ${JSON.stringify(sized)}`;
       writeFileSync(join(fx.bin, "du"), `#!/bin/bash\ncase "\${@: -1}" in ./whole-candidate) ${activate} ;; esac\nexec '${du}' "$@"\n`, { mode: 0o755 });
       const { out } = reclaim(fx, 40);
       assert.ok(existsSync(join(tree, "old-output.txt")), activation + ": " + out);
       if (activation === "cwd") assert.match(out, /process working directory is inside path/);
-      else assert.ok(existsSync(join(tree, "fresh.txt")), out);
+      else if (activation === "recent-content") assert.ok(existsSync(join(tree, "fresh.txt")), out);
+      else {
+        assert.equal(readFileSync(oldFile, "utf8"), "changed during sizing\n");
+        assert.equal(lstatSync(oldFile).mtimeMs, oldMtime, "mtime was restored; only real ctime protects the entry");
+      }
     } finally { rmSync(fx.base, { recursive: true, force: true }); }
   }
 });
