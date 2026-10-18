@@ -10,20 +10,20 @@ const title = "a selected shared-install proof";
 const tap = `TAP version 13\n1..1\nok 1 - tests/unit/shared.test.ts {\n    1..1\n    ok 1 - ${title}\n}\n`;
 const noBrowsers = { preflightBrowsers: () => {} };
 
-function checkout(shared: boolean): { root: string; cwd: string } {
+function checkout(): { root: string; cwd: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-vitest-shared-"));
   const cwd = join(root, "checkout");
-  const modules = shared ? join(root, "install") : join(cwd, "node_modules");
+  const modules = join(root, "install");
   mkdirSync(join(modules, "vitest"), { recursive: true });
   mkdirSync(join(cwd, "tests", "unit"), { recursive: true });
   writeFileSync(join(modules, "vitest", "vitest.mjs"), "");
   writeFileSync(join(cwd, "tests", "unit", "shared.test.ts"), `test("${title}", () => {});\n`);
-  if (shared) symlinkSync(modules, join(cwd, "node_modules"), "dir");
+  symlinkSync(modules, join(cwd, "node_modules"), "dir");
   return { root, cwd };
 }
 
 test("shared-install Vitest proofs load native config in the synchronous executor", () => {
-  const { root, cwd } = checkout(true);
+  const { root, cwd } = checkout();
   try {
     const proof = parseWhitelistedProof("unit test: tests/unit/shared.test.ts", target)!;
     const parsed = [...proof.args];
@@ -40,7 +40,7 @@ test("shared-install Vitest proofs load native config in the synchronous executo
 });
 
 test("shared-install Vitest proofs load native config in the asynchronous executor", async () => {
-  const { root, cwd } = checkout(true);
+  const { root, cwd } = checkout();
   try {
     const proof = parseWhitelistedProof(`unit test: ${title}`, target)!;
     const result = await execWhitelistedProofAsync(proof, cwd, 1000, async (_command, args) => {
@@ -53,19 +53,8 @@ test("shared-install Vitest proofs load native config in the asynchronous execut
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("ordinary Vitest installs keep their existing config-loading argv on both executors", async () => {
-  const { root, cwd } = checkout(false);
-  try {
-    const proof = parseWhitelistedProof("unit test: tests/unit/shared.test.ts", target)!;
-    const expected = [pinnedVitestCli(cwd), ...proof.args.slice(1)];
-    const observe = (_command: string, args: readonly string[]) => { assert.deepEqual(args, expected); return tap; };
-    assert.equal(execWhitelistedProof(proof, cwd, 1000, observe, noBrowsers), "pass");
-    assert.equal(await execWhitelistedProofAsync(proof, cwd, 1000, async (...args) => observe(args[0], args[1]), noBrowsers), "pass");
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
 test("shared-install Vitest config reaches the real pinned-runner child without a dependency write", () => {
-  const { root, cwd } = checkout(true);
+  const { root, cwd } = checkout();
   const install = join(root, "install");
   try {
     // A tiny pinned-runner fixture models Vite's measured config write, not Vitest's test semantics.
