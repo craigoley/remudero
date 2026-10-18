@@ -4,6 +4,7 @@ import {
   createInboxThreadListView,
   readInboxThreadListView,
   warmInboxThreadListView,
+  pageInboxThreads,
   type ThreadListClassification,
   type ThreadListRefreshSettled,
   type ThreadListSources,
@@ -20,7 +21,12 @@ import { loadPlan } from "../src/lib/plan.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import type { InboxThreadItem, ReadMarks } from "../src/lib/inbox-responder.js";
-import { inboxThreadId, type ThreadMessage } from "../src/lib/inbox-thread.js";
+import { appendThreadMessage, inboxThreadIdentity, inboxThreadId, type ThreadMessage } from "../src/lib/inbox-thread.js";
+import { createService } from "../src/lib/service.js";
+import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
+import { snapshotCursor } from "../src/lib/read-page.js";
+import type { AddressInfo } from "node:net";
+import type { TestContext } from "node:test";
 
 // A classification is opaque to the view: these tests carry the operator items it would project.
 interface Fake {
@@ -368,4 +374,157 @@ test("the panel thread list logs a failed pass and claims no slow-lane rows with
   writeFileSync(join(stateDir, "inbox-classified.json"), `${JSON.stringify({ generatedAt: new Date(SLOW_LANE_AT + 5).toISOString(), complete: false, states: { "ruling:p1": "ready" } })}\n`);
   const unnamed = await readInboxThreadListView(view);
   assert.ok(unnamed.kind === "stale" && unnamed.source.completeness === "partial" && unnamed.threads[0]?.proposalId === "ruling:p1", `got ${JSON.stringify(unnamed)}`);
+});
+
+type ThreadPageBody = {
+  repository?: string; instance?: string; contract?: string; error?: string;
+  threadListKey?: string; page?: { total: number; nextCursor?: string };
+  threads: Array<{ threadId: string; proposalId: string; headline: string; snippet: string }>;
+  source: { state: string; completeness: string; classifiedAt: string; verifiedAt: string | null };
+};
+
+async function pagedThreadServer(t: TestContext, count = 356) {
+  const deps = slowLaneWorld(t);
+  const proposals = Array.from({ length: count }, (_, i) => ({ id: `ruling:page-${i}`, summary: `An observation ${"é".repeat(240)} ${i}`, evidenceAnchors: [] }));
+  const registry = join(deps.inboxRoot, "state", "inbox-proposals.json");
+  writeFileSync(registry, JSON.stringify({ proposals }));
+  const store = { threadStorePath: join(deps.inboxRoot, "state", "inbox-threads.jsonl"), now: () => SLOW_LANE_AT };
+  for (const proposal of proposals) appendThreadMessage(inboxThreadIdentity(proposal.id), "escalation", `${"🙂".repeat(80)} ${proposal.id}`, store);
+  const route = panelGraph.buildInboxThreadsRoute(deps, undefined, { warm: false });
+  const scoped = (instance: string) => mountInstanceInboxRoutes({ instance, repository: `owner/${instance}`, stateDir: join(deps.inboxRoot, "state"), routes: [route] });
+  const server = createService({ tokens: { read: "page-read", write: "page-write" }, routes: [route, ...scoped("core"), ...scoped("site")] });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const get = async (path: string) => {
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${path}`, { headers: { authorization: "Bearer page-read" } });
+    const bytes = Buffer.from(await response.arrayBuffer());
+    return { status: response.status, bytes: bytes.length, body: JSON.parse(bytes.toString()) as ThreadPageBody };
+  };
+  return { deps, registry, proposals, get };
+}
+
+test("thread pages keep an oversized real legacy list whole while bounding every scoped page", async t => {
+  const w = await pagedThreadServer(t);
+  const bare = await w.get("/v1/i/core/inbox/threads");
+  assert.equal(bare.status, 200);
+  assert.equal(bare.body.threads.length, 356);
+  assert.ok(bare.bytes > 131072, `the real oversized-body positive control measured ${bare.bytes} bytes`);
+  assert.equal(bare.body.page, undefined, "bare legacy output remains the complete list");
+  const found: string[] = [];
+  let cursor: string | undefined, key: string | undefined;
+  do {
+    const read = await w.get(`/v1/i/core/inbox/threads?limit=500${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    assert.equal(read.status, 200);
+    assert.ok(read.bytes <= 131072, `the fully serialized scoped envelope measured ${read.bytes} bytes`);
+    assert.equal(read.body.repository, "owner/core"); assert.equal(read.body.instance, "core");
+    assert.match(read.body.threadListKey ?? "", /^[a-f0-9]{64}$/);
+    key ??= read.body.threadListKey; assert.equal(read.body.threadListKey, key);
+    assert.equal(read.body.page?.total, 356);
+    assert.equal(read.body.source.completeness, "complete");
+    assert.ok(read.body.threads.length > 0);
+    found.push(...read.body.threads.map(row => row.proposalId));
+    cursor = read.body.page?.nextCursor;
+    assert.ok(found.length <= 356, "continuation makes progress without duplicates");
+  } while (cursor);
+  assert.equal(found.length, 356); assert.equal(new Set(found).size, 356);
+  assert.deepEqual([...found].sort(), w.proposals.map(p => p.id).sort(), "no later-page ask was silently omitted");
+});
+
+test("thread pages reject a foreign generation rather than ignoring its bounded cursor", async t => {
+  const w = await pagedThreadServer(t, 3);
+  const cursor = snapshotCursor({ snapshotKey: "a".repeat(64), section: "threads", offset: 1 });
+  const read = await w.get(`/v1/i/core/inbox/threads?limit=1&cursor=${cursor}`);
+  assert.equal(read.status, 409, "a plausible token for another generation must not be ignored");
+  assert.equal(read.body.error, "inbox_snapshot_changed");
+});
+
+test("thread pages bind exact public scope and representation and reject a changed classification", async t => {
+  const w = await pagedThreadServer(t, 3);
+  const first = await w.get("/v1/i/core/inbox/threads?limit=1");
+  assert.equal(first.status, 200); assert.ok(first.body.page?.nextCursor, "a genuine first page issues a continuation");
+  const cursor = encodeURIComponent(first.body.page.nextCursor);
+  const site = await w.get("/v1/i/site/inbox/threads?limit=1");
+  assert.notEqual(site.body.threadListKey, first.body.threadListKey, "equal underlying content is not the same repository scope");
+  assert.equal((await w.get(`/v1/i/site/inbox/threads?limit=1&cursor=${cursor}`)).status, 409);
+  assert.equal((await w.get(`/v1/i/core/inbox/threads?limit=2&cursor=${cursor}`)).status, 409);
+  const unchanged = await w.get(`/v1/i/core/inbox/threads?limit=1&cursor=${cursor}`);
+  assert.equal(unchanged.status, 200); assert.equal(unchanged.body.threadListKey, first.body.threadListKey, "verification clocks do not replace semantic lineage");
+  writeFileSync(w.registry, JSON.stringify({ proposals: [...w.proposals, { id: "ruling:new-ask", summary: "A genuine new question", evidenceAnchors: [] }] }));
+  assert.equal((await w.get(`/v1/i/core/inbox/threads?limit=1&cursor=${cursor}`)).status, 409, "no mixed classification is stitched after a new ask");
+});
+
+test("thread generation follows full content and marks, not only row sizes or verification clocks", async () => {
+  const original = message("p1", 1); original.body = "First. original";
+  const r = rig([original]), items = [item("p1")];
+  let c = classification(items, r.clock.now);
+  r.sources.classify = async () => c;
+  const view = createInboxThreadListView(r.sources), first = await readInboxThreadListView(view);
+  assert.ok(first.kind === "ok" && "threadListKey" in first && typeof first.threadListKey === "string");
+  r.clock.now += 1000; c = classification(structuredClone(items), r.clock.now);
+  const restamped = await readInboxThreadListView(view);
+  assert.ok(restamped.kind === "ok" && "threadListKey" in restamped);
+  assert.equal(restamped.threadListKey, first.threadListKey);
+  const changed = message("p1", 1); changed.body = "First. replaced";
+  assert.equal(changed.body.length, original.body.length);
+  r.store.read = { status: "ok", threads: new Map([[changed.threadId, [changed]]]) };
+  const content = await readInboxThreadListView(view);
+  assert.ok(content.kind === "ok" && "threadListKey" in content);
+  assert.equal(content.threads[0]!.snippet, restamped.threads[0]!.snippet, "visible snippets alone cannot establish content lineage");
+  assert.notEqual(content.threadListKey, restamped.threadListKey, "same-length stored content cannot reuse a generation");
+  r.marks.value = { [changed.threadId]: 1 };
+  const marked = await readInboxThreadListView(view);
+  assert.ok(marked.kind === "ok" && "threadListKey" in marked);
+  assert.notEqual(marked.threadListKey, content.threadListKey);
+  c = classification(structuredClone(items), c.classifiedAtMs); c.classified.items[0]!.summary += " Changed source detail.";
+  const classified = await readInboxThreadListView(view);
+  assert.ok(classified.kind === "ok" && "threadListKey" in classified);
+  assert.notEqual(classified.threadListKey, marked.threadListKey, "same-clock classification input differs even when the list's visible row does not");
+  c = classification(items, c.classifiedAtMs, false);
+  const partial = await readInboxThreadListView(view);
+  assert.ok(partial.kind === "ok" && "threadListKey" in partial);
+  assert.notEqual(partial.threadListKey, marked.threadListKey); assert.equal(partial.source.completeness, "partial");
+});
+
+test("thread page byte and cursor refusals never truncate a singleton or invent an empty prefix", async () => {
+  const r = rig(), c = classification([item("p1")], r.clock.now);
+  r.sources.classify = async () => c;
+  const read = await readInboxThreadListView(createInboxThreadListView(r.sources));
+  assert.equal(read.kind, "ok"); if (read.kind !== "ok") return;
+  const params = new URLSearchParams({ limit: "1" });
+  const body = { threads: read.threads, source: read.source, repository: "owner/core", instance: "core", contract: "read-write" };
+  assert.equal(pageInboxThreads(body, read.threadListKey, new URLSearchParams({ limit: "0" })).status, 400);
+  assert.equal(pageInboxThreads(body, read.threadListKey, new URLSearchParams({ cursor: "!" })).status, 400);
+  const small = pageInboxThreads(body, read.threadListKey, params);
+  assert.equal(small.status, 200);
+  const key = (small.body as { threadListKey: string }).threadListKey;
+  assert.equal(pageInboxThreads(body, read.threadListKey, new URLSearchParams({ limit: "1", cursor: snapshotCursor({ snapshotKey: key, section: "threads", offset: 1 }) })).status, 409);
+  const headroom = 131072 - Buffer.byteLength(JSON.stringify(small.body));
+  const exact = { ...body, threads: [{ ...body.threads[0]!, headline: body.threads[0]!.headline + "x".repeat(headroom) }] };
+  const atBound = pageInboxThreads(exact, read.threadListKey, params);
+  assert.equal(atBound.status, 200); assert.equal(Buffer.byteLength(JSON.stringify(atBound.body)), 131072);
+  assert.equal(pageInboxThreads({ ...exact, threads: [{ ...exact.threads[0]!, headline: exact.threads[0]!.headline + "é" }] }, read.threadListKey, params).status, 413);
+  const empty = pageInboxThreads({ ...body, threads: [] }, read.threadListKey, params);
+  assert.equal(empty.status, 200); assert.deepEqual((empty.body as { threads: unknown[] }).threads, []);
+  assert.equal(pageInboxThreads({ ...body, threads: [], source: { ...body.source, refreshError: "é".repeat(65536) } }, read.threadListKey, params).status, 413);
+});
+
+test("thread pages retain stale and partial source evidence and leave bare reads unchanged", async t => {
+  const deps = { ...slowLaneWorld(t), inboxFromSlowLane: true };
+  const route = panelGraph.buildInboxThreadsRoute(deps, undefined, { warm: false });
+  const call = async (url: string) => {
+    let status = 0, text = "";
+    const res = { setHeader: () => undefined, writeHead: (n: number) => { status = n; }, end: (s: string) => { text = s; } };
+    await route.handler({ url } as never, res as never, { params: {} });
+    return { status, body: JSON.parse(text) as ThreadPageBody };
+  };
+  assert.equal((await call("/v1/inbox/threads?limit=1")).status, 503);
+  const stale = await call("/v1/inbox/threads?limit=1&qualified=1");
+  assert.equal(stale.status, 200); assert.equal(stale.body.source.state, "stale"); assert.equal(stale.body.source.verifiedAt, null);
+  assert.equal(stale.body.page?.total, 2); assert.equal(stale.body.threads.length, 1);
+  writeClassificationSnapshot(join(deps.inboxRoot, "state"), [{ proposalId: "ruling:p0", state: "not_ready" }], fixedClock(SLOW_LANE_AT), { complete: false, incompleteReason: "incomplete fixture source" });
+  const partial = await call("/v1/inbox/threads?limit=1&qualified=1");
+  assert.equal(partial.status, 200); assert.equal(partial.body.source.completeness, "partial"); assert.equal(partial.body.source.state, "stale");
+  assert.notEqual(partial.body.threadListKey, stale.body.threadListKey);
+  const legacy = await call("/v1/inbox/threads?qualified=1");
+  assert.equal(legacy.body.page, undefined); assert.equal(legacy.body.threadListKey, undefined);
 });

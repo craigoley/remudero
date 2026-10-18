@@ -11152,6 +11152,27 @@ components:
           type: boolean
           description: The daemon wrote last and the read mark is behind that message.
 
+    InboxThreadListSource:
+      type: object
+      description: Classification evidence, not the HTTP read time or permission to write. Partial coverage never establishes a complete empty Inbox.
+      required: [state, completeness, classifiedAt, verifiedAt, ageMs, builtAt]
+      properties:
+        state: {type: string, enum: [fresh, stale]}
+        completeness: {type: string, enum: [complete, partial]}
+        classifiedAt: {type: string, format: date-time}
+        verifiedAt: {type: [string, "null"], format: date-time, description: Null when the classification was not confirmed current.}
+        ageMs: {type: number, minimum: 0}
+        builtAt: {type: string, format: date-time}
+        refreshError: {type: string}
+
+    InboxThreadListPage:
+      type: object
+      description: Continuation over one exact threadListKey; terminal coverage requires unique rows totaling total. A prefix is not a verified complete list.
+      required: [total]
+      properties:
+        total: {type: integer, minimum: 0}
+        nextCursor: {type: string, maxLength: 1024, description: Opaque generation/scope/representation-bound continuation; absent only at the end.}
+
     InboxThreadsResult:
       type: object
       description: GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity.
@@ -11160,10 +11181,28 @@ components:
       properties:
         planSource:
           $ref: "#/components/schemas/PlanSource"
+        source:
+          $ref: "#/components/schemas/InboxThreadListSource"
+        threadListKey:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Present with opt-in pages. Binds semantic classification/items, stored messages, marks, public scope and representation, not verification clocks. Not the proposal classification snapshot key.
+        page:
+          $ref: "#/components/schemas/InboxThreadListPage"
         threads:
           type: array
           items:
             $ref: "#/components/schemas/InboxThreadSummary"
+
+    InstanceInboxThreadsResult:
+      allOf:
+        - $ref: '#/components/schemas/InboxThreadsResult'
+        - type: object
+          required: [repository, instance, contract]
+          properties:
+            repository: {type: string}
+            instance: {type: string}
+            contract: {type: string, enum: [read-write, read-only]}
 
     InboxAttentionCensusSourceState:
       type: string
@@ -18122,8 +18161,16 @@ paths:
         W1-T4088 (src/lib/panel-graph.ts's `buildInboxThreadsRoute`): one thread per
         operator-owned inbox item, with its headline, the first sentence of the latest message,
         who it is waiting on, last activity, message count and unread flag.
+        A bare read remains the whole legacy list. Opt in with limit or cursor for a threadListKey
+        and page envelope, each at most 131072 serialized UTF-8 bytes. Pass nextCursor with the same
+        limit/qualified representation. Changed generations require an explicit first-page restart;
+        an oversized singleton is refused, never dropped. Source coverage/freshness and write gates do not change.
       security:
         - bearerRead: []
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}, description: Opt-in maximum rows per byte-bounded page.}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 1024}, description: Exact continuation returned by this representation and threadListKey.}
+        - {name: qualified, in: query, schema: {type: string, enum: ['1']}, description: Permit labelled stale evidence; this does not make it current or writable.}
       responses:
         "200":
           description: The thread list.
@@ -18131,6 +18178,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxThreadsResult"
+        "400":
+          description: Invalid page limit or malformed cursor.
+        "409":
+          description: Continuation belongs to another thread generation, public scope, representation or offset; restart explicitly.
+        "413":
+          description: A singleton or its complete envelope cannot fit; no thread was omitted or truncated.
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -18395,6 +18448,36 @@ paths:
                   - $ref: '#/components/schemas/InboxResult'
                   - {type: object, required: [repository, instance], properties: {repository: {type: string}, instance: {type: string}}}
         '503': {description: Instance or maintained classification unavailable.}
+
+  /v1/i/{instance}/inbox/threads:
+    parameters:
+      - {name: instance, in: path, required: true, schema: {type: string}}
+    get:
+      summary: The selected instance's source-qualified thread list, optionally byte-bounded and paged.
+      description: >
+        Same opt-in limit/cursor/qualified contract as /v1/inbox/threads. Public repository, instance
+        and contract mode are included in the key and actual 131072-byte response budget. Source,
+        threadListKey and page are required on successful opt-in pages. Bare reads retain the legacy
+        whole list. A capability advertisement is not write authority; incomplete/stale evidence stays qualified.
+      security: [{bearerRead: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 1024}}
+        - {name: qualified, in: query, schema: {type: string, enum: ['1']}}
+      responses:
+        '200':
+          description: Complete bare list or one explicitly continued page, with unchanged classification evidence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/InstanceInboxThreadsResult'}
+        '400': {description: Invalid page request.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: Scope or continuation generation/representation mismatch.}
+        '413': {description: Complete scoped envelope or singleton cannot fit the response budget.}
+        '500': {description: Thread store unreadable.}
+        '502': {description: Source did not provide a keyed source-qualified page.}
+        '503': {description: Classification unavailable or stale without qualified opt-in.}
 
   /v1/i/{instance}/inbox/attention-census:
     parameters:

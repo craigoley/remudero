@@ -18,9 +18,13 @@
 import { listThreadViews, type InboxThreadItem, type ReadMarks, type ThreadSummaryView } from "./inbox-responder.js";
 import { fixedClock } from "./clock.js";
 import type { ThreadMessage } from "./inbox-thread.js";
+import { createHash } from "node:crypto";
+import { readPageRequest, readSnapshotCursor, snapshotCursor } from "./read-page.js";
 
 /** How long a read waits for the shared refresh before answering from what it already holds. Under the console's 5 s. */
 export const INBOX_THREAD_LIST_WAIT_MS = 1_500;
+/** PRIMARY CONTROL: the complete opt-in thread page, including its scoped envelope, fits the existing Console read bound. */
+export const INBOX_THREAD_PAGE_MAX_BYTES = 128 * 1024;
 
 /** One classification pass as the view sees it: the opaque result, when it was made, and whether it saw every input. */
 export interface ThreadListClassification<C> {
@@ -78,8 +82,8 @@ export interface ThreadListSource {
 export type ThreadListUnavailableCode = "thread_store_unreadable" | "classification_pending" | "classification_failed" | "incomplete_evidence";
 
 export type ThreadListRead =
-  | { kind: "ok"; threads: ThreadSummaryView[]; source: ThreadListSource }
-  | { kind: "stale"; threads: ThreadSummaryView[]; source: ThreadListSource }
+  | { kind: "ok"; threads: ThreadSummaryView[]; source: ThreadListSource; threadListKey: string }
+  | { kind: "stale"; threads: ThreadSummaryView[]; source: ThreadListSource; threadListKey: string }
   | { kind: "unavailable"; code: ThreadListUnavailableCode; detail: string };
 
 type Refresh<C> = { ok: true; value: ThreadListClassification<C> } | { ok: false; error: string };
@@ -91,6 +95,7 @@ interface Built<C> {
   inputsKey: string;
   builtAtMs: number;
   views: ThreadSummaryView[];
+  contentKey: string;
 }
 
 export interface InboxThreadListView<C> {
@@ -144,13 +149,10 @@ export async function warmInboxThreadListView<C>(view: InboxThreadListView<C>): 
 }
 
 function threadsDigest(threads: Map<string, ThreadMessage[]>): string {
-  const parts: string[] = [];
-  for (const [id, messages] of threads) {
-    const last = messages[messages.length - 1];
-    parts.push(`${id}:${messages.length}:${last?.seq ?? 0}:${last?.ts ?? 0}:${last?.body.length ?? 0}`);
-  }
-  return parts.sort().join("|");
+  return digest([...threads].sort(([a], [b]) => a.localeCompare(b)));
 }
+
+function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 
 /** The projection over `classification`, rebuilt only when a thing it was built from has changed. */
 function project<C>(view: InboxThreadListView<C>, classification: ThreadListClassification<C>, threads: Map<string, ThreadMessage[]>): Built<C> {
@@ -161,10 +163,12 @@ function project<C>(view: InboxThreadListView<C>, classification: ThreadListClas
   const inputsKey = sources.inputsKey();
   const held = view.built;
   if (held !== undefined && held.classified === classification.classified && held.threadsKey === threadsKey && held.marksKey === marksKey && held.inputsKey === inputsKey) return held;
+  const items = sources.items(classification.classified);
   const built: Built<C> = {
     classified: classification.classified, threadsKey, marksKey, inputsKey,
     builtAtMs: sources.now(),
-    views: listThreadViews(sources.items(classification.classified), threads, marks),
+    views: listThreadViews(items, threads, marks),
+    contentKey: digest([items, threadsKey, marksKey]),
   };
   view.built = built;
   return built;
@@ -206,7 +210,8 @@ export async function readInboxThreadListView<C>(view: InboxThreadListView<C>): 
     if (!classification.complete && built.views.length === 0) {
       return { kind: "unavailable", code: "incomplete_evidence", detail: classification.incompleteReason ?? "the classification did not see every input" };
     }
-    return { kind: "ok", threads: built.views, source: sourceOf(view, classification, built, "fresh") };
+    return { kind: "ok", threads: built.views, source: sourceOf(view, classification, built, "fresh"),
+      threadListKey: digest([built.contentKey, classification.complete, classification.incompleteReason ?? null]) };
   }
 
   // A refresh that failed after an earlier read stopped waiting is still this read's evidence (W1-T5886).
@@ -218,5 +223,42 @@ export async function readInboxThreadListView<C>(view: InboxThreadListView<C>): 
       : { kind: "unavailable", code: "classification_failed", detail: refreshError };
   }
   const built = project(view, held, stored.threads);
-  return { kind: "stale", threads: built.views, source: sourceOf(view, held, built, "stale", refreshError) };
+  return { kind: "stale", threads: built.views, source: sourceOf(view, held, built, "stale", refreshError),
+    threadListKey: digest([built.contentKey, held.complete, held.incompleteReason ?? null]) };
+}
+
+export interface ThreadListEnvelope {
+  threads: ThreadSummaryView[];
+  source: ThreadListSource;
+  repository?: string;
+  instance?: string;
+  contract?: string;
+}
+
+/** Page only a completed projection. No request-time classification, history I/O or new retained generation. */
+export function pageInboxThreads(body: ThreadListEnvelope, contentKey: string, params: URLSearchParams): { status: number; body: object } {
+  const limitOnly = new URLSearchParams(params); limitOnly.delete("cursor");
+  const request = readPageRequest(limitOnly, 100, 500);
+  if ("error" in request) return { status: 400, body: request };
+  const threadListKey = digest(["thread-list-v1", body.repository ?? null, body.instance ?? null, body.contract ?? null,
+    request.limit, params.get("qualified") === "1", contentKey]);
+  const cursor = readSnapshotCursor(params.get("cursor") ?? undefined, threadListKey, "threads");
+  if ("error" in cursor) { const { status, ...failure } = cursor; return { status, body: failure }; }
+  const total = body.threads.length;
+  if (cursor.offset > total || cursor.offset === total && total > 0) return { status: 409, body: { error: "inbox_snapshot_changed", restartRequired: true, detail: "The continuation is outside this thread list; restart at its first page." } };
+  const envelope = (threads: ThreadSummaryView[], end: number) => ({ ...body, threads, threadListKey,
+    page: { total, ...(end < total ? { nextCursor: snapshotCursor({ snapshotKey: threadListKey, section: "threads", offset: end }) } : {}) } });
+  const tooLarge = () => ({ status: 413, body: { error: "inbox_thread_page_too_large", detail: "A thread summary or its source envelope cannot fit the bounded page; no row was omitted or truncated." } });
+  const threads: ThreadSummaryView[] = [];
+  let result = envelope(threads, cursor.offset);
+  if (Buffer.byteLength(JSON.stringify(result)) > INBOX_THREAD_PAGE_MAX_BYTES) return tooLarge();
+  for (const item of body.threads.slice(cursor.offset, cursor.offset + request.limit)) {
+    const next = envelope([...threads, item], cursor.offset + threads.length + 1);
+    if (Buffer.byteLength(JSON.stringify(next)) > INBOX_THREAD_PAGE_MAX_BYTES) {
+      if (threads.length === 0) return tooLarge();
+      break;
+    }
+    threads.push(item); result = next;
+  }
+  return { status: 200, body: result };
 }

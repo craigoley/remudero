@@ -4816,11 +4816,37 @@ export interface components {
       /** The daemon wrote last and the read mark is behind that message. */
       unread: boolean;
     };
+    /** Classification evidence, not the HTTP read time or permission to write. Partial coverage never establishes a complete empty Inbox. */
+    InboxThreadListSource: {
+      state: "fresh" | "stale";
+      completeness: "complete" | "partial";
+      classifiedAt: string;
+      /** Null when the classification was not confirmed current. */
+      verifiedAt: string | null;
+      ageMs: number;
+      builtAt: string;
+      refreshError?: string;
+    };
+    /** Continuation over one exact threadListKey; terminal coverage requires unique rows totaling total. A prefix is not a verified complete list. */
+    InboxThreadListPage: {
+      total: number;
+      /** Opaque generation/scope/representation-bound continuation; absent only at the end. */
+      nextCursor?: string;
+    };
     /** GET /v1/inbox/threads's body -- waiting-on-you first, then most recent activity. */
     InboxThreadsResult: {
       planSource?: PlanSource;
+      source?: InboxThreadListSource;
+      /** Present with opt-in pages. Binds semantic classification/items, stored messages, marks, public scope and representation, not verification clocks. Not the proposal classification snapshot key. */
+      threadListKey?: string;
+      page?: InboxThreadListPage;
       threads: (InboxThreadSummary)[];
     };
+    InstanceInboxThreadsResult: (InboxThreadsResult) & ({
+      repository: string;
+      instance: string;
+      contract: "read-write" | "read-only";
+    });
     InboxAttentionCensusSourceState: "observed" | "partial" | "unavailable";
     InboxAttentionCensusFact: {
       source: string;
@@ -7136,8 +7162,11 @@ export interface paths {
     get: {
       responses: {
           "200": InboxThreadsResult;
+          "400": undefined;
           "401": Error;
           "403": Error;
+          "409": undefined;
+          "413": undefined;
           "500": InboxRefusal;
           "503": InboxRefusal;
         };
@@ -7211,6 +7240,21 @@ export interface paths {
             repository: string;
             instance: string;
           });
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/i/{instance}/inbox/threads": {
+    get: {
+      responses: {
+          "200": InstanceInboxThreadsResult;
+          "400": undefined;
+          "401": Error;
+          "403": Error;
+          "409": undefined;
+          "413": undefined;
+          "500": undefined;
+          "502": undefined;
           "503": undefined;
         };
     };

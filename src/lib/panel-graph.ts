@@ -129,7 +129,7 @@ import {
   type ThreadSummaryView,
 } from "./inbox-responder.js";
 import {
-  createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView,
+  createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView, pageInboxThreads,
   type ThreadListClassification, type ThreadListRefreshSettled, type ThreadListSources,
 } from "./inbox-thread-list-view.js";
 import { appendThreadMessage, appendThreadReplyOnce, inboxThreadId, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
@@ -3103,17 +3103,23 @@ export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: 
     method: "GET",
     path: "/v1/inbox/threads",
     scope: "read",
-    handler: async (req, res) => {
+    handler: async (req, res, ctx) => {
       if (!warmArmed) {
         warmArmed = true;
         setInterval(() => void warmInboxThreadListView(view), INBOX_THREAD_LIST_WARM_MS).unref();
       }
       if (refusePlanSourceUnavailable(deps, res)) return;
       const read = await readInboxThreadListView(view);
-      if (read.kind === "ok") {
-        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
-      } else if (read.kind === "stale" && new URL(req.url ?? "/", "http://localhost").searchParams.get("qualified") === "1") {
-        sendJson(res, 200, withPlanSource(deps, { threads: read.threads, source: read.source }));
+      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+      if (read.kind === "ok" || read.kind === "stale" && params.get("qualified") === "1") {
+        const body = withPlanSource(deps, { threads: read.threads, source: read.source });
+        if (params.has("limit") || params.has("cursor")) {
+          const scope = ctx.params?.inboxThreadRepository === undefined ? {} : {
+            repository: ctx.params.inboxThreadRepository, instance: ctx.params.inboxThreadInstance, contract: ctx.params.inboxThreadContract,
+          };
+          const page = pageInboxThreads({ ...body, ...scope }, read.threadListKey, params);
+          sendJson(res, page.status, page.body);
+        } else sendJson(res, 200, body);
       } else if (read.kind === "stale") {
         res.setHeader("retry-after", "1");
         sendJson(res, 503, { error: "inbox_threads_stale", detail: "the thread list is being refreshed; its rows are not source-verified", source: read.source });
