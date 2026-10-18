@@ -49607,7 +49607,26 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   ledgerPath: string;
   runId: string;
   shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
+  clock?: Clock;
 };
+
+function lifetimeShardAge(
+  taskId: string,
+  root: string,
+  nowMs: number,
+  rows: readonly Record<string, unknown>[],
+): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const fromGit = shardAgeDays(taskId, root, nowMs);
+  if (fromGit.ageDays !== null) return fromGit;
+  let first: number | undefined;
+  for (const row of rows) {
+    if (row.task_id !== taskId && row.task !== taskId) continue;
+    const t = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isNaN(t) && (first === undefined || t < first)) first = t;
+  }
+  if (first === undefined) return fromGit;
+  return { ageDays: Math.max(0, Math.floor((nowMs - first) / 86400000)) };
+}
 
 function latestLifetimeOperatorRuling(note: string | undefined): { date: string; decision: "automate" | "needs_operator" } | undefined {
   if (!note) return undefined;
@@ -49625,6 +49644,7 @@ export async function routeAdaptiveLifetimePressure(
   deps: AdaptiveLifetimePressureRoute,
 ): Promise<VerifyHumanRouteResult> {
   const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
+  const nowMs = (deps.clock ?? systemClock).now();
   const shards: ShardUnderJudgement[] = [];
   const infraOnly: string[] = [];
   const rulings = new Map<string, VerifyHumanVerdict>();
@@ -49664,7 +49684,9 @@ export async function routeAdaptiveLifetimePressure(
         "inside the feature is not a build-time need. Judge why attributable attempts keep failing; " +
         "choose automate, backlog, or needs_operator for the build process.",
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
-      ageDays: 0,
+      route: "lifetime-pressure",
+      attributableDispatches,
+      ...lifetimeShardAge(task.id, deps.root, nowMs, rows),
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
