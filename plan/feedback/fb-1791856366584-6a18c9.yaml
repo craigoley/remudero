@@ -42,10 +42,29 @@ raw: >-
   at current main first (they were read at origin/main efd226b50).
 attachments: []
 origin: cli
-status: new
+status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/12801
+summary:
+  headline: Site PRs with PORTAL-T trailers get no merge credit; rule on the fix
+  what_happened: Remudero's merge-credit check accepts a literal list of trailer
+    prefixes that includes SITE-T but not PORTAL-T, the prefix site PRs actually
+    use. Site PRs credited only by a PORTAL-T trailer are therefore
+    under-credited, though branch-name credit still works.
+  decision: Choose whether to file a bounded task that sources accepted prefixes
+    from the reservation code or instance registry, and adds a PORTAL-T trailer
+    test.
+  options:
+    - label: Approve the bounded fix
+      consequence: Prefixes come from the reservation code or registry, PORTAL-T
+        trailers get credit, and a test covers a trailer-only PR.
+    - label: Decline the fix
+      consequence: Site PRs with only a PORTAL-T trailer stay uncredited, and the
+        stale SITE-T literal remains in the code.
+    - label: Re-verify before filing
+      consequence: The cited lines are rechecked at current main first, and the task
+        is filed only if they still match.
 expansion: null
 submission_key: nanoclaw-2026-10-13/portal-t-trailer-credit
 thread_id: null
+answered_by: null
