@@ -259,6 +259,7 @@ import {
 } from "./escalate.js";
 import { triageEscalation, type EscalationTriageMode, type TriageEvidence, type TriageAction } from "./escalation-triage.js";
 import {
+  CODEQL_CHECK_NAME,
   compareRestArgs,
   prFilesRestArgs,
   rollupFromRest,
@@ -14094,20 +14095,51 @@ export function codeScanningHeadSettled(
     line.pr_number === prNumber && line.head_sha === headSha);
 }
 
+/** W1-T5633/W1-T10066 — one alert's worker-facing log tail: `intro` says why the alert is shown, the rest is the
+ *  shared line builder, labelled untrusted. Both the judged-fix path and a mixed red's CodeQL entry use it. */
+function codeScanningAlertLogTail(alert: CodeqlHeadAlert, intro: readonly string[]): string {
+  return [
+    ...intro,
+    `rule: ${alert.ruleId} (severity ${alert.severity})`,
+    codeScanningLocationLine(alert),
+    `message: ${alert.message}`,
+    "Change this branch's code so the finding no longer applies, within the task's existing file",
+    "scope. Do not dismiss alerts or add suppression comments.",
+  ].join("\n");
+}
+
 /** W1-T5633 — the fix worker's evidence: the alerts and the judge's reason, labelled untrusted. */
 export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], reason: string): CiFailure[] {
   return alerts.map((alert) => ({
     name: codeScanningAlertName(alert),
-    logTail: [
+    logTail: codeScanningAlertLogTail(alert, [
       "UNTRUSTED SCANNER EVIDENCE: CodeQL reported a NEW high-severity alert on this pull request's head,",
       `and the code-scanning judge ruled it must be fixed (${reason.slice(0, 400)}).`,
-      `rule: ${alert.ruleId} (severity ${alert.severity})`,
-      codeScanningLocationLine(alert),
-      `message: ${alert.message}`,
-      "Change this branch's code so the finding no longer applies, within the task's existing file",
-      "scope. Do not dismiss alerts or add suppression comments.",
-    ].join("\n"),
+    ]),
   }));
+}
+
+/** W1-T10066 — a fix round whose red includes a failed `CodeQL` check carries the head's alerts. The results check
+ *  has no job log, so its entry would be blank; it is replaced by one entry per alert read at THIS head, and when
+ *  none was read at this head the entry SAYS so rather than carrying a null tail. Other failures pass through. */
+export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeqlHeadAlerts">, failures: readonly CiFailure[]): CiFailure[] {
+  const observed = pr.codeqlHeadAlerts;
+  return failures.flatMap((failure) => {
+    if (failure.name !== CODEQL_CHECK_NAME) return [failure];
+    if (observed !== undefined && observed.headSha === pr.headSha && observed.alerts.length > 0) {
+      return observed.alerts.map((alert) => ({
+        name: codeScanningAlertName(alert),
+        logTail: codeScanningAlertLogTail(alert, [
+          "UNTRUSTED SCANNER EVIDENCE: the CodeQL check failed at this pull request's head, and this high-severity",
+          "alert is open on it.",
+        ]),
+      }));
+    }
+    const why = observed === undefined
+      ? "no open high-severity alert was read for this head (none is open, the read was not due, or it failed)"
+      : `alerts were read at head ${observed.headSha.slice(0, 7)}, not at this head ${pr.headSha.slice(0, 7)}`;
+    return [{ ...failure, logTail: `CodeQL failed at this head; its alerts were not read: ${why}` }];
+  });
 }
 
 type CodeScanningGate =
@@ -19608,7 +19640,7 @@ export async function runSweep(
               const fixEvidence: FixDispatchEvidence = proofRepairActive
                 ? { unmetCriteria: [], proofDiscrimination: proofRepairRoute }
                 : isBlockedCi(pr)
-                ? { unmetCriteria: [], ciFailures: ciFailuresForFix }
+                ? { unmetCriteria: [], ciFailures: withCodeqlAlertEvidence(pr, ciFailuresForFix) }
                 : {
                     unmetCriteria: pr.unmetCriteria,
                     actionableGateFailures: pr.actionableGateFailures,
