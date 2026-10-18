@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { canonicalWorkerProviderId, type Config, type WorkerProviderId } from "#src/lib/config.js";
 import { OpenWeightRequestTooLargeError, openWeightAllowancePath, openWeightReservationUsd } from "#src/lib/worker-provider.js";
-import { createClaudeExecutableCache, spawnWorker, workerContinuation, workerExecutionForProvider,
+import * as workerApi from "#src/lib/worker.js";
+import { createClaudeExecutableCache, spawnWorker,
   workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -31,7 +32,7 @@ function fixture(t: TestContext, provider: WorkerProviderId | undefined, selecte
     cwd: root, permissionMode: "bypassPermissions", settingsFile: join(REPO_ROOT, "settings/worker.json"),
     config, model: "haiku", effort: "low", tools: ["Read", "Write", "Edit"],
     mountProvider: selected, prompt: action, resumeSessionId: "original-session",
-    continuation: workerContinuation(prior(provider), task, root),
+    continuation: { provider, contextPrompt: `${task}\nWorkspace: ${root}\nPrior report: ${prior(provider).text}` },
     providerRouting: {
       now: () => now, writeStatus: () => {},
       readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: now }),
@@ -85,7 +86,7 @@ test("a routed fresh continuation carries its task and pending action", async t 
   assert.ok(f.captured[0].prompt.includes(action));
   assert.ok(f.captured[0].prompt.includes(f.root));
   assert.match(f.captured[0].prompt, /edits are saved/);
-  assert.ok(f.captured[0].prompt.startsWith(workerExecutionForProvider(f.args, "claude").prompt));
+  assert.ok(f.captured[0].prompt.startsWith(workerApi.workerExecutionForProvider(f.args, "claude").prompt));
   assert.equal(f.captured[0].prompt.indexOf(task), f.captured[0].prompt.lastIndexOf(task));
   const missing = fixture(t, undefined);
   delete missing.args.continuation;
@@ -120,8 +121,8 @@ test("continuation sizing accounts for the selected provider prompt", async t =>
   const f = fixture(t, "claude", "cash");
   f.args.tools = [];
   f.args.routingTrial = { id: "fixture-only", arm: "cash", reason: "fixture model", models: ["gpt-6-luna"] };
-  f.args.continuation = workerContinuation(prior("claude"), task + "x".repeat(300_000), f.root);
-  const execution = workerExecutionForProvider(f.args, "cash").prompt;
+  f.args.continuation = workerApi.workerContinuation(prior("claude"), task + "x".repeat(300_000), f.root);
+  const execution = workerApi.workerExecutionForProvider(f.args, "cash").prompt;
   const shortWant = openWeightReservationUsd("gpt-6-luna", Buffer.byteLength(action));
   const longWant = openWeightReservationUsd("gpt-6-luna", Buffer.byteLength(execution));
   assert.ok(longWant > shortWant);
@@ -132,28 +133,28 @@ test("continuation sizing accounts for the selected provider prompt", async t =>
 
   const roomy = fixture(t, "claude", "cash");
   roomy.args.tools = [];
-  roomy.args.continuation = workerContinuation(prior("claude"), task, roomy.root);
+  roomy.args.continuation = workerApi.workerContinuation(prior("claude"), task, roomy.root);
   await spawnWorker(roomy.args);
   assert.equal(roomy.captured[0].resume, undefined);
   assert.ok(roomy.captured[0].prompt.includes(task));
   const oversized = fixture(t, "claude", "cash");
   oversized.args.tools = [];
   oversized.args.routingTrial = { id: "fixture-only", arm: "cash", reason: "fixture model", models: ["gpt-6-luna"] };
-  oversized.args.continuation = workerContinuation(prior("claude"), task + "x".repeat(4_000_000), oversized.root);
+  oversized.args.continuation = workerApi.workerContinuation(prior("claude"), task + "x".repeat(4_000_000), oversized.root);
   await assert.rejects(() => spawnWorker(oversized.args), OpenWeightRequestTooLargeError);
   assert.equal(oversized.captured.length, 0, "the final handoff must fit before any transport");
 });
 
 test("ordinary spawns and bounded prior-report handoffs keep their own contracts", () => {
-  assert.deepEqual(workerExecutionForProvider({ prompt: "ordinary" }, "claude"), { prompt: "ordinary" });
-  const c = workerContinuation({ provider: "claude", text: "x".repeat(8000) + "tail", blocks: [] }, task, "/fixture");
+  assert.deepEqual(workerApi.workerExecutionForProvider({ prompt: "ordinary" }, "claude"), { prompt: "ordinary" });
+  const c = workerApi.workerContinuation({ provider: "claude", text: "x".repeat(8000) + "tail", blocks: [] }, task, "/fixture");
   assert.ok(c.contextPrompt.length < task.length + 4500);
   assert.ok(c.contextPrompt.includes("tail"));
-  const noSession = workerExecutionForProvider({ prompt: action, continuation: c }, "claude");
+  const noSession = workerApi.workerExecutionForProvider({ prompt: action, continuation: c }, "claude");
   assert.equal(noSession.receipt?.reason, "session-unavailable");
-  const cash = workerExecutionForProvider({ prompt: action, resumeSessionId: "cash-id", continuation: { ...c, provider: "openweight" } }, "cash");
+  const cash = workerApi.workerExecutionForProvider({ prompt: action, resumeSessionId: "cash-id", continuation: { ...c, provider: "openweight" } }, "cash");
   assert.equal(cash.resumeSessionId, undefined);
   assert.equal(cash.receipt?.reason, "provider-fresh-only");
-  assert.throws(() => workerExecutionForProvider({ prompt: action, resumeSessionId: "old",
+  assert.throws(() => workerApi.workerExecutionForProvider({ prompt: action, resumeSessionId: "old",
     continuation: { provider: "codex", contextPrompt: " " } }, "claude"), /must not be blank/);
 });
