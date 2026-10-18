@@ -358,17 +358,21 @@ test("compiled transaction diagnostics name business callers for direct and fenc
   const f = await fixture(t);
   const entry = join(f.dir, "bundled-writer.mjs");
   const module = join(process.cwd(), "src/lib/read-model-db.ts");
-  const contents = `import {openReadModel,flushReadModelTransactions,readReadModelTransactions,acquireLease,withWriteTransaction} from ${JSON.stringify(module)};
+  // Keep the fenced label assertion independent of an asynchronous inventory snapshot race.
+  // The direct case and the blocked-caller child above exercise the default asynchronous publisher.
+  const contents = `import {openReadModel,attachReadModel,flushReadModelTransactions,readReadModelTransactions,acquireLease,withWriteTransaction} from ${JSON.stringify(module)};
+import {mkdirSync,writeFileSync} from 'node:fs';import {dirname} from 'node:path';
 const db=openReadModel({stateDir:process.argv[2],instance:'core',schemaVersion:1});
 await flushReadModelTransactions();
 function businessDirectWrite(){db.exec('BEGIN IMMEDIATE')}
 businessDirectWrite();await flushReadModelTransactions();
 const direct=readReadModelTransactions(db.path).records[0]?.label;
 db.exec('ROLLBACK');await flushReadModelTransactions();
-const acquired=acquireLease(db);if(!acquired.ok)throw Error('private lease not acquired');
-await flushReadModelTransactions();
-function businessFencedWrite(){return withWriteTransaction(db,acquired.lease,()=>readReadModelTransactions(db.path).records[0]?.label)}
-const fenced=businessFencedWrite();db.close();await flushReadModelTransactions();
+let recorded;
+const fencedDb=attachReadModel(db.path,1,{publish:(file,record)=>{mkdirSync(dirname(file),{recursive:true});writeFileSync(file,JSON.stringify(record));recorded=record}});
+const acquired=acquireLease(fencedDb);if(!acquired.ok)throw Error('private lease not acquired');
+function businessFencedWrite(){return withWriteTransaction(fencedDb,acquired.lease,()=>recorded.label)}
+const fenced=businessFencedWrite();fencedDb.close();db.close();await flushReadModelTransactions();
 console.log(JSON.stringify({direct,fenced}));
 `;
   const built = buildSync({ stdin: { contents, resolveDir: process.cwd(), sourcefile: "caller-client.ts" },
