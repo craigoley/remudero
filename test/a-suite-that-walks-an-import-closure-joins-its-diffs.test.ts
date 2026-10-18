@@ -16,6 +16,8 @@ const LEDGER = "src/lib/ledger.ts";
 const SUPERVISOR_SEED = "src/lib/serve-supervisor-main.ts";
 const DEPLOYER_SEED = "src/lib/deployer.ts";
 
+const relativeSpecifier = (name: string) => JSON.stringify(`./${name}.js`);
+
 function discover(files: Record<string, string>) {
   return discoverSourceTextReaders("/fixture", (args) =>
     Object.keys(files).filter((p) => args[0] !== "grep" || p.endsWith(".test.ts")).join("\n"),
@@ -27,13 +29,13 @@ function discover(files: Record<string, string>) {
 
 function trees() {
   const base: Record<string, string> = {
-    [SUPERVISOR_SEED]: 'import "./ledger.js";',
-    [DEPLOYER_SEED]: 'export * from "./ledger.js";',
+    [SUPERVISOR_SEED]: `import ${relativeSpecifier("ledger")};`,
+    [DEPLOYER_SEED]: `export * from ${relativeSpecifier("ledger")};`,
     [LEDGER]: "export const value = 1;",
     "src/lib/host-identity.ts": "export const host = 1;",
     "src/lib/outside.ts": "export const other = 1;",
   };
-  const head: Record<string, string> = { ...base, [LEDGER]: 'import "./host-identity.js";\nexport const value = 1;' };
+  const head: Record<string, string> = { ...base, [LEDGER]: `import ${relativeSpecifier("host-identity")};\nexport const value = 1;` };
   return { base, head };
 }
 
@@ -51,9 +53,9 @@ function evaluate(changed: string[], head: Record<string, string>, base: Record<
 test("W1-T9806: a census-closure seed walks its whole runtime import closure", () => {
   const files = {
     "test/closure.test.ts": "// @census-closure: a.ts side.ts — prose missing.ts\n",
-    "a.ts": 'import { b } from "./b.js"; import "./side.js";',
-    "b.ts": 'export { c } from "./c.js"; export * from "./all.js";',
-    "c.ts": 'import("./dynamic.js"); require("./required.js"); import "./a.js";',
+    "a.ts": `import { b } from ${relativeSpecifier("b")}; import ${relativeSpecifier("side")};`,
+    "b.ts": `export { c } from ${relativeSpecifier("c")}; export * from ${relativeSpecifier("all")};`,
+    "c.ts": `import(${relativeSpecifier("dynamic")}); require(${relativeSpecifier("required")}); import ${relativeSpecifier("a")};`,
     "side.ts": "", "all.ts": "", "dynamic.ts": "", "required.ts": "",
     "missing.ts": "", "unused.ts": "",
   };
@@ -81,17 +83,17 @@ test("W1-T9806: a type-only import or a missing seed adds no walk", () => {
     "test/missing.test.ts": "// @census-closure: src/missing.ts\n",
     "test/unmarked.test.ts": 'const fixture = "// @census-closure: src/unused.ts";',
     "src/a.ts": [
-      'import type { T } from "./types.js";',
-      'import { type T } from "./inline-types.js";',
-      'export type { T } from "./exports.js";',
-      'export { type T } from "./inline-exports.js";',
-      'import { type T, value } from "./value.js";',
-      '// import "./comment.js";',
-      'const text = \'import "./string.js"\';',
-      'const template = `value ${1} import "./template.js"`;',
+      `import type { T } from ${relativeSpecifier("types")};`,
+      `import { type T } from ${relativeSpecifier("inline-types")};`,
+      `export type { T } from ${relativeSpecifier("exports")};`,
+      `export { type T } from ${relativeSpecifier("inline-exports")};`,
+      `import { type T, value } from ${relativeSpecifier("value")};`,
+      `// import ${relativeSpecifier("comment")};`,
+      `const text = 'import ${relativeSpecifier("string")}';`,
+      'const template = `value ${1} import ' + relativeSpecifier("template") + '`;',
       String.raw`const pattern = /^\s*(#|$)/; const decoy = /import "\.\/regexp.js"/;`,
       'if (true) /#/.test("");',
-      'const quotient = 6 / 2; import "./after-division.js";',
+      `const quotient = 6 / 2; import ${relativeSpecifier("after-division")};`,
       'import "node:fs"; import "external-package";',
     ].join("\n"),
     "src/types.ts": "", "src/inline-types.ts": "", "src/exports.ts": "", "src/inline-exports.ts": "",
@@ -141,14 +143,14 @@ test("W1-T9806: a baked-closure refusal names the lists that catalog the closure
 
 test("W1-T9806: an import outside both closures asks no baked-closure census", () => {
   const { head, base } = trees();
-  head["src/lib/outside.ts"] = 'import "./host-identity.js";';
+  head["src/lib/outside.ts"] = `import ${relativeSpecifier("host-identity")};`;
   assert.deepEqual(evaluate(["src/lib/outside.ts"], head, base).asked, []);
   assert.deepEqual(evaluate([], head, base).asked, []);
 });
 
 test("W1-T9806: unchanged import sets never read the baked closures to select suites", () => {
   const changed = "src/lib/closure-member.ts";
-  for (const imports of ["", 'import "./host-identity.js";\n']) {
+  for (const imports of ["", `import ${relativeSpecifier("host-identity")};\n`]) {
     const asked: string[] = [];
     const read = (value: number) => (path: string) => {
       assert.equal(path, changed, "only changed files are read before an import change is established");
