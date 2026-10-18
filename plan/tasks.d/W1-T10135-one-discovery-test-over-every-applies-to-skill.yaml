@@ -36,6 +36,8 @@
   origin: feedback#fb-1791856366583-e5a5e9
   plan_refs: ["§7B"]
   files: [test/every-applies-to-skill-is-selectable-and-bounded.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=27ce200e0ea1f88a
   attempts: 0
   note: "verify:auto — pure test addition over existing exports; no src change."
