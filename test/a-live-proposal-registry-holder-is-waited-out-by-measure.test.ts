@@ -45,8 +45,11 @@ test("W1-T9240: a same-process registry holder can release while its contender w
   const contender = updateProposalRegistryAsync(f.path, current => [...current, proposal("landed")], { maxWaitMs: 1000 });
   const release = setTimeout(f.release, 0);
   t.after(() => clearTimeout(release));
-  assert.equal((await f.holder)?.count, 1);
-  assert.equal((await contender)?.[0]?.id, "landed");
+  const [holder, update] = await Promise.allSettled([f.holder, contender]);
+  assert.equal(holder.status, "fulfilled");
+  assert.equal(update.status, "fulfilled", "a ready holder must progress before the contender's deadline");
+  if (holder.status === "fulfilled") assert.equal(holder.value?.count, 1);
+  if (update.status === "fulfilled") assert.equal(update.value?.[0]?.id, "landed");
   assert.deepEqual(loadProposalRegistry(f.path).map(p => p.id), ["landed"]);
   assert.equal(fs.existsSync(`${f.path}.lock`), false);
 });
@@ -72,6 +75,9 @@ test("W1-T9240: a caller deadline refuses a live holder with an attributable wai
   const f = planted(t);
   const rows: Array<{ step: string; detail: Record<string, unknown> }> = [];
   let calls = 0;
+  // Independent release makes a deleted deadline fail its assertion rather than hang the suite.
+  const release = setTimeout(() => fs.rmSync(`${f.path}.lock`, { force: true }), 400);
+  t.after(() => clearTimeout(release));
   await assert.rejects(updateProposalRegistryAsync(f.path, () => { calls++; return []; }, {
     maxWaitMs: 45, pollIntervalMs: 10, log: (step, detail) => rows.push({ step, detail }),
   }), e => e instanceof ProposalRegistryBusyError && e.outcome === "deadline");
@@ -116,6 +122,7 @@ test("W1-T9240: an unbounded uncancellable caller refuses before creating any lo
     await assert.rejects(updateProposalRegistryAsync(path, () => [], opts), /finite budget/);
     assert.equal(fs.existsSync(`${path}.lock`), false);
   }
+  assert.throws(() => updateProposalRegistry(path, () => [], { maxWaitMs: Infinity }), /must be finite/);
 });
 
 test("W1-T9240: malformed hold evidence is explicit and measurement failure does not lose a committed update", async t => {

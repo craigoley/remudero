@@ -3096,8 +3096,8 @@ export function loadProposalRegistry(registryPath: string): Proposal[] {
 //
 // This is the ONLY sanctioned writer, so a fifth caller inherits the property. An O_EXCL lockfile serialises every
 // call ACROSS PROCESSES, which an in-process single-writer function cannot do, and the write lands via a temp file
-// plus `renameSync`. A live holder is POLLED, not refused as in drain-lock.ts, because every critical section takes
-// microseconds. STALENESS IS NEVER PID-LIVENESS ALONE, so {@link reclaimStaleLock} (W1-T289/W1-T368) conditions its
+// plus `renameSync`. Async holders may span awaited shard reads: async contenders yield, while synchronous callers
+// keep a bounded compatibility wait. STALENESS IS NEVER PID-LIVENESS ALONE, so {@link reclaimStaleLock} (W1-T289/W1-T368) conditions its
 // delete on the lock's on-disk identity and two reclaimers cannot both believe they hold it.
 
 export interface UpdateProposalRegistryOpts {
@@ -3178,6 +3178,7 @@ export function updateProposalRegistry(
 ): Proposal[] | null {
   const lockPath = `${registryPath}.lock`;
   const maxWaitMs = opts.maxWaitMs ?? 2000;
+  if (!Number.isFinite(maxWaitMs) || maxWaitMs < 0) throw new Error("synchronous proposal registry wait must be finite");
   const pollIntervalMs = opts.pollIntervalMs ?? 20;
   const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
   const sleep = opts.sleep ?? defaultRegistryLockSleep;
@@ -3222,11 +3223,10 @@ export function updateProposalRegistry(
   try {
     return updateLockedProposalRegistry(registryPath, update);
   } finally {
-    recordRegistryHold(registryPath, started, opts);
     try {
-      fs.unlinkSync(lockPath);
-    } catch {
-      // already gone — idempotent
+      recordRegistryHold(registryPath, started, opts);
+    } finally {
+      try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
     }
   }
 }
@@ -3430,12 +3430,11 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
   const ownedPath = resolvePath(lockPath);
   ownedAsyncRegistryLocks.add(ownedPath);
   const release = async () => {
-    recordRegistryHold(registryPath, started, opts);
-    ownedAsyncRegistryLocks.delete(ownedPath);
     try {
-      await fs.promises.unlink(lockPath);
-    } catch {
-      // already gone — idempotent
+      recordRegistryHold(registryPath, started, opts);
+    } finally {
+      ownedAsyncRegistryLocks.delete(ownedPath);
+      try { await fs.promises.unlink(lockPath); } catch { /* already gone */ }
     }
   };
   // Cancellation/deadline can arrive during async open/write/close. Do not run the update afterwards.
