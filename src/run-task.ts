@@ -60,7 +60,7 @@ import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, readFile as readFileAsync, rm as rmAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
-import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, type ImportClosureRead } from "./lib/base-reproduction.js";
+import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
 import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
@@ -12647,14 +12647,15 @@ export async function runFixRung(opts: {
           refresh: decision.refresh,
         });
         // W1-T8396: an exact-path match says main touched the red's files, not that merging main clears
-        // the red — a failing test file that still fails on a trial merge is the PR's own. Rule 3 (no
-        // repeat on the same red) needs no read here: this arm's matched paths are themselves counted.
+        // the red — a failing test file that still fails on a trial merge is the PR's own. This arm's
+        // matched paths are themselves counted, so rule 3's path test never refuses here; the history
+        // read below still makes a repeat on the same red need a trial merge that clears it.
         const refreshTestFiles = baseReproductionFiles(currentCiFailures);
         const refreshChecks = [...new Set(currentCiFailures.map((failure) => failure.name))];
         let refreshMainSha: string | undefined;
         const probeMerge = deps.reproduceFailingTestsOnMerge;
         if (decision.refresh && refreshTestFiles.length > 0 && probeMerge) {
-          // An unreadable main tip leaves the probe unrunnable, which keeps today's refresh.
+          // An unreadable main tip leaves the probe unrunnable, which keeps only a first refresh of this red.
           refreshMainSha = await Promise.resolve(deps.readMainTip ? deps.readMainTip() : mainTipViaGit(opts.worktreePath)).then(
             (sha) => sha, (error: unknown) => { deps.log("refresh.clearance.main_tip_unreadable", { error: boundedBaseProbeReason(error) }); return undefined; });
         }
@@ -12662,7 +12663,8 @@ export async function runFixRung(opts: {
           failingTestFiles: refreshTestFiles,
           reach: mainPathsReachingRed({ failingTestFiles: refreshTestFiles, mainChangedFiles: facts.baseChangedFiles, closure: undefined,
             isHarnessPath: isCiHarnessPath, matchedPaths: decision.matchingBaseFiles }),
-          priorRefresh: false,
+          priorRefresh: refreshedOnSameRed(refreshRecordsFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))()),
+            prNumber, refreshChecks, refreshTestFiles),
         }, probeMerge && refreshMainSha !== undefined
           ? () => probeMerge({ prNumber, headSha: review.headSha } as OpenPrView, refreshTestFiles, refreshMainSha!) : undefined)
           : undefined;
