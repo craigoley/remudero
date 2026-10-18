@@ -50,20 +50,20 @@ const SHARED_PROOF_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
-  files: [src/lib/plan.ts, test/example.test.ts]
+  files: [src/lib/plan.ts, test/plan/example.test.ts]
   design: |
-    CREATES: test/example.test.ts
+    CREATES: test/plan/example.test.ts
   acceptance:
     - claim: "the first behaviour"
-      proof: "unit test: test/example.test.ts"
+      proof: "unit test: test/plan/example.test.ts"
     - claim: "the second behaviour"
-      proof: "unit test: test/example.test.ts"
+      proof: "unit test: test/plan/example.test.ts"
 `;
 
 /** The same task with one discriminating proof per criterion — the operator-filed W1-T4330 pattern. */
 const DISTINCT_PROOF_FRAGMENT = SHARED_PROOF_FRAGMENT.replace(
-  'proof: "unit test: test/example.test.ts"\n    - claim: "the second behaviour"\n      proof: "unit test: test/example.test.ts"',
-  `proof: 'grep: test("NEW-1: the first behaviour" in test/example.test.ts'\n    - claim: "the second behaviour"\n      proof: 'grep: test("NEW-1: the second behaviour" in test/example.test.ts'`,
+  'proof: "unit test: test/plan/example.test.ts"\n    - claim: "the second behaviour"\n      proof: "unit test: test/plan/example.test.ts"',
+  `proof: 'grep: test("NEW-1: the first behaviour" in test/plan/example.test.ts'\n    - claim: "the second behaviour"\n      proof: 'grep: test("NEW-1: the second behaviour" in test/plan/example.test.ts'`,
 );
 
 const proposal: Proposal = { id: "proof-debt:W1-T4048", summary: "repair the proof debt", evidenceAnchors: [] };

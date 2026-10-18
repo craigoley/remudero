@@ -79,7 +79,7 @@ test("W1-T9062: a draft naming a src file the tree does not hold is not READY", 
 });
 
 test("W1-T9062: a slug-named new test and a CREATES path keep a draft READY", () => {
-  const allowed = fragment.replace("files: [src/lib/plan.ts]", "files: [src/lib/plan.ts, test/check-declared-paths.test.ts, src/lib/new-path.ts]\n  design: |\n    CREATES: src/lib/new-path.ts");
+  const allowed = fragment.replace("files: [src/lib/plan.ts]", "files: [src/lib/plan.ts, test/plan/check-declared-paths.test.ts, src/lib/new-path.ts]\n  design: |\n    CREATES: src/lib/new-path.ts");
   const withCaller = allowed.replace("risk: medium", "risk: high\n  band_meaning: span") + '    - claim: the existing caller reaches the new module\n      proof: "grep: newPath( in src/lib/plan.ts"\n';
   const classified = classifyProposal(proposal, draft(withCaller), context());
   assert.equal(classified.state, "ready", JSON.stringify(classified.reasons));
@@ -91,7 +91,7 @@ test("W1-T9062: a slug-named new test and a CREATES path keep a draft READY", ()
   const noCaller = classifyProposal(proposal, draft(withCaller.replace("newPath( in src/lib/plan.ts", "newPath( in src/lib/new-path.ts")), context());
   assert.equal(noCaller.state, "not_ready", "a CREATES path cannot supply its own call site");
   assert.ok(noCaller.reasons.some((r) => r.detail.includes("call-site")));
-  for (const dirty of [withCaller.replace("test/check-declared-paths.test.ts", "test/unrelated.test.ts"),
+  for (const dirty of [withCaller.replace("test/plan/check-declared-paths.test.ts", "test/plan/unrelated.test.ts"),
     withCaller.replace("CREATES: src/lib/new-path.ts", "create src/lib/new-path.ts")]) {
     const refused = classifyProposal(proposal, draft(dirty), context());
     assert.equal(refused.state, "not_ready");

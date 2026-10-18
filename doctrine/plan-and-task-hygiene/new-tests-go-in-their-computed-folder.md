@@ -1,5 +1,5 @@
-- **A new test goes in the `test/<folder>/` that `rmd test-place` computes from its imports — never
-  directly under `test/`.** A test's folder is COMPUTED, not chosen: `placeTest` (`src/lib/test-placement.ts`,
+- **A new test goes in the `test/<folder>/` that `rmd test-place` computes from its imports — never directly
+  under `test/`.** A test's folder is COMPUTED, not chosen: `placeTest` (`src/lib/test-placement.ts`,
   W1-T9874) scores the src modules a test reaches against `scripts/test-placement/subsystem-map.json` and returns
   one of its folders (`ci/gates`-style second levels included). W1-T9875 made every NEW-test minter use it, because
   a minter that keeps writing flat `test/<slug>.test.ts` drags the layout straight back: the inbox drafting rule

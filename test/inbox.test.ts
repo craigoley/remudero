@@ -915,11 +915,11 @@ const VALID_DRAFT_TEXT = [
   "  verify: auto",
   "  risk: high",
   "  band_meaning: span",
-  "  files: [src/lib/plan.ts, test/drafted-candidate.test.ts]",
+  "  files: [src/lib/plan.ts, test/plan/drafted-candidate.test.ts]",
   "  origin: feedback#P1",
   "  acceptance:",
   '    - claim: "the drafted candidate does the thing"',
-  '      proof: "unit test: test/drafted-candidate.test.ts"',
+  '      proof: "unit test: test/plan/drafted-candidate.test.ts"',
   "  status: queued",
   "=== FRAGMENT END ===",
   "STAMP: - P1 (plan) — RATIFIED 2026-07-21 -> W1-T900.",
@@ -1072,7 +1072,7 @@ const SIZING_DIRTY_DRAFT = [
 test("lintDraftedFragment: a risk:medium two-subsystem task is a BLOCK sizing violation; a clean task is empty; unparseable ⇒ draft-parse", () => {
   const dirty = lintDraftedFragment("- id: W1-T901\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  files: [src/lib/inbox.ts, src/lib/retro.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1");
   assert.ok(dirty.some((v) => v.check === "sizing" && v.severity === "block"), "medium-risk multi-subsystem ⇒ Rule-19 sizing block");
-  assert.deepEqual(lintDraftedFragment("- id: W1-T900\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: high\n  band_meaning: span\n  files: [src/lib/plan.ts, test/x.test.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1"), []);
+  assert.deepEqual(lintDraftedFragment("- id: W1-T900\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: high\n  band_meaning: span\n  files: [src/lib/plan.ts, test/plan/x.test.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/plan/x.test.ts\"\n  status: queued\n", "P1"), []);
   const parse = lintDraftedFragment("this: is: not: valid: yaml: [", "P1");
   assert.equal(parse[0]?.check, "draft-parse");
 });
