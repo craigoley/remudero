@@ -360,6 +360,21 @@ test("Janitor cache scope: a foreign-owned native temp directory cannot narrow t
   assert.equal(result.decisions, "keep\tcache_scope_unknown\n");
 });
 
+test("Janitor cache scope: an unusable owned temp directory keeps the pass rather than allowing Python fallback", t => {
+  if (process.getuid?.() === 0) { t.skip("root bypasses directory permission controls"); return; }
+  const fx = cacheDelegationFixture(t);
+  for (const mode of [0o500, 0o600]) {
+    chmodSync(fx.canonical, mode);
+    try {
+      const result = fx.run();
+      assert.equal(result.observed, undefined, `mode=${mode.toString(8)} must not invoke the helper`);
+      assert.equal(result.decisions, "keep\tcache_scope_unknown\n");
+    } finally {
+      chmodSync(fx.canonical, 0o700);
+    }
+  }
+});
+
 test("Janitor cache scope: selected HOME must match the verified running account before normalization", t => {
   const fx = cacheDelegationFixture(t);
   for (const options of [

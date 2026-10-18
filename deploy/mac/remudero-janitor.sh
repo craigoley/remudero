@@ -1232,9 +1232,9 @@ cache_reference_tmpdir() {
   # A trailing slash can hide a symlink from -L. Permit native /var's parent
   # alias, but never a linked, foreign-owned or root temp directory itself.
   while [ "${cache_tmp%/}" != "$cache_tmp" ]; do cache_tmp=${cache_tmp%/}; done
-  [ -n "$cache_tmp" ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] || return 1
+  [ -n "$cache_tmp" ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] && [ -w "$cache_tmp" ] && [ -x "$cache_tmp" ] || return 1
   cache_tmp=$(cd "$cache_tmp" 2>/dev/null && pwd -P) || return 1
-  [ "$cache_tmp" != / ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] || return 1
+  [ "$cache_tmp" != / ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] && [ -w "$cache_tmp" ] && [ -x "$cache_tmp" ] || return 1
   printf '%s\n' "$cache_tmp"
 }
 if [ -f "$SCRIPT_DIR/cache-reclaim.py" ] && command -v python3 >/dev/null 2>&1; then
