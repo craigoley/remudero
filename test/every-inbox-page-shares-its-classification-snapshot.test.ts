@@ -406,6 +406,10 @@ test("snapshot-owned attention shares exact retained scope and key across HTTP, 
   assert.deepEqual(native.body.data.items[0].snapshotAttention, expected);
   assert.equal(native.body.data.items[1].snapshotAttention.attention, "decision", "a proper newer ask is not demoted by another row's wait");
   assert.equal(JSON.stringify(expected).includes(w.root), false, "no private source path leaves the producer");
+  for (const stamp of [legacy.body.needsYou.notReady[0].snapshotAttention, native.body.data.items[0].snapshotAttention]) {
+    assert.deepEqual(Object.keys(stamp).sort(), Object.keys(expected).sort(), "only public lineage fields are projected on either read path");
+    assert.equal(JSON.stringify(stamp).includes(w.root), false, "actual HTTP/view lineage omits private source paths");
+  }
   writeFileSync(join(w.root, "state", "inbox-threads.jsonl"), "unreadable live history after classification\n");
   writeFileSync(w.deps.planPath, "invalid mutable plan after classification");
   const restarted = await served(t, w, r, { mode: "off" });
@@ -444,6 +448,7 @@ test("snapshot-owned attention keeps partial, absent, foreign and malformed evid
   assert.equal(initialRow.snapshotAttention.coverage, "partial");
   assert.equal(initialRow.snapshotAttention.attention, undefined);
   const edits: Array<(content: PersistedInboxContent) => void> = [
+    content => { content.complete = false; },
     content => { content.snapshotScope = { repository: "owner/foreign", instance: "elsewhere" }; },
     content => { content.snapshotScope = { root: w.root }; },
     content => { content.attentionCensus!.items[0]!.threadId = "foreign-thread"; },

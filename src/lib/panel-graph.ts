@@ -2441,7 +2441,7 @@ export function snapshotAttentionProjection(content: PersistedInboxContent, scop
   if (!content.snapshotKey || !validInboxSnapshot(content) || !census || census.countSemantics !== "observed_snapshot_not_verified" ||
     scope === undefined || typeof scope.repository !== "string" || scope.repository.length === 0 || !scope.instance || owned?.repository !== scope.repository || owned.instance !== scope.instance ||
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository) || !/^[A-Za-z0-9_.-]{1,120}$/.test(scope.instance)) return () => unknown();
-  if (census.state === "partial") return () => unknown("partial");
+  if (content.complete !== true || census.state === "partial") return () => unknown("partial");
   const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
   const seen = new Set<string>();
   const valid = census.items.every(item => {
