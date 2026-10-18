@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execWhitelistedProof, execWhitelistedProofAsync, parseWhitelistedProof, pinnedVitestCli } from "#src/lib/review.js";
@@ -65,12 +65,10 @@ if (process.argv[process.argv.indexOf("--configLoader") + 1] !== "native") {
 }
 process.stdout.write(${JSON.stringify(tap)});
 `);
-    chmodSync(install, 0o555);
     const proof = parseWhitelistedProof("unit test: tests/unit/shared.test.ts", target)!;
     assert.equal(execWhitelistedProof(proof, cwd, 5000, undefined, noBrowsers), "pass");
     assert.deepEqual(readdirSync(install), ["vitest"], "the shared dependency payload was not written");
   } finally {
-    chmodSync(install, 0o755);
     rmSync(root, { recursive: true, force: true });
   }
 });
