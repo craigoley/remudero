@@ -75,11 +75,15 @@ test('proof source bounded protocol refuses an oversized canonical request befor
 }));
 test('proof source keeps completed bytes when a held parent loop resumes after the nominal child budget',async t=>fixture(async f=>{
  const ready=join(f.root,'child-ready'),original=childProcess.spawn;
+ t.mock.timers.enable({apis:['setTimeout']});
  t.mock.method(childProcess,'spawn',((file:string,_args:readonly string[],options:SpawnOptions)=>original(file,['-e','require("node:fs").writeFileSync('+JSON.stringify(ready)+',"ready");process.stdout.write("inside-positive\\n")'],options)) as typeof childProcess.spawn);syncBuiltinESMExports();
  try{
   const pending=readProofFileInside(f.tree,f.target);
-  await new Promise<void>((resolve,reject)=>{const check=setInterval(()=>{if(fs.existsSync(ready)){clearInterval(check);clearTimeout(limit);resolve();}},5),limit=setTimeout(()=>{clearInterval(check);reject(Error('fixture child did not become ready'));},10000);});
+  await new Promise<void>((resolve,reject)=>{const deadline=performance.now()+10000,check=setInterval(()=>{if(fs.existsSync(ready)){clearInterval(check);resolve();}else if(performance.now()>=deadline){clearInterval(check);reject(Error('fixture child did not become ready'));}},5);});
   const until=performance.now()+PROOF_FILE_READ_TIMEOUT_MS+150;while(performance.now()<until){}
+  // Deliver the due timer before queued child I/O, independent of the host's
+  // poll/check phase ordering. The real clock proves this firing was delayed.
+  t.mock.timers.tick(PROOF_FILE_READ_TIMEOUT_MS);
   assert.equal(await pending,'inside-positive\n','a late wall-clock timer must not discard an already-completed child result');
  }finally{t.mock.restoreAll();syncBuiltinESMExports();}
 }));
