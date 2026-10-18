@@ -4,19 +4,19 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
-import { fixedClock } from "../src/lib/clock.js";
-import { loadProposalRegistry } from "../src/lib/inbox.js";
-import { loadPlan, type Plan } from "../src/lib/plan.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadProposalRegistry } from "#src/lib/inbox.js";
+import { loadPlan, type Plan } from "#src/lib/plan.js";
 import {
   automationProposalFromJudgedShard,
   proposalFromJudgedShard,
   type ShardUnderJudgement,
   type VerifyHumanVerdict,
-} from "../src/lib/verify-human-judge.js";
-import type { Config } from "../src/lib/config-schema.js";
-import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/worker.js";
-import { routeAdaptiveLifetimePressure } from "../src/run-task.js";
+} from "#src/lib/verify-human-judge.js";
+import type { Config } from "#src/lib/config-schema.js";
+import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "#src/lib/worker.js";
+import { routeAdaptiveLifetimePressure } from "#src/run-task.js";
 
 // W1-T8827: the adaptive lifetime-pressure path judged every task with `ageDays: 0` and the
 // proposal then worded it as "filed `verify: human` 0 days ago". These tests drive the real route
