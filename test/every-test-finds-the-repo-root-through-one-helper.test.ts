@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { REPO_ROOT, repoRoot } from "#test/helpers/repo-root.js";
 import { assertInspected } from "#test/helpers/inspected-population.js";
 // @ts-expect-error the codemod is an executable JavaScript module
-import { analyzeSource, rewriteSource, testFiles } from "#scripts/test-repo-root-codemod.mjs";
+import { SHAPES, analyzeSource, rewriteSource, testFiles } from "#scripts/test-repo-root-codemod.mjs";
 // @ts-expect-error the census precheck is an executable JavaScript module
 import { evaluateCensusPrecheck, PRECHECK_PARITY } from "#scripts/census-precheck.mjs";
 
@@ -153,4 +153,28 @@ test("the codemod rewrites supported root shapes without changing quoted example
   const unknown = `${header}const root = mystery(import.meta.url, "..");`;
   assert.equal(rewriteSource(unknown, "test/example.test.ts").source, unknown);
   assert.equal(analyzeSource(unknown, "test/example.test.ts").unsupported.length, 1);
+});
+
+test("the codemod CLI reports a dry-run census of the real tree and refuses unknown arguments", () => {
+  const script = join(REPO_ROOT, "scripts", "test-repo-root-codemod.mjs");
+  const stdout = execFileSync(process.execPath, [script], {
+    cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 << 20, timeout: 120_000,
+  });
+  const report = JSON.parse(stdout);
+  const files: string[] = testFiles(REPO_ROOT);
+  assert.equal(report.mode, "dry-run");
+  assert.equal(report.inspected, files.length);
+  assertInspected("codemod CLI census", report.inspected, files.length);
+  assert.ok(report.changed > 0 && report.changed <= report.inspected, `changed=${report.changed}`);
+  assert.deepEqual(Object.keys(report.counts).sort(), [...SHAPES].sort());
+  assert.ok(Object.values<number>(report.counts).some((n) => n > 0));
+  assert.ok(Array.isArray(report.unsupported));
+  // A dry run must leave the tree untouched: the report's own re-run is identical.
+  assert.equal(execFileSync(process.execPath, [script], {
+    cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 << 20, timeout: 120_000,
+  }), stdout);
+  assert.throws(() => execFileSync(process.execPath, [script, "--bogus"], {
+    cwd: REPO_ROOT, encoding: "utf8", stdio: "pipe", timeout: 120_000,
+  }), (error: { status?: number; stderr?: string }) =>
+    error.status === 1 && /usage: node scripts\/test-repo-root-codemod\.mjs \[--write\]/.test(String(error.stderr)));
 });
