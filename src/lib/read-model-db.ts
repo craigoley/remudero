@@ -360,8 +360,8 @@ export function createReadModelTransactionRecorder(path: string, connection: str
         // Function references survive bundling; adapter filenames do not. Trim the outer transaction helper first.
         const site: { stack?: string } = {};
         Error.captureStackTrace(site, withWriteTransaction);
-        if (!site.stack?.includes("\n")) Error.captureStackTrace(site, acquireLease);
-        if (!site.stack?.includes("\n")) Error.captureStackTrace(site, caller);
+        if (site.stack === undefined || !site.stack.includes("\n")) Error.captureStackTrace(site, acquireLease);
+        if (site.stack === undefined || !site.stack.includes("\n")) Error.captureStackTrace(site, caller);
         const label = site.stack?.split("\n")[1]?.trim().split(" (")[0];
         current = { connection, transaction: nonce, recorder, label: (opts.label ?? label ?? "unlabeled").slice(0, 120),
           pid: process.pid, thread: threadId, identity, recordedState: "attempting", attemptedAt: now(), updatedAt: now() };
