@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as sweepModule from "./helpers/sweep-test.js";
-import type { CiFailure, OpenPrView, SweepDeps } from "./helpers/sweep-test.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import * as sweepModule from "#test/helpers/sweep-test.js";
+import type { CiFailure, OpenPrView, SweepDeps } from "#test/helpers/sweep-test.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 // W1-T10066 — #12570's ordinary fix rounds were sent a `CodeQL` ci_failure with a null tail while the head's
 // alert #429 was already read, so the worker fixed only the members that had text. A fix round whose red

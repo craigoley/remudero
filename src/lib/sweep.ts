@@ -14121,7 +14121,8 @@ export function codeScanningFixCiFailures(alerts: readonly CodeqlHeadAlert[], re
 
 /** W1-T10066 — a fix round whose red includes a failed `CodeQL` check carries the head's alerts. The results check
  *  has no job log, so its entry would be blank; it is replaced by one entry per alert read at THIS head, and when
- *  none was read at this head the entry SAYS so rather than carrying a null tail. Other failures pass through. */
+ *  none was read at this head a blank entry SAYS so rather than carrying a null tail; an entry that already has
+ *  text keeps it. Other failures pass through. */
 export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeqlHeadAlerts">, failures: readonly CiFailure[]): CiFailure[] {
   const observed = pr.codeqlHeadAlerts;
   return failures.flatMap((failure) => {
@@ -14135,6 +14136,7 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
         ]),
       }));
     }
+    if (typeof failure.logTail === "string" && failure.logTail.trim() !== "") return [failure];
     const why = observed === undefined
       ? "no open high-severity alert was read for this head (none is open, the read was not due, or it failed)"
       : `alerts were read at head ${observed.headSha.slice(0, 7)}, not at this head ${pr.headSha.slice(0, 7)}`;
