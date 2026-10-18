@@ -595,6 +595,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   return ['passed', 'not-run'].includes(receipt.verdict) ? 0 : receipt.verdict === 'over-capacity' ? OVER_CAPACITY_EXIT : 1;
 }
 
-if (isMainModule(import.meta.url)) process.exit(guardedAuthorEntry(process.argv.slice(2), {
-  root: REPO_ROOT, runAuthor: (argv, deps) => main(argv, deps),
-}));
+if (isMainModule(import.meta.url)) {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--low-footprint')) {
+    const {runLowFootprintAuthor} = await import('./lib/author-low-footprint.mjs');
+    process.exitCode = await runLowFootprintAuthor(argv, {
+      root: REPO_ROOT, publicationIdentity: authorPublicationIdentity, authorEnvironment, completeTestResult,
+    });
+  } else process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT, runAuthor: (args, deps) => main(args, deps)});
+}

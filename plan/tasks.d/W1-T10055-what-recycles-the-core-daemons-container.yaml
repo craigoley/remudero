@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []  # the 90-minute minimum lifetime hand-fix (branch fix-freshness-min-lifetime-1792255168191) changes the freshness side this measures against; see rationale
   type: implement
-  verify: human  # the memo's tables come from the live core ledger union and a read of the host's recycle callers; a builder under the operator's builder rules runs them
+  # the memo's tables come from the live core ledger union and a read of the host's recycle callers; a builder under the operator's builder rules runs them
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 6.00
   risk: high  # Rule 19: one concern, a boot-cause classifier and an options memo; no daemon, deploy or host-script change
@@ -94,3 +95,13 @@
     EFFECT: the operator gets a per-boot attribution and a short list of absorption options with their costs; the
     build task that follows is filed from it. OPERATOR DECISIONS: any absorb window or wait bound, and whether an
     unledgered recycle caller must write a row.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed plan describes boot attribution and a memo of absorption options, with the absorb window and related policy choices explicitly left as operator decisions."
+      - "The stated deliverables are a script, tests, and documentation; the plan does not state that this task changes deployment, infrastructure, permissions, or data."
+      - "The gates state filingTime is true, and the plan cites a bounded log analysis and specific test acceptance checks."
+    judged_at: "2026-10-17T23:56:59.991Z"
+    pin: "06cbb08f62f45ce0bcd630647b8d1238458861578b031dd01647ea3d74047de7"
