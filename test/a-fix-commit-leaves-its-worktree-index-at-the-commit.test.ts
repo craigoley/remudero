@@ -62,3 +62,16 @@ test("W1-T10068: a refused compare-and-swap leaves the worktree index unchanged"
   assert.deepEqual(readFileSync(indexPath), before);
   assert.equal(readFileSync(join(repo.dir, "declared.txt"), "utf8"), "fixed\n");
 });
+
+test("an index lock surfaces the real refresh failure without rewinding the committed branch", t => {
+  const { repo, priorHeadSha } = fixture(t);
+  const indexPath = repo.git("rev-parse", "--path-format=absolute", "--git-path", "index");
+  const before = readFileSync(indexPath);
+  writeFileSync(indexPath + ".lock", "fixture-owned index lock\n");
+  writeFileSync(join(repo.dir, "outside.txt"), "keep unpublished work\n");
+  assert.throws(() => commitWorkerEdits(repo.dir, ["declared.txt", "added.txt"], "fix: surface index lock", {}, [], { priorHeadSha, branch }), /index\.lock/);
+  assert.notEqual(repo.git("rev-parse", "HEAD"), priorHeadSha, "the failure must be after the successful CAS");
+  assert.equal(repo.git("show", "HEAD:added.txt"), "new");
+  assert.deepEqual(readFileSync(indexPath), before);
+  assert.equal(readFileSync(join(repo.dir, "outside.txt"), "utf8"), "keep unpublished work\n");
+});
