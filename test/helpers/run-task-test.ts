@@ -1,6 +1,7 @@
 import { runFixRung as runFixRungProduction } from "../../src/run-task.js";
 
 export * from "../../src/run-task.js";
+export { runDiagnoseThenRetry } from "../../src/lib/classify.js";
 
 /**
  * Legacy rung tests pin the pre-W1-T7096 stopping behaviour. They wire NO progress judge, so the rung
