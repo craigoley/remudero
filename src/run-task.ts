@@ -16020,6 +16020,7 @@ export function alreadySatisfiedVerdict(
  *  the Anthropic-side api-error flag. Feeds W1-T7's {@link classifyFailure}. */
 function workerSignal(r: WorkerResult): FailureSignal {
   return {
+    cashAllowanceResetAt: r.cashAllowanceResetAt,
     subtype: r.subtype,
     text: [workerTranscript(r), r.stderr].join("\n"),
     apiError: r.apiError,
@@ -16092,11 +16093,15 @@ export function finishTransientRetry(
 ): RunResult | undefined {
   if (driverResult.outcome !== "gave_up" || driverResult.exhaustedClass !== "transient") return undefined;
   const { taskId, runId, repoDir, worktreePath, costUsd, worker, log, say } = context;
-  try {
-    removeWorktree(repoDir, worktreePath);
-    log("worktree.remove", { on: "blocked_transient" });
-  } catch (e) {
-    log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+  if (driverResult.cashAllowanceExhausted) {
+    log("worktree.retained", { on: "cash_allowance_exhausted", reason: "a later tool turn may have left unpublished edits" });
+  } else {
+    try {
+      removeWorktree(repoDir, worktreePath);
+      log("worktree.remove", { on: "blocked_transient" });
+    } catch (e) {
+      log("worktree.remove.error", { on: "blocked_transient", error: String((e as Error)?.message ?? e) });
+    }
   }
   log("verdict", {
     verdict: "blocked_transient",
@@ -16106,7 +16111,8 @@ export function finishTransientRetry(
     cost_usd: costUsd,
     billing_mode: billingMode(worker.childEnvKeys),
     account_label: worker.accountLabel,
-    reason: `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
+    reason: driverResult.cashAllowanceExhausted ? driverResult.reason
+      : `repeated transient API error across ${driverResult.transientRetries} retries — ${driverResult.reason}`,
     ...terminalVerdictFields(worker),
   });
   say(`verdict: blocked_transient — ${driverResult.reason}`);
