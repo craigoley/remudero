@@ -1,0 +1,35 @@
+- id: W1-T10133
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — hand_fix:scripts/preflight-author.mjs cost 26.4 PR minute(s) across 6 round(s) on 6 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.22
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:hand_fix:scripts/preflight-author.mjs"
+  files:
+    - scripts/preflight-author.mjs
+    - test/hand-fix-scripts-preflight-author-mjs.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on hand_fix:scripts/preflight-author.mjs"
+      proof: "grep: test(\"W1-T10133: hand_fix:scripts/preflight-author.mjs is prevented, not retried\" in test/hand-fix-scripts-preflight-author-mjs.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures hand_fix:scripts/preflight-author.mjs's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: hand_fix:scripts/preflight-author.mjs cost 26.4 PR minute(s) across 6 red run(s) within the measured window on 6 pull request(s).
+
+    WHERE IT COMES FROM:
+    - scripts/preflight-author.mjs: repaired by hand in multiple distinct merged PRs
+
+    RECENT ROUNDS (newest first):
+    - PR #12673 at 2026-10-17T23:00:19Z: hand fix PR #12673: scripts/lib/mac-author-admission.mjs, scripts/preflight-author.mjs; minutes are the pass median proxy (5.9983), not measured repair time
+    - PR #12411 at 2026-10-17T03:38:34Z: hand fix PR #12411: scripts/preflight-author.mjs, src/lib/test-slot.ts; minutes are the pass median proxy (5.9983), not measured repair time
+    - PR #12450 at 2026-10-16T22:47:25Z: hand fix PR #12450: scripts/preflight-author.mjs; minutes are the pass median proxy (5.9983), not measured repair time
+    - PR #12312 at 2026-10-16T14:57:08Z: hand fix PR #12312: scripts/lib/author-workflow-contract.mjs, scripts/preflight-author.mjs; minutes are the pass median proxy (5.9983), not measured repair time
+    - PR #12046 at 2026-10-15T16:30:02Z: hand fix PR #12046: scripts/calibrate-author-runtime.mjs, scripts/preflight-author.mjs, src/lib/ci-parity.ts, src/lib/commit-message.ts, src/lib/merge-probe.ts, src/lib/retro-preflight.ts, src/lib/tes
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
