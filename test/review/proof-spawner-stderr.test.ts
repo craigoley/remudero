@@ -6,12 +6,14 @@ import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 test("the real synchronous proof spawner retains stderr on a child failure", t => {
   const { dir } = ownedFixtureDir(t, "proof-spawner-stderr");
   assert.throws(() => defaultProofSpawner(process.execPath, ["-e",
-    'process.stdout.write("fixture stdout\\n"); process.stderr.write("fixture runner refusal\\n"); process.exit(2)',
+    'process.stdout.write("fixture stdout\\n"); process.stderr.write("fixture runner refusal\\napi_key=fixture-not-a-real-credential\\n"); process.exit(2)',
   ], dir, 5_000), (error: unknown) => {
-    const result = error as { status?: number; stdout?: string; stderr?: string };
+    const result = error as { status?: number; stdout?: string; stderr?: string; message?: string };
     assert.equal(result.status, 2);
     assert.equal(result.stdout, "fixture stdout\n");
-    assert.equal(result.stderr, "fixture runner refusal\n");
+    assert.equal(result.stderr, "fixture runner refusal\napi_key=fixture-not-a-real-credential\n");
+    assert.doesNotMatch(result.message ?? "", /fixture-not-a-real-credential/);
+    assert.match(result.message ?? "", /api_key=<redacted>/);
     return true;
   });
 });
