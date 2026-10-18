@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,6 +8,7 @@ import { appendLedger } from "#src/lib/ledger.js";
 import * as review from "#src/lib/review.js";
 import { reviewCommand, reviewAttemptsForInput, type ReviewRunResult } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const HEAD = "1234567890abcdef1234567890abcdef12345678";
 const PR = "https://github.com/acme/portal/pull/8";
@@ -23,16 +24,15 @@ const verdict = {
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "rmd-publisher-replay-"));
   const savedEnv = { ...process.env };
+  const shim = ghShim([{ when: "", stderr: "fixture: publishing credential unreadable", exit: 1 }]);
   t.after(() => {
     process.env = savedEnv;
+    rmSync(shim.dir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   });
   delete process.env.REMUDERO_REVIEWER_TOKEN;
   delete process.env.REMUDERO_REVIEWER_LOGIN;
-  const bin = join(root, "bin");
-  mkdirSync(bin);
-  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho 'fixture: publishing credential unreadable' >&2\nexit 1\n", { mode: 0o755 });
-  process.env.PATH = `${bin}:${process.env.PATH}`;
+  process.env.PATH = `${shim.dir}:${process.env.PATH}`;
   const ledgerPath = join(root, "state", "ledger.ndjson");
   const seed = () => appendLedger(ledgerPath, {
     run_id: "original", task_id: "PR-8", step: "review.posted", pr_url: PR, head_sha: HEAD,
@@ -66,7 +66,7 @@ function fixture(t: TestContext) {
     post: ({ state }: { state: string }) => { posts.push(state); },
   };
   return {
-    root, ledgerPath, options, posts, seed,
+    root, ledgerPath, options, posts, seed, shim,
     status: (value: unknown) => { status = value; },
     binding: (value: unknown) => { binding = value; },
     app: (value: unknown) => { app = value; },
@@ -168,15 +168,13 @@ test("W1-T8959: trusted replay confirmation preserves conflicts lifecycle and le
   f.status({ state: "success", posterLogin: "TRUSTED", posterType: "User" });
   assert.equal((await review.postReviewStatusGuarded(f.options)).replayed, true);
   assert.deepEqual(f.posts, []);
-  writeFileSync(join(f.root, "bin", "gh"), `#!/usr/bin/env node
-if (process.argv[2] !== 'api' || process.argv[3] !== 'user') throw new Error('unexpected request');
-console.log(JSON.stringify({login: process.env.GH_TOKEN === 'dedicated-fixture-token' ? 'trusted' : 'operator'}));
-`, { mode: 0o755 });
-  process.env.REMUDERO_REVIEWER_TOKEN = "dedicated-fixture-token";
+  // The shim echoes the actual child's credential as JSON, so the selected token determines identity.
+  f.shim.addRoute({ when: "api user", stdoutEnv: "GH_TOKEN" });
+  process.env.REMUDERO_REVIEWER_TOKEN = JSON.stringify({ login: "trusted" });
   f.status(undefined);
   assert.equal((await review.postReviewStatusGuarded(f.options)).posted, true,
     "known unpinned recovery uses the same dedicated credential as the existing poster");
-  process.env.REMUDERO_REVIEWER_TOKEN = "operator-fixture-token";
+  process.env.REMUDERO_REVIEWER_TOKEN = JSON.stringify({ login: "operator" });
   assert.equal((await review.postReviewStatusGuarded(f.options)).posted, false);
   assert.deepEqual(f.posts, ["success"]);
   delete process.env.REMUDERO_REVIEWER_TOKEN;
@@ -201,27 +199,6 @@ console.log(JSON.stringify({login: process.env.GH_TOKEN === 'dedicated-fixture-t
 
 test("W1-T8959: default review CLI retains publisher evidence and refuses unreadable provenance", async t => {
   const f = fixture(t);
-  const bin = join(f.root, "bin");
-  const data = join(f.root, "response.json");
-  const calls = join(f.root, "calls.ndjson");
-  writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
-const fs = require('node:fs');
-const data = JSON.parse(fs.readFileSync(${JSON.stringify(data)}, 'utf8'));
-const args = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
-if (args.includes('POST')) {
-  if (!data.allowPost) throw new Error('unauthorized post');
-  console.log('{}'); process.exit(0);
-}
-const path = args[1];
-if (path.endsWith('/status')) console.log(JSON.stringify({statuses: [data.status]}));
-else if (path.endsWith('required_status_checks')) {
-  if (data.fail) { process.stderr.write('source read unavailable'); process.exit(1); }
-  console.log(JSON.stringify(data.binding));
-} else if (path.startsWith('apps/')) console.log(JSON.stringify(data.app));
-else console.log(JSON.stringify(data.pr));
-`, { mode: 0o755 });
-  process.env.PATH = `${bin}:${process.env.PATH}`;
   const response = {
     status: { context: review.REVIEW_CONTEXT, state: "success", creator: { login: "fleet[bot]", type: "Bot", id: 9000 } },
     binding: { checks: [{ context: review.REVIEW_CONTEXT, app_id: 42 }] },
@@ -231,7 +208,14 @@ else console.log(JSON.stringify(data.pr));
   };
   let reviewers = 0;
   const run = async () => {
-    writeFileSync(data, JSON.stringify(response));
+    f.shim.addRoute({ when: `api repos/acme/portal/commits/${HEAD}/status`,
+      stdout: JSON.stringify({ statuses: [response.status] }) });
+    f.shim.addRoute({ when: "required_status_checks", stdout: JSON.stringify(response.binding),
+      stderr: response.fail ? "source read unavailable" : undefined, exit: response.fail ? 1 : 0 });
+    f.shim.addRoute({ when: "api apps/", stdout: JSON.stringify(response.app) });
+    f.shim.addRoute({ when: "api repos/acme/portal/pulls/8", stdout: JSON.stringify(response.pr) });
+    f.shim.addRoute({ when: "-X POST", stdout: "{}",
+      stderr: response.allowPost ? undefined : "unauthorized post", exit: response.allowPost ? 0 : 1 });
     return reviewCommand("8", ["--repo", "acme/portal"], {
       resolveOwnerRepo: () => ({ owner: "acme", repo: "portal" }),
       enforceReviewSubjectCheckout: false,
@@ -272,5 +256,5 @@ else console.log(JSON.stringify(data.pr));
   assert.equal(recovered.status_publisher.requiredAppId, 42);
   assert.equal(recovered.state, "success");
   assert.deepEqual(f.rows()[0].decision_verdict, verdict);
-  assert.ok(readFileSync(calls, "utf8").includes(`/commits/${HEAD}/status`));
+  assert.ok(f.shim.calls().some(call => call.includes(`/commits/${HEAD}/status`)));
 });
