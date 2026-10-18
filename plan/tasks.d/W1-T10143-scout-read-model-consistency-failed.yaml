@@ -20,3 +20,11 @@
     The ledger step read_model.consistency_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 11 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared file is a single new test file (test/scout-read-model-consistency-failed.test.ts), which does not touch secrets, auth, permissions, merge/deploy/infrastructure policy, or data deletion.; on the change's description/files alone, no diff was read — The description asks for a cause fix for a recurring ledger step, with an acceptance check that is a grep for a named test. This does not appear to require an operator-only decision (priorities, budget, policy) and the PR would still pass CI and review.; on the change's description/files alone, no diff was read — Caveats: the rationale states the rows name no file, so the actual production fix location is undeclared and could widen scope beyond the declared test file. The scout family's track record (0 merged, 1 declined, Beta mean 0.33) warrants stricter scrutiny, but this affects the likelihood of success rather than danger, and none of the escalation criteria are met from what is shown."
+    judged_at: "2026-10-18T12:34:10.655Z"
+    pin: "b9ca4e9986ca0cb8df103fee089c6f6967b85b146fcd2fccca186ccd04061ed4"
