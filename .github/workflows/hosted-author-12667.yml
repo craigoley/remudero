@@ -1,50 +1,113 @@
 name: Hosted author pilot 12667
 
-# One explicitly approved pilot branch. No PR, schedule, deploy or production access.
 on:
   push:
     branches: [run-unfiled-1792334880000]
-    paths: [.github/workflows/hosted-author-12667.yml]
+    paths:
+      - .github/workflows/hosted-author-12667.yml
+      - .github/hosted-author-12667.mjs
 
 permissions:
   contents: read
 
 concurrency:
-  group: hosted-author-12667-capacity
+  group: hosted-author-12667-exact-head
   cancel-in-progress: false
 
 jobs:
-  capacity:
-    name: hosted-author-12667-capacity
+  author:
+    name: hosted-author-12667-exact-head
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 205
+    env:
+      SOURCE_HEAD: 76a7eb34c1ac320b049c4b7b4331bc97db46745d
+      CAPTURED_BASE: 959a484ab08ef07340a2374dbaef877f9f26ecc1
+      SOURCE_BUNDLE_SHA256: 4e36e4d9197f9a79ba1d84871eb1673b517b7a2bc5f204de4b2c1cf695f61054
+      PUBLICATION_BRANCH: run-W1-T9805-1792270424954
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pilot-browsers
     steps:
-      - name: Measure capacity before source checkout or dependency installation
+      - name: Fix one total deadline including setup and calibration
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, pathlib, shutil, time
-          def read_sample():
-              mem = {line.split(':')[0]: int(line.split()[1]) * 1024 for line in pathlib.Path('/proc/meminfo').read_text().splitlines() if line.startswith(('MemAvailable:', 'MemTotal:', 'SwapTotal:', 'SwapFree:'))}
-              vm = dict(line.split() for line in pathlib.Path('/proc/vmstat').read_text().splitlines())
-              pressure = dict(field.split('=') for line in pathlib.Path('/proc/pressure/memory').read_text().splitlines() if line.startswith('full ') for field in line.split()[1:])
-              return {'time_unix': time.time(), 'memory': mem, 'swap_in_pages': int(vm['pswpin']), 'full_avg60': float(pressure['avg60']), 'free_workspace_bytes': shutil.disk_usage(os.environ['GITHUB_WORKSPACE']).free, 'free_temp_bytes': shutil.disk_usage(os.environ['RUNNER_TEMP']).free}
-          first = read_sample()
-          time.sleep(30)
-          last = read_sample()
-          checks = {'memory_at_least_7_gib': min(first['memory']['MemAvailable'], last['memory']['MemAvailable']) >= 7 * 1024**3, 'workspace_at_least_20_gib': min(first['free_workspace_bytes'], last['free_workspace_bytes']) >= 20 * 1024**3, 'temp_at_least_20_gib': min(first['free_temp_bytes'], last['free_temp_bytes']) >= 20 * 1024**3, 'no_swap_in': first['swap_in_pages'] == last['swap_in_pages'], 'full_pressure_below_half_percent': max(first['full_avg60'], last['full_avg60']) < 0.5, 'at_least_one_cpu': len(os.sched_getaffinity(0)) >= 1}
-          out = {'pilot': 12667, 'stage': 'capacity-only', 'runner_name': os.environ.get('RUNNER_NAME'), 'runner_os': os.environ.get('RUNNER_OS'), 'runner_arch': os.environ.get('RUNNER_ARCH'), 'workflow_head': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'cpu_affinity': sorted(os.sched_getaffinity(0)), 'samples': [first, last], 'checks': checks, 'admitted': all(checks.values()), 'cost_basis': 'PUBLIC repository; standard ubuntu-latest compute is free, not a paid larger runner', 'limits': 'Capacity measurement only. No source checkout, dependencies, tests, author PASS, production access or future-run capacity guarantee.'}
-          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'hosted-author-12667-capacity.json'
-          path.write_text(json.dumps(out, indent=2) + '\n')
-          print(json.dumps(out))
-          raise SystemExit(0 if out['admitted'] else 1)
+          import datetime, os
+          deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=195)
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('PILOT_DEADLINE=' + deadline.isoformat() + '\n')
           PY
-      - name: Preserve the measured capacity including refusals
+      - name: Checkout the reviewed pilot controller without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: pilot-control
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and reconstruct the exact source from its checksummed Git input
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import cp from 'node:child_process';
+          import crypto from 'node:crypto';
+          import assert from 'node:assert/strict';
+          const root=process.env.GITHUB_WORKSPACE,control=path.join(root,'pilot-control'),source=path.join(root,'source');
+          const input=JSON.parse(fs.readFileSync(path.join(control,'.github/hosted-pilot-source-input.json'),'utf8'));
+          assert.equal(input.format,'rmd-hosted-author-input-v1');assert.equal(input.head,process.env.SOURCE_HEAD);assert.equal(input.base,process.env.CAPTURED_BASE);assert.equal(input.bundleSha256,process.env.SOURCE_BUNDLE_SHA256);
+          const bytes=Buffer.from(input.bundleBase64,'base64');assert.equal(bytes.length,input.bundleBytes);assert(bytes.length<10*1024*1024);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),input.bundleSha256);
+          const bundle=path.join(process.env.RUNNER_TEMP,'pilot-source-input.bundle');fs.writeFileSync(bundle,bytes,{flag:'wx',mode:0o600});
+          const git=(dir,args)=>cp.execFileSync('git',['-C',dir,...args],{encoding:'utf8',timeout:120000}).trim();
+          git(control,['cat-file','-e',input.base+'^{commit}']);
+          cp.execFileSync('git',['clone','--no-local','--no-hardlinks','--no-checkout',control,source],{encoding:'utf8',timeout:120000});
+          git(source,['fetch',control,'refs/remotes/origin/main:refs/remotes/origin/main']);git(source,['cat-file','-e',input.base+'^{commit}']);
+          git(source,['bundle','verify',bundle]);assert.equal(git(source,['bundle','list-heads',bundle]),input.head+' HEAD');
+          git(source,['fetch',bundle,'HEAD:refs/heads/pilot-input']);git(source,['checkout','--detach',input.head]);assert.equal(git(source,['rev-parse','HEAD']),input.head);assert.equal(git(source,['status','--porcelain']),'');
+          console.log(JSON.stringify({stage:'source-reconstructed',head:input.head,base:input.base,bundleSha256:input.bundleSha256,bundleBytes:bytes.length,author:'NOT_RUN'}));
+          JS
+      - name: Use the source tree's pinned runtime and npm download cache
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version-file: source/.nvmrc
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Install exact locked dependencies
+        working-directory: source
+        run: npm ci
+      - name: Install the browser required by normal repository tests
+        working-directory: source
+        run: npx --no-install playwright install chromium
+      - name: Prepare complete local source inputs without production state
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const tmp=process.env.RUNNER_TEMP,workspace=process.env.GITHUB_WORKSPACE;
+          const config={source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
+          fs.writeFileSync(path.join(tmp,'pilot-config.json'),JSON.stringify(config),{flag:'wx',mode:0o600});
+          JS
+          node pilot-control/.github/hosted-author-12667.mjs prepare "$RUNNER_TEMP/pilot-config.json"
+      - name: Run real admission, calibration and author gate without network or credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNNER_USER="$(id -un)"
+          NODE_BIN="$(command -v node)"
+          REMAINING="$(python3 -c 'import datetime,os; print(max(1,int((datetime.datetime.fromisoformat(os.environ["PILOT_DEADLINE"])-datetime.datetime.now(datetime.timezone.utc)).total_seconds())))')"
+          sudo unshare --net -- bash -c 'set -euo pipefail; ip link set lo up; exec "$@"' pilot-net \
+            runuser -u "$RUNNER_USER" -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/pilot-home" TMPDIR="$RUNNER_TEMP/pilot-tmp" \
+            TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 CI=1 \
+            PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+            timeout --signal=TERM --kill-after=15s "${REMAINING}s" \
+            "$NODE_BIN" pilot-control/.github/hosted-author-12667.mjs run "$RUNNER_TEMP/pilot-config.json"
+      - name: Preserve all closed evidence on pass or refusal
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: hosted-author-12667-capacity-${{ github.run_id }}
-          path: ${{ runner.temp }}/hosted-author-12667-capacity.json
+          name: hosted-author-12667-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/pilot-evidence/
           retention-days: 1
           if-no-files-found: error
