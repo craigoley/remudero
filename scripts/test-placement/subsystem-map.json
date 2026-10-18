@@ -1,0 +1,1975 @@
+{
+ "snapshot": "origin/main a323d87ed, 2026-10-16",
+ "about": "Seed for the test/ restructure (operator rulings 2026-10-16). Subsystem ids are analysis keys; folder_of_subsystem gives the folder name under test/. rules/ holds suites that read the repo as text. core/time/harness/dep-review fold into infra/ and review/ as listed. Derived by the taxonomy scripts described in taxonomy.md; the build that ports them (placeTest) copies what it needs into the repo proper.",
+ "folders": [
+  "console-api",
+  "worker",
+  "ci",
+  "inbox",
+  "rules",
+  "review",
+  "daemon",
+  "plan",
+  "github",
+  "deploy",
+  "learning",
+  "ledger",
+  "sweep",
+  "gardeners",
+  "fix-lane",
+  "routing",
+  "dispatch",
+  "memory",
+  "triage",
+  "infra",
+  "sre"
+ ],
+ "second_level": {
+  "console-api": [
+   "board",
+   "serve",
+   "views",
+   "read-model"
+  ],
+  "worker": [
+   "spawn",
+   "run-task",
+   "sandbox"
+  ],
+  "ci": [
+   "gates",
+   "suites",
+   "parity",
+   "coverage"
+  ]
+ },
+ "never_in_a_folder_name": "census|ratchet|baseline (RULE_SUITE_NAME_RE in src/lib/ci-parity.ts is matched against the path after test/)",
+ "folder_of_subsystem": {
+  "console-read-model": "console-api",
+  "worker-run": "worker",
+  "ci-parity": "ci",
+  "inbox-operator": "inbox",
+  "daemon-loop": "daemon",
+  "github-io": "github",
+  "deploy-host": "deploy",
+  "models-routing": "routing",
+  "memory-budget": "memory",
+  "triage-intake": "triage",
+  "sre-incidents": "sre",
+  "review": "review",
+  "dep-review": "review",
+  "plan": "plan",
+  "learning": "learning",
+  "ledger": "ledger",
+  "sweep": "sweep",
+  "gardeners": "gardeners",
+  "fix-lane": "fix-lane",
+  "dispatch": "dispatch",
+  "core": "infra",
+  "time": "infra",
+  "harness": "infra",
+  "unplaced": "infra"
+ },
+ "subsystem_seed_rules": [
+  {
+   "subsystem": "time",
+   "basename_regex": "^(clock|time-window|clock-.*)$"
+  },
+  {
+   "subsystem": "core",
+   "basename_regex": "^(tmp|config|config-schema|settings|env|errors|fs-race-safe|lock-busy-retry|tty|cli-args|short-path-root|composition-root|argv|repo-root|json-duplicate-keys|registry|cli)$"
+  },
+  {
+   "subsystem": "gardeners",
+   "basename_regex": "(gardener|^garden-registry$|^gardeners-route$|^issue-revalidation-garden$|^remedy-effect$)"
+  },
+  {
+   "subsystem": "memory-budget",
+   "basename_regex": "^(host-memory-.*|daemon-memory-.*|serve-memory|owned-run-cgroup|worker-heaps|daemon-footprint|disk-artifact-reclaim|heavy-.*|headroom|object-reaper|clone-reaper|workspace-cleanup-contract|review-worktree-reclaim|git-lock-reclaim|daemon-heap-census|mount-headroom-sweep|owned-run-service-plan|in-tree-budget|idle-lane-accounting|idle-capacity-detector)$"
+  },
+  {
+   "subsystem": "sre-incidents",
+   "basename_regex": "^(sre-.*|incident.*|incidents-view|alert-lane|actions-incident|runbook-coverage|ops|fleet-flow-detectors|foreign-pause-detector|stranded-task-detector|impossible-canary|work-integrity|state-reconciler|main-run-gaps|operator-dirt-drill|recovery-drill)$"
+  },
+  {
+   "subsystem": "fix-lane",
+   "basename_regex": "^(fix-.*|census-fix|body-repair|main-health-rung|base-reproduction|refusal-amendment|strike-.*|ci-remedy-execution|repair-cost-evidence|alert-fix-body|dispatch-repair|plan-shard-repair|proof-amendment|live-edit-ladder)$"
+  },
+  {
+   "subsystem": "dep-review",
+   "basename_regex": "^(dep-review|dependency-seeds|held-dependency-roots|check-dependency-licences|author-dependency-provenance)$"
+  },
+  {
+   "subsystem": "review",
+   "basename_regex": "^(review.*|risk-.*|verify-human-.*|paired-review-eval|reviewer-.*|check-proof|proof.*|judge-calibration|verdict-calibration|shadow-judge|specialist-panel|flight-.*|non-worker-verdict|gate-verdict-record|mutation-verdict-pull|acceptance-author-gate|proof-discrimination-gate|assertion-discrimination-check|evidence-.*|reader-agreement|merge-queue-review-attest)$"
+  },
+  {
+   "subsystem": "ci-parity",
+   "basename_regex": "^(ci-.*|census.*|.*-census|.*-ratchet|hand-run-census|test-.*|typecheck.*|affected-suites|coverage-.*|diff-coverage.*|source-text-readers|source-size-followup|wipe-test|grep-zero-cause|changed-files-cache|preopen-gate|merge-probe|gate-.*|select-affected-suites|list-rule-suites|check|diff-class|flake-.*|pure-test-pool|pool-run-.*|run-with-deadline|lcov|mkdtemp-callsite-check|unwired-gate-check|baseline-monotonic-check|claims-check|tracked-source-write-check|no-hand-rolled-fetch-check|state-citation-check|read-map-.*|instrument-surface-census|inherited-violation|semgrep-.*|lint-plan-.*|rule\\d+-precheck|bundled-gate-report|credit-surface-gate|prompt-surface-gate|head-identity-gate|worker-branch-shape|node-pin-follows-the-image|arch-remeasure|forensics-split|git-spawn-shapes|author-.*|calibrate-author-runtime|native-author-runtime|preflight-author)$"
+  },
+  {
+   "subsystem": "ledger",
+   "basename_regex": "^(ledger.*|compaction|log-rotation|repo-ledger-index|receipt|replay|replay-harness|spend-rows|emissions|recovery-refs|trace|view-replay)$"
+  },
+  {
+   "subsystem": "plan",
+   "basename_regex": "^(plan.*|task-(linter|shard-name|card|view|case-file)|intent-plan.*|thread-plan|supersession|relint|ratification|advance-declarations|proof-grammar|memory-lint|goals|synthetic-tasks|block-reason|never-worked|task-id.*|generate-plan-index|plan-state-claims|satisfied-task-census|decisions-status|generate-proof-dialect)$"
+  },
+  {
+   "subsystem": "dispatch",
+   "basename_regex": "^(dispatch-.*|drain.*|inflight-lock|adaptive-wip|reservation-chain|parallel-attempts|pause-target|recycle-yield|tier|task-class|upgrade-allocation|contributor-admission|run-child-reservation|strike-schedule|backlog.*|work-.*|dispatch)$"
+  },
+  {
+   "subsystem": "daemon-loop",
+   "basename_regex": "^(daemon|daemon-health|loop-.*|liveness-pulse|progress-watchdog|quiet-worker-watchdog|self-sync|measurement-cadence.*|github-event-wake|flush-exit|poll-interval|fleet-.*|emergency-control|breaker-release|unfinished-checkpoint|self-forecast|stall-verifier|policy|state-.*|presence)$"
+  },
+  {
+   "subsystem": "sweep",
+   "basename_regex": "^(sweep|merge-state|branch-update|head-rehome)$"
+  },
+  {
+   "subsystem": "github-io",
+   "basename_regex": "^(github-.*|open-prs-rest|pr-.*|git-.*|git|arm-auto-merge|branch-.*|merge-.*|closing-reference-guard|code-scanning-.*|security-merge-.*|live-write-guard|authority|checkout-head|worktree-git|commit-message|no-draft-pull-request-census|git-credential-socket-helper)$"
+  },
+  {
+   "subsystem": "worker-run",
+   "basename_regex": "^(run-task|worker.*|run-child.*|child-entry-.*|containment|isolation|spawn-guard|mounts|mount-.*|capability-.*|prompt-render|prompt-manifest|secret-boundary|worktree-.*|hand-worktree|run-result|loop-bounded-child|context-controls|tool-step-signature|producer-.*|check-proof-main|run-child-main|build-child-entries|generate-capability-snapshot|untrusted-envelope)$"
+  },
+  {
+   "subsystem": "models-routing",
+   "basename_regex": "^(model-.*|provider-.*|routing-.*|benchmark-.*|bakeoff.*|claude-model-health|codex-capacity-probe|eval-card|paired-trial|field-trials-.*|skill-eval.*|experiment-promotion|cash-.*|draft-routing|account-usage|usage-telemetry|cost-anomaly|openweight-probe|private-routing-daily-review|private-field-trials-case-files|inbox-bakeoff|selector-.*|fix-routing-learner|spike)$"
+  },
+  {
+   "subsystem": "console-read-model",
+   "basename_regex": "^(serve.*|service|read-model.*|read-plane.*|.*-view|views|view-.*|panel-.*|board.*|console-.*|now-.*|analytics-.*|instance-gateway|repo-dashboard-route|route-read-rollup|status-stream-publisher|live-analytics-.*|recent-projection|workstreams-.*|status-board|status|glance|generate-api-client|validate-contract-manifest|ci-gate-from-contract|console-live-review|shell-screenshot|read-page|nav-badge-view)$"
+  },
+  {
+   "subsystem": "inbox-operator",
+   "basename_regex": "^(inbox.*|operator-.*|escalat.*|human-.*|ask-classification|reply-interpreter|grill-choices|digest|standing-briefs|notify|instance-inbox-.*|ruling-judge|preference-policy|follow-up-policy|promised-follow-ups|needs-human-issue|host-escalation-spool|deploy-refusal-escalation|operator-notes|recap|feedback.*)$"
+  },
+  {
+   "subsystem": "deploy-host",
+   "basename_regex": "^(deploy.*|launchd|launcher-.*|install-.*|staged-install|image-drift|host-.*|instance-.*|baked-runtime-inputs|version-switchback|doctor|init|onboard.*|project-init|managed-repos|owner-repo|repositor.*|repo-layout|bundle|engine-tree|inventory|recon|session|synthesize|repo-location|launchd)$"
+  },
+  {
+   "subsystem": "learning",
+   "basename_regex": "^(retro.*|learnings.*|learning-.*|knowledge-.*|doctrine-.*|rule-efficacy|skill.*|prompt-evolution|golden-corpus|workflow-mining|generate-learnings-index|generate-macro-skills|learnings-files)$"
+  },
+  {
+   "subsystem": "triage-intake",
+   "basename_regex": "^(triage.*|auto-triage|issues-intake|opportunity-.*|machine-filing.*|codeql-quality-intake|coverage-nightly-intake|classify|followup-dedup-census|issues-.*)$"
+  }
+ ],
+ "infra_subsystems": [
+  "core",
+  "time"
+ ],
+ "hub_modules": [
+  "src/run-task.ts"
+ ],
+ "generic_helpers": [
+  "browser-absence",
+  "canonical-tmpdir",
+  "captured-console",
+  "fake-gh-rate-limit",
+  "fake-github",
+  "fixture-commit",
+  "fixture-du",
+  "gh-first-on-path",
+  "gh-shim",
+  "gh-stub",
+  "git-repo",
+  "identity-gates",
+  "import-sweep",
+  "isolated-checkout",
+  "module-load-recorder",
+  "mutation-sandbox",
+  "native-gh-and-jq",
+  "no-live-remote",
+  "offline-github",
+  "open-shell",
+  "openapi-strict",
+  "push-safety",
+  "read-map",
+  "reapable-prefix",
+  "reporter-setup",
+  "tmp-hygiene",
+  "wall-clock-bound"
+ ],
+ "module_subsystem": {
+  "ability-map": "console-read-model",
+  "account-usage": "models-routing",
+  "action-executor": "inbox-operator",
+  "action-reconciliation": "inbox-operator",
+  "action-results": "console-read-model",
+  "actions-incident": "sre-incidents",
+  "actions-view": "console-read-model",
+  "actor-evidence": "console-read-model",
+  "adaptive-wip": "dispatch",
+  "advance-declarations": "plan",
+  "affected-suites": "ci-parity",
+  "agent-view": "console-read-model",
+  "alert-fix-body": "fix-lane",
+  "alert-lane": "sre-incidents",
+  "analytics-breakdowns": "console-read-model",
+  "analytics-live-metrics": "console-read-model",
+  "analytics-route": "console-read-model",
+  "analytics-timeseries": "console-read-model",
+  "analytics-view": "console-read-model",
+  "arm-auto-merge": "github-io",
+  "ask-classification": "inbox-operator",
+  "assistant-action-discovery": "console-read-model",
+  "authority": "github-io",
+  "auto-triage": "triage-intake",
+  "automation-action": "inbox-operator",
+  "automation-trigger": "console-read-model",
+  "autonomy": "ledger",
+  "backlog-gardener": "gardeners",
+  "baked-runtime-inputs": "deploy-host",
+  "bakeoff-trigger": "models-routing",
+  "base-reproduction": "fix-lane",
+  "benchmark-aa": "models-routing",
+  "benchmark-aa-prospective": "models-routing",
+  "benchmark-aa-readiness": "models-routing",
+  "benchmark-cohort": "models-routing",
+  "benchmark-evidence": "models-routing",
+  "benchmark-paid-pilot": "models-routing",
+  "benchmark-readiness-intake": "models-routing",
+  "benchmark-run": "models-routing",
+  "benchmark-verified-outcome": "models-routing",
+  "block-reason": "plan",
+  "board": "console-read-model",
+  "board-projection": "console-read-model",
+  "board-review": "console-read-model",
+  "board-snapshot-cache": "console-read-model",
+  "board-worker": "console-read-model",
+  "body-repair": "fix-lane",
+  "branch-reaper": "github-io",
+  "branch-update": "sweep",
+  "bre-metachars": "review",
+  "breaker-release": "daemon-loop",
+  "bundle": "deploy-host",
+  "capability-grant": "worker-run",
+  "capability-inspection": "worker-run",
+  "cash-allowance-lock": "models-routing",
+  "cash-request-effort": "models-routing",
+  "cash-responses": "models-routing",
+  "cash-trial": "models-routing",
+  "cash-web-bridge": "models-routing",
+  "census-fix": "fix-lane",
+  "changed-files-cache": "ci-parity",
+  "check-proof": "review",
+  "check-proof-main": "worker-run",
+  "checkout-head": "github-io",
+  "child-entry-argv": "worker-run",
+  "child-entry-store": "worker-run",
+  "ci-control-plane": "ci-parity",
+  "ci-escalation-judge": "ci-parity",
+  "ci-failure-corpus": "ci-parity",
+  "ci-friction-gardener": "gardeners",
+  "ci-friction-remedy": "ci-parity",
+  "ci-gate-required": "ci-parity",
+  "ci-incidents": "ci-parity",
+  "ci-learning-graphql": "ci-parity",
+  "ci-lesson-recurrence": "ci-parity",
+  "ci-parity": "ci-parity",
+  "ci-refresh-prevention": "ci-parity",
+  "ci-remedy-execution": "fix-lane",
+  "classify": "triage-intake",
+  "claude-model-health": "models-routing",
+  "cli-args": "core",
+  "clock": "time",
+  "clone-reaper": "memory-budget",
+  "closing-reference-guard": "github-io",
+  "code-scanning-merge-adapter": "github-io",
+  "code-scanning-merge-policy": "github-io",
+  "codeql-quality-intake": "triage-intake",
+  "codex-capacity-probe": "models-routing",
+  "commit-message": "github-io",
+  "compaction": "ledger",
+  "companion-paths": "plan",
+  "composition-root": "core",
+  "config": "core",
+  "config-gardener": "gardeners",
+  "config-schema": "core",
+  "consequence-policy": "inbox-operator",
+  "console-projection-worker": "console-read-model",
+  "console-snapshot-cache": "console-read-model",
+  "console-snapshot-store": "console-read-model",
+  "console-telemetry": "console-read-model",
+  "containment": "worker-run",
+  "context-controls": "worker-run",
+  "contributor-admission": "dispatch",
+  "correct": "ledger",
+  "cost-anomaly": "models-routing",
+  "coverage-improvement": "ci-parity",
+  "coverage-nightly-intake": "ci-parity",
+  "daemon": "daemon-loop",
+  "daemon-footprint": "memory-budget",
+  "daemon-health": "daemon-loop",
+  "daemon-memory-census": "memory-budget",
+  "daemon-memory-policy": "memory-budget",
+  "daemon-memory-telemetry": "memory-budget",
+  "delegation-profile": "inbox-operator",
+  "dep-review": "dep-review",
+  "dependency-seeds": "dep-review",
+  "deploy-judge": "deploy-host",
+  "deploy-refusal-escalation": "inbox-operator",
+  "deployer": "deploy-host",
+  "diff-coverage-targets": "ci-parity",
+  "digest": "inbox-operator",
+  "disk-artifact-reclaim": "memory-budget",
+  "dispatch-claim": "dispatch",
+  "dispatch-governor": "dispatch",
+  "dispatch-overlap": "dispatch",
+  "dispatch-repair": "fix-lane",
+  "dispatch-value": "dispatch",
+  "doctor": "deploy-host",
+  "doctrine-lifecycle": "learning",
+  "draft-routing": "models-routing",
+  "drain": "dispatch",
+  "drain-lock": "dispatch",
+  "emergency-control": "daemon-loop",
+  "emissions": "ledger",
+  "engine-tree": "deploy-host",
+  "env": "core",
+  "errors": "core",
+  "escalate": "inbox-operator",
+  "escalation-answers": "inbox-operator",
+  "escalation-catalogue": "inbox-operator",
+  "escalation-precision": "inbox-operator",
+  "escalation-triage": "inbox-operator",
+  "eval-card": "models-routing",
+  "evidence-coverage-gardener": "gardeners",
+  "experiment-promotion": "models-routing",
+  "export-gardener": "gardeners",
+  "feedback": "inbox-operator",
+  "feedback-docket": "inbox-operator",
+  "feedback-landing": "inbox-operator",
+  "feedback-reconcile": "inbox-operator",
+  "feedback-record-merge": "inbox-operator",
+  "feedback-view": "console-read-model",
+  "field-trials-cohorts": "models-routing",
+  "field-trials-flow": "models-routing",
+  "field-trials-github": "models-routing",
+  "fix-fence": "fix-lane",
+  "fix-lane-gardener": "gardeners",
+  "fix-outcome": "fix-lane",
+  "fix-progress-judge": "fix-lane",
+  "fix-round-base": "fix-lane",
+  "fix-round-reapply": "fix-lane",
+  "fix-routing-learner": "fix-lane",
+  "fix-rung-classify": "fix-lane",
+  "flake-incident-gardener": "gardeners",
+  "fleet-control": "daemon-loop",
+  "fleet-flow-detectors": "sre-incidents",
+  "fleet-lane": "daemon-loop",
+  "fleet-liveness": "daemon-loop",
+  "fleet-runtime-health": "daemon-loop",
+  "flight-judge": "review",
+  "flight-signals": "review",
+  "flow-gardener": "gardeners",
+  "flow-remedy-gardener": "gardeners",
+  "flush-exit": "daemon-loop",
+  "fold-debt-pull": "review",
+  "follow-up-policy": "inbox-operator",
+  "followup-dedup-census": "ci-parity",
+  "foreign-pause-detector": "sre-incidents",
+  "fs-race-safe": "core",
+  "garden-registry": "gardeners",
+  "gardener": "gardeners",
+  "gardener-opportunity-evidence": "gardeners",
+  "gardener-overseer": "gardeners",
+  "gardener-runtime": "gardeners",
+  "gardener-spend": "gardeners",
+  "gardeners-route": "gardeners",
+  "gate-fire-rate": "ci-parity",
+  "gate-gardener": "gardeners",
+  "gate-observations": "ci-parity",
+  "gate-posture": "ci-parity",
+  "gate-verdict-record": "review",
+  "git-fetch-retry": "github-io",
+  "git-lock-reclaim": "memory-budget",
+  "git-push": "github-io",
+  "github-app": "github-io",
+  "github-event-wake": "daemon-loop",
+  "github-posture": "github-io",
+  "github-read-queue-replay": "github-io",
+  "github-refresh-pacer": "github-io",
+  "github-transport": "github-io",
+  "glance": "console-read-model",
+  "goals": "plan",
+  "golden-corpus": "learning",
+  "grep-zero-cause": "ci-parity",
+  "grill-choices": "inbox-operator",
+  "hand-run-census": "ci-parity",
+  "hand-worktree": "worker-run",
+  "head-rehome": "sweep",
+  "headroom": "memory-budget",
+  "heavy-build-reservation": "memory-budget",
+  "heavy-ready-deadline": "memory-budget",
+  "heavy-ready-startup": "memory-budget",
+  "held-dependency-roots": "dep-review",
+  "host-escalation-spool": "inbox-operator",
+  "host-identity": "deploy-host",
+  "host-memory-admission": "memory-budget",
+  "host-memory-calibration": "memory-budget",
+  "host-memory-learning": "memory-budget",
+  "host-memory-ledger": "memory-budget",
+  "host-memory-priority": "memory-budget",
+  "host-memory-shadow": "memory-budget",
+  "host-parity": "deploy-host",
+  "host-resource-gardener": "gardeners",
+  "host-serve-evidence": "deploy-host",
+  "host-view": "console-read-model",
+  "hot-file-gardener": "gardeners",
+  "human-gate": "inbox-operator",
+  "human-handoff": "inbox-operator",
+  "idle-capacity-detector": "memory-budget",
+  "idle-lane-accounting": "memory-budget",
+  "image-drift": "deploy-host",
+  "impossible-canary": "sre-incidents",
+  "in-tree-budget": "memory-budget",
+  "inbox": "inbox-operator",
+  "inbox-bakeoff": "models-routing",
+  "inbox-board-referents": "inbox-operator",
+  "inbox-dismissal-audit": "inbox-operator",
+  "inbox-owner": "inbox-operator",
+  "inbox-plain": "inbox-operator",
+  "inbox-recommendation": "inbox-operator",
+  "inbox-replay": "inbox-operator",
+  "inbox-responder": "inbox-operator",
+  "inbox-thread": "inbox-operator",
+  "inbox-thread-list-view": "console-read-model",
+  "inbox-thread-view": "console-read-model",
+  "inbox-verdict-command": "inbox-operator",
+  "inbox-view": "console-read-model",
+  "incident-events": "sre-incidents",
+  "incident-invariants": "sre-incidents",
+  "incident-lifecycle": "sre-incidents",
+  "incidents-view": "sre-incidents",
+  "inflight-lock": "dispatch",
+  "init": "deploy-host",
+  "install-hash": "deploy-host",
+  "install-root": "deploy-host",
+  "instance-gateway": "console-read-model",
+  "instance-inbox-contract": "inbox-operator",
+  "instance-inbox-proposal": "inbox-operator",
+  "instance-mode": "deploy-host",
+  "instance-registry": "deploy-host",
+  "instance-registry-selection": "deploy-host",
+  "instances-view": "console-read-model",
+  "intent-plan": "plan",
+  "intent-planner": "plan",
+  "inventory": "deploy-host",
+  "isolation": "worker-run",
+  "issue-revalidation-garden": "gardeners",
+  "issues-intake": "triage-intake",
+  "judge-calibration": "review",
+  "knowledge-dedup": "learning",
+  "knowledge-gaps": "learning",
+  "knowledge-gardener": "gardeners",
+  "knowledge-inventory": "learning",
+  "knowledge-outcome": "learning",
+  "knowledge-symbols": "learning",
+  "knowledge-value": "learning",
+  "last-seen": "console-read-model",
+  "launchd": "deploy-host",
+  "launcher-host-alerts": "deploy-host",
+  "learning-lexical": "learning",
+  "learnings": "learning",
+  "ledger": "ledger",
+  "ledger-carry": "ledger",
+  "ledger-compact": "ledger",
+  "ledger-compaction-rung": "ledger",
+  "ledger-grep": "ledger",
+  "ledger-path": "ledger",
+  "ledger-projector": "ledger",
+  "ledger-replay": "ledger",
+  "ledger-steps": "ledger",
+  "ledger-union": "ledger",
+  "live-analytics-snapshot-cache": "console-read-model",
+  "live-edit-ladder": "fix-lane",
+  "live-write-guard": "github-io",
+  "liveness-pulse": "daemon-loop",
+  "lock-busy-retry": "core",
+  "log-rotation": "ledger",
+  "loop-bounded-child": "daemon-loop",
+  "loop-stall-profiler": "daemon-loop",
+  "machine-filing": "triage-intake",
+  "machine-filing-judge": "triage-intake",
+  "main-health-rung": "fix-lane",
+  "main-run-gaps": "sre-incidents",
+  "managed-repos": "deploy-host",
+  "measurement-cadence": "daemon-loop",
+  "measurement-cadence-child": "daemon-loop",
+  "memory-lint": "plan",
+  "merge-probe": "ci-parity",
+  "merge-state": "sweep",
+  "model-availability": "models-routing",
+  "model-canary-command": "models-routing",
+  "model-canary-context": "models-routing",
+  "model-canary-context-schedule": "models-routing",
+  "model-canary-metrics": "models-routing",
+  "model-canary-owner": "models-routing",
+  "model-canary-paired-analysis": "models-routing",
+  "model-canary-report": "models-routing",
+  "model-canary-retention": "models-routing",
+  "model-canary-retention-schedule": "models-routing",
+  "model-canary-rotation": "models-routing",
+  "model-canary-runner": "models-routing",
+  "model-canary-schedule": "models-routing",
+  "model-canary-suite": "models-routing",
+  "model-canary-transport": "models-routing",
+  "model-drift": "models-routing",
+  "model-gate": "models-routing",
+  "model-pool": "models-routing",
+  "mount-exploration": "worker-run",
+  "mount-recommender": "worker-run",
+  "mounts": "worker-run",
+  "mutation-verdict-pull": "review",
+  "narrative-fold": "deploy-host",
+  "nav-badge-view": "console-read-model",
+  "needs-you-view": "console-read-model",
+  "never-worked": "plan",
+  "non-worker-verdict": "review",
+  "notify": "inbox-operator",
+  "now-decisions": "console-read-model",
+  "now-view": "console-read-model",
+  "object-reaper": "memory-budget",
+  "onboarding-golive": "deploy-host",
+  "onboarding-readiness": "deploy-host",
+  "onboarding-repository-inventory": "deploy-host",
+  "onboarding-repository-listing": "deploy-host",
+  "open-prs-rest": "github-io",
+  "operator-agent": "inbox-operator",
+  "operator-agent-action-handoff": "inbox-operator",
+  "operator-agent-answer": "inbox-operator",
+  "operator-agent-capacity": "inbox-operator",
+  "operator-agent-decisions": "inbox-operator",
+  "operator-agent-outcomes": "inbox-operator",
+  "operator-agent-proof": "inbox-operator",
+  "operator-agent-read-model": "inbox-operator",
+  "operator-identity-file": "inbox-operator",
+  "operator-interventions": "inbox-operator",
+  "operator-mcp": "inbox-operator",
+  "operator-merge-hold": "inbox-operator",
+  "operator-message": "inbox-operator",
+  "operator-notes": "inbox-operator",
+  "operator-sync": "inbox-operator",
+  "opportunity-intake": "triage-intake",
+  "opportunity-outcomes": "triage-intake",
+  "ops": "sre-incidents",
+  "orientation": "learning",
+  "owned-run-cgroup": "memory-budget",
+  "owner-repo": "deploy-host",
+  "paired-review-eval": "review",
+  "paired-trial": "models-routing",
+  "panel-actions": "console-read-model",
+  "panel-graph": "console-read-model",
+  "panel-skill-run": "console-read-model",
+  "panel-skills": "console-read-model",
+  "parallel-attempts": "dispatch",
+  "pause-target": "dispatch",
+  "plan": "plan",
+  "plan-architect": "plan",
+  "plan-coherence": "plan",
+  "plan-gardener": "gardeners",
+  "plan-index": "plan",
+  "plan-pr-emitter": "plan",
+  "plan-pr-merge-safety": "plan",
+  "plan-proposals": "plan",
+  "plan-reconcile": "plan",
+  "plan-scope": "plan",
+  "plan-shard-repair": "fix-lane",
+  "policy": "daemon-loop",
+  "poll-interval": "daemon-loop",
+  "poll-read-retry": "worker-run",
+  "pr-blocker": "github-io",
+  "pr-board": "github-io",
+  "pr-checks": "github-io",
+  "pr-diff": "github-io",
+  "pr-open": "github-io",
+  "preference-policy": "inbox-operator",
+  "preopen-gate": "ci-parity",
+  "presence": "daemon-loop",
+  "prevention-source-evidence": "models-routing",
+  "producer-completeness": "worker-run",
+  "producer-identity": "worker-run",
+  "progress-watchdog": "daemon-loop",
+  "project-init": "deploy-host",
+  "promised-follow-ups": "inbox-operator",
+  "prompt-evolution": "learning",
+  "prompt-manifest": "worker-run",
+  "prompt-render": "worker-run",
+  "proof-amendment": "fix-lane",
+  "proof-base-stale": "review",
+  "proof-grammar": "review",
+  "proof-missing-export": "review",
+  "proof-queue-audit": "review",
+  "proofExecutor": "review",
+  "provenance": "learning",
+  "provider-auth-sessions": "models-routing",
+  "provider-routing-policy": "models-routing",
+  "provider-routing-status": "models-routing",
+  "qualified-symbol-shadow": "ci-parity",
+  "quiet-worker-watchdog": "daemon-loop",
+  "ratification": "plan",
+  "reachability": "learning",
+  "read-model-cli": "console-read-model",
+  "read-model-consistency": "console-read-model",
+  "read-model-db": "console-read-model",
+  "read-model-slow-lane": "console-read-model",
+  "read-model-worker": "console-read-model",
+  "read-only-inspection": "ledger",
+  "read-page": "console-read-model",
+  "read-plane": "console-read-model",
+  "read-plane.worker": "console-read-model",
+  "reader-agreement": "review",
+  "recap": "inbox-operator",
+  "receipt": "ledger",
+  "recent-projection": "console-read-model",
+  "recon": "deploy-host",
+  "recovery-refs": "ledger",
+  "recycle-yield": "dispatch",
+  "refusal-amendment": "fix-lane",
+  "registry": "core",
+  "relay-client": "console-read-model",
+  "relint": "plan",
+  "remedy-effect": "gardeners",
+  "repair-cost-evidence": "fix-lane",
+  "replay": "ledger",
+  "replay-harness": "ledger",
+  "reply-interpreter": "inbox-operator",
+  "repo-dashboard-route": "console-read-model",
+  "repo-layout": "deploy-host",
+  "repo-ledger-index": "ledger",
+  "repo-location": "deploy-host",
+  "report-commands": "deploy-host",
+  "repositories-view": "console-read-model",
+  "repository-flow": "deploy-host",
+  "reservation-chain": "dispatch",
+  "retro": "learning",
+  "retro-closure": "learning",
+  "retro-open-pr-guard": "learning",
+  "retro-preflight": "learning",
+  "retro-subprocess": "learning",
+  "review": "review",
+  "review-capacity": "review",
+  "review-finding-evidence": "review",
+  "review-finding-outcomes": "review",
+  "review-findings": "review",
+  "review-flow-observation": "review",
+  "review-provider-provenance": "review",
+  "review-worktree-reclaim": "memory-budget",
+  "reviewer-worktree-lease": "review",
+  "risk-judge": "review",
+  "risk-judge-eval": "review",
+  "risk-score": "review",
+  "route-read-rollup": "console-read-model",
+  "routing-daily-status": "models-routing",
+  "routing-experiments": "models-routing",
+  "routing-objective": "models-routing",
+  "routing-prior": "models-routing",
+  "routing-quarantine-resolution": "models-routing",
+  "rule-efficacy": "learning",
+  "ruling-judge": "inbox-operator",
+  "run-child": "worker-run",
+  "run-child-contract": "worker-run",
+  "run-child-main": "worker-run",
+  "run-child-mode": "worker-run",
+  "run-child-reservation": "dispatch",
+  "run-result": "worker-run",
+  "run-task": "worker-run",
+  "runbook-coverage": "sre-incidents",
+  "scout-gardener": "gardeners",
+  "secret-boundary": "worker-run",
+  "security-merge-admission": "github-io",
+  "selector-shadow-gardener": "gardeners",
+  "self-forecast": "daemon-loop",
+  "self-sync": "daemon-loop",
+  "serve": "console-read-model",
+  "serve-drain": "console-read-model",
+  "serve-generation": "console-read-model",
+  "serve-memory": "memory-budget",
+  "serve-plan-reload": "console-read-model",
+  "serve-policy-convergence": "console-read-model",
+  "serve-restart-relevance": "console-read-model",
+  "serve-slots": "console-read-model",
+  "serve-supervisor": "console-read-model",
+  "serve-supervisor-main": "console-read-model",
+  "service": "console-read-model",
+  "session": "deploy-host",
+  "settings": "core",
+  "shadow-judge": "review",
+  "short-path-root": "core",
+  "skill": "learning",
+  "skill-eval": "models-routing",
+  "skill-eval-command": "models-routing",
+  "skill-eval-control": "models-routing",
+  "skill-eval-gate": "models-routing",
+  "skill-eval-grant-consumption": "models-routing",
+  "skill-eval-reservation": "models-routing",
+  "skill-workshop": "learning",
+  "source-size-followup": "ci-parity",
+  "source-text-readers": "ci-parity",
+  "spawn-guard": "worker-run",
+  "specialist-panel": "review",
+  "spend-rows": "ledger",
+  "spike": "models-routing",
+  "sre-governor": "sre-incidents",
+  "sre-lane": "sre-incidents",
+  "sre-runbooks": "sre-incidents",
+  "staged-install": "deploy-host",
+  "stall-verifier": "daemon-loop",
+  "standing-briefs": "inbox-operator",
+  "state-reconciler": "sre-incidents",
+  "status": "console-read-model",
+  "status-board": "console-read-model",
+  "status-stream-publisher": "console-read-model",
+  "stranded-task-detector": "sre-incidents",
+  "strike-ladder": "fix-lane",
+  "strike-schedule": "fix-lane",
+  "supersession": "plan",
+  "sweep": "sweep",
+  "synthesize": "deploy-host",
+  "synthetic-tasks": "plan",
+  "task-card": "plan",
+  "task-case-file": "plan",
+  "task-class": "dispatch",
+  "task-id": "plan",
+  "task-id-release": "plan",
+  "task-id-reservation": "plan",
+  "task-linter": "plan",
+  "task-shard-name": "plan",
+  "task-view": "plan",
+  "test-file-admission": "ci-parity",
+  "test-gardener": "gardeners",
+  "test-impact-map": "ci-parity",
+  "test-run": "ci-parity",
+  "test-slot": "ci-parity",
+  "test-slot-capacity": "ci-parity",
+  "test-slot-mutation": "ci-parity",
+  "test-slot-parent": "ci-parity",
+  "thread-plan": "plan",
+  "tier": "dispatch",
+  "time-window": "time",
+  "tmp": "core",
+  "tool-step-signature": "worker-run",
+  "trace": "ledger",
+  "triage": "triage-intake",
+  "triage-lane-outcomes": "triage-intake",
+  "tty": "core",
+  "typecheck-buildinfo": "ci-parity",
+  "typecheck-run": "ci-parity",
+  "typed-judgment": "review",
+  "unfinished-checkpoint": "daemon-loop",
+  "untrusted-envelope": "worker-run",
+  "upgrade-allocation": "dispatch",
+  "usage-telemetry": "models-routing",
+  "verdict-calibration": "review",
+  "verify-human-judge": "review",
+  "verify-human-release": "review",
+  "version-switchback": "deploy-host",
+  "view-demand": "console-read-model",
+  "view-events": "console-read-model",
+  "view-freshness": "console-read-model",
+  "view-shadow": "console-read-model",
+  "views": "console-read-model",
+  "wipe-test": "ci-parity",
+  "work-integrity": "sre-incidents",
+  "worker": "worker-run",
+  "worker-containment": "worker-run",
+  "worker-heaps": "memory-budget",
+  "worker-home": "worker-run",
+  "worker-init-summary": "worker-run",
+  "worker-mcp-isolation": "worker-run",
+  "worker-provider": "worker-run",
+  "worker-scratch": "worker-run",
+  "worker-telemetry": "worker-run",
+  "worker-tool-lineage": "worker-run",
+  "workflow-mining": "learning",
+  "workflow-run": "unplaced",
+  "workspace-cleanup-contract": "memory-budget",
+  "workstreams-projection-reuse": "console-read-model",
+  "workstreams-view": "console-read-model",
+  "worktree-config": "worker-run",
+  "worktree-git": "github-io",
+  "worktree-sites": "worker-run"
+ },
+ "propagated_modules": {
+  "ability-map": "console-read-model",
+  "action-executor": "inbox-operator",
+  "action-reconciliation": "inbox-operator",
+  "action-results": "console-read-model",
+  "actor-evidence": "console-read-model",
+  "assistant-action-discovery": "console-read-model",
+  "automation-action": "inbox-operator",
+  "automation-trigger": "console-read-model",
+  "autonomy": "ledger",
+  "bre-metachars": "review",
+  "companion-paths": "plan",
+  "consequence-policy": "inbox-operator",
+  "correct": "ledger",
+  "delegation-profile": "inbox-operator",
+  "fold-debt-pull": "review",
+  "last-seen": "console-read-model",
+  "narrative-fold": "deploy-host",
+  "orientation": "learning",
+  "poll-read-retry": "worker-run",
+  "prevention-source-evidence": "models-routing",
+  "provenance": "learning",
+  "qualified-symbol-shadow": "ci-parity",
+  "reachability": "learning",
+  "read-only-inspection": "ledger",
+  "relay-client": "console-read-model",
+  "report-commands": "deploy-host",
+  "typed-judgment": "review",
+  "workflow-run": "unplaced"
+ },
+ "helper_subsystems": {
+  "${PROBE}": "harness",
+  "b": "harness",
+  "browser-absence": "harness",
+  "dynamic": "harness",
+  "env-var-registry.test": "harness",
+  "every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test": "harness",
+  "planted": "plan",
+  "load": "harness",
+  "acceptance-fallback-surface": "worker-run",
+  "captured-console": "harness",
+  "coverage-parity-spawn": "ci-parity",
+  "daemon-loop-walk": "harness",
+  "declared-routes": "console-read-model",
+  "delegation-profile-fixture": "inbox-operator",
+  "dirty-fleet-repo": "harness",
+  "fake-gh-rate-limit": "harness",
+  "fake-github": "harness",
+  "fixture-commit": "harness",
+  "fixture-du": "harness",
+  "fleet-heartbeat-harness": "daemon-loop",
+  "gh-shim": "harness",
+  "gh-stub": "harness",
+  "git-repo": "harness",
+  "host-cleanup-fixture": "deploy-host",
+  "identity-gates": "harness",
+  "import-sweep": "harness",
+  "intent-plan-fixture": "plan",
+  "isolated-checkout": "harness",
+  "judged-pool-run": "harness",
+  "land-queued-feedback": "inbox-operator",
+  "ledger-fixture": "ledger",
+  "mutant-module": "ci-parity",
+  "mutation-sandbox": "harness",
+  "native-gh-and-jq": "harness",
+  "native-runtime-fixture": "ci-parity",
+  "openapi-strict": "harness",
+  "operator-agent-corpus": "inbox-operator",
+  "pass-through-proof-sandbox": "review",
+  "plan-pr-body-fixture": "plan",
+  "proof-runner-checkout": "review",
+  "push-safety": "harness",
+  "read-model-switches": "console-read-model",
+  "reporter-setup": "harness",
+  "retro-shipped-gateway-seam": "learning",
+  "rule-citation-symbols": "harness",
+  "run-task-commit-seam": "worker-run",
+  "run-task-daemon": "worker-run",
+  "run-task-test": "worker-run",
+  "serve-boot-banner": "console-read-model",
+  "sweep-test": "sweep",
+  "test-call-site-key": "ci-parity",
+  "triage-proof-needle": "triage-intake",
+  "w4226-g1-retro-probe-gh": "harness",
+  "wall-clock-bound": "harness",
+  "y": "harness",
+  "browser-test-corpus": "harness",
+  "review": "review",
+  "opposite-branches": "harness",
+  "coverage-merge-ratchet": "ci-parity",
+  "diff-coverage": "ci-parity",
+  "canonical-tmpdir": "harness",
+  "no-live-remote": "harness",
+  "offline-github": "harness",
+  "open-shell": "harness",
+  "read-map": "harness",
+  "reapable-prefix": "harness",
+  "tmp-hygiene": "harness",
+  "source": "harness",
+  "src": "harness",
+  "action-results": "harness",
+  "analytics-route": "console-read-model",
+  "clock": "harness",
+  "cost-anomaly": "models-routing",
+  "dispatch-claim": "dispatch",
+  "doctor": "deploy-host",
+  "follow-up-policy": "inbox-operator",
+  "ledger-union": "ledger",
+  "measurement-cadence": "daemon-loop",
+  "model-canary-command": "models-routing",
+  "panel-actions": "console-read-model",
+  "plan-pr-emitter": "plan",
+  "serve-drain": "console-read-model",
+  "service": "console-read-model",
+  "status": "console-read-model",
+  "sweep": "sweep",
+  "test-slot": "ci-parity",
+  "unrelated": "harness",
+  "z": "harness"
+ },
+ "scoring": {
+  "reach_weight": {
+   "direct": 1.0,
+   "helper": 0.35,
+   "type": 0.15,
+   "string": 0.5,
+   "artifact": 0.45,
+   "artifact-plan": 0.1,
+   "harness": 0.3
+  },
+  "formula": "score(module) = reach_weight * (ln((N+1)/(df+1)) + 0.1) * (1 + 0.25*sqrt(imported_symbol_count)) + 4.0*name_match + 3.0*prefix_match; infra modules x0.4 unless named; per subsystem: best module + 0.3 x each other; top subsystem wins; rule kind overrides to rules/",
+  "second_level_rule": "families are tried in listed order (first regex over the primary module's basename wins), renamed by second_level_family_rename; a folder over ~300 tests keeps only families with >= 25 tests, the rest stay at the folder root (values measured at the snapshot); rules/ has no second level"
+ },
+ "name_keywords": {
+  "serve": [
+   "console-read-model",
+   0.86,
+   44
+  ],
+  "board": [
+   "console-read-model",
+   0.79,
+   38
+  ],
+  "view": [
+   "console-read-model",
+   0.89,
+   37
+  ],
+  "operator": [
+   "inbox-operator",
+   0.71,
+   34
+  ],
+  "coverage": [
+   "ci-parity",
+   0.88,
+   34
+  ],
+  "worktree": [
+   "worker-run",
+   0.66,
+   32
+  ],
+  "suite": [
+   "ci-parity",
+   0.71,
+   31
+  ],
+  "console": [
+   "console-read-model",
+   0.79,
+   28
+  ],
+  "retro": [
+   "learning",
+   0.85,
+   27
+  ],
+  "inbox": [
+   "inbox-operator",
+   0.74,
+   27
+  ],
+  "gardener": [
+   "gardeners",
+   0.92,
+   26
+  ],
+  "census": [
+   "ci-parity",
+   0.81,
+   26
+  ],
+  "agent": [
+   "inbox-operator",
+   0.88,
+   24
+  ],
+  "policy": [
+   "inbox-operator",
+   0.64,
+   22
+  ],
+  "escalation": [
+   "inbox-operator",
+   0.86,
+   22
+  ],
+  "learning": [
+   "learning",
+   0.67,
+   21
+  ],
+  "skill": [
+   "learning",
+   0.75,
+   20
+  ],
+  "codex": [
+   "worker-run",
+   0.9,
+   20
+  ],
+  "drain": [
+   "dispatch",
+   0.74,
+   19
+  ],
+  "image": [
+   "deploy-host",
+   0.84,
+   19
+  ],
+  "status": [
+   "console-read-model",
+   0.79,
+   19
+  ],
+  "garden": [
+   "gardeners",
+   0.94,
+   17
+  ],
+  "slot": [
+   "ci-parity",
+   0.62,
+   16
+  ],
+  "draft": [
+   "inbox-operator",
+   0.62,
+   16
+  ],
+  "feedback": [
+   "inbox-operator",
+   0.81,
+   16
+  ],
+  "risk": [
+   "review",
+   0.75,
+   16
+  ],
+  "canary": [
+   "models-routing",
+   0.94,
+   16
+  ],
+  "deploy": [
+   "deploy-host",
+   0.87,
+   15
+  ],
+  "id": [
+   "plan",
+   0.8,
+   15
+  ],
+  "projection": [
+   "console-read-model",
+   0.86,
+   14
+  ],
+  "container": [
+   "deploy-host",
+   0.64,
+   14
+  ],
+  "precheck": [
+   "ci-parity",
+   1.0,
+   14
+  ],
+  "up": [
+   "inbox-operator",
+   0.62,
+   13
+  ],
+  "capability": [
+   "worker-run",
+   0.92,
+   13
+  ],
+  "freshness": [
+   "daemon-loop",
+   0.69,
+   13
+  ],
+  "ratchet": [
+   "ci-parity",
+   0.69,
+   13
+  ],
+  "reservation": [
+   "plan",
+   0.67,
+   12
+  ],
+  "analytic": [
+   "console-read-model",
+   1.0,
+   11
+  ],
+  "now": [
+   "console-read-model",
+   1.0,
+   11
+  ],
+  "credential": [
+   "worker-run",
+   0.64,
+   11
+  ],
+  "liveness": [
+   "console-read-model",
+   0.6,
+   10
+  ],
+  "selector": [
+   "gardeners",
+   0.7,
+   10
+  ],
+  "local": [
+   "ci-parity",
+   0.7,
+   10
+  ],
+  "union": [
+   "ledger",
+   0.6,
+   10
+  ],
+  "sync": [
+   "daemon-loop",
+   0.6,
+   10
+  ],
+  "delegation": [
+   "inbox-operator",
+   1.0,
+   10
+  ],
+  "containment": [
+   "worker-run",
+   0.8,
+   10
+  ],
+  "benchmark": [
+   "models-routing",
+   0.9,
+   10
+  ],
+  "followup": [
+   "learning",
+   0.89,
+   9
+  ],
+  "landing": [
+   "inbox-operator",
+   0.89,
+   9
+  ],
+  "pause": [
+   "daemon-loop",
+   0.78,
+   9
+  ],
+  "reaper": [
+   "memory-budget",
+   0.67,
+   9
+  ],
+  "app": [
+   "github-io",
+   0.62,
+   8
+  ],
+  "typecheck": [
+   "ci-parity",
+   0.88,
+   8
+  ],
+  "triage": [
+   "triage-intake",
+   0.88,
+   8
+  ],
+  "flake": [
+   "gardeners",
+   0.88,
+   8
+  ],
+  "amendment": [
+   "fix-lane",
+   0.75,
+   8
+  ],
+  "context": [
+   "worker-run",
+   0.62,
+   8
+  ],
+  "tool": [
+   "worker-run",
+   1.0,
+   8
+  ],
+  "trial": [
+   "models-routing",
+   0.88,
+   8
+  ],
+  "cache": [
+   "console-read-model",
+   0.62,
+   8
+  ],
+  "rest": [
+   "github-io",
+   0.75,
+   8
+  ]
+ },
+ "module_name_tokens": {
+  "model": [
+   "models-routing",
+   0.76,
+   25
+  ],
+  "gardener": [
+   "gardeners",
+   1.0,
+   23
+  ],
+  "view": [
+   "console-read-model",
+   0.9,
+   21
+  ],
+  "inbox": [
+   "inbox-operator",
+   0.75,
+   16
+  ],
+  "worker": [
+   "worker-run",
+   0.6,
+   15
+  ],
+  "canary": [
+   "models-routing",
+   0.93,
+   15
+  ],
+  "operator": [
+   "inbox-operator",
+   1.0,
+   15
+  ],
+  "plan": [
+   "plan",
+   0.79,
+   14
+  ],
+  "ci": [
+   "ci-parity",
+   0.83,
+   12
+  ],
+  "ledger": [
+   "ledger",
+   0.92,
+   12
+  ],
+  "task": [
+   "plan",
+   0.75,
+   12
+  ],
+  "serve": [
+   "console-read-model",
+   0.82,
+   11
+  ],
+  "review": [
+   "review",
+   0.73,
+   11
+  ],
+  "read": [
+   "console-read-model",
+   0.82,
+   11
+  ],
+  "memory": [
+   "memory-budget",
+   0.91,
+   11
+  ],
+  "fix": [
+   "fix-lane",
+   0.9,
+   10
+  ],
+  "skill": [
+   "models-routing",
+   0.6,
+   10
+  ],
+  "agent": [
+   "inbox-operator",
+   0.89,
+   9
+  ],
+  "test": [
+   "ci-parity",
+   0.89,
+   9
+  ],
+  "benchmark": [
+   "models-routing",
+   1.0,
+   9
+  ],
+  "eval": [
+   "models-routing",
+   0.78,
+   9
+  ],
+  "routing": [
+   "models-routing",
+   0.89,
+   9
+  ],
+  "child": [
+   "worker-run",
+   0.67,
+   9
+  ],
+  "proof": [
+   "review",
+   0.62,
+   8
+  ],
+  "pr": [
+   "github-io",
+   0.62,
+   8
+  ],
+  "board": [
+   "console-read-model",
+   0.75,
+   8
+  ],
+  "knowledge": [
+   "learning",
+   0.86,
+   7
+  ],
+  "github": [
+   "github-io",
+   0.71,
+   7
+  ],
+  "incident": [
+   "sre-incidents",
+   0.71,
+   7
+  ],
+  "escalation": [
+   "inbox-operator",
+   0.86,
+   7
+  ],
+  "feedback": [
+   "inbox-operator",
+   0.83,
+   6
+  ],
+  "analytic": [
+   "console-read-model",
+   1.0,
+   6
+  ],
+  "daemon": [
+   "memory-budget",
+   0.67,
+   6
+  ],
+  "repo": [
+   "deploy-host",
+   0.67,
+   6
+  ],
+  "trial": [
+   "models-routing",
+   1.0,
+   5
+  ],
+  "status": [
+   "console-read-model",
+   0.6,
+   5
+  ],
+  "provider": [
+   "models-routing",
+   0.6,
+   5
+  ],
+  "coverage": [
+   "ci-parity",
+   0.6,
+   5
+  ],
+  "intake": [
+   "triage-intake",
+   0.6,
+   5
+  ],
+  "replay": [
+   "ledger",
+   0.6,
+   5
+  ],
+  "panel": [
+   "console-read-model",
+   0.8,
+   5
+  ],
+  "slot": [
+   "ci-parity",
+   0.8,
+   5
+  ],
+  "fleet": [
+   "daemon-loop",
+   0.8,
+   5
+  ],
+  "verdict": [
+   "review",
+   0.8,
+   5
+  ],
+  "cash": [
+   "models-routing",
+   1.0,
+   5
+  ],
+  "retro": [
+   "learning",
+   1.0,
+   5
+  ],
+  "dispatch": [
+   "dispatch",
+   0.8,
+   5
+  ],
+  "repair": [
+   "fix-lane",
+   1.0,
+   4
+  ],
+  "snapshot": [
+   "console-read-model",
+   1.0,
+   4
+  ],
+  "cache": [
+   "console-read-model",
+   0.75,
+   4
+  ],
+  "route": [
+   "console-read-model",
+   0.75,
+   4
+  ],
+  "projection": [
+   "console-read-model",
+   1.0,
+   4
+  ],
+  "console": [
+   "console-read-model",
+   1.0,
+   4
+  ],
+  "git": [
+   "github-io",
+   0.75,
+   4
+  ],
+  "detector": [
+   "sre-incidents",
+   0.75,
+   4
+  ],
+  "triage": [
+   "triage-intake",
+   0.75,
+   4
+  ],
+  "schedule": [
+   "models-routing",
+   0.75,
+   4
+  ],
+  "onboarding": [
+   "deploy-host",
+   1.0,
+   4
+  ],
+  "field": [
+   "models-routing",
+   1.0,
+   3
+  ],
+  "command": [
+   "models-routing",
+   0.67,
+   3
+  ],
+  "prompt": [
+   "worker-run",
+   0.67,
+   3
+  ],
+  "risk": [
+   "review",
+   1.0,
+   3
+  ],
+  "reclaim": [
+   "memory-budget",
+   1.0,
+   3
+  ],
+  "rung": [
+   "fix-lane",
+   0.67,
+   3
+  ],
+  "context": [
+   "models-routing",
+   0.67,
+   3
+  ],
+  "mount": [
+   "worker-run",
+   1.0,
+   3
+  ],
+  "readiness": [
+   "models-routing",
+   0.67,
+   3
+  ],
+  "open": [
+   "github-io",
+   0.67,
+   3
+  ],
+  "install": [
+   "deploy-host",
+   1.0,
+   3
+  ],
+  "reaper": [
+   "memory-budget",
+   0.67,
+   3
+  ],
+  "sre": [
+   "sre-incidents",
+   1.0,
+   3
+  ],
+  "init": [
+   "deploy-host",
+   0.67,
+   3
+  ],
+  "drain": [
+   "dispatch",
+   0.67,
+   3
+  ],
+  "id": [
+   "plan",
+   1.0,
+   3
+  ],
+  "repository": [
+   "deploy-host",
+   1.0,
+   3
+  ],
+  "aa": [
+   "models-routing",
+   1.0,
+   3
+  ],
+  "calibration": [
+   "review",
+   0.67,
+   3
+  ],
+  "inventory": [
+   "deploy-host",
+   0.67,
+   3
+  ],
+  "finding": [
+   "review",
+   1.0,
+   3
+  ],
+  "heavy": [
+   "memory-budget",
+   1.0,
+   3
+  ],
+  "paired": [
+   "models-routing",
+   0.67,
+   3
+  ],
+  "base": [
+   "fix-lane",
+   0.67,
+   3
+  ],
+  "opportunity": [
+   "triage-intake",
+   0.67,
+   3
+  ],
+  "source": [
+   "ci-parity",
+   1.0,
+   2
+  ],
+  "bakeoff": [
+   "models-routing",
+   1.0,
+   2
+  ],
+  "filing": [
+   "triage-intake",
+   1.0,
+   2
+  ],
+  "machine": [
+   "triage-intake",
+   1.0,
+   2
+  ],
+  "round": [
+   "fix-lane",
+   1.0,
+   2
+  ],
+  "liveness": [
+   "daemon-loop",
+   1.0,
+   2
+  ],
+  "answer": [
+   "inbox-operator",
+   1.0,
+   2
+  ],
+  "intent": [
+   "plan",
+   1.0,
+   2
+  ],
+  "watchdog": [
+   "daemon-loop",
+   1.0,
+   2
+  ],
+  "follow": [
+   "inbox-operator",
+   1.0,
+   2
+  ],
+  "usage": [
+   "models-routing",
+   1.0,
+   2
+  ],
+  "cohort": [
+   "models-routing",
+   1.0,
+   2
+  ],
+  "idle": [
+   "memory-budget",
+   1.0,
+   2
+  ],
+  "capability": [
+   "worker-run",
+   1.0,
+   2
+  ],
+  "producer": [
+   "worker-run",
+   1.0,
+   2
+  ],
+  "amendment": [
+   "fix-lane",
+   1.0,
+   2
+  ],
+  "experiment": [
+   "models-routing",
+   1.0,
+   2
+  ],
+  "ladder": [
+   "fix-lane",
+   1.0,
+   2
+  ],
+  "dependency": [
+   "dep-review",
+   1.0,
+   2
+  ],
+  "tool": [
+   "worker-run",
+   1.0,
+   2
+  ],
+  "runbook": [
+   "sre-incidents",
+   1.0,
+   2
+  ],
+  "compaction": [
+   "ledger",
+   1.0,
+   2
+  ],
+  "loop": [
+   "daemon-loop",
+   1.0,
+   2
+  ],
+  "stall": [
+   "daemon-loop",
+   1.0,
+   2
+  ],
+  "scanning": [
+   "github-io",
+   1.0,
+   2
+  ],
+  "code": [
+   "github-io",
+   1.0,
+   2
+  ],
+  "measurement": [
+   "daemon-loop",
+   1.0,
+   2
+  ],
+  "cadence": [
+   "daemon-loop",
+   1.0,
+   2
+  ],
+  "isolation": [
+   "worker-run",
+   1.0,
+   2
+  ],
+  "containment": [
+   "worker-run",
+   1.0,
+   2
+  ],
+  "entry": [
+   "worker-run",
+   1.0,
+   2
+  ],
+  "typecheck": [
+   "ci-parity",
+   1.0,
+   2
+  ],
+  "flight": [
+   "review",
+   1.0,
+   2
+  ],
+  "body": [
+   "fix-lane",
+   1.0,
+   2
+  ],
+  "handoff": [
+   "inbox-operator",
+   1.0,
+   2
+  ],
+  "now": [
+   "console-read-model",
+   1.0,
+   2
+  ],
+  "retention": [
+   "models-routing",
+   1.0,
+   2
+  ],
+  "ready": [
+   "memory-budget",
+   1.0,
+   2
+  ],
+  "garden": [
+   "gardeners",
+   1.0,
+   2
+  ],
+  "followup": [
+   "ci-parity",
+   1.0,
+   2
+  ],
+  "self": [
+   "daemon-loop",
+   1.0,
+   2
+  ],
+  "strike": [
+   "fix-lane",
+   1.0,
+   2
+  ],
+  "supervisor": [
+   "console-read-model",
+   1.0,
+   2
+  ],
+  "verify": [
+   "review",
+   1.0,
+   2
+  ],
+  "workstream": [
+   "console-read-model",
+   1.0,
+   2
+  ]
+ },
+ "second_level_families": {
+  "console-read-model": [
+   [
+    "views",
+    "(-view|^views|^view-)"
+   ],
+   [
+    "read-model",
+    "^(read-model|read-plane|.*projection.*|.*snapshot-cache|recent-projection|workstreams-|ledger-projector)"
+   ],
+   [
+    "serve",
+    "^(serve|service|.*-route$|instance-gateway|status-stream-publisher|route-read-rollup|openapi|daemon$|contracts|packages|api-client)"
+   ],
+   [
+    "board",
+    "^(status|status-board|board|glance|pr-board)"
+   ],
+   [
+    "analytics",
+    "^(analytics|live-analytics)"
+   ],
+   [
+    "panel",
+    "^panel-"
+   ]
+  ],
+  "worker-run": [
+   [
+    "run-task",
+    "^run-task$"
+   ],
+   [
+    "sandbox",
+    "^(containment|isolation|spawn-guard|mounts?|mount-|capability-|secret-boundary|worker-mcp-isolation|worker-containment|untrusted-envelope)"
+   ],
+   [
+    "worker",
+    "^(worker|worker-|settings)"
+   ],
+   [
+    "run-child",
+    "^(run-child|child-entry|loop-bounded-child|build-child-entries)"
+   ],
+   [
+    "worktree",
+    "^(worktree-|hand-worktree)"
+   ]
+  ],
+  "ci-parity": [
+   [
+    "workflows",
+    "^(ci$|ci-gate$|workflows|\\.github|ci-gate-required|ci-control-plane)"
+   ],
+   [
+    "ci-parity",
+    "^(ci-parity|ci-)"
+   ],
+   [
+    "coverage",
+    "^(coverage-|diff-coverage|lcov)"
+   ],
+   [
+    "suites",
+    "^(test-|affected-suites|select-affected-suites|flake-|pure-test-pool|pool-run-|wipe-test|list-rule-suites|run-with-deadline)"
+   ],
+   [
+    "gates",
+    "(census|ratchet|baseline|-check$|-gate$|precheck|^check$|semgrep|claims-check|typecheck)"
+   ]
+  ]
+ },
+ "measured_at_snapshot": {
+  "tests": 3640,
+  "high": 1876,
+  "medium": 1324,
+  "low": 425,
+  "none": 15,
+  "cross_cutting_3plus": 723,
+  "modularity_seeded_map": 0.236,
+  "modularity_louvain": 0.457,
+  "rule_kind_tests": 254,
+  "official_rule_suites": 88
+ },
+ "second_level_family_rename": {
+  "ci-parity": "parity",
+  "worker": "spawn"
+ }
+}

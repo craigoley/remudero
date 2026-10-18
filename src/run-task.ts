@@ -545,6 +545,7 @@ import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDep
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
+import { placePaths, renderPlacement } from "./lib/test-placement.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
@@ -7884,6 +7885,24 @@ export function hostAlertCommand(rest: string[], clock: Clock = systemClock): nu
   }
   console.log(rest.includes("--json") ? JSON.stringify(result) : `host-alert ${result.condition} (${result.instance}): ${result.tier}, count ${result.count}`);
   return 0;
+}
+
+/** `rmd test-place <path...>` (W1-T9874): the folder a test belongs in, computed from its imports. */
+export function testPlaceCommand(rest: string[], root: string = repoRoot): number {
+  const paths = rest.filter((a) => !a.startsWith("-"));
+  const badArg = paths.length === 0 ? "rmd test-place: at least one test path is required" : unknownArgError("test-place", rest.filter((a) => a.startsWith("-")), [], ["--json"]);
+  if (badArg !== null) {
+    console.error(`${badArg}\n${USAGE}`);
+    return 2;
+  }
+  try {
+    const placed = placePaths(root, paths, hostWorktreeGit(root, ["rev-parse", "HEAD^{tree}"]).trim());
+    console.log(rest.includes("--json") ? JSON.stringify(placed) : placed.map(renderPlacement).join("\n"));
+    return 0;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -54222,6 +54241,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "2026-10-11: the host watchdog's entry into src/lib/launcher-host-alerts.ts. --raise records one observation of a condition (crash-loop, units-not-on-main, units-diverged, deploy-code-fetch-failed, deploy-code-diverged, deploy-run-problem) under <state-root>/launcher-alerts/. A refusal is counted per consecutive observed tick: at the deployer's REFUSAL_PERSISTING_AT it writes launcher_alert.persisting, at REFUSAL_ESCALATE_AT it spools one needs-human escalation under <state-root>/escalation-spool/ for the daemon to post (the host has no GitHub credential). A crash loop is spooled on its first observation, because the launcher only names one after its own tiering. --clear ends the run when the launcher sees the step succeed: a still-spooled escalation is withdrawn and one the daemon already opened gets a spooled close. Prints one JSON line with --json.",
   },
   {
+    name: "test-place",
+    syntax: "rmd test-place <test-path...> [--json]",
+    summary: "Print the test/ folder each test file belongs in, computed from the src modules it imports.",
+    detail: "W1-T9874: a test's folder is computed, not chosen. Extracts the test's value, type-only and helper imports (helpers followed through test/helpers|setup|lib), repo path strings and imported symbol names with a comment-aware scanner, then scores every module by reach weight x IDF x symbol count plus name bonuses, sums per subsystem and maps the winner to one of the 21 folders (or rules/ for a suite that reads the repo as text). The data is scripts/test-placement/subsystem-map.json and test-folders.tsv. Prints the folder, the confidence (high, medium, low, none) and the reasons for each path; --json prints the same as an array. Exits 2 on no path or an unknown flag, 1 on a path that does not exist.",
+  },
+  {
     name: "claim",
     syntax: "rmd claim <task-id> [--drop]",
     summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
@@ -55334,6 +55359,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["live-edits", async (rest) => await liveEditsCommand(rest)],
   ["host-alert", async (rest) => hostAlertCommand(rest)],
+  ["test-place", (rest) => testPlaceCommand(rest)],
   ["claim", (rest) => claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
