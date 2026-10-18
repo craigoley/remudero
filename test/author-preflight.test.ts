@@ -446,13 +446,18 @@ test('author preflight clears foreign Git scope without hiding a dirty intended 
   assert.deepEqual(parent, original, 'do not mutate the caller environment');
 });
 
-test('author preflight full fallback includes unrelated tests for unmodelled configuration', () => {
+test('author preflight full fallback for unmodelled configuration selects every suite and leaves them to CI', () => {
   const f = fixture();
   writeFileSync(join(f.root, 'package-lock.json'), JSON.stringify(JSON.parse(readFileSync(join(ROOT, 'package-lock.json'),'utf8')),null,1)+'\n');
   f.git('add', '.'); f.git('commit', '-m', 'test: change dependency inputs');
-  assert.equal(mod.main([], { root: f.root }), 0);
-  assert.equal(f.receipt().selection, 'full-fallback');
+  // W1-T9953: the changed leaf test runs; the unrelated suite is CI's full run, and the verdict is never green.
+  assert.equal(mod.main([], { root: f.root }), 3);
+  assert.equal(f.receipt().selectedArm, 'full-fallback');
+  assert.equal(f.receipt().verdict, 'over-capacity');
   assert.deepEqual(f.receipt().suites, ['test/leaf.test.ts', 'test/other.test.ts']);
+  assert.deepEqual(f.receipt().partial.setAside, ['package-lock.json']);
+  assert.deepEqual(f.receipt().partial.ran, ['test/leaf.test.ts']);
+  assert.equal(f.receipt().partial.leftToCi, 1);
 });
 
 test('author preflight catches census failures before expensive validation and records unreadable census refusal', () => {
