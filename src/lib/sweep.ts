@@ -12895,6 +12895,26 @@ function codeqlBlockerDispatched(lines: ReadonlyArray<Record<string, unknown>>, 
   return dispatched;
 }
 
+/** W1-T9433 — a stand-down the FLEET placed on itself (a fleet PAUSE/STOP hold, worker-admission or host
+ *  capacity, a light-pass deferral). The stage's owner could not act during a pass that read this. */
+const FLEET_WITHHELD_STAND_DOWN =
+  /fleet (?:PAUSE|STOP) hold|live host capacity|host worker budget|deferred to full sweep \(light pass\)/;
+
+/** W1-T9433 — how much of a stage's age its own `sweep.disposed` rows show the fleet withholding the repair:
+ *  each un-acted row that read a fleet-placed stand-down covers the time until the next row (the last, until `nowMs`). */
+export function fleetWithheldStageMs(rows: ReadonlyArray<Record<string, unknown>>, nowMs: number): number {
+  const passes = rows.filter(row => row.step === "sweep.disposed")
+    .map(row => ({ row, at: Date.parse(String(row.ts)) })).filter(p => Number.isFinite(p.at))
+    .sort((a, b) => a.at - b.at);
+  let held = 0;
+  passes.forEach(({ row, at }, i) => {
+    const text = `${String(row.stand_down_reason ?? "")} ${String(row.reason ?? "")}`;
+    if (row.acted === true || !FLEET_WITHHELD_STAND_DOWN.test(text)) return;
+    held += Math.max(0, (passes[i + 1]?.at ?? nowMs) - at);
+  });
+  return held;
+}
+
 /** W1-T5932 — BACKSTOP: detached dispatch failures per (PR, head) before the sweep stops and escalates once;
  *  the {@link FIX_CLAIM_DECLINE_BACKSTOP} sibling, the first attempt plus two retries. */
 export const FIX_DISPATCH_FAILED_BACKSTOP = 3;
@@ -16195,6 +16215,10 @@ export async function runSweep(
     const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
     if (reportedStage) { stuckStages.set(key, reportedStage); return; }
     const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
+    // W1-T9433: the backstop counts only the time the stage's owner could act, so a stand-down the fleet placed
+    // on itself (a PAUSE hold, capacity, a light pass) is read back from the stage's own rows and excluded.
+    const heldMs = fleetWithheldStageMs(stageRows, now);
+    if (fields.blocker_age_ms - heldMs <= bound.minutes * 60_000) return;
     // W1-T9971: the fix rung writes `fix.dispatch` when a round ENDS, so a round an EARLIER pass handed to it
     // (still queued in memory admission, or running) has no qualifying row yet. Read it as the dedup does: this
     // head is in the dispatched set and its seed's rung has not ended. Only a seed since the stage began counts.
@@ -16294,9 +16318,11 @@ export async function runSweep(
     }
     const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
     const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
-      `${Math.floor(fields.blocker_age_ms / 60_000)} minutes (BACKSTOP ${bound.minutes}); ` +
-      `since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}`;
-    const row = { pr_number: pr.prNumber, ...fields, diagnosis, bound_minutes: bound.minutes, bound_kind: bound.kind };
+      `${Math.floor(fields.blocker_age_ms / 60_000)} minutes ` +
+      `(BACKSTOP ${bound.minutes}); since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}` +
+      (heldMs > 0 ? `; the fleet itself withheld the repair for ${Math.floor(heldMs / 60_000)} of those minutes` : "");
+    const row = { pr_number: pr.prNumber, ...fields, diagnosis, bound_minutes: bound.minutes, bound_kind: bound.kind,
+      held_ms: heldMs };
     record("pr.stuck", row);
     stuckStages.set(key, row);
     try {
