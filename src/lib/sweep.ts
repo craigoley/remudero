@@ -1,7 +1,7 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
+import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict, unfiledScopeStandDown,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -16289,6 +16289,12 @@ export async function runSweep(
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
     for (const pr of openPrs) {
+      const scopeHold = isFixCandidate(pr) ? unfiledScopeStandDown(ledgerLines, pr) : undefined;
+      if (scopeHold) {
+        judgedUnavailable.set(pr.prNumber, scopeHold);
+        next.push({ ...pr, progressContinue: { reason: scopeHold, unavailable: true } });
+        continue;
+      }
       if (judged && cappedProofDiscriminationFromLedger(pr, ledgerLines) !== undefined) {
         next.push({ ...pr, progressContinue: { reason: "capped repair judged at its own site" } });
         continue;
@@ -18830,6 +18836,8 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              const scopeHold = unfiledScopeStandDown(ledgerLines, pr);
+              if (scopeHold) { acted = false; spent = false; standDownReason = scopeHold; break; }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
               if (preflightEscalation !== undefined) {
                 const reason = preflightEscalation.alreadyDelivered
