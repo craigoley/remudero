@@ -562,9 +562,8 @@ function identifyLockFailure(error: unknown, path: string, connection: string, r
   const code = sqliteErrcode(error);
   if (error instanceof Error && code !== undefined && [5, 6].includes(code & 0xff)) {
     error.message += ` [connection=${connection}/${readOnly ? "reader" : "writer"} pid=${process.pid} thread=${threadId} path=${path}] [operation=${operation}]`;
-    const transactions = readReadModelTransactions(path);
-    Object.assign(error, { readModelTransactions: transactions });
-    error.message += ` [readModelTransactions=${JSON.stringify(transactions)}]`;
+    // Recorded holders ride on the error object; the message keeps its `[operation=…]` tail contract.
+    Object.assign(error, { readModelTransactions: readReadModelTransactions(path) });
   }
 }
 
