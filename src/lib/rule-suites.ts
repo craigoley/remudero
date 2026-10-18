@@ -171,6 +171,13 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
       "it carries no baseline/grandfather table either",
   ),
   refusedForPredicate(
+    "test/every-test-finds-the-repo-root-through-one-helper.test.ts",
+    "a",
+    "W1-T9863's root guard. Its git ls-files and filesystem walk enumerate only test/ to compare own-folder root " +
+      "computations against the merge base; src/ appears only inside synthetic fixture bodies, never as the repository " +
+      "population it inspects",
+  ),
+  refusedForPredicate(
     "test/a-landed-feedback-file-remains-in-the-boot-checkout.test.ts",
     "a",
     "its sole ls-files call is `--error-unmatch <one file>` against a synthetic fixture repo — a single tracked-path check, not a " +
