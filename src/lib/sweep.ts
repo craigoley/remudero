@@ -9094,7 +9094,9 @@ export interface RefreshAdmissionReading {
   carried: Set<string>;
 }
 
-/** W1-T9595 — CI uptake of the latest admission's refreshed heads (its cohort): one not started holds every candidate. */
+/** W1-T9595 — CI uptake of the latest admission's refreshed heads (its cohort): one not started holds every candidate.
+ *  W1-T9949 — uptake belongs to the refresh: an entry whose row recorded the post-refresh head (`refreshed_head`) counts as
+ *  started once the PR's head is any other head, because a later push proves it moved on. */
 export function refreshAdmissionReading(
   openPrs: readonly OpenPrView[], lines: readonly Record<string, unknown>[],
 ): RefreshAdmissionReading {
@@ -9109,13 +9111,23 @@ export function refreshAdmissionReading(
   for (const { pr_number: prNumber, head_sha: refreshedHead } of cohort as Array<{ pr_number: number; head_sha: string }>) {
     const view = byNumber.get(prNumber);
     if (view === undefined) continue;
-    if (view.headSha === refreshedHead || view.requiredContextsUnreadable === true) reading.unreadable.push(prNumber);
+    const postHead = cohort.find((e) => e.pr_number === prNumber)?.refreshed_head;
+    if (view.headSha === refreshedHead) reading.unreadable.push(prNumber);
+    else if (typeof postHead === "string" && view.headSha !== postHead) reading.started.push({ pr_number: prNumber, head_sha: refreshedHead });
+    else if (view.requiredContextsUnreadable === true) reading.unreadable.push(prNumber);
     else if (view.checksState === "green" || view.checksState === "red" || view.checksPendingSince !== undefined) {
       reading.started.push({ pr_number: prNumber, head_sha: refreshedHead });
     } else reading.notStarted.push(prNumber);
   }
   reading.signal = reading.notStarted.length > 0 ? "waiting" : reading.unreadable.length > 0 ? "unreadable" : cohort.length === 0 ? "slow-start" : "clear";
   return reading;
+}
+
+/** W1-T9949 — the read that names the head a refresh produced: the head-only seam, else the live-state read's head. */
+function postRefreshHeadReader(deps: Pick<SweepDeps, "readLiveHeadSha" | "readLiveState">): ((pr: OpenPrView) => Promise<string | undefined>) | undefined {
+  const head = deps.readLiveHeadSha;
+  if (head !== undefined) return async (pr) => head(pr);
+  return deps.readLiveState === undefined ? undefined : liveHeadShaFrom(deps.readLiveState);
 }
 
 export interface RefreshAdmissionCandidate {
@@ -9132,7 +9144,10 @@ const behindText = (prs: readonly number[], why: string) =>
   `waiting for refresh admission behind ${prs.length > 0 ? prs.map((n) => `#${n}`).join(", ") : "this pass's closed admission"} (${why})`;
 
 /** A full pass presses in arrival order; overflow and light admissions retain oldest-held-first order. */
-export function createRefreshAdmission(reading: RefreshAdmissionReading, surface: SweepRepairSurface, passPrs?: readonly OpenPrView[]) {
+export function createRefreshAdmission(
+  reading: RefreshAdmissionReading, surface: SweepRepairSurface, passPrs?: readonly OpenPrView[],
+  readHead?: (pr: OpenPrView) => Promise<string | undefined>,
+) {
   const candidates = new Map<number, RefreshAdmissionCandidate>();
   const pressed = new Set<number>();
   const held: Array<Record<string, unknown>> = [];
@@ -9149,7 +9164,15 @@ export function createRefreshAdmission(reading: RefreshAdmissionReading, surface
   const press = async (c: RefreshAdmissionCandidate) => {
     pressed.add(c.pr.prNumber);
     const outcome = await c.refresh();
-    admitted.push(entry(c, { outcome }));
+    // W1-T9949: the head the refresh produced, so a later pass tells it from a later push. An unread head, or one the
+    // refresh has not yet moved, records nothing and the reading falls back to the head the row names.
+    let postHead: string | undefined;
+    let unread: { error: string } | undefined;
+    if (outcome === "updated" && readHead !== undefined) {
+      try { postHead = await readHead(c.pr); } catch (error) { unread = { error: String((error as Error)?.message ?? error) }; }
+    }
+    admitted.push(entry(c, { outcome, ...(postHead !== undefined && postHead !== c.pr.headSha ? { refreshed_head: postHead } : {}),
+      ...(unread !== undefined ? { refreshed_head_unread: unread.error } : {}) }));
     c.settle({ outcome });
   };
   return {
@@ -16614,7 +16637,8 @@ export async function runSweep(
   const recordRefresh = (pr: OpenPrView, checks: readonly string[], testFiles: readonly string[], outcome: string) => {
     if (outcome === "updated") refreshRecords.set(pr.prNumber, [...(refreshRecords.get(pr.prNumber) ?? []), { checks: [...checks], testFiles: [...testFiles] }]);
   };
-  const refreshAdmission = createRefreshAdmission(refreshAdmissionReading(openPrs, ledgerLines), deps.repairAdmissionSurface ?? "full", openPrs);
+  const refreshAdmission = createRefreshAdmission(refreshAdmissionReading(openPrs, ledgerLines), deps.repairAdmissionSurface ?? "full", openPrs,
+    postRefreshHeadReader(deps));
   const admissionReasons = new Map<number, string>();
   const clearedRefreshKeys = new Set(ledgerLines.flatMap((row) => row.step === REFRESH_CLEARANCE_STEP && row.refresh === true
     ? [`${String(row.pr_number)}@${String(row.head_sha)}@${String(row.main_sha)}`] : []));
@@ -20770,7 +20794,7 @@ let lightPassRefreshAdmissionInFlight = false;
 /** W1-T9595 — the light pass's ONE admission over its snapshot: it replays the heads the last admission held. */
 export async function runLightPassRefreshAdmission(
   openPrs: readonly OpenPrView[],
-  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now">,
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "readLedger" | "appendLine" | "dryRun" | "now" | "readLiveHeadSha" | "readLiveState">,
 ): Promise<number[]> {
   const updateBranch = deps.updateBranch;
   if (deps.dryRun || !updateBranch || lightPassRefreshAdmissionInFlight) return [];
@@ -20784,7 +20808,8 @@ export async function runLightPassRefreshAdmission(
     if (waiting.length === 0 || reading.signal === "waiting" || mainLatestRunFromLedger(ledgerLines)?.state === "red") return [];
     const refreshed = baseRedHistoryFromLedger(ledgerLines).refreshed;
     const byNumber = new Map(openPrs.map((pr) => [pr.prNumber, pr]));
-    const admission = createRefreshAdmission(reading, "light");
+    const admission = createRefreshAdmission(reading, "light", undefined,
+      postRefreshHeadReader(deps));
     for (const held of waiting) {
       const pr = typeof held.pr_number === "number" ? byNumber.get(held.pr_number) : undefined;
       const row = held.refresh_row;
