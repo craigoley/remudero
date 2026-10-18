@@ -18,7 +18,8 @@
 // left untouched), and a taskless PR whose body IS authoritative (body-repair.ts, a disjoint path).
 
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
@@ -711,23 +712,129 @@ function scopeWorkRecoveryPath(input: ScopeAmendmentWork): string {
 
 // Recovery copies contain regular files or deletions only; neither a source nor a destination may
 // follow a worker-controlled symlink out of the worktree (including an ancestor directory).
-function scopeWorkPath(root: string, path: string): string {
+function scopeWorkParts(path: string): string[] {
   if (!path || /[\\\x00-\x1f\x7f:]/.test(path) || path.split("/").some((p) => !p || p === "." || p === ".." || p === ".git")) {
     throw new Error(`unsafe scope recovery path: ${path}`);
   }
-  let current = resolve(root);
-  const parts = path.split("/");
-  for (let i = 0; i < parts.length; i++) {
-    current = join(current, parts[i]);
-    const stat = lstatSync(current, { throwIfNoEntry: false });
-    if (stat && (stat.isSymbolicLink() || (i < parts.length - 1 ? !stat.isDirectory() : !stat.isFile()))) {
-      throw new Error(`scope recovery requires a regular path: ${path}`);
-    }
-  }
-  return current;
+  return path.split("/");
 }
 
 interface ScopeWorkEntry { path: string; data: string | null; mode: number }
+
+interface ScopeWorkIo { run: (script: string, input: string) => string }
+// BACKSTOP: bound the rare recovery subprocess and its private IPC, never truncate saved work.
+const SCOPE_WORK_IO_TIMEOUT_MS = 30_000;
+const SCOPE_WORK_IO_MAX_BYTES = 64 * 1024 * 1024;
+const scopeWorkIo: ScopeWorkIo = { run: (script, input) => execFileSync("python3", ["-I", "-c", script], {
+  input, encoding: "utf8", timeout: SCOPE_WORK_IO_TIMEOUT_MS, maxBuffer: SCOPE_WORK_IO_MAX_BYTES,
+}) };
+
+// Python3 is already required by the deploy image. Its dir_fd operations expose openat/renameat
+// on both supported POSIX hosts; /dev/fd/<directory>/<child> is not portable to macOS.
+const SCOPE_WORK_FILES = String.raw`
+import base64, contextlib, errno, json, os, stat, sys, uuid
+
+def recover(request):
+    required = (os.open, os.mkdir, os.unlink, os.rename, os.stat)
+    if not all(fn in os.supports_dir_fd for fn in required) or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("descriptor-relative scope recovery is unavailable")
+    entries = request["entries"]
+    for entry in entries:
+        name = entry["path"]
+        if not name or any(ord(c) < 32 or ord(c) == 127 or c in "\\:" for c in name) or any(p in ("", ".", "..", ".git") for p in name.split("/")):
+            raise ValueError("unsafe scope recovery path")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with contextlib.ExitStack() as stack:
+        def held(fd):
+            stack.callback(os.close, fd)
+            return fd
+        root = held(os.open(request["root"], directory_flags))
+        def parent_for(name, create):
+            parent = root
+            for part in name.split("/")[:-1]:
+                try:
+                    child = os.open(part, directory_flags, dir_fd=parent)
+                except FileNotFoundError:
+                    if not create:
+                        return None
+                    try:
+                        os.mkdir(part, mode=0o755, dir_fd=parent)
+                        os.fsync(parent)
+                    except FileExistsError:
+                        pass
+                    child = os.open(part, directory_flags, dir_fd=parent)
+                parent = held(child)
+            return parent
+        plans = []
+        for entry in entries:
+            parent = parent_for(entry["path"], request["restore"] and entry["data"] is not None)
+            leaf = entry["path"].split("/")[-1]
+            if request["restore"] and parent is not None:
+                try:
+                    current = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    current = None
+                if current is not None and not stat.S_ISREG(current.st_mode):
+                    raise ValueError("scope recovery requires a regular path")
+            plans.append((entry, parent, leaf))
+        result = []
+        for entry, parent, leaf in plans:
+            if not request["restore"]:
+                try:
+                    if parent is None:
+                        raise FileNotFoundError()
+                    fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                except FileNotFoundError:
+                    result.append(dict(path=entry["path"], data=None, mode=0))
+                    continue
+                with os.fdopen(fd, "rb") as source:
+                    info = os.fstat(source.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError("scope recovery requires a regular path without hard links")
+                    result.append(dict(path=entry["path"], data=base64.b64encode(source.read()).decode("ascii"), mode=stat.S_IMODE(info.st_mode) & 0o777))
+            elif parent is not None:
+                if entry["data"] is None:
+                    try:
+                        os.unlink(leaf, dir_fd=parent)
+                        os.fsync(parent)
+                    except FileNotFoundError:
+                        pass
+                else:
+                    data = base64.b64decode(entry["data"], validate=True)
+                    temporary = ".scope-restore-" + uuid.uuid4().hex
+                    fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                    published = False
+                    try:
+                        with os.fdopen(fd, "w+b") as target:
+                            target.write(data)
+                            target.flush()
+                            os.fchmod(target.fileno(), entry["mode"])
+                            os.fsync(target.fileno())
+                            target.seek(0)
+                            if target.read() != data:
+                                raise ValueError("restored scope recovery bytes did not verify")
+                        os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                        published = True
+                        os.fsync(parent)
+                    finally:
+                        if not published:
+                            os.unlink(temporary, dir_fd=parent)
+        return result
+
+try:
+    print(json.dumps(dict(ok=True, entries=recover(json.load(sys.stdin)))))
+except (OSError, ValueError) as error:
+    message = "scope recovery requires a regular path" if isinstance(error, OSError) and error.errno in (errno.ELOOP, errno.ENOTDIR) else str(error)
+    print(json.dumps(dict(ok=False, error=message)))
+`;
+
+function scopeWorkFiles(input: ScopeAmendmentWork, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): ScopeWorkEntry[] {
+  for (const entry of entries) scopeWorkParts(entry.path);
+  const result = JSON.parse(io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(input.worktreePath), entries, restore })));
+  if (result.ok !== true) throw new RmdError("scope_recovery", 1, String(result.error ?? "scope recovery filesystem unavailable"));
+  if (!Array.isArray(result.entries)) throw new Error("scope recovery filesystem response did not verify");
+  return result.entries;
+}
 
 class MissingScopeWorkError extends RmdError {
   constructor() {
@@ -762,7 +869,7 @@ function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
 
 /** Shared by any lane that parks edits behind a scope amendment. A resume verifies its existing
  *  immutable copy instead of replacing the asking round's work with an empty, later checkout. */
-export function saveScopeAmendmentWork(input: ScopeAmendmentWork): string {
+export function saveScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): string {
   const file = scopeWorkRecoveryPath(input);
   try {
     readScopeWork(input);
@@ -770,11 +877,7 @@ export function saveScopeAmendmentWork(input: ScopeAmendmentWork): string {
   } catch (error) {
     if (!(error instanceof MissingScopeWorkError)) throw error;
   }
-  const entries = [...new Set(input.paths)].sort().map((path): ScopeWorkEntry => {
-    const source = scopeWorkPath(input.worktreePath, path);
-    const stat = lstatSync(source, { throwIfNoEntry: false });
-    return { path, data: stat ? readFileSync(source).toString("base64") : null, mode: stat ? stat.mode & 0o777 : 0 };
-  });
+  const entries = scopeWorkFiles(input, [...new Set(input.paths)].sort().map((path) => ({ path, data: null, mode: 0 })), false, io);
   const payload = JSON.stringify(entries);
   const text = JSON.stringify({ identity: scopeWorkIdentity(input), payload,
     digest: createHash("sha256").update(payload).digest("hex") });
@@ -805,21 +908,9 @@ export function saveScopeAmendmentWork(input: ScopeAmendmentWork): string {
   return file;
 }
 
-export function restoreScopeAmendmentWork(input: ScopeAmendmentWork): string[] {
+export function restoreScopeAmendmentWork(input: ScopeAmendmentWork, io: ScopeWorkIo = scopeWorkIo): string[] {
   const entries = readScopeWork(input);
-  const targets = entries.map((entry) => scopeWorkPath(input.worktreePath, entry.path));
-  for (let i = 0; i < entries.length; i++) {
-    const { data, mode } = entries[i];
-    const target = targets[i];
-    if (data === null) {
-      rmSync(target, { force: true });
-    } else {
-      mkdirSync(dirname(target), { recursive: true });
-      const bytes = Buffer.from(data, "base64");
-      writeFileSync(target, bytes, { mode, flush: true });
-      chmodSync(target, mode);
-      if (!readFileSync(target).equals(bytes)) throw new Error(`restored scope recovery bytes did not verify: ${entries[i].path}`);
-    }
-  }
+  scopeWorkFiles(input, entries, true, io);
   return entries.map((entry) => entry.path);
 }
+
