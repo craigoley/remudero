@@ -6,6 +6,7 @@ import * as retro from "#src/lib/retro.js";
 import { loadProposalRegistry } from "#src/lib/inbox.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 function source(): retro.LedgerRecord[] {
   return [{ ts: new Date().toISOString(), run_id: "fixture-run", task_id: "fixture-task",
@@ -68,10 +69,11 @@ test("a failed publication does not consume a newly remeasured fix followup", t 
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
   const at = (n: number) => new Date(now + n * day).toISOString();
-  writeFileSync(ledgerPath, [
-    { ts: at(-4), step: "control" }, { ts: at(-3), step: "fixture.failed" },
-    { ts: at(-1), step: "fixture.failed" }, { ts: at(0), step: "control" },
-  ].map(r => JSON.stringify(r)).join("\n") + "\n");
+  writeLedger([{ ts: at(-1), step: "fixture.failed" }, { ts: at(0), step: "control" }], {
+    dir: root, rotations: [{ at: at(-2), rows: [
+      { ts: at(-4), step: "control" }, { ts: at(-3), step: "fixture.failed" },
+    ] }],
+  });
   const tasks = parseTasksFromYaml(JSON.stringify([{ id: "W1-T1", title: "repair the fixture symptom",
     repo: "remudero", type: "implement", symptom_query: { pattern: "fixture.failed", direction: "decrease" } }]), "fixture");
   const harvest = () => {
