@@ -4,7 +4,7 @@
  * (never an import — `cli-no-run-task`), and `src/run-task.ts` keeps a same-named function that builds the host
  * and delegates here, so HANDLERS and every caller are unchanged.
  */
-import { tickReadProducer, type TickReadFacts, type TickReadRequest } from "../../lib/tick-read-worker.js";
+import type { tickReadProducer, TickReadFacts, TickReadRequest } from "../../lib/tick-read-worker.js";
 import { registeredGardenEnabled } from "../../lib/garden-registry.js";
 import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "../../lib/read-plane.js";
 import { remeasureSettledGoals, withGoalRemeasurement } from "../../lib/goals.js";

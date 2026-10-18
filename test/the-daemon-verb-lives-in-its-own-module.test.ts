@@ -37,3 +37,8 @@ test("W1-T9333: the daemon module imports nothing from src/run-task.ts", () => {
   const offending = specifiers.filter((s) => /(^|\/)run-task(\.[jt]s)?$/.test(s));
   assert.deepEqual(offending, [], "cli-no-run-task: a verb module takes run-task.ts symbols through its host");
 });
+
+// The moved handler's BEHAVIOUR (its boot rung reaping a stale scratchpad and ledgering
+// `daemon.scratch_sweep`) is driven through the real `daemonCommand` in
+// test/daemon-command-retro-wiring.test.ts, a suite that already imports src/run-task.ts, so this file
+// adds no new direct importer to test/the-affected-suite-reach-ratchet.test.ts's recorded ceiling.
