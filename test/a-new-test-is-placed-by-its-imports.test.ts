@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
-import { testPlaceCommand } from "../src/run-task.js";
+import { testPlaceCommand } from "#src/run-task.js";
 import {
   allFolderNames,
   extractTestFeatures,
@@ -12,8 +12,8 @@ import {
   placeTest,
   populationFor,
   stripComments,
-} from "../src/lib/test-placement.js";
-import { RULE_SUITE_NAME_RE } from "../src/lib/rule-suites.js";
+} from "#src/lib/test-placement.js";
+import { RULE_SUITE_NAME_RE } from "#src/lib/rule-suites.js";
 
 // W1-T9874: a test's folder is computed from its imports. The data under scripts/test-placement/
 // is the only thing read; plan/seeds stays provenance.
@@ -38,7 +38,7 @@ function captured(run: () => number): { code: number; out: string; err: string }
 }
 
 test("W1-T9874: a test importing only sweep is placed in sweep", () => {
-  const text = 'import { sweep } from "../src/lib/sweep.js";\nimport { mergeState } from "../src/lib/merge-state.js";\n';
+  const text = 'import { sweep } from "#src/lib/sweep.js";\nimport { mergeState } from "../src/lib/merge-state.js";\n';
   const features = extractTestFeatures("test/a-pass-reaps-merged-branches.test.ts", text);
   assert.deepEqual(features.imports.map((i) => i.module).sort(), ["merge-state", "sweep"]);
   const placed = placeFeatures(features, map);
@@ -61,14 +61,14 @@ test("W1-T9874: the run-task hub defers to the imported symbol names", () => {
 
 test("W1-T9874: a suite that walks the repo as text is placed in rules", () => {
   const walk = ["execFileSync('git', ['ls-", "files', 'src/**/*.ts'], { cwd: REPO_ROOT });"].join("");
-  const text = `import { x } from "../src/lib/sweep.js";\nconst REPO_ROOT = join(import.meta.dirname, "..");\n${walk}\n`;
+  const text = `import { x } from "#src/lib/sweep.js";\nconst REPO_ROOT = join(import.meta.dirname, "..");\n${walk}\n`;
   const features = extractTestFeatures("test/every-src-file-is-tracked.test.ts", text);
   assert.equal(features.kind, "rule");
   const placed = placeFeatures(features, map);
   assert.equal(placed.folder, "rules");
   assert.equal(placed.confidence, "high");
   // a behavioural test that merely reads one repo file stays with its subject
-  const wiring = 'import { sweep } from "../src/lib/sweep.js";\nimport { readFileSync } from "node:fs";\nconst t = readFileSync(join(REPO_ROOT, "x"), "utf8");\n';
+  const wiring = 'import { sweep } from "#src/lib/sweep.js";\nimport { readFileSync } from "node:fs";\nconst t = readFileSync(join(REPO_ROOT, "x"), "utf8");\n';
   assert.equal(placeFeatures(extractTestFeatures("test/y.test.ts", `const REPO_ROOT = join(import.meta.dirname, "..");\n${wiring}`), map).folder, "sweep");
 });
 
@@ -97,7 +97,7 @@ test("W1-T9874: no folder name reads as a rule suite", () => {
 });
 
 test("W1-T9874: the comment-aware scanner keeps code a regex stripper would eat", () => {
-  const src = '// every src/**/*.ts file\nimport { a } from "../src/lib/clock.js";\nconst re = /\\/\\*/;\nconst s = `x ${"//"} y`; /* gone */ import { b } from "../src/lib/sweep.js";\n';
+  const src = '// every src/**/*.ts file\nimport { a } from "#src/lib/clock.js";\nconst re = /\\/\\*/;\nconst s = `x ${"//"} y`; /* gone */ import { b } from "../src/lib/sweep.js";\n';
   const stripped = stripComments(src);
   assert.doesNotMatch(stripped, /every src/);
   assert.doesNotMatch(stripped, /gone/);
@@ -111,7 +111,7 @@ test("W1-T9874: helpers are followed, type-only imports are weighed less and art
     "test/helpers/git-repo.ts": 'import { sweep } from "../../src/lib/sweep.js";\n',
   };
   const text = [
-    'import type { Row } from "../src/lib/review.js";',
+    'import type { Row } from "#src/lib/review.js";',
     'import { type Other } from "#src/lib/plan.js";',
     'import { gitRepo } from "./helpers/git-repo.js";',
     'import { ledgerFixture } from "./helpers/ledger-fixture.js";',
