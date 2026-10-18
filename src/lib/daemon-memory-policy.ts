@@ -285,7 +285,7 @@ export interface MemoryGovernorStep extends MemoryPressureDecision {
 }
 
 export interface DaemonMemoryGovernor {
-  step(): MemoryGovernorStep;
+  step(readingIsUsable?: (reading: DaemonMemoryReading) => boolean): MemoryGovernorStep;
   /** The growth percent last applied (W1-T8401: a reclaim restores it after its tightest-factor collection). */
   inForcePercent?(): number;
 }
@@ -311,8 +311,9 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
   let heldBudget: number | undefined;
   let heldSource: DaemonMemoryReading["budget_source"];
   return {
-    step() {
+    step(readingIsUsable) {
       const reading = read();
+      if (readingIsUsable && !readingIsUsable(reading)) throw new Error("post-reclaim charge or unchanged budget is unreadable; retain the restart");
       const decision = decideMemoryPressure(reading, policy, inForce);
       const charged = reading.rss_bytes + (reading.swap_bytes ?? 0);
       const initialReading = baseline === undefined;
@@ -878,6 +879,53 @@ export function installDaemonSlackReclaimer(reclaimer: DaemonSlackReclaimer | un
 
 export function installedDaemonSlackReclaimer(): DaemonSlackReclaimer | undefined {
   return installedReclaimer;
+}
+
+/** Reclaim once before an otherwise-required cgroup restart; only a complete fresh reading can avert it. */
+export function reclaimBeforeMemoryRestart(
+  step: MemoryGovernorStep,
+  governor: DaemonMemoryGovernor,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  reclaimer: DaemonSlackReclaimer | undefined = installedDaemonSlackReclaimer(),
+): MemoryGovernorStep {
+  if (step.tier !== "restart") return step;
+  let next = step;
+  let outcome = "unavailable";
+  let recheck = "not-run";
+  let reason: string | undefined;
+  const completeReading = (read: DaemonMemoryReading): boolean => Number.isFinite(read.rss_bytes) && read.rss_bytes > 0 &&
+    typeof read.budget_bytes === "number" && Number.isFinite(read.budget_bytes) && read.budget_bytes > 0 &&
+    read.budget_bytes === step.reading.budget_bytes && read.budget_source === step.reading.budget_source &&
+    typeof read.swap_bytes === "number" && Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0;
+  try {
+    if (reclaimer === undefined) reason = "no daemon slack reclaimer installed";
+    else {
+      const record = reclaimer.reclaim();
+      outcome = record.outcome;
+      reason = record.reason;
+      if (record.outcome === "reclaimed") {
+        recheck = "unavailable";
+        const fresh = governor.step(completeReading);
+        const complete = completeReading(fresh.reading) && Number.isFinite(fresh.share);
+        recheck = complete ? "measured" : "unavailable";
+        if (complete) next = { ...fresh, previousTier: step.previousTier, changed: step.changed || fresh.changed };
+        else reason = "post-reclaim charge or unchanged budget is unreadable; retain the restart";
+      }
+    }
+  } catch (error) {
+    log("daemon.memory_restart_reclaim", {
+      outcome: "unavailable", recheck, reason: String((error as Error)?.message ?? error).slice(0, 200),
+      prior_share: step.share, share: step.share,
+      budget_bytes: step.reading.budget_bytes, budget_source: step.reading.budget_source, relieved: false,
+    });
+    return step;
+  }
+  log("daemon.memory_restart_reclaim", {
+    outcome, recheck, reason, prior_share: step.share, share: next.share,
+    budget_bytes: step.reading.budget_bytes, budget_source: step.reading.budget_source,
+    relieved: next.tier !== "restart",
+  });
+  return next;
 }
 
 /** The reclaim's fields on a hold row (`dispatch_deferred_wip`, `dispatch_memory_observed`, `sweep.fix_capacity`). */
