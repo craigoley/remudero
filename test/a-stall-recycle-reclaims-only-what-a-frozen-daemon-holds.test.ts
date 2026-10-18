@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { fixedClock, systemClock, type Clock } from "../src/lib/clock.js";
 import { STALL_RECYCLE_AFTER_MS } from "../src/lib/progress-watchdog.js";
 
 /**
@@ -119,11 +120,73 @@ function writeStubs(dir: string): void {
 const isoAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
 const MIN = 60_000;
 
+interface FixtureClock {
+  start: Clock;
+  epoch: string;
+  trace: string;
+}
+
+function logicalClock(): FixtureClock {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-recycle-clock-"));
+  const start = fixedClock(Math.floor(systemClock.now() / 1_000) * 1_000);
+  const clock = { start, epoch: join(dir, "epoch"), trace: join(dir, "trace") };
+  writeFileSync(clock.epoch, String(start.now() / 1_000));
+  writeFileSync(clock.trace, "");
+  return clock;
+}
+
+function writeClockStubs(dir: string, clock: FixtureClock): void {
+  const realDate = spawnSync("/bin/sh", ["-c", "command -v date"], { encoding: "utf8" });
+  assert.equal(realDate.status, 0, realDate.stderr);
+  assert.ok(realDate.stdout.trim().startsWith("/"), "the clock pins an absolute host date executable");
+  const body = `#!${process.execPath}
+const {readFileSync,writeFileSync,appendFileSync}=require("node:fs");
+const {spawnSync}=require("node:child_process");
+const epochPath=${JSON.stringify(clock.epoch)},trace=${JSON.stringify(clock.trace)},realDate=${JSON.stringify(realDate.stdout.trim())};
+const args=process.argv.slice(2),before=Number(readFileSync(epochPath,"utf8"));
+if(process.argv[1].endsWith("/sleep")){
+  const seconds=Number(args[0]);
+  if(args.length!==1||!Number.isSafeInteger(seconds)||seconds<0)process.exit(64);
+  writeFileSync(epochPath,String(before+seconds));
+  appendFileSync(trace,JSON.stringify({kind:"sleep",before,after:before+seconds,seconds})+"\\n");
+}else{
+  let result;
+  if(args.some(a=>a==="-d"||a==="-r"||a==="-j"))result=spawnSync(realDate,args,{encoding:"utf8"});
+  else{
+    const format=args.at(-1);
+    if(![format,"-u "+format].includes(args.join(" "))||!["+%s","+%Y-%m-%dT%H:%M:%S.000Z"].includes(format))process.exit(64);
+    if(format==="+%s")result={status:0,stdout:String(before)+"\\n",stderr:""};
+    else{
+      result=spawnSync(realDate,["-u","-d","@"+before,format],{encoding:"utf8"});
+      if(result.status!==0)result=spawnSync(realDate,["-u","-r",String(before),format],{encoding:"utf8"});
+    }
+  }
+  appendFileSync(trace,JSON.stringify({kind:"date",before,after:before})+"\\n");
+  process.stdout.write(result.stdout||"");process.stderr.write(result.stderr||"");process.exit(result.status??1);
+}
+`;
+  for (const bin of ["date", "sleep"]) writeFileSync(join(dir, bin), body, { mode: 0o755 });
+}
+
+function assertClockCausality(clock: FixtureClock): void {
+  let epoch = clock.start.now() / 1_000;
+  const trace = readFileSync(clock.trace, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(trace.some((row) => row.kind === "date"), "the real script read the fixture clock");
+  assert.ok(trace.some((row) => row.kind === "sleep"), "the real script advanced the fixture clock");
+  for (const row of trace) {
+    assert.equal(row.before, epoch, "only an explicit sleep advances logical time; host delays do not");
+    epoch += row.kind === "sleep" ? row.seconds : 0;
+    assert.equal(row.after, epoch, "each requested sleep advances exactly its original number of seconds");
+  }
+  assert.equal(Number(readFileSync(clock.epoch, "utf8")), epoch);
+}
+
 interface Fleet {
   state: string;
   lockPath: string;
   worktree: string;
   workerHome: string;
+  clock?: FixtureClock;
 }
 
 /**
@@ -132,15 +195,16 @@ interface Fleet {
  * file; a worker home holds a log. `daemonRowAgoMs` is the age of pid 110's NEWEST ledger row
  * (its daemon.pulse); other pids keep writing inside the bound throughout.
  */
-function fleet(daemonRowAgoMs: number): Fleet {
+function fleet(daemonRowAgoMs: number, clock?: FixtureClock): Fleet {
+  const ago = clock ? (ms: number) => fixedClock(clock.start.now() - ms).iso() : isoAgo;
   const state = mkdtempSync(join(tmpdir(), "rmd-frozen-state-"));
   const stateSub = join(state, "state");
   const inflight = join(stateSub, "inflight");
   mkdirSync(inflight, { recursive: true });
-  const holder = { pid: DAEMON_PID, host: DAEMON_HOST, startedAt: isoAgo(240 * MIN) };
+  const holder = { pid: DAEMON_PID, host: DAEMON_HOST, startedAt: ago(240 * MIN) };
   writeFileSync(join(stateSub, "drain.lock"), JSON.stringify(holder));
   const lockPath = join(inflight, LOCK_NAME);
-  writeFileSync(lockPath, JSON.stringify({ ...holder, run_id: "sweep-1791423000000", startedAt: isoAgo(120 * MIN) }));
+  writeFileSync(lockPath, JSON.stringify({ ...holder, run_id: "sweep-1791423000000", startedAt: ago(120 * MIN) }));
 
   const worktree = join(state, "worktrees", WORKTREE_NAME);
   mkdirSync(worktree, { recursive: true });
@@ -161,19 +225,20 @@ function fleet(daemonRowAgoMs: number): Fleet {
   writeFileSync(join(workerHome, "worker.log"), "fix worker finished 18:27:11Z\n");
 
   const rows = [
-    { ts: isoAgo(90 * MIN), host: DAEMON_HOST, actor_pid: 999, step: "sweep.pass" },
-    { ts: isoAgo(daemonRowAgoMs), host: DAEMON_HOST, actor_pid: DAEMON_PID, step: "daemon.pulse" },
-    { ts: isoAgo(10 * MIN), host: DAEMON_HOST, actor_pid: 1110, step: "worker.state" },
-    { ts: isoAgo(1 * MIN), host: "f00dfeedbeef", actor_pid: 4242, step: "serve.alive" },
+    { ts: ago(90 * MIN), host: DAEMON_HOST, actor_pid: 999, step: "sweep.pass" },
+    { ts: ago(daemonRowAgoMs), host: DAEMON_HOST, actor_pid: DAEMON_PID, step: "daemon.pulse" },
+    { ts: ago(10 * MIN), host: DAEMON_HOST, actor_pid: 1110, step: "worker.state" },
+    { ts: ago(1 * MIN), host: "f00dfeedbeef", actor_pid: 4242, step: "serve.alive" },
   ].sort((a, b) => a.ts.localeCompare(b.ts));
   writeFileSync(join(stateSub, "ledger.ndjson"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
-  return { state, lockPath, worktree, workerHome };
+  return { state, lockPath, worktree, workerHome, clock };
 }
 
 function runRecycle(f: Fleet, verdict: string | undefined, waitS: number, extraEnv: NodeJS.ProcessEnv = {}): Run {
   const dir = mkdtempSync(join(tmpdir(), "rmd-frozen-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "rmd-frozen-rec-"));
   writeStubs(dir);
+  if (f.clock) writeClockStubs(dir, f.clock);
   // The daemon's idle CI-JUDGE child: lane-less, 2000s old (under the 7200s hung bound), so it
   // counts as BUSY to the lane-less census unless ownership is proven.
   writeFileSync(join(rec, "ps-workers"), `${CHILD_PID} 2000 claude --output-format stream-json --verbose\n`);
@@ -291,7 +356,8 @@ test("(iv) a daemon whose newest row is inside the bound when the drain starts, 
   // OBSERVED 2026-10-10: the daemon froze at 08:22:50Z; the STALLED recycle checked ONCE at
   // 08:25:14Z (row 2.4 min old), failed clause (b), and then waited the full drain on the frozen
   // daemon's own children without asking again. Scaled down: a 4s bound, the row 1s old at start.
-  const f = fleet(1_000);
+  const clock = logicalClock();
+  const f = fleet(1_000, clock);
   const run = runRecycle(f, STALLED, 20, { RMD_RECYCLE_STALL_BOUND_S: "4" });
 
   assert.equal(run.status, 0, `the proof must be re-evaluated during the wait and pass once the row ages out: ${run.stderr}`);
@@ -305,12 +371,14 @@ test("(iv) a daemon whose newest row is inside the bound when the drain starts, 
   assert.equal(readdirSync(reclaimedDir).filter((n) => n.startsWith(LOCK_NAME) && !n.endsWith(".reason")).length, 1, "moved exactly once, never deleted");
   assert.ok(existsSync(join(f.worktree, "half-merged.ts")), "the worktree is kept");
   assert.equal(run.calls.filter(isStop).length, 1, "the container is stopped through the ordinary path");
+  assertClockCausality(clock);
 });
 
 test("(iv) re-evaluating on each poll never reclaims from a daemon that keeps writing rows through the wait", () => {
   // The same short bound, but the daemon is ALIVE: every worker census the script runs appends a
   // fresh row from pid 110, so each re-check finds a row inside the bound and the wait refuses.
-  const f = fleet(1_000);
+  const clock = logicalClock();
+  const f = fleet(1_000, clock);
   const run = runRecycle(f, STALLED, 8, {
     RMD_RECYCLE_STALL_BOUND_S: "3",
     STUB_PULSE_LEDGER: join(f.state, "state", "ledger.ndjson"),
@@ -323,6 +391,8 @@ test("(iv) re-evaluating on each poll never reclaims from a daemon that keeps wr
   assert.ok((run.stderr.match(/ownership NOT proven/g) ?? []).length >= 2, `the proof was re-evaluated during the wait, not once:\n${run.stderr}`);
   assert.ok(existsSync(f.lockPath), "the lock is untouched");
   assert.ok(!existsSync(join(f.state, "state", "inflight", "reclaimed")), "nothing is reclaimed");
+  assertClockCausality(clock);
+  assert.equal(Number(readFileSync(clock.epoch, "utf8")), clock.start.now() / 1_000 + 8, "the unchanged eight one-second polls consume exactly the logical wait");
 });
 
 test("the launcher forwards the STALLED verdict and its progress age to the recycle in RMD_RECYCLE_VERDICT", () => {
