@@ -5599,6 +5599,7 @@ export async function runDaemon(
     // The governor (daemon-memory-policy.ts) judges RSS+swap against the cgroup budget: tighten first,
     // restart only past the tightest factor. The V8 fraction stays as the backstop with no budget.
     const memoryStep = memoryGovernor.step();
+    if (memoryStep.futileRestart) log("daemon.memory_restart_futile", memoryStep.futileRestart);
     if (memoryStep.changed) {
       log("daemon.memory_pressure", {
         tier: memoryStep.tier,
