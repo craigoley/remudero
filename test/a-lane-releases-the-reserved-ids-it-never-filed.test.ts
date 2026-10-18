@@ -19,12 +19,12 @@ import { afterEach, test } from "node:test";
 
 // Through the shared re-export helper, not `../src/run-task.js` directly: the affected-suite reach
 // ratchet (test/the-affected-suite-reach-ratchet.test.ts) refuses every new DIRECT run-task importer.
-import { approveCommand, laneReleaseReason, releaseUnfiledReservations, triageCommand } from "./helpers/run-task-test.js";
-import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import type { WorkerResult } from "../src/lib/worker.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { ghShim } from "./helpers/gh-shim.js";
-import { gitRepo } from "./helpers/git-repo.js";
+import { approveCommand, laneReleaseReason, releaseUnfiledReservations, triageCommand } from "#test/helpers/run-task-test.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const GIT_ENV = {
