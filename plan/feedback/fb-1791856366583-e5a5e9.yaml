@@ -51,8 +51,29 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
-summary: null
+proposal_pr: https://github.com/craigoley/remudero/pull/12752
+summary:
+  headline: Approve one discovery test that checks every applies-to skill automatically
+  what_happened: NanoClaw checks all skills with one discovery test, while
+    Remudero needs a hand-written test per skill, so a new skill goes unchecked
+    unless its author writes one. The proposal adds one test covering task type,
+    glob matches, knowledge budget, selection, and allowlist, plus a typo
+    fixture that proves it fails.
+  decision: Rule on filing the discovery-test task, and require re-verification of
+    every cited line at current main before filing.
+  options:
+    - label: Approve filing the discovery test
+      consequence: Files one bounded task; a future applies-to skill with a typo or
+        dead glob fails CI by name.
+      intent: approve
+    - label: Decline for now
+      consequence: Keeps the two hand-written tests; new skills stay unchecked unless
+        their authors write tests.
+      intent: decline
+    - label: Reframe as a smaller first step
+      consequence: Start with only the task-type and glob checks, and add budget and
+        selection checks later.
+      intent: reframe
 expansion: null
 submission_key: nanoclaw-2026-10-13/skill-conformance-discovery
 thread_id: null
