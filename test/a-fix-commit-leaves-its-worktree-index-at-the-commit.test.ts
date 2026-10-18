@@ -3,12 +3,14 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { gitRepo } from "#test/helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 import { commitWorkerEdits } from "#test/helpers/run-task-test.js";
 
 const branch = "run-W1-T10068-1";
 function fixture(t: test.TestContext) {
   const repo = gitRepo({ scope: t, branch, kind: "fix-index" });
+  repo.git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+  repo.git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
   writeFileSync(join(repo.dir, "declared.txt"), "before\n");
   writeFileSync(join(repo.dir, "outside.txt"), "outside before\n");
   repo.git("add", "-A");
@@ -56,7 +58,7 @@ test("W1-T10068: a refused compare-and-swap leaves the worktree index unchanged"
     },
   }, [], { priorHeadSha, branch });
   assert.equal(result.committed, false);
-  assert.equal(result.headMoved?.observedHeadSha ?? result.headMoved?.observed_head_sha, movedSha);
+  assert.equal(result.headMoved?.observed_head_sha, movedSha);
   assert.deepEqual(readFileSync(indexPath), before);
   assert.equal(readFileSync(join(repo.dir, "declared.txt"), "utf8"), "fixed\n");
 });
