@@ -15,7 +15,7 @@
     - src/lib/sweep.ts
     - src/run-task.ts
     - test/a-first-fix-round-is-dispatched-without-asking-the-progress-judge.test.ts
-  status: queued
+  status: merged
   priority: 1  # a stochastic verdict on an empty history parks a fixable PR behind a person
   attempts: 0
   rationale: |
