@@ -335,8 +335,7 @@ test("minting a proposal files no task and approves nothing — the registry is 
     // rule-efficacy assertion of the same shape). W1-T2490: `inbox-proposals.d/` is the newly
     // minted proposal's OWN shard mirror — part of the registry's own footprint, not a second
     // write path — updateProposalRegistry writes it alongside, never instead of, the blob.
-    // W1-T9240: `inbox-proposals.json.lock-hold.json` is the registry's own bounded hold measurement.
-    assert.deepEqual(readdirSync(root).sort(), ["inbox-proposals.d", "inbox-proposals.json", "inbox-proposals.json.lock-hold.json"]);
+    assert.deepEqual(readdirSync(root).sort(), ["inbox-proposals.d", "inbox-proposals.json"]);
 
     const proposal = readRegistry(registryPath)[0];
 

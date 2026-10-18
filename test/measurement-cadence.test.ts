@@ -264,9 +264,7 @@ test("THE ESCALATING FORM, WHEN OPTED IN, ONLY EVER DRAFTS A PROPOSAL — never 
     // registry's own footprint, not a second write path — updateProposalRegistry writes it
     // alongside, never instead of, the blob.
     const entries = readdirSync(stateDir).sort();
-    // W1-T9240: `inbox-proposals.json.lock-hold.json` is the registry's own bounded hold measurement.
-    assert.deepEqual(entries, ["inbox-proposals.d", "inbox-proposals.json", "inbox-proposals.json.lock-hold.json",
-      "ledger.2026-08-12T00-00-00-000Z.ndjson"].sort());
+    assert.deepEqual(entries, ["inbox-proposals.d", "inbox-proposals.json", "ledger.2026-08-12T00-00-00-000Z.ndjson"].sort());
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
