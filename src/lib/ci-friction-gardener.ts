@@ -97,7 +97,21 @@ export function readCiFrictionHandFixes(
   }
 }
 
-/** A manual repair is one observation. Attribute it to its highest-priced owner match, never count it twice. */
+/** The earliest time each cause was observed failing; a round with no readable `at` dates its cause from always. */
+function ciFrictionCauseFirstSeen(rounds: readonly CiFrictionRound[]): Map<string, number> {
+  const first = new Map<string, number>();
+  for (const round of rounds) {
+    const key = ciFrictionCauseKey(round.cause);
+    const at = round.at === undefined || !Number.isFinite(Date.parse(round.at)) ? -Infinity : Date.parse(round.at);
+    first.set(key, Math.min(first.get(key) ?? Infinity, at));
+  }
+  return first;
+}
+
+/** A manual repair is one observation. Attribute it to its highest-priced owner match, never count it twice.
+ *  A repair merged before every observed round of a cause cannot have repaired that cause: W1-T9386 was filed
+ *  on four read-model-worker.ts fixes merged days before its test existed. Such a fix falls to the unowned
+ *  file count instead. A cause with no dated round keeps every owner match, as before. */
 export function ciFrictionHandFixRounds(
   fixes: readonly CiFrictionHandFix[], rounds: readonly CiFrictionRound[], priced: readonly CiFrictionCausePrice[], search: OwnerSearch,
 ): CiFrictionRound[] {
@@ -107,11 +121,13 @@ export function ciFrictionHandFixRounds(
   const median = sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
   const owners = priced.map((price) => ({ price, files: locateCiFrictionOwner(ciFrictionCauseKey(price.cause),
     rounds.filter((r) => ciFrictionCauseKey(r.cause) === ciFrictionCauseKey(price.cause)).flatMap((r) => r.detail ? [r.detail] : []), search)?.files ?? [] }));
+  const firstSeen = ciFrictionCauseFirstSeen(rounds);
   const unique = [...new Map(fixes.map((fix) => [fix.pr, fix])).values()];
   const unowned = new Map<string, CiFrictionHandFix[]>();
   const result: CiFrictionRound[] = [];
   for (const fix of unique) {
-    const matched = owners.find((owner) => owner.files.some((file) => fix.files.includes(file)));
+    const matched = owners.find((owner) => (firstSeen.get(ciFrictionCauseKey(owner.price.cause)) ?? -Infinity) <= Date.parse(fix.at) &&
+      owner.files.some((file) => fix.files.includes(file)));
     if (matched) {
       if (!rounds.some((round) => round.pr === fix.pr && ciFrictionCauseKey(round.cause) === ciFrictionCauseKey(matched.price.cause)))
         result.push({ pr: fix.pr, at: fix.at, cause: matched.price.cause, minutes: median,
