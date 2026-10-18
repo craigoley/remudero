@@ -111,33 +111,36 @@ export const CI_FRICTION_EFFECT_MAX_WINDOW_MS = 14 * 24 * 3_600_000;
 
 const share = (w: ShareWindow): number => (w.n > 0 ? w.k / w.n : 0);
 
-function logChoose(n: number, k: number): number {
-  let value = 0;
-  for (let i = 1, end = Math.min(k, n - k); i <= end; i++) value += Math.log(n - i + 1) - Math.log(i);
+function combinations(n: number, k: number): bigint {
+  let value = 1n;
+  for (let i = 1, end = Math.min(k, n - k); i <= end; i++) value = value * BigInt(n - i + 1) / BigInt(i);
   return value;
 }
 
 /** Fisher's conditional tail, enumerating the rarer column so near-saturated counts stay small. */
-function countFallProbability(before: ShareWindow, after: ShareWindow): number {
+function countFallProbability(before: ShareWindow, after: ShareWindow): { pValue: number; significant: boolean } {
   const total = before.n + after.n, hits = before.k + after.k;
   const failures = total - hits;
   const complement = hits > failures;
   const k = complement ? failures : hits;
   const observed = complement ? after.n - after.k : after.k;
-  const logMass = logChoose(after.n, observed) + logChoose(before.n, k - observed) - logChoose(total, k);
-  let relative = 1, sum = 1;
+  const denominator = combinations(total, k);
+  let mass = combinations(after.n, observed) * combinations(before.n, k - observed), numerator = mass;
   if (complement) {
     for (let x = observed, end = Math.min(after.n, k); x < end; x++) {
-      relative *= ((after.n - x) / (x + 1)) * ((k - x) / (before.n - k + x + 1));
-      sum += relative;
+      mass = mass * BigInt(after.n - x) * BigInt(k - x) / (BigInt(x + 1) * BigInt(before.n - k + x + 1));
+      numerator += mass;
     }
   } else {
     for (let x = observed, end = Math.max(0, k - before.n); x > end; x--) {
-      relative *= (x / (after.n - x + 1)) * ((before.n - k + x) / (k - x + 1));
-      sum += relative;
+      mass = mass * BigInt(x) * BigInt(before.n - k + x) / (BigInt(after.n - x + 1) * BigInt(k - x + 1));
+      numerator += mass;
     }
   }
-  return Math.min(1, Math.exp(logMass) * sum);
+  const shift = (value: bigint) => BigInt(Math.max(0, value.toString(2).length - 53));
+  const a = shift(numerator), b = shift(denominator);
+  const pValue = Number(numerator >> a) / Number(denominator >> b) * 2 ** Number(a - b);
+  return { pValue: Math.min(1, pValue), significant: 20n * numerator <= denominator };
 }
 
 /**
@@ -180,11 +183,12 @@ export function judgeShareWindows(before: ShareWindow, after: ShareWindow, windo
   const se = after.n > 0 ? Math.sqrt(pooled * (1 - pooled) * (1 / before.n + 1 / after.n)) : 0;
   const z = se > 0 ? (share(after) - share(before)) / se : 0;
   const fell = after.n > 0 && share(after) < share(before);
-  const pValue = label.sampleUnit === "count" && fell ? countFallProbability(before, after) : undefined;
+  const exact = label.sampleUnit === "count" && fell ? countFallProbability(before, after) : undefined;
+  const pValue = exact?.pValue;
   const measured = pValue === undefined ? {} : { pValue };
   const pct = (w: ShareWindow) => `${(share(w) * 100).toFixed(1)}% (${w.k}/${w.n})`;
-  const line = `${label.share} ${pct(before)} before, ${pct(after)} after, over ${windowDays} day(s) each side${pValue === undefined ? "" : `; pointwise exact p=${pValue}`}`;
-  const significant = label.sampleUnit === "count" ? pValue !== undefined && pValue <= 0.05 : z <= ONE_SIDED_Z;
+  const line = `${label.share} ${pct(before)} before, ${pct(after)} after, over ${windowDays} day(s) each side${pValue === undefined ? "" : `; pointwise exact p=${pValue.toPrecision(6)}`}`;
+  const significant = label.sampleUnit === "count" ? exact?.significant === true : z <= ONE_SIDED_Z;
   if (after.n > 0 && significant) return { verdict: "credit", before, after, windowDays, z, ...measured, reason: `fell: ${line}` };
   if (label.sampleUnit === "count" && fell) return { verdict: "pending", before, after, windowDays, z, ...measured, reason: `measuring: ${line}` };
   // Equal evidence: the after window has seen as many rounds as the before window needed to show

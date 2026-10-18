@@ -59,6 +59,18 @@ test("large sparse and near-saturated populations enumerate the rare column", ()
   assert.ok(Math.abs(saturated.pValue! - 0.75) < 1e-12);
 });
 
+test("an exact five-percent boundary is not changed by floating-point log rounding", () => {
+  for (const n of [1, 4, 7, 10, 1000]) assert.equal(judge({ k: 1, n }, { k: 0, n: 19 * n }).verdict, "credit");
+  assert.equal(judge({ k: 19, n: 19 }, { k: 0, n: 1 }).verdict, "credit");
+  assert.equal(judge({ k: 1, n: 1 }, { k: 0, n: 18 }).verdict, "pending");
+});
+
+test("large combinatorial totals retain a finite displayed probability", () => {
+  const result = judge({ k: 500, n: 1000 }, { k: 450, n: 1000 });
+  assert.equal(result.verdict, "credit");
+  assert.ok(Number.isFinite(result.pValue) && result.pValue! > 0 && result.pValue! < 0.05);
+});
+
 test("explicit metric units keep PR-hours separate even when durations happen to be integers", () => {
   assert.equal(ciFrictionRoundsMetric([]).label.sampleUnit, "count");
   assert.equal(flakeIncidentMetric([]).label.sampleUnit, "count");
