@@ -2859,6 +2859,33 @@ export function dispatchPriorityViolations(task: Task): LintViolation[] {
   return violations;
 }
 
+/** W1-T9328: warn below the other open tasks' minimum; filing at the head avoids priority inflation.
+ *  Absent/equal priorities, closed tasks, and queues without another priority stay silent (W1-T9323). */
+function priorityBelowQueueHeadViolations(task: Task, plan: Plan): LintViolation[] {
+  if (task.priority === undefined || NON_OPEN_FILING_STATUSES.has(task.status)) return [];
+  let head: number | undefined;
+  let atHead = 0;
+  for (const other of plan.tasks) {
+    if (other.id === task.id || other.priority === undefined) continue;
+    if (NON_OPEN_FILING_STATUSES.has(other.status)) continue;
+    if (head === undefined || other.priority < head) {
+      head = other.priority;
+      atHead = 1;
+    } else if (other.priority === head) atHead++;
+  }
+  if (head === undefined || !(task.priority < head)) return [];
+  return [
+    {
+      check: "dispatch-priority",
+      severity: "warn",
+      message:
+        `task ${task.id} carries priority ${task.priority}, below the open queue head ${head} ` +
+        `(${atHead} other open task(s) sit at ${head}) — file at ${head} instead: a value below ` +
+        "the head buys at most one rank (W1-T9323). Advisory only.",
+    },
+  ];
+}
+
 // ── ADVISORY-ROUTING (W1-T519 — a security-shaped filing is PUBLISHED before it's fixed) ────
 // SECURITY.md routes OUTSIDE reporters to a private advisory, but nothing told the fleet's OWN
 // filers that the same rule applies to a task shard: filing a task IS publishing on this repo,
@@ -3854,7 +3881,7 @@ export function lintPlan(
     const opts = optsFor(task);
     const withSurfaces = opts.openTaskSurfaces !== undefined ? opts : { ...opts, openTaskSurfaces: surfaceCorpus };
     const base = lintTask(task, withSurfaces);
-    const planOnly = [...blockedWithoutDispositionViolations(task, plan), ...(task.retirement === undefined ? [] : supersededByViolations(task, plan.byId))];
+    const planOnly = [...blockedWithoutDispositionViolations(task, plan), ...priorityBelowQueueHeadViolations(task, plan), ...(task.retirement === undefined ? [] : supersededByViolations(task, plan.byId))];
     const violations = planOnly.length > 0 ? [...base.violations, ...planOnly] : base.violations;
     out.set(task.id, { ok: base.ok && violations.every((v) => v.severity !== "block"), violations });
   }
