@@ -1,0 +1,84 @@
+- id: W1-T10164
+  title: "A CONTINUATION NEVER RESUMES ANOTHER PROVIDER'S SESSION — an auction selected Claude for a successful Codex worker's next turn, forwarded its Codex session id as Claude resume, and failed at zero turns instead of repairing the pre-open gates"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator-authorized three-daemon recovery, 2026-10-18"
+  plan_refs: [W1-T3792, W1-T4052, W1-T5325]
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - src/lib/sweep.ts
+    - test/worker/spawn/provider-safe-continuation.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at core origin/main 959a484ab, 2026-10-18. spawnWorker accepts only an opaque
+    resumeSessionId. Its Claude arm assigns that id to Options.resume without knowing which
+    provider created it. The continuation callers in run-task.ts pass WorkerResult.sessionId but
+    not WorkerResult.provider; the capacity auction runs again on the next call.
+
+    A complete consumer ledger-form inventory (268 gzip archives, zero plain archives, one live
+    file; 1,760,401 rows, zero malformed rows, 45,144 sweep controls) contains the positive
+    failure sequence: at 2026-10-14T23:56:45Z an implementation completed on Codex; its pre-open
+    continuation selected Claude at 23:57:14Z, returned zero turns and 'No conversation found
+    with session ID', then kept the checkpoint. This is a provider namespace error, not evidence
+    of a bad task or unavailable subscription. Other proof-execution failures on that task are
+    separate and are not excused by this finding.
+
+    Subject sweep at 2026-10-18: 430 remote heads / 424 unique trees, counted against main,
+    found no added owner for resume provider provenance or cross-provider sessions. W1-T3792
+    already requires write-capable Codex continuations to start fresh; preserve that boundary.
+  design: |
+    One concern: make continuation identity and context coherent with the provider actually
+    selected. Carry session origin from the previous WorkerResult.provider, never infer it from
+    the requested mount/model or session-id spelling. At the final routed-provider boundary,
+    including mount affinity and cash diversion, resume only a provider-supported same-provider
+    session. Claude must never receive a Codex/cash/unknown-origin id. Preserve genuine Claude
+    resume and the Codex adapter's existing fresh-writer sandbox rule.
+
+    Supply a bounded self-contained fresh-session handoff when an actual resume is unavailable:
+    original task/output/tool contract, current workspace identity and the pending action/error,
+    plus a bounded prior-report excerpt. Do not forward an orphan 'fix the gate from before'
+    prompt after dropping its conversation. Read current files rather than copying whole state
+    or a full transcript. Unknown legacy origin is explicit; without a safe handoff it refuses
+    before paid execution rather than guessing a provider namespace.
+
+    Census every production continuation producer in run-task.ts and sweep.ts, including
+    decision, checkpoint, pre-open gate, missing commit line, fix resume and repair/retry paths.
+    No caller may silently omit provenance and fall back to the broken bare-id behavior. Apply
+    existing prompt/model-fit and cash reservation checks to the exact final handoff prompt,
+    not the shorter follow-up it replaces; run cleanup/output-contract shaping exactly once.
+
+    Record resumed versus fresh handoff and the reason/provider pair through the existing
+    worker telemetry. Store no session id, credential, transcript or raw prompt. Do not pin the
+    provider, alter reserve/spend policy, clear a breaker, skip a gate or restart a daemon.
+    Production recovery still requires a loaded-source receipt and a genuinely admitted run.
+  acceptance:
+    - claim: "a routed continuation never forwards a foreign or unknown session id, while a supported same-provider resume is preserved"
+      proof: "unit test: a continuation never resumes another provider session"
+    - claim: "a fresh routed continuation receives the task contract and pending action, including the Codex-to-Claude pre-open failure shape"
+      proof: "unit test: a routed fresh continuation carries its task and pending action"
+    - claim: "model-fit and cash reservation account for the final selected-provider handoff rather than a shorter continuation"
+      proof: "unit test: continuation sizing accounts for the selected provider prompt"
+  falsifier: |
+    Force a first result from Codex and a second selection of Claude at the real spawnWorker
+    boundary. Before the fix the Claude query receives the Codex id as Options.resume; after,
+    it must receive no foreign resume id and a self-contained pending-action prompt. Also drive
+    genuine Claude-to-Claude, Codex writer fresh, cash diversion and unknown-origin cases.
+    Delete the provider check and the first regression must fail. Delete the handoff and the
+    task/action assertion must fail. Size a handoff beyond a model or cash budget while its
+    short follow-up fits; deleting final-prompt accounting must make the ceiling assertion fail.
+    If a current producer already carries origin and final routing enforces it, close unbuilt
+    with those exact caller/adapter receipts rather than adding another continuation mechanism.
+  note: |
+    rmd test-place computed worker/spawn from the proposed worker/sweep imports; recompute if
+    imports change, using a separate scope amendment if the canonical file needs to move.
+    Reservation held atomically as refs/rmd-id/W1-T10164 from the operator checkout.
+    reservation hand-off: codex/file-provider-safe-continuations-1792336596615 -> codex/file-provider-safe-continuations-1792336596615
