@@ -8,6 +8,7 @@ import { fixedClock } from "#src/lib/clock.js";
 import * as provider from "#src/lib/worker-provider.js";
 import { cashAllowanceFallbackRefusal, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { reviewerOutcome } from "#src/lib/review.js";
+import { finishTransientRetry, implementAttemptOutcome, runDiagnoseThenRetry } from "./helpers/run-task-test.js";
 
 const NOW = Date.parse("2026-10-17T09:50:29.000Z"), ISO = fixedClock(NOW).iso();
 const RESET = "2026-10-18T00:00:00.000Z";
@@ -72,6 +73,34 @@ test("W1-T10040: a cap refusal is cash_allowance_exhausted not an api error", as
 test("W1-T10040: a cap-refused reviewer is recorded as cash_allowance_exhausted", async t => {
   const worker = await capResult(fixture(t));
   assert.equal(reviewerOutcome({ attempted: true, subtype: worker.subtype, exit: worker.exit }), "cash_allowance_exhausted");
+});
+
+test("W1-T10040: the retry driver stops on a cap refusal and names it", async t => {
+  const f = fixture(t);
+  const worker = await capResult(f);
+  let attempts = 0, diagnoses = 0, judges = 0, removals = 0;
+  const sleeps: number[] = [], rows: Array<{ step: string } & Record<string, unknown>> = [];
+  const result = await runDiagnoseThenRetry({ now: () => NOW,
+    attempt: async () => { attempts++; return implementAttemptOutcome(worker); },
+    diagnose: async () => { diagnoses++; return { text: "unused" }; },
+    sleep: async ms => { sleeps.push(ms); },
+    fixProgressJudge: async () => { judges++; return undefined; } });
+  assert.equal(result.outcome, "gave_up");
+  assert.equal(attempts, 1);
+  assert.equal(diagnoses, 0);
+  assert.equal(judges, 0);
+  assert.deepEqual(sleeps, []);
+  assert.equal(result.strikes, 0);
+  assert.match(result.reason ?? "", /cash daily allowance exhausted until 2026-10-18T00:00:00.000Z/);
+  const terminal = finishTransientRetry(result, { taskId: "FIXTURE", runId: "fixture", repoDir: f.root,
+    worktreePath: f.root, costUsd: 0, worker, log: (step, extra) => rows.push({ step, ...extra }), say: () => {} },
+  () => { removals++; });
+  assert.equal(terminal?.verdict, "blocked_transient");
+  const verdict = rows.find(row => row.step === "verdict");
+  assert.match(String(verdict?.reason), /cash daily allowance exhausted until 2026-10-18T00:00:00.000Z/);
+  assert.doesNotMatch(String(verdict?.reason), /repeated transient API error|fix progress/);
+  assert.equal(removals, 0);
+  assert.ok(rows.some(row => row.step === "worktree.retained"));
 });
 
 test("cash allowance observation is read-only and shares normal squeezed fleet and Claude limits", t => {
