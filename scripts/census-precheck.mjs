@@ -722,6 +722,12 @@ function closureImportTrigger(seed) {
     if (changed.some((p) => p === seed || BAKED_CATALOG_PATHS.includes(p))) return true;
     if (typeof readHead !== "function" || typeof readBase !== "function") return false;
     const specifiers = (text) => new Set([...String(text ?? "").matchAll(IMPORT_SPECIFIER_RE)].map((m) => m[2]));
+    const importChanges = changed.filter((path) => {
+      const head = specifiers(readHead(path));
+      const base = specifiers(readBase(path));
+      return head.size !== base.size || [...head].some((spec) => !base.has(spec));
+    });
+    if (importChanges.length === 0) return false;
     const closure = (read) => {
       const seen = new Set();
       const queue = [seed];
@@ -736,12 +742,7 @@ function closureImportTrigger(seed) {
       return seen;
     };
     const reachable = new Set([...closure(readHead), ...closure(readBase)]);
-    return changed.some((path) => {
-      if (!reachable.has(path)) return false;
-      const head = specifiers(readHead(path));
-      const base = specifiers(readBase(path));
-      return head.size !== base.size || [...head].some((spec) => !base.has(spec));
-    });
+    return importChanges.some((path) => reachable.has(path));
   };
 }
 const IMPORT_SCOPE_RE = /^(?:src|scripts)\/.+\.(?:[cm]?[jt]sx?)$/;

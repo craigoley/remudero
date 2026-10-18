@@ -145,3 +145,20 @@ test("W1-T9806: an import outside both closures asks no baked-closure census", (
   assert.deepEqual(evaluate(["src/lib/outside.ts"], head, base).asked, []);
   assert.deepEqual(evaluate([], head, base).asked, []);
 });
+
+test("W1-T9806: unchanged import sets never read the baked closures to select suites", () => {
+  const changed = "src/lib/closure-member.ts";
+  for (const imports of ["", 'import "./host-identity.js";\n']) {
+    const asked: string[] = [];
+    const read = (value: number) => (path: string) => {
+      assert.equal(path, changed, "only changed files are read before an import change is established");
+      return `${imports}export const value = ${value};`;
+    };
+    const result = precheck.evaluateAdmittedCensusSuites({
+      changed: [changed], readHead: read(2), readBase: read(1), loadMembers: () => [],
+      runSuites: (files: string[]) => { asked.push(...files); return []; },
+    });
+    assert.deepEqual(result, { violations: [], unmeasured: null });
+    assert.deepEqual(asked, []);
+  }
+});
