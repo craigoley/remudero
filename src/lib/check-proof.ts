@@ -13,7 +13,7 @@ import { resolveTestPath } from "./test-path-resolver.js";
 import {
   explainGrepProofRefusal, explainUnitTestProofRefusal, materialiseBaseProofBlobs,
   parseWhitelistedProof, resolveNameFilteredCandidates, narrowNameFilteredArgs, resolveProofTestPath,
-  execWhitelistedProof, defaultProofSpawner, registerReviewerCheckout, type ProofSpawner,
+  execWhitelistedProof, defaultProofSpawner, proofFailureTail, registerReviewerCheckout, type ProofSpawner,
 } from "./review.js";
 
 const CHECK_PROOF_USAGE = "usage: rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]";
@@ -479,7 +479,14 @@ export function checkProofCommand(
   // `defaultProofSpawner`, the identical primitive execWhitelistedProof would use by default) and
   // records what it observed on the side, purely so the diagnostics below (`exit:`, `hits:`) can
   // still be printed — this file never reads `diag` to decide the verdict.
-  let diag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
+  type SpawnDiagnostics = { stdout: string; stderr: string; status: number | null; signal: NodeJS.Signals | null };
+  // Use the reviewer's bounded, redacted tail: the CLI must preserve the runner's refusal evidence,
+  // not its entire output (or credentials), and must never turn that evidence into a new verdict.
+  function printFailureOutput(side: "head" | "base", observed: SpawnDiagnostics | undefined, tail?: string): void {
+    const kept = tail ?? proofFailureTail(observed?.stdout ?? "", observed?.stderr ?? "");
+    console.log(`${side} output:\n${kept === "" ? "(no output captured)" : kept}`);
+  }
+  let diag: SpawnDiagnostics | undefined;
   const capturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
     const proofPaths = grepTargetPath === undefined
       ? spawnArgs.filter((arg) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg))
@@ -502,16 +509,18 @@ export function checkProofCommand(
     }
     try {
       const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-      diag = { stdout: out, status: 0, signal: null };
+      diag = { stdout: out, stderr: "", status: 0, signal: null };
       return out;
     } catch (e) {
       const err = e as NodeJS.ErrnoException & {
         status?: number | null;
         signal?: NodeJS.Signals | null;
         stdout?: string | Buffer | null;
+        stderr?: string | Buffer | null;
       };
       diag = {
         stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
+        stderr: typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? ""),
         status: typeof err.status === "number" ? err.status : null,
         signal: err.signal ?? null,
       };
@@ -530,9 +539,10 @@ export function checkProofCommand(
       console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
       const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
       console.log(`hits:       ${hits}`);
-      if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
     }
-    console.log(`verdict:    exec_error — ${String((e as Error)?.message ?? e)}`);
+    printFailureOutput("head", diag);
+    // execFileSync's message repeats stderr; do not leak the unbounded, unredacted copy after the tail.
+    console.log(`verdict:    exec_error — ${proofFailureTail(String((e as Error)?.message ?? e).split("\n")[0])}`);
     // W1-T1224 (design (iv)): an ABSENT path is the one exec_error cause this task names — it
     // still reports exec_error and exit 4 exactly as before (no caller shifts), it simply gains
     // this line. Checked with existsSync rather than the classifier: there is no file text to
@@ -557,8 +567,9 @@ export function checkProofCommand(
     console.log(`exit:       ${diag.status === null ? `killed by ${diag.signal}` : diag.status}`);
     const hits = diag.stdout.split("\n").filter((l) => l.trim() !== "").length;
     console.log(`hits:       ${hits}`);
-    if (diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
+    if (outcome !== "fail" && diag.stdout.trim()) console.log(diag.stdout.trimEnd().split("\n").slice(0, 10).join("\n"));
   }
+  if (outcome === "fail") printFailureOutput("head", diag, w.failureTail);
   console.log(`verdict:    ${outcome}`);
   if (w.kind === "grep" && outcome !== "pass") {
     // W1-T1224: check-proof calls the classifier rather than deriving a cause of its own —
@@ -659,20 +670,22 @@ export function checkProofCommand(
       return headExit;
     }
 
-    let baseDiag: { stdout: string; status: number | null; signal: NodeJS.Signals | null } | undefined;
+    let baseDiag: SpawnDiagnostics | undefined;
     const baseCapturingSpawn: ProofSpawner = (command, spawnArgs, spawnCwd, spawnTimeoutMs) => {
       try {
         const out = defaultProofSpawner(command, spawnArgs, spawnCwd, spawnTimeoutMs);
-        baseDiag = { stdout: out, status: 0, signal: null };
+        baseDiag = { stdout: out, stderr: "", status: 0, signal: null };
         return out;
       } catch (e) {
         const err = e as NodeJS.ErrnoException & {
           status?: number | null;
           signal?: NodeJS.Signals | null;
           stdout?: string | Buffer | null;
+          stderr?: string | Buffer | null;
         };
         baseDiag = {
           stdout: typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? ""),
+          stderr: typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? ""),
           status: typeof err.status === "number" ? err.status : null,
           signal: err.signal ?? null,
         };
@@ -684,6 +697,7 @@ export function checkProofCommand(
       baseOutcome = execWhitelistedProof(baseW, baseCheckoutDir, checkProofTimeoutMs(), baseCapturingSpawn);
     } catch (e) {
       const loadOutput = (e as { loadOutput?: unknown }).loadOutput;
+      printFailureOutput("base", baseDiag, baseDiag === undefined && typeof loadOutput === "string" ? proofFailureTail(loadOutput) : undefined);
       const missingExport =
         baseW.kind === "test" && typeof loadOutput === "string"
           ? baseLacksPrAddedExports(loadOutput, baseCheckoutDir, process.cwd())
@@ -694,12 +708,13 @@ export function checkProofCommand(
         return headExit;
       }
       console.log(
-        `base:       COULD NOT EXECUTE — ${String((e as Error)?.message ?? e)} — an environment gap, never\n` +
+        `base:       COULD NOT EXECUTE — ${proofFailureTail(String((e as Error)?.message ?? e).split("\n")[0])} — an environment gap, never\n` +
           "            evidence either way, same as the reviewer's own base_unknown degrade.",
       );
       console.log("discrimination: unknown — reported verdict above stands unchanged");
       return headExit;
     }
+    if (baseOutcome === "fail") printFailureOutput("base", baseDiag, baseW.failureTail);
     if (baseDiag && baseW.kind === "grep") {
       const baseHits = baseDiag.stdout.split("\n").filter((l) => l.trim() !== "").length;
       console.log(`base hits:  ${baseHits}`);

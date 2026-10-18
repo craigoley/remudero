@@ -196,6 +196,10 @@ test("real serial coverage batches conserve positive line hits and dispose only 
   assert.equal(result.status, 0, readFileSync(result.receiptPath, "utf8"));
   const receipt = JSON.parse(readFileSync(result.receiptPath, "utf8"));
   assert.equal(receipt.state, "complete"); assert.equal(receipt.batches.length, 2);
+  assert.equal(receipt.resourceScope, "workspace-and-registered-scratch");
+  assert.equal(receipt.diskProfile, null); assert.equal(receipt.estimatedPeakBasis, "not-supplied");
+  assert.ok(receipt.resources.samples[3].generatedPathBytes > receipt.resources.samples[4].generatedPathBytes,
+    "the raw-plus-compact phase charges external raw output before its confirmed disposal");
   for (const batch of receipt.batches) {
     assert.equal(batch.verdict.complete, true); assert.equal(batch.verdict.reported, 1);
     assert.equal(batch.rawDisposed, true); assert.equal(existsSync(batch.raw), false);
@@ -217,12 +221,15 @@ test("coverage batches refuse ghost inputs and retain an actual failing batch wi
     "--test-reporter=lcov", "--test-reporter-destination=coverage/lcov.info", "--experimental-test-coverage"],
     files: ["test/fail.test.mjs", "test/later.test.mjs"], batchSize: 1, lcov: join(repo.dir, "coverage/lcov.info"), base: "HEAD" };
   await assert.rejects(runCoverageBatches({ ...opts, files: ["test/ghost.test.mjs"] }), /ENOENT/);
+  mkdirSync(join(repo.dir, "coverage"), { recursive: true }); writeFileSync(opts.lcov, "previous evidence");
   const blocked = await runCoverageBatches({ ...opts,
     diskProfile: { minimumFreeBytes: Number.MAX_SAFE_INTEGER, reservedBytes: 0, estimatedPeakBytes: 1 } },
   { acquire: async () => f.slot, log() {} });
   assert.equal(blocked.status, 75);
   const blockedReceipt = JSON.parse(readFileSync(blocked.receiptPath, "utf8"));
   assert.equal(blockedReceipt.state, "not-run-disk-capacity"); assert.equal(blockedReceipt.batches.length, 0);
+  assert.equal(readFileSync(opts.lcov, "utf8"), "previous evidence", "capacity refusal preserves previous evidence");
+  assert.equal(blockedReceipt.estimatedPeakBasis, "declared-profile");
   f.write();
   const lost = await runCoverageBatches(opts, { acquire: async () => f.slot, log() {},
     run: async () => { rmSync(f.path); return { status: 7, signal: null }; } });
@@ -255,4 +262,40 @@ test("coverage batches preserve an admission refusal without starting a child", 
   assert.equal(result.status, 75); assert.equal(receipt.state, "not-run");
   assert.equal(receipt.reason, "another owner retains the slot"); assert.deepEqual(receipt.batches, []);
   assert.equal(spawned, 0); assert.equal(released, 1);
+});
+
+test("coverage batches preserve a replaced raw scratch root after the compactor closes", async (t) => {
+  const repo = gitRepo({ scope: t, seedCommit: false });
+  const fixture = ownedFixtureDir(t, "batch-raw-swap");
+  mkdirSync(join(repo.dir, "test"));
+  writeFileSync(join(repo.dir, ".gitignore"), "coverage\n");
+  writeFileSync(join(repo.dir, ".nvmrc"), process.versions.node + "\n");
+  writeFileSync(join(repo.dir, "subject.mjs"), "export const value = 1;\n");
+  writeFileSync(join(repo.dir, "test/ready.test.mjs"),
+    "import{test}from'node:test';import{value}from'../subject.mjs';test('ready',()=>{if(value!==1)throw Error('wrong value')});\n");
+  repo.git("add", "."); repo.git("commit", "-m", "test: raw replacement fixture");
+  const f = lease(fixture.dir);
+  let replacement = "";
+  const result = await runCoverageBatches({ cwd: repo.dir, flags: ["--test", "--experimental-test-coverage",
+    "--test-coverage-exclude=test/**", "--test-reporter=tap", "--test-reporter-destination=stderr",
+    "--test-reporter=lcov", "--test-reporter-destination=coverage/lcov.info"],
+    files: ["test/ready.test.mjs"], batchSize: 1, lcov: join(repo.dir, "coverage/lcov.info"), base: "HEAD" }, {
+    acquire: async () => f.slot, log() {},
+    run: async (args: string[], options: SpawnOptions) => {
+      const closed = await runCoverageCommand(args, options);
+      if (args.includes("--compact-output") && closed.status === 0) {
+        replacement = args.at(-1)!;
+        renameSync(replacement, join(fixture.dir, "original-raw"));
+        mkdirSync(replacement); writeFileSync(join(replacement, "replacement-evidence"), "preserve");
+      }
+      return closed;
+    },
+  });
+  assert.ok(replacement, "the real compactor closed successfully before the path swap");
+  assert.notEqual(result.status, 0, "a replaced raw directory cannot qualify successful disposal");
+  assert.equal(readFileSync(join(replacement, "replacement-evidence"), "utf8"), "preserve");
+  assert.ok(existsSync(join(fixture.dir, "original-raw")), "the original raw evidence is retained");
+  const receipt = JSON.parse(readFileSync(result.receiptPath, "utf8"));
+  assert.equal(receipt.state, "failed"); assert.notEqual(receipt.batches[0].rawDisposed, true);
+  assert.match(receipt.reason, /scratch.*changed/);
 });
