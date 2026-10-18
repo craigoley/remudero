@@ -1,12 +1,21 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,rmSync,writeFileSync} from 'node:fs';
+import {mkdtempSync,rmSync,writeFileSync,createReadStream} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {test} from 'node:test';
-import {platformEventRecord} from '#scripts/lib/read-map-platform-reporter.mjs';
+import readMapPlatformReporter,{platformEventRecord} from '#scripts/lib/read-map-platform-reporter.mjs';
 const reporter=fileURLToPath(import.meta.resolve('#scripts/lib/read-map-platform-reporter.mjs'));
+test('platform default producer hashes its actual executable and reporter while refusing output promotion',async()=>{
+ const digest=async(path:string)=>{const h=createHash('sha256');for await(const chunk of createReadStream(path))h.update(chunk);return h.digest('hex');};
+ async function* events(){yield{type:'test:stdout',data:{message:'must not enter metadata'}};yield{type:'test:summary',data:{counts:{tests:2,passed:1,skipped:1},success:true}};}
+ const rows=[];for await(const line of readMapPlatformReporter(events()))rows.push(JSON.parse(line));
+ assert.equal(rows.length,2);const producer=rows[0];assert.equal(producer.event,'producer');assert.deepEqual(producer.runtime,{node:process.version,platform:process.platform,arch:process.arch,executableSha256:await digest(process.execPath)});assert.equal(producer.reporterSha256,await digest(reporter));assert.equal(producer.state,'RAW_SHADOW_METADATA_NOT_QUALIFIED');
+ assert.equal(rows[1].event,'test:summary');assert.equal(rows[1].data.counts.skipped,1);assert.equal(rows[1].data.counts.failed,null);
+ for(const row of rows){assert.equal(row.dispatchAllowed,false);assert.equal(row.liveNarrowingAllowed,false);assert.equal(row.productionCoverageChanged,false);assert.equal(row.authorPass,false);assert.equal(row.fullCorpusQualified,false);}
+});
 test('platform metadata uses actual entry identity and preserves concurrent lineage and duplicate names',()=>{
  const root=mkdtempSync(join(tmpdir(),'rmd-platform-events-'));
  try{
