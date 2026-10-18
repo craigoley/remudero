@@ -15,7 +15,7 @@
     - src/run-task.ts
     - src/lib/daemon.ts
     - test/a-run-waiting-for-its-childs-memory-admission-never-holds-a-latched-restart.test.ts
-  status: queued
+  status: merged
   priority: 1  # a latched restart waits for the whole implement admission queue (28-35 min waits today); it recurred 3 times on 10-17 alone
   attempts: 0
   rationale: |

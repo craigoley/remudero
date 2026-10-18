@@ -13,7 +13,7 @@
   files:
     - src/lib/plan.ts
     - test/a-ci-learning-filing-names-its-new-lesson-file.test.ts
-  status: queued
+  status: merged
   priority: 1  # every ci-learning landing PR is born red on its own record and the plan-repair round cannot fix it (it refused "2 criterion/criteria have no proof" and twice "the plan round needs a valid COMMIT_MESSAGE"), so the lane's lessons never land without a hand edit
   attempts: 0
   rationale: |
