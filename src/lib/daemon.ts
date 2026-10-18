@@ -5600,8 +5600,10 @@ export async function runDaemon(
     // restart only past the tightest factor. The V8 fraction stays as the backstop with no budget.
     const memoryStep = memoryGovernor.step();
     if (memoryStep.futileRestart) log("daemon.memory_restart_futile", memoryStep.futileRestart);
-    if (memoryStep.changed) {
+    if (memoryStep.changed || memoryStep.initialReading) {
       log("daemon.memory_pressure", {
+        initial_reading: memoryStep.initialReading,
+        baseline: memoryStep.baseline,
         tier: memoryStep.tier,
         previous_tier: memoryStep.previousTier,
         share: memoryStep.share,
@@ -5617,6 +5619,7 @@ export async function runDaemon(
     if (heapPressure !== undefined) {
       log("daemon.heap_pressure_exit", {
         basis: memoryStep.tier === "restart" ? "cgroup_share" : "v8_limit",
+        ...(memoryStep.tier === "restart" ? { baseline: memoryStep.baseline } : {}),
         used_heap_size: heapStats.used_heap_size,
         heap_size_limit: heapStats.heap_size_limit,
         threshold: HEAP_PRESSURE_RESTART_FRACTION,

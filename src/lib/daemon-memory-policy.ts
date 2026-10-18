@@ -263,6 +263,9 @@ export function decideMemoryPressure(
 
 export interface MemoryGovernorStep extends MemoryPressureDecision {
   reading: DaemonMemoryReading;
+  /** Observation only: expose the actual first reading, including an unknown budget, not a later warm guess. */
+  initialReading?: boolean;
+  baseline?: Readonly<DaemonMemoryReading & { charged_bytes: number; share?: number; boot_over_line: boolean }>;
   /** True when the tier or the applied growth percent changed on this step. */
   changed: boolean;
   previousTier: MemoryPressureTier;
@@ -303,6 +306,7 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
   let inForce = Math.round(policy.heapGrowingPercent);
   let tier: MemoryPressureTier = "clear";
   let baseline: number | undefined;
+  let baselineReading: MemoryGovernorStep["baseline"];
   let bootOverLine = false;
   let heldBudget: number | undefined;
   let heldSource: DaemonMemoryReading["budget_source"];
@@ -311,9 +315,11 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
       const reading = read();
       const decision = decideMemoryPressure(reading, policy, inForce);
       const charged = reading.rss_bytes + (reading.swap_bytes ?? 0);
+      const initialReading = baseline === undefined;
       if (baseline === undefined) {
         baseline = charged;
         bootOverLine = decision.share !== undefined && decision.share >= policy.restartShare;
+        baselineReading = { ...reading, charged_bytes: charged, share: decision.share, boot_over_line: bootOverLine };
       }
       const held = bootOverLine && decision.share !== undefined && decision.share >= policy.restartShare &&
         charged <= BOOT_BASELINE_RESTART_MARGIN * baseline;
@@ -339,7 +345,8 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
       tier = decision.tier;
       heldBudget = held ? reading.budget_bytes : undefined;
       heldSource = held ? reading.budget_source : undefined;
-      return { ...decision, reading, changed, previousTier, ...(futileRestart ? { futileRestart } : {}) };
+      return { ...decision, reading, changed, previousTier, initialReading, baseline: baselineReading,
+        ...(futileRestart ? { futileRestart } : {}) };
     },
     inForcePercent: () => inForce,
   };
