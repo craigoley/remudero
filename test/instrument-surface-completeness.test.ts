@@ -212,7 +212,11 @@ test("a diff carrying no instrument path never entangles whatever else it holds"
 });
 
 test("hosted author and calibration tools are exact protected instruments, never data exclusions", () => {
-  for (const path of ["scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs"]) {
+  for (const path of [
+    "scripts/preflight-author.mjs",
+    "scripts/calibrate-author-runtime.mjs",
+    "scripts/lib/author-step-capture.mjs",
+  ]) {
     assert.equal(INSTRUMENT_SURFACE_EXCLUSIONS[path], undefined);
     assert.deepEqual(INSTRUMENT_SURFACE.filter(pattern => new RegExp(pattern).test(path)), [
       "^" + path.replaceAll(".", "\\.") + "$",
@@ -253,15 +257,15 @@ test("hosted tooling registration still refuses a newly unregistered executable 
   const candidates = deriveInstrumentCandidates({
     tracked,
     readText: path => path === workflow
-      ? "jobs:\n  author:\n    steps:\n      - run: node scripts/preflight-author.mjs\n      - run: node scripts/calibrate-author-runtime.mjs\n      - run: node " + helper + "\n"
+      ? "jobs:\n  author:\n    steps:\n      - run: node scripts/preflight-author.mjs\n      - run: node scripts/calibrate-author-runtime.mjs\n      - run: node scripts/lib/author-step-capture.mjs\n      - run: node " + helper + "\n"
       : path === helper ? "export const fixture = true;" : actual.readText(path),
   });
-  for (const path of [helper, "scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs", "docs/docs-index.json"]) {
+  for (const path of [helper, "scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs", "scripts/lib/author-step-capture.mjs", "docs/docs-index.json"]) {
     assert.ok(candidates.includes(path), "control: the real maintained derivation must see " + path);
   }
   const gaps = findUnexplainedGaps(candidates, DECLARED_RE, INSTRUMENT_SURFACE_EXCLUSIONS);
   assert.ok(gaps.includes(helper), "new executable remains a refusal, not an exclusion");
-  for (const path of ["scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs", "docs/docs-index.json"]) {
+  for (const path of ["scripts/preflight-author.mjs", "scripts/calibrate-author-runtime.mjs", "scripts/lib/author-step-capture.mjs", "docs/docs-index.json"]) {
     assert.equal(gaps.includes(path), false);
   }
 });
