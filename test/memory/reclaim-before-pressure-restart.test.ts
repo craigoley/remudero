@@ -64,6 +64,14 @@ test("pressure remaining after a reclaim still restarts without retrying the col
   assert.equal(f.rows[0].fields.relieved, false);
 });
 
+test("relief below the restart line retains proportional GC tightening", () => {
+  const f = fixture();
+  const result = reclaimBeforeMemoryRestart(f.due, f.governor, f.log, f.reclaimer(() => f.set(reading(0.4))));
+  assert.equal(result.tier, "tighten");
+  assert.equal(result.heapGrowingPercent, 30);
+  assert.equal(f.rows[0].fields.relieved, true);
+});
+
 test("a paced reclaim does not manufacture a lower reading or retry the collector", () => {
   const f = fixture(), r = f.reclaimer(() => {});
   r.reclaim();
@@ -164,5 +172,29 @@ test("the daemon uses measured reclaim relief before its tick-boundary restart",
     assert.equal(summary.stopReason, "stopped");
     assert.equal(rows.some(r => r.step === "daemon.heap_pressure_exit"), false);
     assert.equal(rows.find(r => r.step === "daemon.memory_restart_reclaim")?.fields.relieved, true);
+  });
+});
+
+test("measured cgroup relief never disables the independent V8-limit backstop", async t => {
+  await withTempDir("memory-reclaim-v8-backstop", async dir => {
+    writeFileSync(join(dir, "tasks.yaml"), "[]\n");
+    let reads = 0, relieved = false;
+    const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+    const governor = createDaemonMemoryGovernor({ read: () => {
+      reads++;
+      return reading(reads === 1 ? 0.25 : relieved ? 0.28 : 0.52);
+    }, setFlags: () => {} });
+    installed(t, createDaemonSlackReclaimer({ collect: () => { relieved = true; }, setFlags: () => {},
+      snapshot: () => ({ rss_bytes: (relieved ? 0.28 : 0.52) * BUDGET, swap_bytes: 0,
+        heap_used_bytes: 0.2 * BUDGET, heap_physical_bytes: 0.25 * BUDGET, external_bytes: 0, heap_size_limit_bytes: 4 * BUDGET }) }));
+    const summary = await runDaemon(loadPlan(join(dir, "tasks.yaml")), {
+      refreshMerged: () => () => false, runOne: async () => { throw Error("empty plan"); },
+      checkStop: () => reads > 5 ? "fixture exhausted" : undefined, sleep: async () => {}, memoryGovernor: governor,
+      heapStatistics: () => ({ used_heap_size: (relieved ? 3.5 : 0.2) * BUDGET, heap_size_limit: 4 * BUDGET }),
+      log: (step, fields = {}) => rows.push({ step, fields }),
+    }, { pollIntervalMs: 1 });
+    assert.equal(relieved, true);
+    assert.equal(summary.stopReason, "heap_pressure");
+    assert.equal(rows.find(r => r.step === "daemon.heap_pressure_exit")?.fields.basis, "v8_limit");
   });
 });

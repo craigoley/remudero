@@ -903,10 +903,10 @@ export function reclaimBeforeMemoryRestart(
         const fresh = governor.step();
         const read = fresh.reading;
         const complete = Number.isFinite(read.rss_bytes) && read.rss_bytes > 0 &&
+          typeof read.budget_bytes === "number" && read.budget_bytes > 0 &&
           Number.isFinite(fresh.share) && read.budget_bytes === step.reading.budget_bytes &&
           read.budget_source === step.reading.budget_source &&
-          (step.reading.swap_bytes === undefined || read.swap_bytes !== undefined) &&
-          (read.swap_bytes === undefined || (Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0));
+          typeof read.swap_bytes === "number" && Number.isFinite(read.swap_bytes) && read.swap_bytes >= 0;
         recheck = complete ? "measured" : "unavailable";
         if (complete) next = { ...fresh, previousTier: step.previousTier, changed: step.changed || fresh.changed };
         else reason = "post-reclaim charge or unchanged budget is unreadable; retain the restart";
