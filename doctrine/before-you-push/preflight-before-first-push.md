@@ -100,6 +100,30 @@ and `--coverage` remain available for full local reproduction; infrastructure, c
 and test-selector changes should use that full reproduction before their first push. The default
 static preflight's small scoped coverage check is also retained, not silently removed.
 
+### Explicit low-footprint local checks
+
+Operator-approved 2026-10-17: the Mac may run an explicitly scoped check below the ordinary
+20-GiB reserve without pretending it completed ordinary author validation:
+
+```sh
+node --import tsx scripts/preflight-author.mjs --low-footprint --scratch-mib 256 --timeout-ms 120000 --head-ref run-unfiled-<epochMs> --test test/<literal-file>.test.ts
+```
+
+Choose the scratch/runtime budgets for the named work; the example is not a policy default.
+This opt-in Mac path requires a committed tree, fresh base, physical tracked files, publication
+identity, a test slot, normal native memory pressure and room for the bounded image plus retained
+output. It runs serially with no discovery/full-suite fallback. A fixed-capacity disk image bounds
+fixture growth, and an inherited native sandbox denies writes outside it, dependency payload
+writes and networking. An incompatible test fails; it is not silently rerun unsandboxed.
+
+The separate `coverage/author-low-footprint-*/receipt.json` records `scoped-pass`, never full-author
+PASS. Default static/affected selection and full-author assurance remain NOT RUN; hosted full-suite,
+coverage, review and security gates remain required, unchanged. Ordinary author validation retains
+its 20-GiB guard. Capture is output/runtime bounded, source is rechecked afterwards, and failed
+detach retains the scratch and refuses the run rather than deleting a possibly active volume.
+This is local write/resource containment, not a security boundary for hostile test code or a
+host-wide storage reservation; other sessions' writes and OS swap remain separate pressure.
+
 Regression evidence: `test/author-preflight.test.ts` exercises real Git and Node subprocesses,
 including a failing test; `test/merge-lcov.test.ts` compares every LCOV record against pinned Node.
 The implementation PR is identified by branch `run-unfiled-1791130203363`.
