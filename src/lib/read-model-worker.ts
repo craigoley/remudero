@@ -2463,13 +2463,22 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       const again = loadCommittedViewBodies(opts.stateDir, home);
       committedAt = committedTickTimes(opts.stateDir, opts.instances);
       let replaced = 0;
+      let removed = 0;
+      if (again.reason === undefined) {
+        const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
+        for (const key of bodies.keys()) if (!posted.has(key) && !committed.has(key)) {
+          bodies.delete(key);
+          bodyReadings.delete(key);
+          removed++;
+        }
+      }
       for (const entry of again.bodies) {
         const key = readModelBodyKey(entry.view, entry.key);
         if (posted.has(key) || bodies.get(key)?.etag === entry.etag) continue;
         bodies.set(key, entry);
         replaced++;
       }
-      opts.log?.("read_model.reloaded", { bodies: again.bodies.length, replaced, ...(again.reason ? { reason: again.reason } : {}) });
+      opts.log?.("read_model.reloaded", { bodies: again.bodies.length, replaced, removed, ...(again.reason ? { reason: again.reason } : {}) });
       return replaced;
     },
     switches: () => mainSwitches,
