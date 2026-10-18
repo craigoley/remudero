@@ -39,6 +39,9 @@ function planted(t: TestContext) {
   const holder = { pid: process.pid, host: hostname(), startedAt: new Date().toISOString() };
   const raw = JSON.stringify(holder);
   fs.writeFileSync(`${path}.lock`, raw);
+  // Independent cleanup bounds deletion mutants too; disappearance cannot turn a refused waiter into success.
+  const watchdog = setTimeout(() => fs.rmSync(`${path}.lock`, { force: true }), 1500);
+  t.after(() => clearTimeout(watchdog));
   return { path, raw, holder };
 }
 
@@ -196,4 +199,34 @@ test("W1-T9240: the publication lifetime cancels waiting work and disposes handl
   }, signals as NodeJS.Process), /attempt terminated/);
   assert.equal(signals.listenerCount("SIGINT"), 0);
   assert.equal(signals.listenerCount("SIGTERM"), 0);
+});
+
+test("W1-T9240: acquisition failures and thrown updates release without fabricating success", async t => {
+  const root = ownedFixtureDir(t, "registry-acquisition-failure").dir;
+  const blocked = join(root, "not-a-directory");
+  fs.writeFileSync(blocked, "fixture");
+  await assert.rejects(updateProposalRegistryAsync(join(blocked, "registry.json"), () => [], { maxWaitMs: 1000 }), /EEXIST|ENOTDIR/);
+  const path = join(root, "registry.json");
+  await assert.rejects(updateProposalRegistryAsync(path, () => { throw new Error("update failed"); }, { maxWaitMs: 1000 }), /update failed/);
+  assert.equal(fs.existsSync(`${path}.lock`), false);
+  assert.equal(fs.existsSync(path), false);
+  await updateProposalRegistryAsync(path, () => [proposal("retry")], { maxWaitMs: 1000 });
+  assert.equal(loadProposalRegistry(path)[0]?.id, "retry");
+});
+
+test("W1-T9240: cancellation arriving during real lock creation prevents a later callback", async t => {
+  const path = join(ownedFixtureDir(t, "registry-open-cancel").dir, "registry.json");
+  const controller = new AbortController();
+  const open = fs.promises.open;
+  t.mock.method(fs.promises, "open", async (...args: Parameters<typeof open>) => {
+    const handle = await open(...args);
+    controller.abort();
+    return handle;
+  });
+  let calls = 0;
+  await assert.rejects(updateProposalRegistryAsync(path, () => { calls++; return []; }, {
+    maxWaitMs: 1000, signal: controller.signal,
+  }), e => e instanceof ProposalRegistryBusyError && e.outcome === "cancelled");
+  assert.equal(calls, 0);
+  assert.equal(fs.existsSync(`${path}.lock`), false);
 });
