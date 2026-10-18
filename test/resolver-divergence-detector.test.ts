@@ -220,11 +220,18 @@ test("resolvePlanCriteriaForReview is wired at exactly ZERO call sites now — t
   // three somewhere new.
   // W1-T7743: the daemon-side paths resolve through the AWAITED form, so the fix-rung helper has a sync and an async
   // call and the count is four: review command (async), fix-rung helper (sync + async), preflight proofs (sync).
+  // W1-T9232: the review command reads the SAME plan at `origin/main` once, only when the head has no record of
+  // the task's own, to tell "built before its shard merged" from "no such task". Pinned below; a sixth is refused.
   const atHeadCallSites = runTaskSrc.split(/resolvePlanCriteriaAtHead(?:Async)?\(/).length - 1;
   assert.equal(
     atHeadCallSites,
-    4,
-    "exactly the review-command, fix-rung-head-contract (sync and awaited) and preflight-proofs resolver call sites are permitted",
+    5,
+    "exactly the review-command (head and origin/main), fix-rung-head-contract (sync and awaited) and preflight-proofs resolver call sites are permitted",
+  );
+  assert.match(
+    runTaskSrc,
+    /resolvePlanCriteriaAtHeadAsync\(body, subjectRepoDir, "plan\/tasks\.yaml", "origin\/main"\)[\s\S]{0,120}headLacksOwnTaskRecord\(resolved, atMain\)/,
+    "the fifth resolver call is the review command's origin/main read feeding headLacksOwnTaskRecord",
   );
   assert.match(
     runTaskSrc,
