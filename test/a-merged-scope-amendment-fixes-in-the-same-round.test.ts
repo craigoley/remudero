@@ -10,6 +10,7 @@ import { findTaskShard, requestScopeAmendment, restoreScopeAmendmentWork, saveSc
   type ProofAmendmentWritePorts } from "#src/lib/proof-amendment.js";
 import type { Config } from "#src/lib/config.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import { isRmdError, exitCodeFor } from "#src/lib/errors.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -379,6 +380,22 @@ test("scope recovery awaits asynchronous IO before publishing its immutable reco
   const saved = await pending;
   const entries = JSON.parse(JSON.parse(readFileSync(saved, "utf8")).payload);
   assert.equal(Buffer.from(entries[0].data, "base64").toString(), content);
+});
+
+test("scope recovery exposes descriptor refusals through a concrete typed error", async (t) => {
+  const f = fixture(t);
+  const input = { root: f.opts.config.root, worktreePath: f.repo.dir, taskId, prNumber: 42,
+    amendmentNumber: 99, paths: [path] };
+  for (const response of [{ ok: false, error: "descriptor operation refused" }, { ok: false }]) {
+    await assert.rejects(saveScopeAmendmentWork(input, { run: () => JSON.stringify(response) }), (error) => {
+      assert.ok(isRmdError(error));
+      assert.equal(error.name, "ScopeRecoveryError");
+      assert.equal(error.kind, "scope_recovery");
+      assert.equal(exitCodeFor(error), 1);
+      assert.equal(error.message, response.error ?? "scope recovery filesystem unavailable");
+      return true;
+    });
+  }
 });
 
 test("an unverifiable asking-round save is named in the ledger and the worker evidence", async (t) => {

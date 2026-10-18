@@ -841,14 +841,21 @@ except (OSError, ValueError) as error:
 async function scopeWorkFiles(input: ScopeAmendmentWork, entries: ScopeWorkEntry[], restore: boolean, io: ScopeWorkIo): Promise<ScopeWorkEntry[]> {
   for (const entry of entries) scopeWorkParts(entry.path);
   const result = JSON.parse(await io.run(SCOPE_WORK_FILES, JSON.stringify({ root: resolve(input.worktreePath), entries, restore })));
-  if (result.ok !== true) throw new RmdError("scope_recovery", 1, String(result.error ?? "scope recovery filesystem unavailable"));
+  if (result.ok !== true) throw new ScopeRecoveryError(String(result.error ?? "scope recovery filesystem unavailable"));
   if (!Array.isArray(result.entries)) throw new Error("scope recovery filesystem response did not verify");
   return result.entries;
 }
 
-class MissingScopeWorkError extends RmdError {
+class ScopeRecoveryError extends RmdError {
+  constructor(message: string) {
+    super("scope_recovery", 1, message);
+    this.name = "ScopeRecoveryError";
+  }
+}
+
+class MissingScopeWorkError extends ScopeRecoveryError {
   constructor() {
-    super("scope_recovery", 1, "missing saved work from the round that asked for scope");
+    super("missing saved work from the round that asked for scope");
     this.name = "MissingScopeWorkError";
   }
 }
