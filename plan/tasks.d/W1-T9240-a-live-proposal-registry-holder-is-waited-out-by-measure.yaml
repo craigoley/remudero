@@ -15,10 +15,19 @@
     - src/lib/retro.ts
     - src/run-task.ts
     - test/a-live-proposal-registry-holder-is-waited-out-by-measure.test.ts
+    - test/followup-routing-has-a-consumer.test.ts
+    - test/the-followup-retirement-arm-has-a-call-site.test.ts
   status: queued
   priority: 1  # observed again in the failed 2026-10-18 automated retro; do not clear its existing backoff
   attempts: 0
   rationale: |
+    CALLER-CENSUS SCOPE RECONCILIATION 2026-10-18:
+    The asynchronous production call also changes the literal call shape asserted by the existing routing and
+    retirement wiring suites. PR #12799's full hosted run exposed the retirement assertion as a real failure,
+    and its fleet repair is in flight; do not race that repair. Include both existing caller suites in this
+    task's files so the eventual async bridge can keep their reachability/ordering assertions accurate instead
+    of weakening them, leaving them red, or hiding a dead old call in a comment. No acceptance proof changes.
+    This scope-only amendment is separate from the build, carries no task trailer, and must merge first.
     CONTRACT RECONCILIATION 2026-10-18, source 350a59d4dc273c65628bbb95be9d1416b6c678c2:
     The original design below could not safely be implemented as an indefinite synchronous wait. Since W1-T9443,
     pruneOrphanedDraftsAsync holds this same lock across awaited reads. updateProposalRegistry's default sleep is
