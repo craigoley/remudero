@@ -200,6 +200,7 @@ test("the daemon loop drains and restarts on the cgroup share while V8's own lim
   const flags: string[] = [];
   let idles = 0;
   const reading: DaemonMemoryReading = { rss_bytes: 3.9 * GB, swap_bytes: 1.5 * GB, budget_bytes: HIGH, budget_source: "memory.high" };
+  let readings = 0;
   try {
     const summary = await runDaemon(loadPlan(planPath), {
       refreshMerged: () => () => false,
@@ -210,7 +211,10 @@ test("the daemon loop drains and restarts on the cgroup share while V8's own lim
         if (++idles > 5) throw new Error("five idle ticks and no restart");
       },
       heapStatistics: () => ({ used_heap_size: 1.2 * GB, heap_size_limit: 8 * GB }),
-      memoryGovernor: createDaemonMemoryGovernor({ read: () => reading, setFlags: (f) => flags.push(f) }),
+      memoryGovernor: createDaemonMemoryGovernor({
+        read: () => ++readings === 1 ? { ...reading, rss_bytes: 0.2 * HIGH, swap_bytes: 0 } : reading,
+        setFlags: (f) => flags.push(f),
+      }),
       log: (step, extra = {}) => rows.push({ step, extra }),
     }, { pollIntervalMs: 1 });
     assert.equal(summary.stopReason, "heap_pressure");
