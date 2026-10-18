@@ -482,7 +482,7 @@ test("whole temporary entries are requalified after sizing before removal", () =
       const oldFile = join(tree, "old-output.txt");
       const oldMtime = lstatSync(oldFile).mtimeMs;
       if (activation === "ctime-only") {
-        writeFileSync(stamp, "reference mtime\n"); age(stamp, HOURS_AGO(8));
+        writeFileSync(stamp, "reference mtime\n"); sh(fx.base, "touch", "-r", oldFile, stamp);
         const nativeFind = sh(fx.base, "sh", "-c", "command -v find").trim();
         // Only initial old metadata is simulated. After du mutates and restores
         // mtime, the final boundary uses the real kernel ctime via native find.
