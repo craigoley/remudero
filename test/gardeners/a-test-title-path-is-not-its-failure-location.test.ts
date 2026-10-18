@@ -178,7 +178,8 @@ test("real pinned Node TAP and spec reporter diagnostics defeat the misleading t
   writeFileSync(file, `import test from 'node:test';import assert from 'node:assert/strict';\ntest(${JSON.stringify(TITLE)},()=>assert.equal('actual','expected'));\n`);
   for (const reporter of ["tap", "spec"]) {
     const r = spawnSync(process.execPath, ["--test", `--test-reporter=${reporter}`, "--test-concurrency=1", file],
-      { cwd: f.dir, encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024 });
+      { cwd: f.dir, encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024,
+        env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" } });
     assert.equal(r.error, undefined); assert.equal(r.signal, null); assert.equal(r.status, 1, "the controlled child really failed");
     assert.match(r.stdout, /runner-fixture\.test\.mjs/);
     assert.equal(ciFailureSignature(r.stdout), "test/runner-fixture.test.mjs", `${reporter}: ${r.stdout}`);
@@ -191,7 +192,8 @@ test("a real failing file wrapper is not attributed to a path in its exception",
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `throw new Error(${JSON.stringify("not the owner " + MENTIONED)});\n`);
   const r = spawnSync(process.execPath, ["--test", "--test-reporter=tap", file],
-    { cwd: f.dir, encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024 });
+    { cwd: f.dir, encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024,
+      env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" } });
   assert.equal(r.error, undefined); assert.equal(r.signal, null); assert.equal(r.status, 1);
   assert.equal(ciFailureSignature(r.stdout), "test/wrapper-fixture.test.mjs");
 });
