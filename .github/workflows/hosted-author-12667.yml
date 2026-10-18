@@ -1,4 +1,4 @@
-name: Hosted author pilot 12667
+name: Hosted capture diagnostic 12667
 on:
   push:
     branches:
@@ -12,23 +12,23 @@ concurrency:
   cancel-in-progress: false
 jobs:
   author:
-    name: hosted-instrument-companion-exact-head
+    name: capture-diagnostic-only-not-author-qualification
     runs-on: ubuntu-latest
-    timeout-minutes: 205
+    timeout-minutes: 20
     env:
       SOURCE_HEAD: 277fc86d98049af6df7b4250980d5bf76c21744a
       CAPTURED_BASE: f9935f71c4f332921fde9409e757227f5871067b
       SOURCE_BUNDLE_SHA256: 8d7b65b404f1f1b59733c1a79713c934ae74aad490ca91e9db3a91bf99532cd4
       PUBLICATION_BRANCH: run-unfiled-1792341522996
-      PILOT_CONCERN: instrument-companion
+      PILOT_CONCERN: capture-diagnostic
     steps:
-      - name: Fix one total deadline including setup and calibration
+      - name: Fix one diagnostic deadline including setup; no author retry
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import datetime, os
-          deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=195)
+          deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=15)
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write('PILOT_DEADLINE=' + deadline.isoformat() + '\n')
               f.write('PLAYWRIGHT_BROWSERS_PATH=' + os.path.join(os.environ['RUNNER_TEMP'], 'pilot-browsers') + '\n')
@@ -40,6 +40,7 @@ jobs:
           const tmp=process.env.RUNNER_TEMP;
           const dir=path.join(tmp,'pilot-bootstrap-evidence');fs.mkdirSync(dir,{mode:0o700});fs.writeFileSync(path.join(dir,'input.json'),JSON.stringify({at:new Date().toISOString(),sourceHead:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,controllerHead:process.env.GITHUB_SHA,bundleSha256:process.env.SOURCE_BUNDLE_SHA256,author:'NOT_RUN',exception:'Explicit operator-approved execution-location deferral for both unchanged pre-push hooks; no check waived'}),{flag:'wx',mode:0o600});
           fs.writeFileSync(path.join(tmp,'hosted-author-12667.mjs'),process.env.PILOT_CONTROLLER_JS,{flag:'wx',mode:0o600});
+          fs.writeFileSync(path.join(tmp,'pilot-observer.mjs'),process.env.PILOT_OBSERVER_JS,{flag:'wx',mode:0o600});
           fs.writeFileSync(path.join(tmp,'pilot-source-input.json'),JSON.stringify({format:'rmd-hosted-author-input-v1',head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,bundleSha256:process.env.SOURCE_BUNDLE_SHA256,bundleBytes:Buffer.from(process.env.PILOT_SOURCE_BUNDLE_B64,'base64').length,requiredPublicPrerequisite:process.env.CAPTURED_BASE,bundleBase64:process.env.PILOT_SOURCE_BUNDLE_B64}),{flag:'wx',mode:0o600});
           JS
         env:
@@ -76,7 +77,7 @@ jobs:
              cp.execFileSync('git',['-C',mirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
              git(['remote','set-url','origin','file://'+mirror]);
              assert.equal(config.controllerBranch,'run-unfiled-1792334880000');
-             assert.equal(config.controllerPriorHead,'bb1b3d73019fdedbd72311c60ab243c3e19cec8f');
+             assert.equal(config.controllerPriorHead,'e56ab0c66604355ce28935511f98ff4f82664a23');
              const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();
              assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
              assert.equal(controlGit(['rev-parse','--is-shallow-repository']),'false');assert(!fs.existsSync(path.join(config.controller,'.git/objects/info/alternates')));
@@ -124,6 +125,9 @@ jobs:
              };
              let final, companionEvidence;
              try{
+              if(config.concern==='capture-diagnostic'){
+               final=await captureDiagnostic(command,config);save('diagnostic-final.json',final);
+              }else{
               const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();
               assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
               const controllerRefLine='refs/heads/'+config.controllerBranch+' '+config.controllerHead+' refs/heads/'+config.controllerBranch+' '+config.controllerPriorHead;
@@ -146,11 +150,39 @@ jobs:
               const passed=author.status===0&&!author.error&&!author.signal&&author.outputComplete===true&&receipt.verdict==='passed'&&receipt.headSha===head&&receipt.baseSha===base&&receipt.steps.every(s=>s.ok===true)&&!receipt.tiered&&test?.judge?.complete===true&&summary?.tests>0&&summary.fail===0&&summary.cancelled===0&&summary.todo===0&&summary.pass+summary.skipped===summary.tests;
               final={pilot:12667,at:new Date().toISOString(),head,base,tree:git(['rev-parse','HEAD^{tree}']),deadline,passed,status:author.status,selectedPhysicalFiles:receipt.suites.length,summary,conditionalSkips:summary?.skipped??null,companionControls:companionEvidence??null,judge:test?.judge,slot:receipt.testSlot,executionWorkers:receipt.executionWorkers,runtimeAdmission:receipt.runtimeAdmission,capacity:receipt.capacity,finalResources:sample(),phaseAccounting:receipt.phaseAccounting??null,limits:'Exact-head author gate only. Conditional platform test skips are disclosed, never tests credited as passed; no required check or selected physical suite was manually omitted. Hosted required CI/security/review, publication/reopening and live adoption remain separate.'};
               save('final.json',final);assert(passed,'Actual maintained author gate did not qualify this head');
+              }
              }catch(error){if(!final){final={pilot:12667,at:new Date().toISOString(),head,base,deadline,passed:false,error:{message:error.message},limits:'Terminal pilot failure/refusal; no retry, deadline reset, source publication or production action.'};save('final.json',final);}throw error;}
              finally{const coverage=path.join(source,'coverage');if(fs.existsSync(coverage))for(const name of fs.readdirSync(coverage).filter(n=>n.startsWith('rmd-author-')||n.startsWith('rmd-native-runtime-')||n==='preflight-author-static.json'))fs.cpSync(path.join(coverage,name),path.join(output,name),{recursive:true,errorOnExist:true,force:false});}
              console.log(JSON.stringify(final));
             }else throw Error('Unknown pilot mode');
             function min(...values){return Math.min(...values);}
+
+            async function captureDiagnostic(command,config){
+             const {source,head,output,privateTmp,deadline,publicationBranch}=config;
+             assert(fs.lstatSync(config.observer).isFile());assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');
+             const observer=cp.spawn(process.execPath,[config.observer,String(process.pid),output,deadline],{env:process.env,stdio:['ignore','ignore','ignore']});let observerExit;
+             const closed=new Promise(resolve=>observer.once('close',(status,signal)=>{observerExit={status,signal};resolve(observerExit);}));
+             let positive,hook;
+             try{
+              const ready=path.join(output,'observer-ready.json'),until=Date.now()+10000;while(!fs.existsSync(ready)&&!observerExit&&Date.now()<until)await new Promise(r=>setTimeout(r,50));assert(fs.existsSync(ready),'Owned observer did not initialize');assert.equal(JSON.parse(fs.readFileSync(ready)).observer,observer.pid);
+              positive=await command('diagnostic-positive',['-e','setTimeout(()=>process.stdout.write("owned-observer-positive\\n"),750)']);assert.equal(positive.status,0);assert(positive.outputComplete);
+              const ref='refs/heads/'+publicationBranch+' '+head+' refs/heads/'+publicationBranch+' '+'0'.repeat(40);
+              hook=await command('diagnostic-source-pre-push',['--noprofile','--norc','-c','set -euo pipefail; printf "%s\\n" "$1" | /bin/sh hooks/pre-push origin "$2"','diagnostic-hook',ref,git(['remote','get-url','origin'])],'/bin/bash');
+             }finally{if(!observerExit)observer.kill('SIGTERM');await Promise.race([closed,new Promise(r=>setTimeout(r,3000))]);if(!observerExit){observer.kill('SIGKILL');await closed;}}
+             assert.equal(observerExit.status,0,'Observer did not close normally; diagnostic is incomplete');
+             const observed=JSON.parse(fs.readFileSync(path.join(output,'observer-final.json'),'utf8')),events=fs.readFileSync(path.join(output,'owned-process-states.ndjson'),'utf8').trim().split('\n').map(s=>JSON.parse(s)),positiveNative=JSON.parse(fs.readFileSync(path.join(output,'diagnostic-positive.native.json')));
+             assert(events.some(e=>e.kind==='state'&&e.pid===positiveNative.ownedGroup&&!['Z','not-present-or-replaced'].includes(e.state)),'Process-population positive control missing');
+             assert(!observed.truncated,'Metadata row cap reached; preserve unknown rather than diagnose absence');
+             const nested=path.join(output,'nested-census-captures');fs.mkdirSync(nested,{mode:0o700});const captures=[];let total=0;
+             for(const name of fs.readdirSync(privateTmp).filter(n=>/^rmd-census-capture-[A-Za-z0-9]+$/.test(n))){
+              const dir=path.join(privateTmp,name),st=fs.lstatSync(dir);assert(st.isDirectory()&&!st.isSymbolicLink()&&st.uid===process.getuid());const entries=fs.readdirSync(dir);let failed=false;
+              for(const entry of entries.filter(n=>n.endsWith('.json'))){const p=path.join(dir,entry),s=fs.lstatSync(p);if(!s.isFile()||s.isSymbolicLink()||s.size>2*1024**2)continue;try{const j=JSON.parse(fs.readFileSync(p,'utf8'));if(j.version===1&&j.outputComplete===false)failed=true;}catch{}}
+              if(!failed)continue;const target=path.join(nested,name);fs.mkdirSync(target,{mode:0o700});const kept=[];
+              for(const entry of entries.filter(n=>/^[A-Za-z0-9_.-]+\.(?:log|json)$/.test(n))){const p=path.join(dir,entry),s=fs.lstatSync(p);assert(s.isFile()&&!s.isSymbolicLink()&&s.uid===process.getuid()&&s.size<=2*1024**2);total+=s.size;assert(total<=16*1024**2,'Nested evidence cap reached');fs.copyFileSync(p,path.join(target,entry),fs.constants.COPYFILE_EXCL);kept.push({name:entry,bytes:s.size,sha256:hash(p)});}captures.push({directory:name,files:kept});
+             }
+             assert.equal(git(['rev-parse','HEAD']),head);assert.equal(git(['status','--porcelain']),'');
+             return{pilot:12667,at:new Date().toISOString(),kind:'capture-diagnostic-only',head,base:config.base,deadline,authorStarted:false,authorPassed:false,hook:{status:hook.status,signal:hook.signal,error:hook.error,outputComplete:hook.outputComplete,reason:hook.reason,notices:(hook.stdout+'\n'+hook.stderr).split('\n').filter(l=>l.startsWith('census-precheck: census suites NOT MEASURED')||l.startsWith('pre-push: census-precheck could not measure'))},observer:observed,nestedCaptures:captures,diagnosticCollected:true,limits:'One unchanged-source hook diagnostic with sampled PID identities/states and actual nested capture records. Not an author retry, test narrowing, qualification, root-cause proof by absence, source publication or lifecycle/resource change. No process other than our observer/group is signalled; no argv/env/prod data is collected.'};
+            }
 
             async function companionControls(command,config){
              const {source,base,head,output,privateTmp,deadline}=config;
@@ -203,6 +235,25 @@ jobs:
              fs.writeFileSync(path.join(output,'companion-controls.json'),JSON.stringify(out,null,2)+'\n',{flag:'wx',mode:0o600});return out;
             }
           PILOT_SOURCE_BUNDLE_B64: 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
+          PILOT_OBSERVER_JS: |
+            import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
+            const [ownerArg,out,deadlineArg]=process.argv.slice(2),owner=Number(ownerArg),deadline=Date.parse(deadlineArg);
+            assert(Number.isSafeInteger(owner)&&owner>0&&process.ppid===owner&&Number.isFinite(deadline));
+            const stat=pid=>{const raw=fs.readFileSync('/proc/'+pid+'/stat','utf8'),tail=raw.slice(raw.lastIndexOf(')')+2).trim().split(/\s+/);return{pid:Number(pid),ppid:Number(tail[1]),pgid:Number(tail[2]),sid:Number(tail[3]),state:tail[0],startTicks:Number(tail[19])};};
+            const initial=stat(owner),seen=new Map(),last=new Map(),file=path.join(out,'owned-process-states.ndjson');let rows=0,scans=0,unread=0,truncated=false,stopped=false;const MAX_ROWS=20000;
+            const write=row=>{if(rows>=MAX_ROWS){truncated=true;return;}fs.appendFileSync(file,JSON.stringify(row)+'\n',{mode:0o600});rows++;};
+            fs.writeFileSync(file,'',{flag:'wx',mode:0o600});write({kind:'observer-start',at:new Date().toISOString(),observer:process.pid,owner,ownerStartTicks:initial.startTicks,pidNamespace:fs.readlinkSync('/proc/self/ns/pid'),limits:'Status/stat only; no argv/environment/file contents, no signals to observed processes. Observed descendants only; very short unobserved lifetimes remain unknown.'});
+            function scan(){
+             const names=fs.readdirSync('/proc').filter(n=>/^[0-9]+$/.test(n));assert(names.length<20000);const table=new Map();for(const n of names){try{const p=stat(n);table.set(p.pid,p);}catch{unread++;}}scans++;
+             const inside=pid=>{const visited=new Set();while(pid&&table.has(pid)&&!visited.has(pid)){if(pid===process.pid)return false;if(pid===owner)return true;visited.add(pid);pid=table.get(pid).ppid;}return false;};
+             for(const p of table.values())if(p.pid!==owner&&inside(p.pid))seen.set(p.pid+':'+p.startTicks,{pid:p.pid,startTicks:p.startTicks});
+             const at=new Date().toISOString();for(const [key,identity]of seen){const p=table.get(identity.pid),value=p&&p.startTicks===identity.startTicks?p:{pid:identity.pid,startTicks:identity.startTicks,state:'not-present-or-replaced'},encoded=JSON.stringify(value);if(last.get(key)!==encoded){write({kind:'state',at,identity:key,...value});last.set(key,encoded);}}
+             return table;
+            }
+            function finish(reason){if(stopped)return;stopped=true;clearInterval(timer);let current;try{current=scan();}catch{}const remaining=[...seen.values()].flatMap(i=>{const p=current?.get(i.pid);return p&&p.startTicks===i.startTicks?[p]:[];});fs.writeFileSync(path.join(out,'observer-final.json'),JSON.stringify({at:new Date().toISOString(),owner,ownerStartTicks:initial.startTicks,reason,scans,unread,rows,truncated,trackedIdentities:seen.size,remaining,limits:'Finite sampled ownership metadata, not universal process absence, useful-progress proof, author qualification or permission to kill. Zombie and living states are retained distinctly.'},null,2)+'\n',{flag:'wx',mode:0o600});process.exit(0);}
+            scan();fs.writeFileSync(path.join(out,'observer-ready.json'),JSON.stringify({observer:process.pid,owner,ownerStartTicks:initial.startTicks}),{flag:'wx',mode:0o600});
+            const timer=setInterval(()=>{try{if(process.ppid!==owner||stat(owner).startTicks!==initial.startTicks)return finish('owner-lost');if(Date.now()>=deadline)return finish('fixed-deadline');scan();}catch(error){finish('metadata-unavailable:'+String(error.code??error.message));}},100);
+            process.once('SIGTERM',()=>finish('requested-after-hook-close'));process.once('SIGINT',()=>finish('interrupted'));
       - name: Checkout the reviewed pilot controller without persistent credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -252,11 +303,11 @@ jobs:
           import fs from 'node:fs';
           import path from 'node:path';
           const tmp=process.env.RUNNER_TEMP,workspace=process.env.GITHUB_WORKSPACE;
-          const config={concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792334880000",controllerPriorHead:"bb1b3d73019fdedbd72311c60ab243c3e19cec8f",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
+          const config={observer:path.join(tmp,"pilot-observer.mjs"),concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792334880000",controllerPriorHead:"e56ab0c66604355ce28935511f98ff4f82664a23",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
           fs.writeFileSync(path.join(tmp,'pilot-config.json'),JSON.stringify(config),{flag:'wx',mode:0o600});
           JS
           node "$RUNNER_TEMP/hosted-author-12667.mjs" prepare "$RUNNER_TEMP/pilot-config.json"
-      - name: Run real admission, slotted falsifiers, calibration and full author gate
+      - name: Run unchanged source hook with bounded descendant-state observation; not author qualification
         shell: bash
         run: |
           set -euo pipefail
@@ -274,7 +325,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: hosted-author-12667-evidence-${{ github.run_id }}
+          name: hosted-capture-diagnostic-12667-${{ github.run_id }}
           path: |-
             ${{ runner.temp }}/pilot-evidence/
             ${{ runner.temp }}/pilot-bootstrap-evidence/
