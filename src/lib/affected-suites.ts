@@ -644,7 +644,15 @@ export function changedSymbols(diffText: string, readFile: (path: string) => str
     if (header) {
       file = CODE_FILE.test(header[1]!) && SYMBOL_SOURCE.test(header[1]!) ? header[1] : undefined;
       try {
-        lines = file ? readFile(file).split("\n") : [];
+        let depth = 0;
+        lines = file ? maskLiterals(stripComments(readFile(file), { keepLines: true, conservative: true }), { conservative: true }).split("\n").map((text) => {
+          const declaration = depth === 0 ? DECL.exec(text)?.[0] : undefined;
+          for (const c of text) {
+            if ("({[".includes(c)) depth++;
+            else if (")}]".includes(c)) depth--;
+          }
+          return declaration ?? "";
+        }) : [];
       } catch (err) {
         // Deleted in the new tree: it declares nothing now, and its importers are the graph's business.
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
