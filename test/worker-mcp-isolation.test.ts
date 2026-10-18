@@ -7,6 +7,7 @@ import type { Options, HookInput } from "@anthropic-ai/claude-agent-sdk";
 import { applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpIsolationEvidence } from "../src/lib/worker-mcp-isolation.js";
 import { workerInitSummaryFromMessage } from "../src/lib/worker-init-summary.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, createClaudeExecutableCache, spawnWorker, workerLedgerFields } from "../src/lib/worker.js";
+import { implementAttemptOutcome, terminalVerdictFields } from "../src/run-task.js";
 
 const rule = "mcp__knowledge__rule";
 const init = (servers: unknown = [], tools: unknown = []) => workerInitSummaryFromMessage({
@@ -138,8 +139,36 @@ test("default workers keep no opt-in hook and opted-in unknown or leaked invento
   for (const events of [[], [{ type: "system", subtype: "init", mcp_servers: [], tools: ["mcp__external__delete"] }]]) {
     const { result } = await capture(t, true, events);
     assert.equal(result.isError, true);
+    assert.equal(result.subtype, "error_mcp_exposure", "callers grade {isError, subtype: success} as clean");
     assert.notEqual(result.mcpIsolation?.inventory, "observed-only");
   }
   const empty = await capture(t, true, [{ type: "system", subtype: "init", mcp_servers: [], tools: ["Read", "Bash"] }]);
   assert.equal(empty.result.isError, false);
+});
+
+test("an opted-in run with unknown inventory takes the error_mcp_exposure subtype and earns no credit", async t => {
+  // W1-T9573: no init event at all, so the inventory is unknown; the worker's own envelope still says "success".
+  const { result } = await capture(t, true, []);
+  assert.equal(result.mcpIsolation?.inventory, "unknown");
+  assert.equal(result.isError, true);
+  assert.equal(result.subtype, "error_mcp_exposure");
+  assert.equal(result.mcpIsolation?.original_subtype, "success", "the worker's own subtype stays on the evidence");
+  const row = workerLedgerFields(result);
+  assert.equal(row.verdict, "error_mcp_exposure");
+  assert.equal(row.mcp_isolation?.original_subtype, "success");
+  // The run-task success folds: the routing receipt and the implement attempt both grade it as no success.
+  assert.equal(terminalVerdictFields(result).success, false);
+  assert.equal(implementAttemptOutcome(result).success, false);
+});
+
+test("an opted-in run denied by both the opt-in and the default boundary keeps the worker's original subtype", async t => {
+  // A leaked account connector trips both rules on one run: the second denial must not record the first one's subtype.
+  const { result } = await capture(t, true, [{ type: "system", subtype: "init", mcp_servers: [],
+    tools: ["Read", "Bash", "mcp__claude_ai_Claude_Docs__search"] }]);
+  assert.equal(result.mcpIsolation?.inventory, "violated");
+  assert.equal(result.mcpExposure?.state, "exposed");
+  assert.equal(result.subtype, "error_mcp_exposure");
+  assert.equal(result.mcpIsolation?.original_subtype, "success");
+  assert.equal(result.mcpExposure?.original_subtype, "success", "never error_mcp_exposure");
+  assert.equal(terminalVerdictFields(result).success, false);
 });
