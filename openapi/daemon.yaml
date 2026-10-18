@@ -8829,6 +8829,32 @@ components:
         kind: {type: string}
         name: {type: string}
 
+    InboxSnapshotAttention:
+      type: object
+      description: >
+        Snapshot-owned attention from the SAME validated persisted census as this lane item, not
+        live thread coherence or write authority. Observed requires complete matching public scope
+        and key; unknown omits attention and identity. Partial/missing/invalid evidence stays unknown.
+        Lane counts are unchanged; countSemantics does not certify current human decisions.
+      oneOf:
+        - type: object
+          required: [state, coverage, countSemantics, repository, instance, snapshotKey, attention, waitingOn]
+          properties:
+            state: {type: string, enum: [observed]}
+            coverage: {type: string, enum: [complete]}
+            countSemantics: {type: string, enum: [observed_snapshot_not_verified]}
+            repository: {type: string, description: "Exact public repository of an observed snapshot."}
+            instance: {type: string, description: "Exact public instance of an observed snapshot."}
+            snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+            attention: {type: string, enum: [decision, reply, in_progress, history, awaiting_daemon]}
+            waitingOn: {type: string, enum: [operator, daemon]}
+        - type: object
+          required: [state, coverage, countSemantics]
+          properties:
+            state: {type: string, enum: [unknown]}
+            coverage: {type: string, enum: [partial, unavailable]}
+            countSemantics: {type: string, enum: [observed_snapshot_not_verified]}
+
     InboxViewItem:
       type: object
       description: >
@@ -8836,6 +8862,8 @@ components:
         unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem.
       required: [proposalId]
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10637,6 +10665,8 @@ components:
         - plain
         - draftedTasks
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10680,6 +10710,8 @@ components:
         - plain
         - spawnedAt
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10718,6 +10750,8 @@ components:
         - plain
         - reasons
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
         retirement:
           $ref: '#/components/schemas/InboxRetirement'
         needsTriageReason:
@@ -10784,6 +10818,8 @@ components:
         - plain
         - reason
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:
@@ -10850,6 +10886,8 @@ components:
         - plain
         - lane
       properties:
+        snapshotAttention:
+          $ref: "#/components/schemas/InboxSnapshotAttention"
         from:
           $ref: "#/components/schemas/InboxSender"
         receivedAt:

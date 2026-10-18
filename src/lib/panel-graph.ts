@@ -108,7 +108,7 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
 import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
@@ -126,6 +126,7 @@ import {
   readReadMarks,
   threadDetailView,
   type InboxThreadItem,
+  type ThreadSummaryView,
 } from "./inbox-responder.js";
 import {
   createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView,
@@ -2428,8 +2429,39 @@ export function readInboxStores(inboxRoot: string, proposals: ReadonlyArray<{ id
   return { fleetDecisions: narrow(fleetLaneStoreForDisplay(stateDir)), plainMessages: narrow(readPlainStore(plainStorePath(stateDir))), recommendations: narrow(readRecommendationStore(recommendationStorePath(stateDir))), provenance: inboxProvenance(inboxRoot, proposals, evidence), triage: activeTriage(stateDir, ids, evidence.nowMs ?? systemClock.now()) };
 }
 
+export type InboxSnapshotAttention =
+  | { state: "unknown"; coverage: "partial" | "unavailable"; countSemantics: "observed_snapshot_not_verified" }
+  | { state: "observed"; coverage: "complete"; countSemantics: "observed_snapshot_not_verified"; repository: string; instance: string;
+      snapshotKey: string; attention: ThreadSummaryView["attention"]; waitingOn: ThreadSummaryView["waitingOn"] };
+
+/** Pure projection of a validated retained census, never live-thread coherence or write authority. */
+export function snapshotAttentionProjection(content: PersistedInboxContent, scope?: { repository?: string; instance?: string }): (id: string) => InboxSnapshotAttention {
+  const unknown = (coverage: "partial" | "unavailable" = "unavailable"): InboxSnapshotAttention => ({ state: "unknown", coverage, countSemantics: "observed_snapshot_not_verified" });
+  const census = content.attentionCensus, owned = content.snapshotScope;
+  if (!content.snapshotKey || !validInboxSnapshot(content) || !census || census.countSemantics !== "observed_snapshot_not_verified" ||
+    scope === undefined || typeof scope.repository !== "string" || scope.repository.length === 0 || !scope.instance || owned?.repository !== scope.repository || owned.instance !== scope.instance ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository) || !/^[A-Za-z0-9_.-]{1,120}$/.test(scope.instance)) return () => unknown();
+  if (content.complete !== true || census.state === "partial") return () => unknown("partial");
+  const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };
+  const seen = new Set<string>();
+  const valid = census.items.every(item => {
+    if (!item || typeof item.proposalId !== "string" || item.threadId !== inboxThreadId(item.proposalId) || seen.has(item.proposalId) ||
+      !Object.hasOwn(counts, item.attention) || (item.waitingOn !== "operator" && item.waitingOn !== "daemon")) return false;
+    seen.add(item.proposalId); counts[item.attention]++; return true;
+  });
+  if (!valid || Object.values(census.sources).some(state => state !== "observed") ||
+    (Object.keys(counts) as Array<keyof typeof counts>).some(key => counts[key] !== census.counts[key] || counts[key] !== census.verifiedCounts[key])) return () => unknown();
+  const items = new Map(census.items.map(item => [item.proposalId, item]));
+  return id => {
+    const item = items.get(id);
+    return item ? { state: "observed", coverage: "complete", countSemantics: "observed_snapshot_not_verified", repository: scope.repository!, instance: scope.instance!,
+      snapshotKey: content.snapshotKey!, attention: item.attention, waitingOn: item.waitingOn } : unknown();
+  };
+}
+
 /** GET /v1/inbox's lanes over one pass and the stores the slow lane persisted with it (none carried: the stores now). */
-export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { plan?: Pick<Plan, "byId">; stores?: InboxStores }, inboxRoot: string) {
+export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines"> & { plan?: Pick<Plan, "byId">; stores?: InboxStores }, inboxRoot: string,
+  snapshot?: { content: PersistedInboxContent; scope?: { repository?: string; instance?: string } }) {
   const { proposals, classifications, ledgerLines } = classified;
   const stores = classified.stores ?? readInboxStores(inboxRoot, proposals, { plan: classified.plan, ledgerLines });
   // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
@@ -2543,7 +2575,11 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
       notReady: needsYou.notReady.filter(isAsk).length, declined: needsYou.declined.filter(isAsk).length,
     },
   };
-  return { ready, drafting, notReady, declined, needsYou, fleet, archived, snoozed, counts, humanGates };
+  const attention = snapshot && snapshotAttentionProjection(snapshot.content, snapshot.scope);
+  const project = <T extends { proposalId: string }>(items: T[]) => items.map(item => ({ ...item, ...(attention ? { snapshotAttention: attention(item.proposalId) } : {}) }));
+  return { ready: project(ready), drafting: project(drafting), notReady: project(notReady), declined: project(declined),
+    needsYou: { ready: project(needsYou.ready), drafting: project(needsYou.drafting), notReady: project(needsYou.notReady), declined: project(needsYou.declined) },
+    fleet: project(fleet), archived: project(archived), snoozed: project(snoozed), counts, humanGates };
 }
 
 /**
@@ -2969,7 +3005,7 @@ function slowLaneInboxOf(deps: PanelGraphDeps, persisted: PersistedInbox): SlowL
     lanes: () => {
       const stateDir = join(deps.inboxRoot, "state");
       const key = JSON.stringify([statStamp(plainStorePath(stateDir)) ?? null, statStamp(fleetLaneStorePath(stateDir)) ?? null]);
-      if (lanes?.key !== key) lanes = { key, built: inboxLanes(classified, deps.inboxRoot) };
+      if (lanes?.key !== key) lanes = { key, built: inboxLanes(classified, deps.inboxRoot, { content: persisted, scope: deps.inboxSourceIdentity ?? deps.inboxAuditScope }) };
       return lanes.built;
     },
   };
