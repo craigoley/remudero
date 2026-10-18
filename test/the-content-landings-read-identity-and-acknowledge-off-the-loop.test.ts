@@ -78,19 +78,29 @@ function fixture(nonce: string, onMain: Record<string, string>, queued: Record<s
   };
 }
 
-/** A `git` on PATH that logs `start|end <ms> <argv>` around a 0.3 s sleep and the real git. */
+/** A `git` on PATH that logs one JSON record per child edge around a 0.3 s wait and the real git. */
 function sleepingGit() {
   const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const dir = makeTempDir("w9755-sleeping-git");
   const log = join(dir, "children.log");
+  // BSD date accepts %3N literally. Use this fixture's exact Node, not a PATH-dependent
+  // executable, so both the child and the parent measure finite wall-clock milliseconds.
+  const quotedNode = `'${process.execPath.replace(/'/g, "'\\''")}'`;
+  const script = join(dir, "sleeping-git.cjs");
+  writeFileSync(script, `const { appendFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const argv = process.argv.slice(2);
+const record = phase => appendFileSync(${JSON.stringify(log)}, JSON.stringify({ phase, at: Date.now(), pid: process.pid, argv }) + "\\n");
+record("start");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+const child = spawnSync(${JSON.stringify(real)}, argv, { stdio: "inherit" });
+record("end");
+if (child.error) throw child.error;
+process.exitCode = child.status ?? 1;
+`);
   writeFileSync(join(dir, "git"), [
     "#!/bin/sh",
-    `echo "start $(date +%s%3N) $*" >> '${log}'`,
-    "sleep 0.3",
-    `'${real}' "$@"`,
-    "rc=$?",
-    `echo "end $(date +%s%3N) $*" >> '${log}'`,
-    "exit $rc",
+    `exec ${quotedNode} '${script.replace(/'/g, "'\\''")}' "$@"`,
   ].join("\n") + "\n", { mode: 0o755 });
   const saved = process.env.PATH;
   return {
@@ -99,16 +109,24 @@ function sleepingGit() {
     /** Each child, paired start to end in log order. */
     children: (): Array<{ argv: string; start: number; end: number }> => {
       const lines = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
-      const open: Array<{ argv: string; start: number }> = [];
+      const open: Array<{ argv: string; start: number; pid: number }> = [];
       const done: Array<{ argv: string; start: number; end: number }> = [];
       for (const line of lines) {
-        const [phase, at, ...argv] = line.split(" ");
-        if (phase === "start") open.push({ argv: argv.join(" "), start: Number(at) });
+        const { phase, at, pid, argv } = JSON.parse(line) as { phase: unknown; at: unknown; pid: unknown; argv: unknown };
+        assert.ok(typeof at === "number" && Number.isFinite(at), `the child clock must report finite milliseconds: ${at}`);
+        assert.ok(typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0, "each child record must carry its process identity");
+        assert.ok(Array.isArray(argv) && argv.every((arg) => typeof arg === "string"), "child arguments must remain a structured string array");
+        assert.ok(phase === "start" || phase === "end", `unknown child-log phase: ${phase}`);
+        if (phase === "start") open.push({ argv: argv.join(" "), start: at, pid });
         else {
-          const index = open.findIndex((child) => child.argv === argv.join(" "));
-          if (index >= 0) done.push({ ...open.splice(index, 1)[0]!, end: Number(at) });
+          const index = open.findIndex((child) => child.pid === pid && child.argv === argv.join(" "));
+          assert.ok(index >= 0, "each child end must pair with a recorded start");
+          const child = open.splice(index, 1)[0]!;
+          assert.ok(at > child.start, "the sleeping child must have a positive clock window");
+          done.push({ argv: child.argv, start: child.start, end: at });
         }
       }
+      assert.equal(open.length, 0, "every observed child must finish before its window is judged");
       return done;
     },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -131,6 +149,20 @@ async function beside<T>(git: ReturnType<typeof sleepingGit>, land: () => Promis
 /** The children no timer tick fell inside: each held the loop for its whole window. */
 const blocking = (children: ReturnType<ReturnType<typeof sleepingGit>["children"]>, ticks: number[]) =>
   children.filter((child) => !ticks.some((tick) => tick > child.start + 50 && tick < child.end)).map((child) => child.argv);
+
+test("W1-T9755: the fixture clock is finite and a real synchronous child still blocks the timer", async () => {
+  const git = sleepingGit();
+  try {
+    const { ticks } = await beside(git, async () => {
+      execFileSync("git", ["-c", "fixture.note=first\nsecond", "--version"], { encoding: "utf8" });
+    });
+    const children = git.children();
+    assert.equal(children.length, 1, "positive control: the real synchronous git shim ran");
+    assert.deepEqual(blocking(children, ticks), ["-c fixture.note=first\nsecond --version"], "real blocking is detected even when an argument contains a newline");
+  } finally {
+    git.cleanup();
+  }
+});
 
 test("W1-T9755: a content landing reads its identity without blocking a timer", async () => {
   const f = fixture("identity", {}, {});

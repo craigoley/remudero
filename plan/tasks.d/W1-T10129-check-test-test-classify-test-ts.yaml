@@ -4,6 +4,7 @@
   depends_on: []
   type: implement
   verify: auto
+  dispatch_hold: true  # Operator hold: title/location attribution disagrees; await W1-T10154 and owner review.
   risk: low
   priority: 1.14
   status: queued

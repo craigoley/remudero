@@ -19,7 +19,7 @@ import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { classifyContribution, feedbackContentDigest, type AdmissionSettings, type AdmissionDecision } from "./contributor-admission.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
-import { loadPlan, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
+import { loadPlan, newTestPath, retirementHoldsOrigin, taskLandedOnMain } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -480,7 +480,7 @@ export function flowFollowUpStem(stat: Pick<FlowStageStat, "cls" | "stage">): st
 }
 
 export function renderFlowFollowUp(stat: FlowStageStat, taskId: string, population: readonly number[]): { text: string; refused?: string } {
-  const testPath = `test/${flowFollowUpStem(stat)}.test.ts`;
+  const testPath = newTestPath(flowFollowUpStem(stat), [STAGE_OWNER[stat.stage]], "flow-gardener");
   const surface = stat.surface === "all" ? "" : ` on the ${stat.surface} surface`;
   const u = unitLabel(stat);
   const numbers = `p50 ${stat.current!.p50} ${u} against a ${stat.baseline!.p50} ${u} baseline`;
