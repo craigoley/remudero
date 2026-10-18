@@ -103,6 +103,7 @@ test("failed COMMIT retains the acquired record and successful ROLLBACK retires 
   f.db.exec("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)");
   f.db.exec("BEGIN IMMEDIATE"); f.db.prepare("INSERT INTO child VALUES(?)").run(7);
   assert.throws(() => f.db.exec("COMMIT"));
+  await adapter.flushReadModelTransactions();
   assert.ok(f.db.inTransaction());
   assert.equal(adapter.readReadModelTransactions(f.db.path).records[0]?.recordedState, "recorded-acquired");
   f.db.exec("ROLLBACK");
