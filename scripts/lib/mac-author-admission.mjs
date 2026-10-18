@@ -14,16 +14,18 @@ export function macPressureState(text) {
 }
 
 export function readMacAuthorAdmission(root, {platform = process.platform, scratch = tmpdir(),
-  statfs = statfsSync, spawn = spawnSync} = {}) {
+  statfs = statfsSync, spawn = spawnSync, minimumFreeBytes = MAC_AUTHOR_FREE_RESERVE_BYTES} = {}) {
   if (platform !== 'darwin') return {state: 'not-applicable', platform, reasons: []};
-  const result = {state: 'not-run', platform, minimumFreeBytes: MAC_AUTHOR_FREE_RESERVE_BYTES,
+  if (!Number.isSafeInteger(minimumFreeBytes) || minimumFreeBytes <= 0) throw new Error('invalid author disk reserve');
+  const result = {state: 'not-run', platform, minimumFreeBytes,
     workspaceFreeBytes: null, scratchFreeBytes: null, pressure: 'unknown', reasons: []};
   for (const [key, path] of [['workspaceFreeBytes', root], ['scratchFreeBytes', scratch]]) {
     try {
       const fs = statfs(path), bytes = fs.bavail * fs.bsize;
       if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('invalid filesystem capacity');
       result[key] = bytes;
-      if (bytes < MAC_AUTHOR_FREE_RESERVE_BYTES) result.reasons.push(`${key}:below-existing-20GiB-reserve`);
+      if (bytes < minimumFreeBytes) result.reasons.push(`${key}:${minimumFreeBytes === MAC_AUTHOR_FREE_RESERVE_BYTES
+        ? 'below-existing-20GiB-reserve' : 'below-bounded-job-reserve'}`);
     } catch (error) {
       result.reasons.push(`${key}:unavailable:${error.code ?? error.message}`);
     }

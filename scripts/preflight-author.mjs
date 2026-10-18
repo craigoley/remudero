@@ -3,8 +3,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { affectedSelectionOrFull, changedSymbols, isPlanOnlyDiff, planOnlySelectionOrFull, readAffectedSuitesInput,
-  readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
+import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
+  planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
 import { callerReachableSuites } from '../src/lib/ci-parity.ts';
 import { acquireTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
@@ -123,6 +123,58 @@ export function fittingSubset(suites, manifest, budget, { changed = [], narrow =
   }
   const kept = new Set(ran);
   return { ran: ran.sort(), skipped: [...suites].filter((suite) => !kept.has(suite)).sort(), costMs: used };
+}
+
+/**
+ * W1-T9953 — a full fallback is never run whole: CI runs the full suite on every PR anyway, hours sooner.
+ * The changed files that force a full run on their own are SET ASIDE; the partial candidate set is the
+ * changed tests, the suites reaching a set-aside file through the import/named-path graph, and the
+ * selection `select` gives for the modelled rest. Every other suite is CI's full run. A part that cannot be
+ * read is named in `unavailable`, never silently empty.
+ */
+export function fullFallbackPartialSet({ root, changed, suites, fullRun, range, select,
+  readInput = (files) => readAffectedSuitesInput(root, files) }) {
+  const known = new Set(suites);
+  const setAside = fullRun ? changed.filter((file) => fullRunTrigger([file], false) !== undefined) : [];
+  const asideSet = new Set(setAside);
+  const changedTests = changed.filter((file) => known.has(file));
+  const unavailable = [];
+  const setAsideReaders = [];
+  if (setAside.length > 0) {
+    try {
+      const { importers } = buildAffectedSuitesGraph(readInput(setAside).files, setAside);
+      const seen = new Set(), queue = [...setAside];
+      while (queue.length > 0) {
+        const file = queue.shift();
+        if (seen.has(file)) continue;
+        seen.add(file);
+        if (known.has(file) && !asideSet.has(file)) setAsideReaders.push(file);
+        for (const next of importers.get(file) ?? []) queue.push(next);
+      }
+    } catch (error) {
+      unavailable.push(`set-aside readers could not be read: ${error.message}`);
+    }
+  }
+  const rest = changed.filter((file) => !asideSet.has(file));
+  let modelled = [];
+  if (setAside.length > 0 && rest.length > 0) {
+    try {
+      const restSelection = select(rest, range);
+      if (restSelection.fullRun) unavailable.push(`modelled rest fell back too: ${restSelection.reasons.join('; ')}`);
+      else modelled = (restSelection.narrow?.length ? restSelection.narrow : restSelection.suites).filter((suite) => known.has(suite));
+    } catch (error) {
+      unavailable.push(`modelled rest could not be selected: ${error.message}`);
+    }
+  }
+  const tiers = { changed: [...new Set(changedTests)].sort(), setAsideReaders: [...new Set(setAsideReaders)].sort(),
+    modelled: [...new Set(modelled)].sort() };
+  return { setAside, tiers, suites: [...new Set([...tiers.changed, ...tiers.setAsideReaders, ...tiers.modelled])].sort(),
+    ...(unavailable.length > 0 ? { unavailable } : {}) };
+}
+
+/** The W1-T9953 sentence a full-fallback run prints, ran or not: what ran locally and what is CI's. */
+export function partialSentence(ran, total, setAside) {
+  return `full-fallback: PARTIAL — ran ${ran} of ${total} suite(s) chosen by reach and measured cost; CI's full run is the check for ${setAside.length > 0 ? setAside.join(', ') : 'the cause of the fallback'} and the other ${total - ran}`;
 }
 
 export function authorEnvironment(parent) {
@@ -379,6 +431,14 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     // A plan-only selection may name no suite: plan lint is then its whole check, and it says so.
     if (receipt.suites.length === 0 && receipt.selection !== 'plan-only') throw new Error('no verified test files in the checkout');
     console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s) (floor ${receipt.floorSize ?? 'full'}, narrow ${receipt.narrowSize ?? 'none'}); head=${receipt.headSha}, base=${receipt.baseSha}`);
+    // W1-T9953: name why, and set aside what forced it; the partial set is all that may run locally.
+    let partial;
+    if (receipt.selection === 'full-fallback') {
+      for (const reason of receipt.reasons) console.log(`full-fallback because: ${reason}`);
+      partial = fullFallbackPartialSet({ root, changed: receipt.changedFiles, suites: receipt.suites,
+        fullRun: Boolean(selection.fullRun), range: `${receipt.baseSha}...${receipt.headSha}`, select });
+      if (partial.unavailable) for (const why of partial.unavailable) console.log(`full-fallback partial set: ${why}`);
+    }
     if (!values['dry-run']) {
       const dependencyBefore=authorDependencyProvenance(root);
       receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
@@ -441,6 +501,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (deadline === undefined) return;
             if (!['acquired', 'inherited'].includes(slot.outcome)) throw new Error('runtime admission requires a real slot; unslotted fallback is not deadline-fit capacity');
             runtimeProfile ??= readRuntimeProfile(root, values['runtime-profile'], runtimeBindings(root, receipt.headSha, authorEnvironment(process.env)));
+            // An empty full-fallback partial set runs no suite: the profile is still validated, nothing is priced.
+            if (files.length === 0) return;
             runtimeManifest ??= JSON.parse(readFileSync(join(root, 'scripts/test-tier-manifest.json'), 'utf8'));
             const decision = runtimeSelectionFit(files, runtimeManifest, runtimeProfile, {
               workers, deadline, ...(staticReserveMs === undefined ? {} : { staticReserveMs }),
@@ -449,7 +511,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             progress({ name: 'runtime-admission', stage, fits: decision.fits });
             if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
           };
-          admitRuntime('before-static');
+          admitRuntime('before-static', undefined, partial ? partial.suites : receipt.suites);
           const staticCapacity = admitHost('static-preflight');
           if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
@@ -480,15 +542,37 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             const legacyBudget = hostBudget((host ?? readHostCapacityInputs)(), { slotConcurrency: slot.concurrency });
             // A deadline without a validated native profile was refused before static work.
             // Never expand workers or restart the deadline to admit a larger selection.
-            const budget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
+            const nativeBudget = runtimeProfile ? deadlineHostBudget(legacyBudget, { deadline }) : legacyBudget;
+            // W1-T9953: a full fallback is priced against the HOST, never the deadline; a deadline may only shrink it.
+            const budget = partial && nativeBudget.budgetMs > legacyBudget.budgetMs ? legacyBudget : nativeBudget;
             const executionWorkers = runtimeProfile ? budget.workers : Math.min(AUTHOR_MAX_WORKERS, slot.concurrency);
             receipt.executionWorkers = executionWorkers;
-            reportManifestFallbacks(receipt.suites, manifest);
-            const verdict = capacityVerdict(receipt.suites, manifest, budget);
+            const priced = partial ? partial.suites : receipt.suites;
+            reportManifestFallbacks(priced, manifest);
+            const verdict = capacityVerdict(priced, manifest, budget);
             receipt.capacity = verdict;
             let ranSuites = receipt.suites;
             let notRun = false;
-            if (!verdict.fits) {
+            if (partial) {
+              // Changed tests, then set-aside readers, then the modelled rest, each cheapest first, within the budget.
+              const subset = fittingSubset(partial.suites, manifest, budget, { changed: partial.tiers.changed,
+                narrow: partial.tiers.setAsideReaders, includeRest: true });
+              receipt.selectedArm = 'full-fallback';
+              receipt.selection = 'over-capacity';
+              const sentence = partialSentence(subset.ran.length, receipt.suites.length, partial.setAside);
+              receipt.partial = { reasons: receipt.reasons, setAside: partial.setAside, tiers: partial.tiers,
+                ran: subset.ran, leftToCi: receipt.suites.length - subset.ran.length, costMs: subset.costMs,
+                ...(partial.unavailable ? { unavailable: partial.unavailable } : {}) };
+              if (subset.ran.length === 0) {
+                notRun = true;
+                receipt.affectedTestsNotRunReason = sentence;
+                console.log(`affected-tests: NOT RUN — ${sentence}`);
+              } else {
+                ranSuites = subset.ran;
+                receipt.tiered = { ran: subset.ran, skipped: subset.skipped, costMs: subset.costMs };
+                console.log(sentence);
+              }
+            } else if (!verdict.fits) {
               const subset = fittingSubset(receipt.suites, manifest, budget, { changed: receipt.changedFiles,
                 narrow: narrow ?? [], includeRest: receipt.selection !== 'full-fallback' });
               receipt.selectedArm = receipt.selection;
@@ -595,6 +679,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   return ['passed', 'not-run'].includes(receipt.verdict) ? 0 : receipt.verdict === 'over-capacity' ? OVER_CAPACITY_EXIT : 1;
 }
 
-if (isMainModule(import.meta.url)) process.exit(guardedAuthorEntry(process.argv.slice(2), {
-  root: REPO_ROOT, runAuthor: (argv, deps) => main(argv, deps),
-}));
+if (isMainModule(import.meta.url)) {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--low-footprint')) {
+    const {runLowFootprintAuthor} = await import('./lib/author-low-footprint.mjs');
+    process.exitCode = await runLowFootprintAuthor(argv, {
+      root: REPO_ROOT, publicationIdentity: authorPublicationIdentity, authorEnvironment, completeTestResult,
+    });
+  } else process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT, runAuthor: (args, deps) => main(args, deps)});
+}

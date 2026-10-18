@@ -4,7 +4,7 @@
   depends_on: [W1-T9284]
   priority: 1
   type: implement
-  verify: human
+  verify: auto
   risk: high
   author_class: operator
   origin: "2026-10-17 operator-approved gardener admission follow-up"
@@ -12,7 +12,7 @@
   files:
     - src/lib/inbox-gardener.ts
     - test/the-inbox-gardener-admits-a-bounded-production-sized-registry.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A read-only production check on 2026-10-17 parsed all 1400 core proposals from a
@@ -47,3 +47,11 @@
     require the same tests to pass, including oversized valid JSON, count, ownership and
     protected-purpose controls. A mocked capture or a test that only mirrors a constant
     is not the acceptance proof. Keep raw summaries and the exact tested committed tree.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The plan describes a bounded registry-admission fix with explicit safeguards; the gates state no concerning action, and the declared verification is a unit test. No diff or bounded actual-change view is supplied."
+    judged_at: "2026-10-17T23:53:50.413Z"
+    pin: "d51f985ad815c203bc11ae2ad833b1c2586ccc2cad7badcd1989ba98bca56717"

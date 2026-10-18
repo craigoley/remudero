@@ -8,6 +8,7 @@ const SCRIPT = fileURLToPath(import.meta.url);
 export const AUTHOR_OUTPUT_LIMIT_BYTES = 100 * 1024 * 1024;
 export const AUTHOR_STEP_RUNTIME_MS = 4 * 60 * 60 * 1000;
 export const AUTHOR_CAPTURE_PARENT_ENV = 'RMD_AUTHOR_CAPTURE_PARENT_PID';
+const GROUP_SHUTDOWN_GRACE_MS = 2000;
 
 // This marker only opts an immediate owned child into cancellation; it grants no authority.
 const inheritedParentTracking = () => process.ppid > 0 && process.env[AUTHOR_CAPTURE_PARENT_ENV] === String(process.ppid);
@@ -95,7 +96,7 @@ async function spool(config) {
   const stop = (message, code) => {
     error ??= { message, code };
     kill('SIGTERM');
-    escalation ??= setTimeout(() => kill('SIGKILL'), 2000).unref();
+    escalation ??= setTimeout(() => kill('SIGKILL'), GROUP_SHUTDOWN_GRACE_MS).unref();
   };
   function record(fd, chunk) {
     observedBytes += chunk.length;
@@ -131,9 +132,19 @@ async function spool(config) {
   }
   const native = await new Promise((resolve) => child.once('close', (status, signal) => resolve({ status, signal })));
   const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch (cause) { return cause.code !== 'ESRCH'; } };
+  // 'close' proves the leader and its stdio closed, not that disconnected descendants ended.
+  // This group was created by this capture; never reap a PID or group from an external receipt.
+  if (!spawnFailed && child.pid && process.platform !== 'win32' && !escalation && groupAlive()) {
+    // esbuild/loader helpers can finish their normal shutdown just after leader.close.
+    // Give natural group closure the existing teardown grace, not an immediate false
+    // refusal. The original runtime, output and parent-loss monitors stay active.
+    const drainUntil = performance.now() + GROUP_SHUTDOWN_GRACE_MS;
+    while (!escalation && groupAlive() && performance.now() < drainUntil) await new Promise((resolve) => setTimeout(resolve, 50));
+    if (!escalation && groupAlive()) stop('native leader closed with live descendants', 'ERR_AUTHOR_DESCENDANTS_ALIVE');
+  }
   // A leader that obeyed SIGTERM closes the pipes while members that ignored it live on: finish the escalation.
   while (escalation && child.pid && process.platform !== 'win32' && groupAlive() &&
-    !(killedAt !== undefined && performance.now() - killedAt > 2000)) await new Promise((resolve) => setTimeout(resolve, 50));
+    !(killedAt !== undefined && performance.now() - killedAt > GROUP_SHUTDOWN_GRACE_MS)) await new Promise((resolve) => setTimeout(resolve, 50));
   closed = true;
   if (heartbeat) {
     // Withdraw the cadence only once the step's whole process group is gone (signal 0 delivers nothing).

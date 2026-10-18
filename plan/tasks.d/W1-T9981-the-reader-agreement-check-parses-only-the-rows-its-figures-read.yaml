@@ -14,7 +14,7 @@
     - src/lib/reader-agreement.ts
     - src/lib/status.ts
     - test/the-reader-agreement-check-parses-only-the-rows-its-figures-read.test.ts
-  status: queued
+  status: merged
   priority: 1  # operator-2026-10-17: the post-boot spike behind the 02:33Z host collapse
   attempts: 0
   rationale: |

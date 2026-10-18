@@ -1,0 +1,30 @@
+- id: W1-T10142
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — inbox.thread_list_classification_failed landed 18 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.3
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:inbox.thread_list_classification_failed"
+  files:
+    - test/scout-inbox-thread-list-classification-failed.test.ts
+  acceptance:
+    - claim: "inbox.thread_list_classification_failed stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10142: inbox.thread_list_classification_failed no longer recurs\" in test/scout-inbox-thread-list-classification-failed.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step inbox.thread_list_classification_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 15 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single new test file (test/scout-inbox-thread-list-classification-failed.test.ts). Nothing in the description or files list touches secrets, auth, permissions, deletion, merge/deploy/infra/review policy, or irreversible actions.; on the change's description/files alone, no diff was read — The task asks for a root-cause fix rather than hiding rows, and the acceptance is a grep for a named test, which is verifiable. The cause is not yet located, though, so the fix may touch files beyond the declared one.; on the change's description/files alone, no diff was read — The family track record is weak (0 merged, 1 declined; Beta mean 0.33), and the task cites no PRs. This warrants scrutiny, but the normal CI and review steps still apply, and none of the escalation criteria is met."
+    judged_at: "2026-10-18T12:33:44.386Z"
+    pin: "303668bda4b7a237d8fa303c350dafddf7d7a86b87825d2a368c1567972aa625"

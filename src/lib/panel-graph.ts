@@ -111,6 +111,7 @@ import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox } from "./fleet-lane.js";
 import { inboxOwner, inboxSender, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
 import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
@@ -138,7 +139,6 @@ import {
   createAnchorGrepCache,
   createFragmentMemo,
   gitGrepAnchorTrue,
-  ledgerProposalVerdicts,
   readOriginMainSha,
   parseDraftCache,
   parseDraftInFlightCache,
@@ -1894,6 +1894,8 @@ export interface ClassifiedInbox {
   ledgerLines: LedgerLines;
   projection: Map<string, StatusProjection>;
   attentionEvidence?: InboxAttentionEvidence;
+  /** Every decline and restore receipt this pass read, when its archive read was complete: what the slow lane stores. */
+  verdictReceipts?: readonly VerdictReceipt[];
 }
 
 function statStamp(path: string): string | undefined {
@@ -1933,7 +1935,7 @@ interface InboxClassifyState {
   grep: AnchorGrepCache;
   fragments: FragmentMemo;
   /** The last ledger read, reused while the ledger's stamp is unchanged. */
-  ledger?: { stamp: string | null; lines: LedgerLines; verdictDigest: string };
+  ledger?: { stamp: string | null; receiptsKey?: string; lines: LedgerLines; verdictDigest: string };
   last?: { key: string; plan: Plan; planKey?: string; result: ClassifiedInbox; /** Epoch millis the pass that made `result` completed. */ at: number };
   generation?: object;
   /** A sliced refresh in progress, so a second caller with the same inputs awaits it instead of starting another. */
@@ -1978,6 +1980,7 @@ function prepareInboxPass(
   grepAnchorTrue: (anchor: EvidenceAnchor) => boolean,
   boardReferents: ReturnType<typeof inboxBoardReferents>,
   archiveReleases: ReadonlyMap<string, string> = new Map(),
+  verdictReceipts: readonly VerdictReceipt[] = readVerdictReceipts(join(deps.inboxRoot, "state")),
 ): InboxPass {
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
   const proposals = parseProposalRegistry(readFileIfExists(registryPath));
@@ -1995,7 +1998,7 @@ function prepareInboxPass(
   // ledger already carries `ratify.approved` for, even when the registry entry itself
   // still looks READY (a drifted write) — re-derived from the ledger on every pass,
   // never trusted from the registry's own state.
-  const verdicts = ledgerProposalVerdicts(ledgerLines);
+  const verdicts = proposalVerdictsWithReceipts(ledgerLines, verdictReceipts);
   const releasedHumanTasks = releasedHumanTaskIds(ledgerLines);
   // W1-T3518: the last adoption scan's own output. Same posture as the ledger read — read
   // ONCE per pass here, re-derived every pass that recomputes.
@@ -2091,8 +2094,8 @@ function releasedHumanTaskIds(lines: LedgerLines): Set<string> {
 
 /** Every release is already a `ratify.approved` row, so this existing digest also invalidates
  * the inbox memo when one lands; no second scan or release-specific fingerprint is needed. */
-function ledgerVerdictDigest(lines: LedgerLines): string {
-  const { ratified, declined } = ledgerProposalVerdicts(lines);
+function ledgerVerdictDigest(lines: LedgerLines, receipts: readonly VerdictReceipt[]): string {
+  const { ratified, declined } = proposalVerdictsWithReceipts(lines, receipts);
   return JSON.stringify([[...ratified].sort(), [...declined].sort((x, y) => (x[0] < y[0] ? -1 : 1))]);
 }
 
@@ -2106,6 +2109,7 @@ interface InboxFingerprint {
   boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
   archiveReleases?: ReadonlyMap<string, string>;
+  verdictReceipts: readonly VerdictReceipt[];
 }
 
 /**
@@ -2114,16 +2118,18 @@ interface InboxFingerprint {
  * merged facts), never its raw stamp: the daemon appends to it continuously, and a stamp would recompute on every
  * unrelated row.
  */
-function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan, archiveReleases?: ReadonlyMap<string, string>): InboxFingerprint {
+function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan, archiveReleases?: ReadonlyMap<string, string>,
+  verdictReceipts: readonly VerdictReceipt[] = readVerdictReceipts(join(deps.inboxRoot, "state"))): InboxFingerprint {
   const stat = deps.inboxStatFile ?? statStamp;
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
   const stamps = [registryPath, draftsPath, inflightPath, adoptionPath, inboxGardenerPath(join(deps.inboxRoot, "state")), inboxThreadStorePath(deps.inboxRoot)].map((p) => stat(p) ?? null);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
 
   const ledgerStamp = stat(deps.ledgerPath) ?? null;
-  if (state.ledger === undefined || state.ledger.stamp !== ledgerStamp) {
-    const lines = readLedgerLines(deps.ledgerPath);
-    state.ledger = { stamp: ledgerStamp, lines, verdictDigest: ledgerVerdictDigest(lines) };
+  const receiptsKey = createHash("sha256").update(JSON.stringify(verdictReceipts)).digest("hex");
+  if (state.ledger === undefined || state.ledger.stamp !== ledgerStamp || state.ledger.receiptsKey !== receiptsKey) {
+    const lines = state.ledger?.stamp === ledgerStamp ? state.ledger.lines : readLedgerLines(deps.ledgerPath);
+    state.ledger = { stamp: ledgerStamp, receiptsKey, lines, verdictDigest: ledgerVerdictDigest(lines, verdictReceipts) };
   }
   const { lines: ledgerLines, verdictDigest } = state.ledger;
 
@@ -2140,7 +2146,7 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
   const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
   const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
-  return { key, sha, plan, planKey, projection, boardReferents, ledgerLines, archiveReleases };
+  return { key, sha, plan, planKey, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
 }
 
 /** The previous result, when `fp` names exactly its inputs and the commit is known. Its ledger rows are this pass's. */
@@ -2164,7 +2170,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases);
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
   if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
   return result;
@@ -2201,21 +2207,25 @@ export async function classifyAllProposalsSliced(
 ): Promise<ClassifiedInbox> {
   const state = inboxClassifyState(deps);
   const retained = await readRetainedHumanReleases(deps);
-  const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts);
+  const stored = readVerdictReceipts(join(deps.inboxRoot, "state"));
+  const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts, retained.verdictReceiptsRead ? mergeVerdictReceipts(stored, retained.verdictReceipts) : stored);
   const attentionEvidence = attentionEvidenceFor(retained, fp.ledgerLines, fp.plan, fp.projection);
+  // Only a complete archive read may replace the store; a partial one keeps what the store already holds.
+  const receipts = retained.verdictReceiptsRead ? { verdictReceipts: mergeVerdictReceipts(fp.verdictReceipts, fp.ledgerLines.flatMap((row) => verdictReceiptOf(row) ?? [])) } : {};
   const reused = reusableResult(state, fp);
-  if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence)
-    ? reused : { ...reused, attentionEvidence };
+  if (reused !== undefined) return JSON.stringify(reused.attentionEvidence) === JSON.stringify(attentionEvidence) &&
+    (receipts.verdictReceipts === undefined || JSON.stringify(reused.verdictReceipts) === JSON.stringify(receipts.verdictReceipts))
+    ? reused : { ...reused, attentionEvidence, ...receipts };
   if (state.pending !== undefined && state.pending.generation === state.generation && state.pending.key === fp.key && state.pending.plan === fp.plan) return state.pending.promise;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases);
+  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const run = async (): Promise<ClassifiedInbox> => {
     const classifications: InboxClassification[] = [];
     for (let i = 0; i < pass.proposals.length; i += INBOX_CLASSIFY_SLICE) {
       if (i > 0) await yieldNow();
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
-    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence };
+    const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence, ...receipts };
     if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
     return result;
   };
@@ -2674,7 +2684,11 @@ const attentionLedgerMemos = new WeakMap<PanelGraphDeps, ReturnType<typeof creat
 function attentionLedgerMemo(deps: PanelGraphDeps) {
   let memo = attentionLedgerMemos.get(deps);
   if (!memo) {
-    memo = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "ratify.approved" || row.step === "verify_human.judged"));
+    memo = createLedgerRotationMemo((rows) => rows.flatMap((row): Array<Record<string, unknown>> => {
+      if (row.step === "ratify.approved" || row.step === "verify_human.judged") return [row];
+      const receipt = verdictReceiptOf(row);
+      return receipt ? [{ ...receipt }] : [];
+    }));
     attentionLedgerMemos.set(deps, memo);
   }
   return memo;
@@ -2693,9 +2707,10 @@ function humanReleaseReceipt(row: Record<string, unknown>): string {
  * in the classifier fingerprint and must not be scanned a second time on each Inbox read. */
 async function readRetainedHumanReleases(deps: PanelGraphDeps) {
   const ledger = await readLedgerUnionRecordsMemoized(dirname(deps.ledgerPath), attentionLedgerMemo(deps), {
-    step: ["ratify.approved", "verify_human.judged"], readLiveRecords: () => [], refuseIncomplete: true,
+    step: ["ratify.approved", "verify_human.judged", ...PROPOSAL_VERDICT_RECEIPT_STEPS], readLiveRecords: () => [], refuseIncomplete: true,
   });
   const receipts = new Map<string, string>();
+  const verdictReceipts = ledger.ok ? ledger.rows.flatMap((row) => verdictReceiptOf(row) ?? []) : [];
   const judges = new Map<string, Record<string, unknown>>();
   if (ledger.ok) {
     for (const row of ledger.rows) {
@@ -2708,7 +2723,7 @@ async function readRetainedHumanReleases(deps: PanelGraphDeps) {
     }
   }
   const archiveLedger = ledger.unread.length > 0 || ledger.archiveCount === 0 ? "unavailable" as const : "partial" as const;
-  return { receipts, judges, archiveLedger };
+  return { receipts, judges, archiveLedger, verdictReceipts, verdictReceiptsRead: ledger.ok };
 }
 
 function attentionEvidenceFor(retained: Awaited<ReturnType<typeof readRetainedHumanReleases>>, live: LedgerLines, plan: Plan, projection: ReadonlyMap<string, StatusProjection>): InboxAttentionEvidence {

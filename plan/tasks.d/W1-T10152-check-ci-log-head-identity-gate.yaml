@@ -1,0 +1,53 @@
+- id: W1-T10152
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:head-identity-gate cost 17.1 PR minute(s) across 17 round(s) on 17 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.29
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:head-identity-gate"
+  files:
+    - .github/workflows/head-identity-gate.yml
+    - test/check-ci-log-head-identity-gate.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:head-identity-gate"
+      proof: "grep: test(\"W1-T10152: check:ci-log:head-identity-gate is prevented, not retried\" in test/check-ci-log-head-identity-gate.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:head-identity-gate's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:head-identity-gate cost 17.1 PR minute(s) (seven-day half-life) across 17 fix round(s) on 17 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/head-identity-gate.yml: declares job head-identity-gate for head-identity-gate
+
+    RECENT ROUNDS (newest first):
+    - PR #12575 (https://github.com/craigoley/remudero/pull/12575) at 2026-10-17T15:26:28.529Z: ci-log round — rule-checks: test/containment.test.ts; acceptance-author-gate; proof-discrimination; head-identity-gate
+        failing tests: test/containment.test.ts; test/docs-claims.test.ts
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/containment.test.ts:1:1
+          | ✖ test/containment.test.ts (856.81369ms)
+          |   'test failed'
+          | 
+          |   [docs-ws-stage-not-ws0-spike] README.md does not claim the repo is still the WS-0 spike, or that run-task.ts becomes real in WS-1 -- WS-1 closed 2026-07-15 and run-task.ts is real, dispatched code today.
+          |   plan_section: README.md#whats-here-today
+          |   assertion:    node --test --import tsx --test-name-pattern "README.md does not claim the repo currently contains the WS-0 spike" test/docs-claims.test.ts
+          |   exit code:    1
+          |   stdout: node:internal/modules/esm/resolve:272
+          |     throw new ER
+    - PR #11319 at 2026-10-13T12:53:06.719Z: ci-log round — ci-shard (1/8): test/shadow-comparisons-follow-the-view-owner.test.ts; head-identity-gate
+    - PR #10450 at 2026-10-09T19:33:57.480Z: ci-log round — head-identity-gate
+    - PR #9972 at 2026-10-07T23:08:39.241Z: ci-log round — head-identity-gate
+    - PR #9415 at 2026-10-05T21:42:47.290Z: ci-log round — test-slow; ci; coverage-ratchet; ci-shard (4/8); coverage-shard (6/8); coverage-shard (7/8); mutation-ratchet; ci-shard (1/8); coverage-shard (1/8); coverage-shard (8/8); coverage-shard
+
+    WHAT THE LAST RUNG TRIED: W1-T5116 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:head-identity-gate in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

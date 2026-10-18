@@ -68,7 +68,7 @@ export interface CauseMetric {
   /** The cause's count in `[fromMs, toMs)`. `{unreadable}` when the evidence could not be read. */
   window: (key: string, fromMs: number, toMs: number) => MetricWindow;
   /** The nouns a reason line uses: `{noun: "round", share: "share of fix rounds"}`. */
-  label: { noun: string; share: string };
+  label: { noun: string; share: string; sampleUnit?: "count" };
 }
 
 export type UnmeasurableWhy = "no-merge-credit" | "no-before-evidence" | "metric-unreadable" | "key-drift";
@@ -132,7 +132,7 @@ const inWindow = (atMs: number, from: number, to: number): boolean => Number.isF
 /** ci-friction: the cause's share of fix rounds. */
 export function ciFrictionRoundsMetric(rounds: readonly RemedyRound[]): CauseMetric {
   return {
-    family: "ci-friction", label: { noun: "round", share: "share of fix rounds" },
+    family: "ci-friction", label: { noun: "round", share: "share of fix rounds", sampleUnit: "count" },
     parseOrigin: origin => parseCiFrictionOrigin(origin),
     window: (key, from, to) => {
       const w = empty();
@@ -181,7 +181,7 @@ export interface FlakeLedgerRow { step?: string; ts?: string; file?: unknown; pr
 export function flakeIncidentMetric(rows: readonly FlakeLedgerRow[], touchesFile: (pr: number, file: string) => boolean = () => false): CauseMetric {
   const prs = (v: unknown): number[] => (Array.isArray(v) ? v : [v]).filter((n): n is number => Number.isSafeInteger(n) && (n as number) > 0);
   return {
-    family: "flake-incident", label: { noun: "PR", share: "share of PRs failed by the file" },
+    family: "flake-incident", label: { noun: "PR", share: "share of PRs failed by the file", sampleUnit: "count" },
     parseOrigin: origin => {
       if (!origin.startsWith("flake-incident:")) return undefined;
       const file = origin.slice("flake-incident:".length).split("#")[0]!;

@@ -13,7 +13,7 @@
   files:
     - src/run-task.ts
     - test/a-new-test-is-committed-through-the-subpath-alias.test.ts
-  status: queued
+  status: merged
   priority: 1  # each miss costs a CI round and a fix round, and the shape recurs until every neighbouring test is migrated
   attempts: 0
   rationale: |

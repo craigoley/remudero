@@ -14,7 +14,7 @@
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/a-review-fail-handed-back-for-the-sandbox-is-re-reviewed-on-a-newer-image.test.ts
-  status: queued
+  status: merged
   priority: 1  # every PR whose proofs need a binary the reviewer image lacks stays review-failed forever after the image is fixed, and spends fix rounds that cannot help
   attempts: 0
   rationale: |

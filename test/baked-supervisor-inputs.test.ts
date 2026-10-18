@@ -1,3 +1,4 @@
+// @census-closure: src/lib/serve-supervisor-main.ts
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";

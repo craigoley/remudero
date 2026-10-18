@@ -1,0 +1,32 @@
+- id: W1-T10121
+  title: Widen W1-T3801 scope to include scripts/test-tier-manifest.json
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: high
+  band_meaning: span
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=f3fd6235e2711a72
+  attempts: 0
+  files:
+    - scripts/test-tier-manifest.json
+    - scripts/test-tier-manifest.mjs
+    - test/gate-posture-production-adapter.test.ts
+  acceptance:
+    - claim: W1-T3801 scope includes scripts/test-tier-manifest.json allowing seed operation
+      proof: "grep: W1-T3801 in scripts/test-tier-manifest.json"
+  origin: architect
+  rationale: >-
+    From the 2026-09-21 follow-up on https://github.com/craigoley/remudero/pull/6382, ratified via
+    rmd approve:
+  
+    follow-up harvest [task]: seed `scripts/test-tier-manifest.json` for
+    `test/gate-posture-production-adapter.test.ts` via `node scripts/test-tier-manifest.mjs
+    --seed` (adds one `"...": 0` entry) so `test-slow`'s tier-check step passes — this is outside
+    W1-T3801's declared scope (only `src/lib/gate-posture.ts`, `src/run-task.ts`,
+    `test/gate-posture-production-adapter.test.ts`) and isn't covered by the
+    `REGENERABLE_ARTIFACT_GENERATORS` registry exception, so it needs either a scope widening or a
+    small separate PR before this branch's CI can go green. — from W1-T3801 (run
+    DAEMON-1789988067712, https://github.com/craigoley/remudero/pull/6382)

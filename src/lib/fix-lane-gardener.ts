@@ -30,6 +30,9 @@ import {
   type Charge, type Episode, type FlowAction, type Inventory, type LadderKind, type PrOutcome,
 } from "./flow-remedy-gardener.js";
 import type { LedgerRecord } from "./retro.js";
+import { loadPlanForLayout } from "./plan.js";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { fixTranscriptsFromLedger, reflectOnTranscripts, splitHeldOut } from "./prompt-evolution.js";
 import {
   interventionFromLedgerRow, interventionKey, interventionLedgerFields, OPERATOR_INTERVENTION_STEP, prCauseClass, type OperatorInterventionRow,
 } from "./operator-interventions.js";
@@ -556,9 +559,41 @@ function summaryOf(inv: FixLaneInventory, now: number): string {
   return lines.join("\n") + "\n";
 }
 
+function promptLessonsShadow(deps: GardenerDeps, records: readonly LedgerRecord[], now: number): string {
+  const heading = "\n## Prompt lessons (shadow — nothing installed)\n\n";
+  try {
+    const window = records.filter(row => {
+      const ts = Date.parse(row.ts ?? "");
+      return ts >= now - FIX_LANE_WINDOW_MS && ts <= now;
+    });
+    let taskTypes: Map<string, string> | undefined;
+    const { transcripts, unmodelled } = fixTranscriptsFromLedger(window, id => {
+      taskTypes ??= new Map(loadPlanForLayout(resolveRepoLayout(deps.repoRoot)).tasks.map(task => [task.id, task.type]));
+      return taskTypes.get(id);
+    });
+    const lines = [`Unmodelled refused rounds: ${unmodelled}.`, ""];
+    for (const model of [...new Set(transcripts.map(t => t.model))].sort()) {
+      const own = transcripts.filter(t => t.model === model);
+      const { train } = splitHeldOut(own, "fix-lane-prompt-shadow-v1");
+      const lessons = reflectOnTranscripts(train).slice(0, 16).map(r => ({
+        reason: r.reason.slice(0, 320), lesson: r.lesson.slice(0, 320), task_shapes: r.taskShapes.slice(0, 16), count: r.count,
+      }));
+      deps.log("prompt_evolution.shadow", { model, transcripts: own.length, unmodelled, lessons });
+      lines.push(`### ${model}`, "", `Transcripts: ${own.length}; training: ${train.length}.`, "");
+      for (const lesson of lessons) lines.push(`- ${lesson.lesson}`, "");
+    }
+    return heading + lines.join("\n");
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error).slice(0, 320);
+    deps.log("prompt_evolution.shadow", { error: reason });
+    return `${heading}UNKNOWN — ${reason}\n`;
+  }
+}
+
 /** The fix-lane garden: once per UTC day, clusters the lane's defects and files one remedy for the top-priced class. */
 export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
   const clock = deps.clock ?? systemClock;
+  const shadowInputs = new WeakMap<Inventory, { records: readonly LedgerRecord[]; now: number }>();
   const readInputs = () => {
     const now = clock.now();
     const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FIX_LANE_LADDER, STEPS);
@@ -574,7 +609,9 @@ export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
     const openPrs = [...new Set(events.filter(e => e.pr > 0).map(e => e.pr))];
     const outcomes = sources.prOutcomes ? sources.prOutcomes(openPrs) : readOutcomes(openPrs, sources);
     const read = sources.interventions ? sources.interventions(prs, sinceMs) : readOperatorInterventions(sources, prs, sinceMs);
-    return fixLaneInventoryOf(records, plan.tasks, outcomes, read, now, evidence);
+    const inventory = fixLaneInventoryOf(records, plan.tasks, outcomes, read, now, evidence);
+    shadowInputs.set(inventory, { records, now });
+    return inventory;
   };
   return ladderGardenSpec(deps, {
     kind: FIX_LANE_LADDER, sources, bucket: c => Math.floor(c.now() / DAY),
@@ -619,7 +656,8 @@ export function fixLaneGardenSpec(deps: GardenerDeps, sources: FixLaneSources) {
       deps.log(FIXLANE_REPORT_STEP, { class: null, classes: inv.priced.length, hours: scorecard.total_pr_hours, interventions: read.ok ? full.interventions.total : null,
         ...(read.ok ? {} : { interventions_unknown: read.reason }), next: scorecard.next });
       mkdirSync(deps.stateDir, { recursive: true });
-      writeFileSync(join(deps.stateDir, FIXLANE_REPORT_FILE), summaryOf(full, now));
+      const input = shadowInputs.get(inv)!;
+      writeFileSync(join(deps.stateDir, FIXLANE_REPORT_FILE), summaryOf(full, now) + promptLessonsShadow(deps, input.records, input.now));
     },
   });
 }

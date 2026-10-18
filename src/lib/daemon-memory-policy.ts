@@ -52,6 +52,11 @@ export const DEFAULT_DAEMON_MEMORY_POLICY: DaemonMemoryPolicy = {
 /** The tightest growth factor the governor applies: a collection at every 10% of growth. */
 export const TIGHTEST_HEAP_GROWING_PERCENT = 10;
 
+/** W1-T9596: restart only for growth beyond the charge an over-line boot already held. */
+export const BOOT_BASELINE_RESTART_MARGIN = 1.25;
+/** Below this heap share, tighter GC cannot materially reduce the held daemon's charge. */
+export const FUTILE_RESTART_HEAP_SHARE = 0.4;
+
 const ROW_BOUNDS: Record<keyof DaemonMemoryPolicy, { min: number; max: number }> = {
   heapGrowingPercent: { min: TIGHTEST_HEAP_GROWING_PERCENT, max: 300 },
   tightenShare: { min: 0.05, max: 0.95 },
@@ -209,7 +214,7 @@ export function readDaemonMemory(io: DaemonMemoryReadingIo = {}): DaemonMemoryRe
   return reading;
 }
 
-export type MemoryPressureTier = "clear" | "tighten" | "restart";
+export type MemoryPressureTier = "clear" | "tighten" | "restart" | "hold";
 
 export interface MemoryPressureDecision {
   tier: MemoryPressureTier;
@@ -261,6 +266,19 @@ export interface MemoryGovernorStep extends MemoryPressureDecision {
   /** True when the tier or the applied growth percent changed on this step. */
   changed: boolean;
   previousTier: MemoryPressureTier;
+  /** Present only when a futile-restart hold begins, ends, or its remedy/budget changes. */
+  futileRestart?: {
+    held: boolean;
+    baseline_bytes: number;
+    charged_bytes: number;
+    line_bytes?: number;
+    share?: number;
+    restart_share: number;
+    k: number;
+    budget_bytes?: number;
+    budget_source?: DaemonMemoryReading["budget_source"];
+    heap_share: number;
+  };
 }
 
 export interface DaemonMemoryGovernor {
@@ -273,6 +291,7 @@ export interface DaemonMemoryGovernorOptions {
   policy?: DaemonMemoryPolicy;
   read?: () => DaemonMemoryReading;
   setFlags?: (flags: string) => void;
+  heapUsed?: () => number;
 }
 
 /** The stateful half: reads, decides, applies a changed growth percent, and remembers what is in force. */
@@ -280,18 +299,47 @@ export function createDaemonMemoryGovernor(opts: DaemonMemoryGovernorOptions): D
   const policy = opts.policy ?? DEFAULT_DAEMON_MEMORY_POLICY;
   const setFlags = opts.setFlags ?? setFlagsFromString;
   const read = opts.read ?? (() => readDaemonMemory());
+  const heapUsed = opts.heapUsed ?? (() => getHeapStatistics().used_heap_size);
   let inForce = Math.round(policy.heapGrowingPercent);
   let tier: MemoryPressureTier = "clear";
+  let baseline: number | undefined;
+  let bootOverLine = false;
+  let heldBudget: number | undefined;
+  let heldSource: DaemonMemoryReading["budget_source"];
   return {
     step() {
       const reading = read();
       const decision = decideMemoryPressure(reading, policy, inForce);
+      const charged = reading.rss_bytes + (reading.swap_bytes ?? 0);
+      if (baseline === undefined) {
+        baseline = charged;
+        bootOverLine = decision.share !== undefined && decision.share >= policy.restartShare;
+      }
+      const held = bootOverLine && decision.share !== undefined && decision.share >= policy.restartShare &&
+        charged <= BOOT_BASELINE_RESTART_MARGIN * baseline;
+      const heapShare = held || tier === "hold" ? heapUsed() / charged : 0;
+      if (held) {
+        decision.tier = "hold";
+        decision.heapGrowingPercent = heapShare < FUTILE_RESTART_HEAP_SHARE
+          ? Math.round(policy.heapGrowingPercent) : TIGHTEST_HEAP_GROWING_PERCENT;
+        delete decision.detail;
+      }
       const previousTier = tier;
       const changed = decision.tier !== tier || decision.heapGrowingPercent !== inForce;
+      const futileChanged = (held || tier === "hold") && (changed ||
+        reading.budget_bytes !== heldBudget || reading.budget_source !== heldSource);
+      const futileRestart: MemoryGovernorStep["futileRestart"] = futileChanged ? {
+        held, baseline_bytes: baseline, charged_bytes: charged,
+        line_bytes: reading.budget_bytes === undefined ? undefined : policy.restartShare * reading.budget_bytes,
+        share: decision.share, restart_share: policy.restartShare, k: BOOT_BASELINE_RESTART_MARGIN,
+        budget_bytes: reading.budget_bytes, budget_source: reading.budget_source, heap_share: heapShare,
+      } : undefined;
       if (decision.heapGrowingPercent !== inForce) setFlags(heapGrowingFlag(decision.heapGrowingPercent));
       inForce = decision.heapGrowingPercent;
       tier = decision.tier;
-      return { ...decision, reading, changed, previousTier };
+      heldBudget = held ? reading.budget_bytes : undefined;
+      heldSource = held ? reading.budget_source : undefined;
+      return { ...decision, reading, changed, previousTier, ...(futileRestart ? { futileRestart } : {}) };
     },
     inForcePercent: () => inForce,
   };

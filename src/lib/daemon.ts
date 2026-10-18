@@ -43,7 +43,7 @@ import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-revi
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
 import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
-import type { AdoptedRunChild, RunChildHandle, RunChildPending } from "./run-child.js";
+import { runChildOutsideKill, type AdoptedRunChild, type RunChildHandle, type RunChildPending } from "./run-child.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
@@ -5599,6 +5599,7 @@ export async function runDaemon(
     // The governor (daemon-memory-policy.ts) judges RSS+swap against the cgroup budget: tighten first,
     // restart only past the tightest factor. The V8 fraction stays as the backstop with no budget.
     const memoryStep = memoryGovernor.step();
+    if (memoryStep.futileRestart) log("daemon.memory_restart_futile", memoryStep.futileRestart);
     if (memoryStep.changed) {
       log("daemon.memory_pressure", {
         tier: memoryStep.tier,
@@ -6994,7 +6995,10 @@ export async function runDaemon(
       if (inFlightFreshness) laneIdleSince.set(lane, daemonClock.now());
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
-        if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) {
+        const outsideKill = runChildOutsideKill(outcome.reason);
+        // W1-T10001: a child lost to a container stop or OOM kill ends only its lane, and its task is offered again.
+        if (outsideKill !== undefined) passIds.delete(finished.id);
+        if (outsideKill === undefined && !(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) {
           // W1-T9680: a credential refusal closes refill only once the fleet credential probe does not read alive.
           if (laneCredentialRefusal(outcome.reason) !== undefined) {
             return fleetCredentialFor(outcome.reason as object).then((probe) => {
@@ -7552,6 +7556,12 @@ export async function runDaemon(
           const rawReason = String(err.message).replace(/[\r\n\t]+/g, " ");
           const reason = rawReason.length <= 240 ? rawReason : `${rawReason.slice(0, 239)}…`;
           reporting.report("daemon.admission_stood_down", { task: t.id, reason });
+          return;
+        }
+        // W1-T10001: an outside kill took the child, not the contract; it ends this lane only and the pass goes on.
+        const outsideKill = runChildOutsideKill(err);
+        if (outsideKill !== undefined) {
+          reporting.report("daemon.lane_lost", { task: t.id, loss: outsideKill, reason: String((err as Error).message).slice(0, 240) });
           return;
         }
         const transientTransport = transientGhDispatchFailure(err);

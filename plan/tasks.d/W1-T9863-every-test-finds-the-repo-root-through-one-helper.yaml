@@ -16,6 +16,7 @@
     - scripts/test-repo-root-codemod.mjs
     - test/every-test-finds-the-repo-root-through-one-helper.test.ts
     - test/a-count-assertion-names-its-members.test.ts
+    - "src/lib/rule-suites.ts"
   status: queued
   priority: 2
   attempts: 0

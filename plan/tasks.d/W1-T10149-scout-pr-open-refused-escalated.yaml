@@ -1,0 +1,30 @@
+- id: W1-T10149
+  title: "THE SCOUT'S UNCOVERED RECURRING SYMPTOM — pr.open_refused.escalated landed 2 ledger rows across the trailing window and no task cites it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 3.55
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "scout:pr.open_refused.escalated"
+  files:
+    - test/scout-pr-open-refused-escalated.test.ts
+  acceptance:
+    - claim: "pr.open_refused.escalated stops recurring: its cause is fixed rather than its rows hidden"
+      proof: "grep: test(\"W1-T10149: pr.open_refused.escalated no longer recurs\" in test/scout-pr-open-refused-escalated.test.ts"
+  note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  rationale: |
+    The ledger step pr.open_refused.escalated carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 1 in the newer.
+    No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
+    The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.96
+    reasons:
+      - "high-risk verdict at confidence 0.96 — on the change's description/files alone, no diff was read — The filing reports two recurring ledger rows but supplies no per-event evidence or diagnosed cause; its finding that these escalations require a fix cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The task requests implementation before locating the emitter or identifying the remedy, and declares only a new test file. Its acceptance grep checks for test text rather than demonstrating that the recurrence's cause is fixed."
+    judged_at: "2026-10-18T12:46:17.915Z"
+    pin: "a44010f9732133035c4767c09c31db7a91e72dd090971888f5f6f1d7abd48d98"

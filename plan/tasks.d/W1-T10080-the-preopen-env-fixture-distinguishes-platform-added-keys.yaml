@@ -12,7 +12,7 @@
   plan_refs: [W1-T9619, W1-T2234, W1-T9983, W1-T10058]
   files:
     - test/the-preopen-gate-runs-trusted-code-with-a-scrubbed-environment.test.ts
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

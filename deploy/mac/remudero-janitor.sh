@@ -1218,19 +1218,64 @@ else
 fi
 # This helper owns only exact ignored duplicate packages and Turbopack caches
 # below this account's artifact root. Source/Git/build outputs never retire.
+cache_reference_tmpdir() {
+  local account_record account_home cache_tmp
+  # getconf describes the running account, not an arbitrary selected HOME.
+  # Verify that relationship before substituting its implicit temp namespace.
+  account_record=$(dscl . -read "/Users/$RUN_USER" NFSHomeDirectory 2>/dev/null) || return 1
+  case "$account_record" in 'NFSHomeDirectory: '*) account_home=${account_record#NFSHomeDirectory: } ;; *) return 1 ;; esac
+  case "$account_home" in *$'\n'*|*$'\r'*) return 1 ;; /*) ;; *) return 1 ;; esac
+  account_home=$(cd "$account_home" 2>/dev/null && pwd -P) || return 1
+  [ "$account_home" = "$USER_HOME" ] || return 1
+  cache_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || return 1
+  case "$cache_tmp" in *$'\n'*|*$'\r'*) return 1 ;; /*) ;; *) return 1 ;; esac
+  # A trailing slash can hide a symlink from -L. Permit native /var's parent
+  # alias, but never a linked, foreign-owned or root temp directory itself.
+  while [ "${cache_tmp%/}" != "$cache_tmp" ]; do cache_tmp=${cache_tmp%/}; done
+  [ -n "$cache_tmp" ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] && [ -w "$cache_tmp" ] && [ -x "$cache_tmp" ] || return 1
+  cache_tmp=$(cd "$cache_tmp" 2>/dev/null && pwd -P) || return 1
+  [ "$cache_tmp" != / ] && [ -d "$cache_tmp" ] && [ ! -L "$cache_tmp" ] && [ -O "$cache_tmp" ] && [ -w "$cache_tmp" ] && [ -x "$cache_tmp" ] || return 1
+  printf '%s\n' "$cache_tmp"
+}
 if [ -f "$SCRIPT_DIR/cache-reclaim.py" ] && command -v python3 >/dev/null 2>&1; then
   cache_mode=()
   [ "$APPLY" != 1 ] || cache_mode=(--apply)
-  # Stream the existing receipt: the reporter bounds JSON parsing and does not
-  # inspect any filesystem targets. Retain the full original in the human log.
-  python3 "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" 2>&1 | \
-    tee -a "$LOG" | rmd_decision_cache_json "$DECISION_LOG"
-  cache_status=("${PIPESTATUS[@]}")
-  [ "${cache_status[1]}" = 0 ] || exit 2
-  if [ "${cache_status[2]}" != 0 ]; then
-    rmd_decision_record "$DECISION_LOG" 'generated-cache receipt unavailable or unrecognized; original output retained in human log' info cache_report_unknown || exit 2
+  cache_command=(python3)
+  cache_scope_known=1
+  # Python chooses TMPDIR, then TEMP, then TMP. An unset/empty TMPDIR with an
+  # explicit fallback is not cron's all-unset default; preserve that selection.
+  cache_explicit_fallback=0
+  if [ -z "${TMPDIR:-}" ] && { [ -n "${TEMP:-}" ] || [ -n "${TMP:-}" ]; }; then
+    cache_explicit_fallback=1
   fi
-  [ "${cache_status[0]}" = 0 ] || log "WARN generated-cache helper refused or could not verify a removal"
+  if [ "$OS_NAME" = Darwin ] && [ "$cache_explicit_fallback" = 0 ]; then
+    case "$DEFAULT_TMP" in /tmp|/tmp/|/private/tmp|/private/tmp/)
+      # Cron omits TMPDIR. Match the GUI account's resolved temp root so their
+      # authenticated namespace checkpoints have the same reference scope.
+      # Leave explicit custom TMPDIR and every other Janitor phase unchanged.
+      if cache_tmp=$(cache_reference_tmpdir); then
+        cache_command=(env "TMPDIR=$cache_tmp" python3)
+      else
+        cache_scope_known=0
+      fi
+      ;;
+    esac
+  fi
+  if [ "$cache_scope_known" = 1 ]; then
+    # Stream the existing receipt: the reporter bounds JSON parsing and does not
+    # inspect any filesystem targets. Retain the full original in the human log.
+    "${cache_command[@]}" "$SCRIPT_DIR/cache-reclaim.py" --home "$USER_HOME" "${cache_mode[@]+"${cache_mode[@]}"}" 2>&1 | \
+      tee -a "$LOG" | rmd_decision_cache_json "$DECISION_LOG"
+    cache_status=("${PIPESTATUS[@]}")
+    [ "${cache_status[1]}" = 0 ] || exit 2
+    if [ "${cache_status[2]}" != 0 ]; then
+      rmd_decision_record "$DECISION_LOG" 'generated-cache receipt unavailable or unrecognized; original output retained in human log' info cache_report_unknown || exit 2
+    fi
+    [ "${cache_status[0]}" = 0 ] || log "WARN generated-cache helper refused or could not verify a removal"
+  else
+    log "SKIP generated-cache-scope (running-account temp namespace unverified; cache pass retained)"
+    rmd_decision_record "$DECISION_LOG" 'SKIP generated-cache-scope: running-account temp namespace unverified' keep cache_scope_unknown || exit 2
+  fi
 fi
 rmd_decision_summary "$DECISION_LOG"
 log "decision-report: $DECISION_LOG (six-hour guard; workspace and generated-cache decisions)"
@@ -1252,75 +1297,67 @@ for candidate in "$USER_HOME/Remudero/remudero" "$USER_HOME/Remudero/repos/remud
   fi
 done
 if [ -n "$CORE_INSTALL_ROOT" ]; then
-  if ! command -v node >/dev/null 2>&1; then
-    log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (node unavailable)"
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (python3 unavailable)"
   else
-    dependency_health=$(NODE_OPTIONS='' NODE_PATH='' node --input-type=commonjs - "$CORE_INSTALL_ROOT" 2>/dev/null <<'NODE'
-const fs = require('node:fs');
-const path = require('node:path');
-const root = process.argv[2];
-const manifestPath = path.join(root, 'package.json');
-const warn = message => console.log(`WARN dependency-health: ${message}`);
-function checkRunners() {
-  let fd;
-  let text;
-  try {
-    fd = fs.openSync(manifestPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-    if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error(), { code: 'not-regular-file' });
-    const buffer = Buffer.alloc(1024 * 1024 + 1);
-    let size = 0, count;
-    while (size < buffer.length && (count = fs.readSync(fd, buffer, size, buffer.length - size, null)) > 0) size += count;
-    if (size === buffer.length) throw Object.assign(new Error(), { code: 'size-limit' });
-    text = buffer.toString('utf8', 0, size);
-  } catch (error) {
-    warn(`manifest unreadable at ${manifestPath} (${error.code || 'read-error'}); runner health unknown`);
-    process.exitCode = 1;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-  if (text === undefined) return;
-  let manifest;
-  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-  try {
-    manifest = JSON.parse(text);
-    if (!object(manifest)) throw new Error();
-    for (const section of ['dependencies', 'devDependencies']) {
-      if (Object.hasOwn(manifest, section) && (!object(manifest[section]) ||
-          Object.values(manifest[section]).some(value => typeof value !== 'string' || value.trim() === ''))) throw new Error();
-    }
-  } catch {
-    warn(`manifest malformed at ${manifestPath}; runner health unknown`);
-    return;
-  }
-  for (const [name, relative, mode] of [
-    ['tsx', 'node_modules/.bin/tsx', fs.constants.R_OK | fs.constants.X_OK],
-    ['vitest', 'node_modules/vitest/vitest.mjs', fs.constants.R_OK],
-  ]) {
-    if (!['dependencies', 'devDependencies'].some(section => Object.hasOwn(manifest[section] || {}, name))) continue;
-    const runner = path.join(root, relative);
-    try {
-      if (!fs.statSync(runner).isFile()) {
-        warn(`declared ${name} runner unavailable at ${runner} (not a regular file)`);
-        continue;
-      }
-      fs.accessSync(runner, mode);
-    } catch (error) {
-      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-        warn(`declared ${name} runner missing at ${runner}; linked proofs may fail because shared dependencies are not reinstalled`);
-      } else {
-        warn(`declared ${name} runner unreadable at ${runner} (${error.code || 'read-error'}); runner health unknown`);
-      }
-    }
-  }
-}
-checkRunners();
-NODE
+    # Cron has Python's existing cache-helper dependency but need not have Node on PATH.
+    # Read metadata with the standard library; never load runner/package code or widen PATH.
+    dependency_health=$(python3 - "$CORE_INSTALL_ROOT" 2>/dev/null <<'PYTHON'
+import errno, json, os, stat, sys
+root = sys.argv[1]
+manifest_path = os.path.join(root, 'package.json')
+def warn(message):
+    print('WARN dependency-health: ' + message)
+def check_runners():
+    fd = None
+    try:
+        fd = os.open(manifest_path, os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError('not-regular-file')
+        data = bytearray()
+        while len(data) < 1024 * 1024 + 1:
+            part = os.read(fd, 1024 * 1024 + 1 - len(data))
+            if not part: break
+            data.extend(part)
+        if len(data) > 1024 * 1024: raise ValueError('size-limit')
+    except (OSError, ValueError) as error:
+        detail = errno.errorcode.get(error.errno, 'read-error') if isinstance(error, OSError) else str(error)
+        warn(f'manifest unreadable at {manifest_path} ({detail}); runner health unknown')
+        return
+    finally:
+        if fd is not None: os.close(fd)
+    try:
+        manifest = json.loads(data)
+        if not isinstance(manifest, dict): raise ValueError()
+        for section in ('dependencies', 'devDependencies'):
+            if section in manifest and (not isinstance(manifest[section], dict) or
+                    any(not isinstance(v, str) or not v.strip() for v in manifest[section].values())):
+                raise ValueError()
+    except (ValueError, UnicodeError):
+        warn(f'manifest malformed at {manifest_path}; runner health unknown')
+        return
+    for name, relative, mode in (('tsx', 'node_modules/.bin/tsx', os.R_OK | os.X_OK),
+                                  ('vitest', 'node_modules/vitest/vitest.mjs', os.R_OK)):
+        if not any(name in manifest.get(section, {}) for section in ('dependencies', 'devDependencies')): continue
+        runner = os.path.join(root, relative)
+        try:
+            if not stat.S_ISREG(os.stat(runner).st_mode):
+                warn(f'declared {name} runner unavailable at {runner} (not a regular file)')
+                continue
+            if not os.access(runner, mode): raise PermissionError(errno.EACCES, 'access refused')
+        except OSError as error:
+            if error.errno in (errno.ENOENT, errno.ENOTDIR):
+                warn(f'declared {name} runner missing at {runner}; linked proofs may fail because shared dependencies are not reinstalled')
+            else:
+                warn(f'declared {name} runner unreadable at {runner} ({errno.errorcode.get(error.errno, "read-error")}); runner health unknown')
+check_runners()
+PYTHON
     )
     dependency_health_status=$?
     if [ -n "$dependency_health" ]; then
       while IFS= read -r health_line; do log "$health_line"; done <<< "$dependency_health"
     elif [ "$dependency_health_status" != 0 ]; then
-      log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (node probe failed)"
+      log "WARN dependency-health: check unavailable for $CORE_INSTALL_ROOT (python3 probe failed)"
     fi
   fi
 fi

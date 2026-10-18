@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human  # the capture needs the live host under the builder rules (per-task /proc io and stat, fd readlink only); a fleet worker cannot take it
+  # the capture needs the live host under the builder rules (per-task /proc io and stat, fd readlink only); a fleet worker cannot take it
+  verify: auto
   principles: {tdd: strict}
   budget_usd: 6.00
   risk: high  # Rule 19: one concern, a per-run measurement and an options memo; no daemon code, no ledger step and no change to ~/.codex
@@ -79,3 +80,14 @@
     OPERATOR DECISIONS named here: the io and fd sampling rates (rootio2 used 1 Hz and 40 Hz), capture length and
     count, the start-time match tolerance, which instances to sample (core only, or core, site and console), where
     output goes (/mnt/scratch by default), and whether the image's Codex docs are read via docker exec.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description says the task is a measurement and options memo and changes nothing in ~/.codex; the declared files are a script, a test, and docs."
+      - "Acceptance criterion 3 requires the sampler never to open cmdline, environ or cwd, and the description says auth.json is not opened, so no secrets or credentials are touched."
+      - "Nothing in the declared files or description shows deletion, deploy, merge or review-policy changes. The listed operator decisions are sampling parameters the memo surfaces as options, not decisions the change makes."
+      - "All four acceptance criteria are grep-verifiable and the gates state is clean (operator author, filingTime true, a reasonable family track record)."
+    judged_at: "2026-10-18T11:00:38.314Z"
+    pin: "227cf1faf214893c4fed04bb2ba173a8b2b8ac1dae7cc0867b04167fd7403e33"

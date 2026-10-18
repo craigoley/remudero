@@ -1,7 +1,8 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
 import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, validateWorkerMcpIsolation, workerMcpExposure,
-  workerMcpIsolationEvidence, workerMcpProbeBoundary, WORKER_MCP_STRICT, type WorkerMcpExposure, type WorkerMcpIsolation,
+  workerMcpIsolationEvidence, workerMcpProbeBoundary, workerPluginInventory, WORKER_MCP_STRICT,
+  type WorkerPluginInventory, type WorkerMcpExposure, type WorkerMcpIsolation,
   type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead, securityMetadataGhArgs } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
@@ -100,7 +101,7 @@ import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { configuredDependencySeedRoot } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
@@ -171,6 +172,8 @@ import {
   openWeightDeploymentReady,
   openWeightDeploymentHolds,
   openWeightEstimatedTokens,
+  openWeightReservationUsd,
+  readOpenWeightAllowance,
   spawnCodexWorker,
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -341,6 +344,7 @@ export interface WorkerResult {
   budgetReservedUsd?: number;
   budgetSettledUsd?: number;
   budgetRefused?: boolean;
+  cashAllowanceResetAt?: string;
   /** W1-T4079: set when a cash attempt found its deployment absent (HTTP 404), so the ladder walks. */
   openWeightDeploymentAbsent?: string;
   /** Opaque join key for the immutable, pre-execution routing assignment. A terminal worker row
@@ -595,6 +599,7 @@ export function workerLedgerFields(r: WorkerResult): {
   mcp_boundary?: typeof WORKER_MCP_STRICT;
   mcp_exposure?: WorkerMcpExposure;
   sdk_init_summary: WorkerInitSummary;
+  plugin_inventory: WorkerPluginInventory;
   worker_exit?: WorkerExit["kind"];
   worker_exit_signal?: string;
   worker_exit_code?: number;
@@ -652,6 +657,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.mcpBoundary ? { mcp_boundary: r.mcpBoundary } : {}),
     ...(r.mcpExposure ? { mcp_exposure: r.mcpExposure } : {}),
     sdk_init_summary: r.initSummary ?? unavailableWorkerInitSummary(r.provider !== undefined && r.provider !== "claude"),
+    plugin_inventory: workerPluginInventory(r.initSummary),
     ...(r.exit ? { worker_exit: r.exit.kind } : {}),
     ...(r.exit?.kind === "signal" ? { worker_exit_signal: r.exit.signal } : {}),
     ...(r.exit?.kind === "exit" ? { worker_exit_code: r.exit.code } : {}),
@@ -1176,7 +1182,7 @@ export interface SpawnWorkerArgs {
     /** Test seam for the contained Azure adapter. Production reads the daemon-only API key
      * directly and never places it in a worker environment. */
     spawnOpenWeight?: (
-      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
+      args: Omit<SpawnWorkerArgs, "env"> & { workerEnv?: Record<string, string>; workerHome: string; zdotdir?: string },
       config: Config,
       selection: { model: string; effort: string },
     ) => Promise<WorkerResult>;
@@ -1628,6 +1634,27 @@ export function cashFallbackRefusal(
     return `this spawn's tool surface is not implementable by cash (${tools ? tools.join(", ") : "unbounded"})`;
   }
   return undefined;
+}
+
+/** Refuse only when every candidate's first-request lower bound exceeds its observed room. */
+export function cashAllowanceFallbackRefusal(config: Config, prompt: string, deployments: readonly string[], atIso: string): string | undefined {
+  try {
+    if (deployments.length === 0) throw new Error("no eligible cash deployment");
+    const reading = readOpenWeightAllowance(config, { deployments, atIso, squeezed: true });
+    const candidates = reading.deployments.map(row => ({ ...row, wantUsd: openWeightReservationUsd(row.deployment, Buffer.byteLength(prompt, "utf8")) }));
+    if (candidates.some(row => row.remainingUsd >= row.wantUsd)) return undefined;
+    const cheapest = candidates.reduce((a, b) => a.wantUsd <= b.wantUsd ? a : b);
+    return `cash daily allowance exhausted until ${reading.resetAt}: committed $${cheapest.committedUsd.toFixed(6)} of $${cheapest.capUsd.toFixed(2)}, this spawn needs at least $${cheapest.wantUsd.toFixed(6)}`;
+  } catch (error) {
+    const reason = `cash allowance observation unavailable: ${String((error as Error).message).slice(0, 512)}`;
+    return reason;
+  }
+}
+
+function cashSonnetAlternatives(prompt: string): string[] {
+  return openWeightDeploymentReady("gpt-6.1-sol") &&
+    openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(prompt, "utf8")))
+    ? ["gpt-6.1-sol"] : [];
 }
 
 /** Fail-closed: an undeclared lane REFUSES rather than falling back to unrestricted (falsifier:
@@ -2617,6 +2644,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
+      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionPrompt, models,
+        fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
+      const plainCashModels = () => {
+        const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionPrompt, "utf8"),
+          { cashSqueezed: true, modelApprovals: config.modelApprovals,
+            ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}) });
+        return [choice.model, ...choice.alternatives];
+      };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2625,7 +2660,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const refusal = (!bothSubscriptionsObserved ? "both subscription capacities were not observed" : undefined) ??
           cashFallbackRefusal(config, divertTools) ??
           (!env[FOUNDRY_CLAUDE_API_KEY_ENV] || !env[FOUNDRY_CLAUDE_ENDPOINT_ENV]
-            ? "Foundry Opus endpoint or daemon key is absent" : undefined);
+            ? "Foundry Opus endpoint or daemon key is absent" : undefined) ??
+          allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
           return await spawnWorker({
@@ -2638,6 +2674,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
           });
         }
         console.error(JSON.stringify({ event: "worker.provider.subscription_only_hold", requested_model: args.model, reason: refusal }));
+        error.message += `; ${refusal}`;
       } else if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined) {
         // The surface the DIVERTED spawn would actually run, which is what eligibility must be
         // judged on -- asking about `tools` here would refuse a lane that declared a perfectly
@@ -2646,8 +2683,26 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         const refusal = cashFallbackRefusal(config, divertTools);
         // W1-T4785: a squeezed BALANCED task tries Foundry Sonnet 5.5 first; Luna stays the fallback.
         const sonnetEnv = args.env ?? process.env;
-        if (refusal === undefined && requestedCapability === "balanced" &&
-            sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV]) {
+        const canTrySonnet = requestedCapability === "balanced" &&
+          !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
+        if (refusal === undefined) {
+          let models: string[];
+          try { models = plainCashModels(); }
+          catch (selectionError) {
+            if (!canTrySonnet) throw selectionError;
+            // A refused plain ladder does not remove the independently eligible Sonnet arm.
+            models = [];
+          }
+          if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionPrompt));
+          const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
+          if (held !== undefined) {
+            console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
+            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+            error.message += `; ${held}`;
+            throw error;
+          }
+        }
+        if (refusal === undefined && canTrySonnet) {
           console.error(JSON.stringify({
             event: "worker.provider.cash_sonnet_fallback",
             reason: "no subscription had readable headroom",
@@ -2876,6 +2931,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw new SubscriptionOnlyRefusedError(args.model!);
     }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    // env means child extras here, but a complete daemon override in the adapter. Keep custody distinct.
+    const { env: workerEnv, ...cashArgs } = args;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
       assertLiveSpawnAllowed(`spawnOpenWeightWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2892,9 +2949,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
       : args.cashSonnetEmergency === true
       ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
-        alternatives: openWeightDeploymentReady("gpt-6.1-sol") &&
-          openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(executionPrompt, "utf8")))
-          ? ["gpt-6.1-sol"] : [] }
+        alternatives: cashSonnetAlternatives(executionPrompt) }
       : selectOpenWeightModel(
       capabilities,
       args.model,
@@ -2961,7 +3016,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
-          const rung: WorkerResult = await runOpenWeight({ ...args, prompt: executionPrompt, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
           if (args.draftRouting) {
