@@ -3729,18 +3729,22 @@ export interface components {
       name: string;
     };
     /** Snapshot-owned attention from the SAME validated persisted census as this lane item, not live thread coherence or write authority. Observed requires complete matching public scope and key; unknown omits attention and identity. Partial/missing/invalid evidence stays unknown. Lane counts are unchanged; countSemantics does not certify current human decisions. */
-    InboxSnapshotAttention: {
-      state: "observed" | "unknown";
-      coverage: "complete" | "partial" | "unavailable";
+    InboxSnapshotAttention: ({
+      state: "observed";
+      coverage: "complete";
       countSemantics: "observed_snapshot_not_verified";
       /** Exact public repository of an observed snapshot. */
-      repository?: string;
+      repository: string;
       /** Exact public instance of an observed snapshot. */
-      instance?: string;
-      snapshotKey?: string;
-      attention?: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
-      waitingOn?: "operator" | "daemon";
-    };
+      instance: string;
+      snapshotKey: string;
+      attention: "decision" | "reply" | "in_progress" | "history" | "awaiting_daemon";
+      waitingOn: "operator" | "daemon";
+    }) | ({
+      state: "unknown";
+      coverage: "partial" | "unavailable";
+      countSemantics: "observed_snapshot_not_verified";
+    });
     /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
     InboxViewItem: {
       snapshotAttention?: InboxSnapshotAttention;

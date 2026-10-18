@@ -9,7 +9,7 @@ import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, inboxLegacyView, inboxViewBodies, 
 import { mountInstanceInboxRoutes } from "../src/lib/instance-inbox-contract.js";
 import { buildInboxAttentionCensusRoute, buildInboxRoute, readSlowLaneInbox, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { classificationSnapshotKey } from "../src/lib/read-page.js";
-import { appendThreadMessage, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
+import { appendThreadEvent, appendThreadMessage, inboxThreadIdentity } from "../src/lib/inbox-thread.js";
 import { boundConsoleReadRoute, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import type { PlanSourceOutcome } from "../src/lib/serve-plan-reload.js";
@@ -392,11 +392,11 @@ function retainedBodies(w: ReturnType<typeof world>, refreshed: InboxRefresh): I
 }
 
 test("snapshot-owned attention shares exact retained scope and key across HTTP, views and restart", async (t) => {
-  const w = world(t, 2), initial = await w.refresh();
-  const snapshot = retainAttention(w, content => {
-    const item = content.attentionCensus!.items[0]!;
-    item.attention = "awaiting_daemon"; item.waitingOn = "daemon";
-  });
+  const w = world(t, 2), store = { threadStorePath: join(w.root, "state", "inbox-threads.jsonl") };
+  appendThreadEvent("ruling:p0", { kind: "reframed", key: "fixture:performed-reframe" }, "Fixture direction already performed.", store, w.at - 100);
+  appendThreadEvent("ruling:p0", { kind: "redrafted", key: "fixture:older-redraft" }, "Fixture older daemon draft, backfilled later.", store, w.at - 100_000);
+  const initial = await w.refresh(), snapshot = retainAttention(w);
+  assert.equal(snapshot.attentionCensus!.items[0]!.attention, "awaiting_daemon", "an older backfilled redraft is not a new daemon ask");
   const r = retainedBodies(w, initial), s = await served(t, w, r);
   const legacy = await s.get("/v1/i/core/inbox?section=needsYou");
   const expected = { state: "observed", repository: "owner/core", instance: "core", snapshotKey: snapshot.snapshotKey,

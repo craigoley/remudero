@@ -2439,7 +2439,7 @@ export function snapshotAttentionProjection(content: PersistedInboxContent, scop
   const unknown = (coverage: "partial" | "unavailable" = "unavailable"): InboxSnapshotAttention => ({ state: "unknown", coverage, countSemantics: "observed_snapshot_not_verified" });
   const census = content.attentionCensus, owned = content.snapshotScope;
   if (!content.snapshotKey || !validInboxSnapshot(content) || !census || census.countSemantics !== "observed_snapshot_not_verified" ||
-    !scope?.repository || !scope.instance || owned?.repository !== scope.repository || owned.instance !== scope.instance ||
+    scope === undefined || typeof scope.repository !== "string" || scope.repository.length === 0 || !scope.instance || owned?.repository !== scope.repository || owned.instance !== scope.instance ||
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repository) || !/^[A-Za-z0-9_.-]{1,120}$/.test(scope.instance)) return () => unknown();
   if (census.state === "partial") return () => unknown("partial");
   const counts = { decision: 0, reply: 0, in_progress: 0, history: 0, awaiting_daemon: 0 };

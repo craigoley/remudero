@@ -8836,16 +8836,24 @@ components:
         live thread coherence or write authority. Observed requires complete matching public scope
         and key; unknown omits attention and identity. Partial/missing/invalid evidence stays unknown.
         Lane counts are unchanged; countSemantics does not certify current human decisions.
-      required: [state, coverage, countSemantics]
-      properties:
-        state: {type: string, enum: [observed, unknown]}
-        coverage: {type: string, enum: [complete, partial, unavailable]}
-        countSemantics: {type: string, enum: [observed_snapshot_not_verified]}
-        repository: {type: string, description: "Exact public repository of an observed snapshot."}
-        instance: {type: string, description: "Exact public instance of an observed snapshot."}
-        snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
-        attention: {type: string, enum: [decision, reply, in_progress, history, awaiting_daemon]}
-        waitingOn: {type: string, enum: [operator, daemon]}
+      oneOf:
+        - type: object
+          required: [state, coverage, countSemantics, repository, instance, snapshotKey, attention, waitingOn]
+          properties:
+            state: {type: string, enum: [observed]}
+            coverage: {type: string, enum: [complete]}
+            countSemantics: {type: string, enum: [observed_snapshot_not_verified]}
+            repository: {type: string, description: "Exact public repository of an observed snapshot."}
+            instance: {type: string, description: "Exact public instance of an observed snapshot."}
+            snapshotKey: {type: string, pattern: '^[a-f0-9]{64}$'}
+            attention: {type: string, enum: [decision, reply, in_progress, history, awaiting_daemon]}
+            waitingOn: {type: string, enum: [operator, daemon]}
+        - type: object
+          required: [state, coverage, countSemantics]
+          properties:
+            state: {type: string, enum: [unknown]}
+            coverage: {type: string, enum: [partial, unavailable]}
+            countSemantics: {type: string, enum: [observed_snapshot_not_verified]}
 
     InboxViewItem:
       type: object
