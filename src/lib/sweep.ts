@@ -1,7 +1,7 @@
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode } from "./instance-mode.js";
 import type { RegistryFileIO } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict,
+import { buildFixProgressInput as buildBaseFixProgressInput, firstFixRoundVerdict, fixRedClass, judgeFixProgress, parseFixProgressVerdict, unfiledScopeStandDown,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredChecks } from "./ci-gate-required.js";
@@ -1485,6 +1485,8 @@ export type PlanScopedFixRoundInput = {
   body: string;
   runId?: string;
   lastRefusal?: string;
+  /** W1-T9289: the PR is dirty — merge origin/main into the head and resolve the plan text on the merged tree. */
+  conflict?: boolean;
   admission?: AdmissionSettings;
   deps: Pick<BuildSweepEffectsDeps, "log"> & Pick<BodyRepairDeps, "execProof"> & {
     runGit?: (args: string[]) => string;
@@ -3332,6 +3334,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         };
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
           title: live.title, body: live.body, runId, admission: config.contributorAdmission,
+          conflict: pr.mergeState === "dirty",
           lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,
@@ -9283,13 +9286,20 @@ export const PLAN_REPAIR_STEP = "sweep.plan_repair";
  *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
  *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
 export const MACHINE_LANE_HEAD_RE = new RegExp(
-  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource)-garden-\\d+" +
+  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource|flow|flow-remedy|fix-lane|scout)-garden-\\d+" +
     "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
     "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
 );
 
 export function isMachineLanePlanHead(head: string | undefined): boolean {
   return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
+}
+
+/** W1-T9289 — a DIRTY plan filing on a machine-lane head whose captured conflict evidence names only
+ *  plan-scope paths. The author is a separate, async read (`readPlanRepairFacts`) the caller adds. */
+export function planConflictRoundCandidate(pr: OpenPrView): boolean {
+  return pr.mergeState === "dirty" && pr.isPlanFiling === true && isMachineLanePlanHead(pr.headRefName) &&
+    hasCapturedMergeConflictEvidence(pr.mergeConflict) && pr.mergeConflict!.files.every((file) => isInPlanScope(file.path));
 }
 
 /** The fleet App, as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL timeline
@@ -14594,9 +14604,17 @@ export function metadataRedRuledOut(lines: ReadonlyArray<Record<string, unknown>
     line.metadata_repair_outcome === "not-metadata" && JSON.stringify(line.metadata_red_checks) === checks);
 }
 
+/** The acceptance-author-gate refusal that names a FILE the head lacks: the task's declared test suite is
+ *  absent, so no title or body edit can cure it and only a commit can. #12695 sat 13 h on it: metadata
+ *  repair found no body cure and escalated, and no fix worker was ever sent to ship the suite. */
+const FILE_DEFECT_AUTHOR_GATE_RED = /acceptance-author-gate: REFUSED \(credited-test-path\)/;
+
 export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
   if (!isBlockedCi(pr) || pr.reviewState === "failure") return undefined;
   const checks = redCheckNames(pr);
+  if (pr.ciFailures?.some((failure) => failure.name === "acceptance-author-gate" && FILE_DEFECT_AUTHOR_GATE_RED.test(failure.logTail))) {
+    return undefined;
+  }
   return checks.length > 0 && checks.every((name) => METADATA_RED_CHECKS.has(name)) ? checks : undefined;
 }
 
@@ -16289,6 +16307,12 @@ export async function runSweep(
     const judged = deps.fixProgressJudge !== undefined;
     const next: OpenPrView[] = [];
     for (const pr of openPrs) {
+      const scopeHold = isFixCandidate(pr) ? unfiledScopeStandDown(ledgerLines, pr) : undefined;
+      if (scopeHold) {
+        judgedUnavailable.set(pr.prNumber, scopeHold);
+        next.push({ ...pr, progressContinue: { reason: scopeHold, unavailable: true } });
+        continue;
+      }
       if (judged && cappedProofDiscriminationFromLedger(pr, ledgerLines) !== undefined) {
         next.push({ ...pr, progressContinue: { reason: "capped repair judged at its own site" } });
         continue;
@@ -17970,10 +17994,23 @@ export async function runSweep(
         disposition = "wait";
       }
     }
+    // W1-T9289: a dirty fleet-App plan filing on a machine-lane head is owned by the same plan-scoped round.
+    let planConflictRound = false;
+    if (disposition === "blocked-ambiguous" && derived.blocker === "conflict" && deps.dispatchPlanGateRound &&
+        deps.readPlanRepairFacts && planConflictRoundCandidate(pr)) {
+      try {
+        const facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
+        planRoundFacts.set(pr.prNumber, facts);
+        planConflictRound = isFleetAppAuthor(facts.authorLogin);
+      } catch (error) {
+        log("sweep.plan_conflict.read_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+      }
+    }
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
-    if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
+    if (planConflictRound || (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true)) {
       const pendingJudgment = judgedUnavailable.get(pr.prNumber);
-      const repair = pendingJudgment ? { repaired: true, reason: pendingJudgment } : await tryPlanRepair(pr);
+      const repair = pendingJudgment ? { repaired: true, reason: pendingJudgment }
+        : planConflictRound ? { repaired: false, reason: "" } : await tryPlanRepair(pr);
       const facts = planRoundFacts.get(pr.prNumber);
       let planRoundExhausted = false;
       if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
@@ -17982,7 +18019,7 @@ export async function runSweep(
           checks: (pr.ciFailures ?? []).map((f) => f.name), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP" };
         repair.repaired = true;
         repair.reason = "plan-scoped round deferred";
-        const base = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+        const base = planConflictRound ? { kind: "own" as const } : decideBaseRed(pr, mainLatestRun, baseRedHistory);
         if (base.kind !== "own") {
           baseRedStandDownPrs.add(pr.prNumber);
           repair.reason = `plan-scoped round waits on base red: ${base.check}`;
@@ -18069,6 +18106,8 @@ export async function runSweep(
       const red = (pr.ciFailures ?? []).map((failure) => failure.name).join(", ") || "a required check";
       reason = repair.repaired
         ? repair.reason
+        : planConflictRound
+        ? `merge conflict (mergeState dirty) — the plan-scoped conflict round on this fleet plan PR is exhausted${repair.reason} — escalating`
         : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
           `fix is dispatched; the plan violation needs a plan repair${repair.reason}`;
     }
@@ -18830,6 +18869,8 @@ export async function runSweep(
               break;
             }
             case "blocked-fixable": {
+              const scopeHold = unfiledScopeStandDown(ledgerLines, pr);
+              if (scopeHold) { acted = false; spent = false; standDownReason = scopeHold; break; }
               const preflightEscalation = preflightEscalations.get(pr.prNumber);
               if (preflightEscalation !== undefined) {
                 const reason = preflightEscalation.alreadyDelivered

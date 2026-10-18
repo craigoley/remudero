@@ -72,6 +72,20 @@ test("W1-T4459: a title or body red is repaired without a fix worker", async () 
   assert.deepEqual(mixed.repairs, [], "a failing review is another required red and must not be treated as metadata-only");
 });
 
+test("an acceptance-author-gate red naming an absent credited suite reaches the fix worker, not metadata repair", async () => {
+  const gateRed = (logTail: string): OpenPrView => ({ ...subject(["acceptance-author-gate"]), ciFailures: [{ name: "acceptance-author-gate", logTail }] });
+  const missingSuite = harness();
+  await runSweep([gateRed("2026-10-18T00:40:12.0000000Z acceptance-author-gate: REFUSED (credited-test-path) — W1-T4459 declares " +
+    "test/a-credited-suite.test.ts, which is absent from this head")], missingSuite.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(missingSuite.repairs, [], "no title or body edit can ship a missing test file");
+  assert.deepEqual(missingSuite.escalations, [], "a file the worker can write is not a question for a person");
+  assert.deepEqual(missingSuite.dispatched, ["head-a"]);
+  const bodyShaped = harness();
+  await runSweep([gateRed("acceptance-author-gate: REFUSED (proof-shape) — a grep: pattern is wrapped in quotes")], bodyShaped.deps, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(bodyShaped.repairs, [["acceptance-author-gate"]], "a body-shaped refusal from the same check is still metadata");
+  assert.deepEqual(bodyShaped.dispatched, []);
+});
+
 test("W1-T4459: a commitlint red whose title already passes still reaches the fix worker", async () => {
   const h = harness();
   const writes: Array<{ title?: string; body?: string }> = [];

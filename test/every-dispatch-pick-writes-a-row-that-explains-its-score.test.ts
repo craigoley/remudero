@@ -103,7 +103,7 @@ test("W1-T9325: a tick start logs dispatch.pick_scored with its components and t
     const components = (score: number) => ({
       basis: "cost-of-delay", priority: 1, priority_head_start: 1, filing_age_ms: 0,
       median_wait_ms: 2 * HOUR, urgency: 1, score, stride_pass: 1 / score,
-      starts: 0, open_dependents: 0, imputed: false,
+      starts: 0, open_dependents: 0, dependent_value: 0, imputed: false,
     });
     assert.deepEqual(h.picks(), [3.5, 2].map((score, i) => ({
       task: tasks[i].id, site: "tick", rank: i + 1, ...components(score),
@@ -135,11 +135,11 @@ test("W1-T9325: a lane refill logs dispatch.pick_scored for the task it starts",
       task: "Z", site: "lane-refill", rank: 1,
       basis: "cost-of-delay", priority: 1, priority_head_start: 1, filing_age_ms: 0,
       median_wait_ms: 2 * HOUR, urgency: 1, score: 0.9, stride_pass: 1 / 0.9,
-      starts: 0, open_dependents: 0, imputed: false,
+      starts: 0, open_dependents: 0, dependent_value: 0, imputed: false,
       runner_up: {
         task: "NEXT", basis: "cost-of-delay", priority: 1, priority_head_start: 1,
         filing_age_ms: 0, median_wait_ms: 2 * HOUR, urgency: 1, score: 0.8,
-        stride_pass: 1 / 0.8, starts: 0, open_dependents: 0, imputed: false, reason: "order",
+        stride_pass: 1 / 0.8, starts: 0, open_dependents: 0, dependent_value: 0, imputed: false, reason: "order",
       },
     });
     assert.deepEqual(h.rows.find(r => r.step === "dispatch.lane_refilled")?.extra,
@@ -176,7 +176,7 @@ test("W1-T9325: a runner-up serialized by packing keeps its score and reason", a
         assert.deepEqual(row?.runner_up, {
           task: "Y", basis: "cost-of-delay", priority: 1, priority_head_start: 1,
           filing_age_ms: 0, median_wait_ms: 2 * HOUR, urgency: 1, score: 2,
-          stride_pass: 0.5, starts: 0, open_dependents: 0, imputed: false, reason: "serialized",
+          stride_pass: 0.5, starts: 0, open_dependents: 0, dependent_value: 0, imputed: false, reason: "serialized",
         });
       }
     } finally { await h.finish(); }
@@ -209,12 +209,13 @@ test("W1-T9325: explanation preserves calibrated inputs without reading a clock"
   assert.deepEqual(explanation, {
     basis: "cost-of-delay", priority: 1, priority_head_start: 1, filing_age_ms: 0,
     median_wait_ms: 2 * HOUR, urgency: 1, score: context.costOfDelayByTaskId!.get("X"),
-    stride_pass: context.stridePassByTaskId!.get("X"), starts: 0, open_dependents: 1, imputed: false,
+    stride_pass: context.stridePassByTaskId!.get("X"), starts: 0, open_dependents: 1, dependent_value: 0.25, imputed: false,
   });
   assert.deepEqual(dispatchValue.explainDispatchScore(tasks[0], context), explanation);
   const lower = dispatchValue.explainDispatchScore(tasks[1], context);
   assert.equal(lower.basis, "cost-of-delay");
   assert.equal(lower.priority_head_start, 0.5);
+  assert.equal(lower.dependent_value, 0);
   assert.deepEqual(dispatchValue.explainDispatchScore(absentPriority),
     { basis: "priority-first", priority: null });
 });
@@ -236,12 +237,16 @@ test("W1-T9325: calibrated age, starts and imputation survive in the explanation
   assert.equal(explanation.urgency, 3);
   assert.equal(explanation.starts, 1);
   assert.equal(explanation.open_dependents, 1);
+  assert.equal(explanation.dependent_value, 0.25, "fresh P2 dependent is discounted one dependency level");
   assert.equal(explanation.imputed, false);
   // W1-T9968: the stride pass is a no-fan-out slot of the task's tier; alone in it, the task holds its own.
-  assert.equal(explanation.stride_pass, 2 / (explanation.score! / (1 + explanation.open_dependents)));
+  const ownScore = explanation.score! * 3 / (3 + 0.25);
+  assert.ok(Math.abs(explanation.stride_pass! - 2 / ownScore) < 1e-12,
+    "the tier slot uses own urgency, excluding the weighted dependent value");
   const undated = dispatchValue.explainDispatchScore(imputed, result.context);
   assert.equal(undated.basis, "cost-of-delay");
   assert.equal(undated.filing_age_ms, 0);
   assert.equal(undated.imputed, true);
   assert.equal(undated.urgency, 0.5);
+  assert.equal(undated.dependent_value, 0);
 });

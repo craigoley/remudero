@@ -10,7 +10,7 @@
   risk: medium
   origin: "operator-authorized queue followthrough 2026-10-18: PR12703 and W10129 attribution"
   plan_refs: [W1-T9056, W1-T9057, W1-T9059, W1-T5380, W1-T10129]
-  files: [src/lib/ci-friction-gardener.ts, test/gardeners/a-test-title-path-is-not-its-failure-location.test.ts]
+  files: [src/lib/ci-friction-gardener.ts, test/ci/parity/a-test-title-path-is-not-its-failure-location.test.ts]
   status: queued
   attempts: 0
   rationale: |
