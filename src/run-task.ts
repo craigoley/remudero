@@ -3125,6 +3125,7 @@ import {
   foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath,
   workerLedgerFields,
   workerTranscript,
+  workerContinuation,
   withAssignmentTrailer, resolveCommitAssignment,
   uniqueRunBranch,
   excludeNodeModulesFromGit,
@@ -11765,6 +11766,7 @@ export async function runFixRung(opts: {
   worktreePath: string;
   /** The failing implement worker's session id — resumed on strike 1. */
   initialSessionId: string;
+  initialSessionProvider?: WorkerResult["provider"];
   mount: Mount;
   /** The final fresh strike's mount (`step_up:`); absent keeps every strike on {@link mount}. */
   stepUpMount?: Mount;
@@ -12207,6 +12209,9 @@ export async function runFixRung(opts: {
     return { outcome: "handed_off", review, strikes, retriggers, reason };
   };
   let sessionToResume: string | undefined = opts.initialSessionId;
+  let previousForResume: Pick<WorkerResult, "provider" | "text" | "blocks"> = {
+    provider: opts.initialSessionProvider, text: "", blocks: [],
+  };
   // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
   // blocked_ci dispatch (opts.ciFailures set) has no reviewer verdict at all
   // yet, so its evidence is ci-log-shaped rather than review-shaped. Flips
@@ -13726,6 +13731,9 @@ export async function runFixRung(opts: {
       prompt,
       ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
+      ...(round === "resume" && sessionToResume ? {
+        continuation: workerContinuation(previousForResume, "The current self-contained repair contract and evidence appear in the pending action below.", opts.worktreePath),
+      } : {}),
       // W1-T210: ci-log mode's prompt carries an untrusted CI log tail, so no WebFetch/WebSearch.
       // W1-T4458 (iii): a round the harness commits loses Bash too, so its prompt and tools agree.
       tools: fixHarnessOwnsGit ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
@@ -13993,6 +14001,7 @@ export async function runFixRung(opts: {
             declaredPaths: opts.task.files ?? [],
           }),
           resumeSessionId: fixResult.sessionId,
+          continuation: workerContinuation(fixResult, prompt, opts.worktreePath),
         },
         { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
       );
@@ -14154,6 +14163,7 @@ export async function runFixRung(opts: {
       );
     }
     sessionToResume = fixResult.sessionId;
+    previousForResume = fixResult;
     if (harnessCommitRefused && fixAction.kind !== "scope-needed") {
       const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
@@ -19333,6 +19343,7 @@ export async function repairCensusRefusedPush(input: {
   worktreePath: string;
   branch: string;
   resumeSessionId: string;
+  resumeSessionProvider?: WorkerResult["provider"];
   mount: Mount;
   stepUpMount?: Mount;
   settingsFile: string;
@@ -19394,6 +19405,10 @@ export async function repairCensusRefusedPush(input: {
         prompt,
         ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
         resumeSessionId: strike === 1 ? input.resumeSessionId : undefined,
+        ...(strike === 1 && input.resumeSessionId ? { continuation: workerContinuation(
+          { provider: input.resumeSessionProvider, text: "", blocks: [] },
+          "The current task, output contract and refused gate are in the pending action below.", cwd,
+        ) } : {}),
         tools: harnessCommits ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
         ...(cashTools === undefined ? {} : { cashTools }),
         runId: input.runId,
@@ -20908,6 +20923,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           permissionMode: "bypassPermissions",
           settingsFile,
           resumeSessionId: impl.sessionId,
+          continuation: workerContinuation(impl, prompt, worktreePath),
           model: implementMount.model, // same mount as the initial implement spawn (§9).
           mountProvider: implementMount.provider,
           effort: implementMount.effort,
@@ -20993,6 +21009,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           permissionMode: "bypassPermissions",
           settingsFile,
           resumeSessionId: impl.sessionId,
+          continuation: workerContinuation(impl, prompt, worktreePath),
           model: implementMount.model,
           mountProvider: implementMount.provider,
           effort: implementMount.effort,
@@ -21029,6 +21046,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             permissionMode: "bypassPermissions",
             settingsFile,
             resumeSessionId: impl.sessionId,
+            continuation: workerContinuation(impl, prompt, worktreePath),
             model: implementMount.model,
             mountProvider: implementMount.provider,
             effort: implementMount.effort,
@@ -21144,6 +21162,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         permissionMode: "bypassPermissions",
         settingsFile,
         resumeSessionId: impl.sessionId,
+        continuation: workerContinuation(impl, prompt, worktreePath),
         model: implementMount.model,
         mountProvider: implementMount.provider,
         effort: implementMount.effort,
@@ -21438,7 +21457,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         if (!refusal) throw err;
         const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : censusPushRefusal(err) ? "census-refused" : "pre-push-refused";
         const rung = await repairCensusRefusedPush({
-          refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
+          refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId,
+          resumeSessionProvider: impl.provider, mount: fixMount,
           ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
@@ -21735,6 +21755,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         branch,
         worktreePath,
         initialSessionId: impl.sessionId,
+        initialSessionProvider: impl.provider,
         mount: fixMount,
         ...(stepUpMount ? { stepUpMount } : {}),
         settingsFile,
@@ -34367,6 +34388,7 @@ async function retroCommand(
           config: repairConfig,
           prompt: repairPrompt,
           resumeSessionId: worker.sessionId,
+          continuation: workerContinuation(worker, prompt, worktreePath),
         });
         log("retro.preflight_repair", {
           session_id: repaired.sessionId,
