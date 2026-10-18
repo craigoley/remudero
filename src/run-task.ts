@@ -28204,6 +28204,62 @@ export function hostWorktreeGitResult(worktreePath: string, args: string[]): { s
 }
 
 /**
+ * W1-T9488: what a lane's pushed branch says about the remote ids it reserved. `undefined` = no push was
+ * attempted, `"unknown"` = a push started and did not report (it threw: the branch may carry any id),
+ * an array = the push landed and these are the ids its plan diff declares.
+ */
+export type LanePushedIds = string[] | "unknown" | undefined;
+
+/** The task ids a committed branch declares in its plan diff against the merge base with origin/main. */
+export function branchDeclaredTaskIds(worktreePath: string): string[] {
+  const diff = hostWorktreeGit(worktreePath, ["diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { maxBuffer: 64 * 1024 * 1024 });
+  return [...new Set(diff.split("\n").map((line) => /^\+\s*-\s*id:\s*(\S+)/.exec(line)?.[1]).filter((id): id is string => id !== undefined))];
+}
+
+/** {@link branchDeclaredTaskIds} for a branch that has JUST been pushed; a diff that cannot be read keeps the
+ *  outcome unknown (nothing is released) and says why. */
+export function pushedBranchIds(worktreePath: string, log: (step: string, fields: Record<string, unknown>) => void): LanePushedIds {
+  try {
+    return branchDeclaredTaskIds(worktreePath);
+  } catch (e) {
+    log("task_id.reservation_release_skipped", { lane_phase: "declared-ids-unreadable", outcome: "unknown", detail: String((e as Error)?.message ?? e) });
+    return "unknown";
+  }
+}
+
+/**
+ * W1-T9488: give back every remote id a lane reserved and its pushed branch does not declare, through the
+ * leased release the garden and approve lanes use. Nothing pushed: all of them. Pushed: the unused tail.
+ * Push outcome unknown: none, because a branch may carry the id. Never throws; `held` is drained.
+ */
+export function releaseUnfiledReservations(
+  held: HeldTaskIdReservation[],
+  pushed: LanePushedIds,
+  opts: { run: (args: string[]) => { status: number; stdout: string; stderr: string }; lane: string; reason: string; log: (step: string, fields: Record<string, unknown>) => void },
+): void {
+  const claims = held.splice(0);
+  if (pushed === "unknown") {
+    for (const c of claims) opts.log("task_id.reservation_release_skipped", { reserved_id: c.taskId, sha: c.sha, lane: opts.lane, reason: opts.reason, outcome: "push_outcome_unknown" });
+    return;
+  }
+  const declared = new Set(pushed ?? []);
+  for (const c of claims) {
+    if (!declared.has(c.taskId)) releaseTaskIdReservation(opts.run, c, { reason: opts.reason, lane: opts.lane, log: opts.log });
+  }
+}
+
+/** The release reason: the run's outcome, then what its push left on the remote. */
+export function laneReleaseReason(prefix: string, ending: string, pushed: LanePushedIds): string {
+  const pushNote = pushed === undefined ? "no branch pushed" : pushed === "unknown" ? "push outcome unknown" : `branch declares ${pushed.length} id(s)`;
+  return `${prefix}: ${ending}; ${pushNote}`;
+}
+
+/** The sha each reserved id was left at: the reserver's winning anchor, else the handle's own. */
+export function heldFromBlock(block: RemoteReservationBlock, reserver: { wonAnchor?(taskId: string): string | undefined }): HeldTaskIdReservation[] {
+  return block.handles.map((h) => ({ taskId: h.taskId, sha: reserver.wonAnchor?.(h.taskId) ?? h.anchor }));
+}
+
+/**
  * The real cross-host triage claim reserver, bound to ONE worktree (W1-T1132).
  *
  * `worktreePath`, NOT the module-level `repoRoot`: the claim must be taken on the SAME `origin`
@@ -47785,6 +47841,11 @@ async function triageCommandLocked(
   // LOST the claim holds nothing to release.
   let triageClaim: TriageClaimResult | undefined;
   let claimReserver: TriageClaimReserverAsync | undefined;
+  // W1-T9488: the remote ids this run holds, what its pushed branch declares, and how it ended —
+  // the finally gives back every id the branch does not carry.
+  const triageHeld: HeldTaskIdReservation[] = [];
+  let triagePushed: LanePushedIds;
+  let triageEnding = "ended before a verdict";
   try {
     // Read the entry from the FRESH worktree (origin/main snapshot), not repoRoot, which may be
     // a stale checkout — same discipline retro's next-task read follows.
@@ -47914,6 +47975,7 @@ async function triageCommandLocked(
     // NAMED FOR WHAT IT IS. The old `reservedTaskId` was bound to an advisory-derived value, and
     // that name is most of why this survived review: every reader who checked "does the worker get
     // the reserved id" read it and stopped. These two are derived from the remote block only.
+    triageHeld.push(...heldFromBlock(remoteIdBlock, triageRemoteRefReserver));
     const reservedIds = remoteIdBlock.taskIds;
     const reservedHeadTaskId = reservedIds[0];
     say(`next task id: ${describeMintWithHistory(mint)}`);
@@ -47986,6 +48048,7 @@ async function triageCommandLocked(
         }),
     });
     const { decision, changedFiles } = loop.decision;
+    triageEnding = `verdict ${decision.action}`;
     await observeFeedbackInputs(config.contributorAdmission, entry.contribution ? [entry.contribution] : [],
       `triage-${decision.action}-adoption`, log);
 
@@ -48138,7 +48201,9 @@ async function triageCommandLocked(
 
     await observeFeedbackPublication(config.contributorAdmission === undefined ? undefined : { mode: "shadow", record: log },
       entry.contribution ? [entry.contribution] : [], `${owner}/${repo}`, "triage-publication");
+    triagePushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
+    triagePushed = pushedBranchIds(worktreePath, log);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -48262,6 +48327,7 @@ async function triageCommandLocked(
     return reviewCode;
   } catch (e) {
     log("triage.error", { error: String((e as Error)?.message ?? e) });
+    triageEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
       worktreeRemove(repoDir, worktreePath);
     } catch {
@@ -48270,11 +48336,16 @@ async function triageCommandLocked(
     throw e;
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+    // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
+    releaseUnfiledReservations(triageHeld, triagePushed, {
+      run: gitRunAdapter((args) => hostWorktreeGitResult(repoDir, args)), lane: "triage", log,
+      reason: laneReleaseReason(`triage ${feedbackId}`, triageEnding, triagePushed),
+    });
     // Every LOCAL id is now either ON an open PR (where the mint's openPrs source sees it) or
     // unused and free to reissue. Either way holding the file longer protects nothing — release
     // the WHOLE block, used or not, exactly as `rmd plan`'s block does (a hole is not a defect;
-    // see task-id-reservation.ts's own doctrine). The REMOTE half is never released — nothing
-    // releases a remote reservation, deliberately (same module, same doctrine).
+    // see task-id-reservation.ts's own doctrine). The REMOTE half is released just above
+    // (W1-T9488), for every id the pushed branch does not declare.
     localIdBlock?.releaseAll();
     // W1-T1132 RELEASE ARM 1 (HOLDER): explicit, on completion, success or throw — never a timer.
     // Guarded on the ANCHOR rather than on `triageClaim` being set: a lane that refused because
@@ -48373,6 +48444,10 @@ export async function planCommand(
   const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   let planIdBlock: TaskIdReservationBlock | undefined;
+  // W1-T9488: see the triage lane's twin — the remote ids held, what the pushed branch declares, how it ended.
+  const planHeld: HeldTaskIdReservation[] = [];
+  let planPushed: LanePushedIds;
+  let planEnding = "ended before a verdict";
 
   try {
     // ID MINT + BLOCK RESERVATION (impl-DV), the SAME ordering triage uses at :10222-:10240: mint
@@ -48400,19 +48475,17 @@ export async function planCommand(
     // message) rather than falling through — the paid worker is still unstarted when it does.
     // Same closure-narrowing reason as the triage lane above.
     const planReserveFrom = planIdBlock.ids[0];
+    // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
+    // rejected push is NORMAL here (contention), so a throwing runner would make it
+    // indistinguishable from an unreachable remote.
+    const planRemoteReserver = gatedRemoteRefReserver({
+      lane: "plan", log,
+      run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)),
+    });
     const planRemoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
-      reserveTaskIdBlockRemote(
-        planReserveFrom,
-        PLAN_MAX_NEW_TASKS,
-        gatedRemoteRefReserver({
-          lane: "plan", log,
-          // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
-          // rejected push is NORMAL here (contention), so a throwing runner would make it
-          // indistinguishable from an unreachable remote.
-          run: gitRunAdapter((args) => hostWorktreeGitResult(worktreePath, args)),
-        }),
-      ),
+      reserveTaskIdBlockRemote(planReserveFrom, PLAN_MAX_NEW_TASKS, planRemoteReserver),
     );
+    planHeld.push(...heldFromBlock(planRemoteIdBlock, planRemoteReserver));
     const reservedIds = planRemoteIdBlock.taskIds;
     log("plan.id_minted", {
       reserved: reservedIds,
@@ -48470,6 +48543,7 @@ export async function planCommand(
     // directs the worker to add tasks, and PR #1074's monolith-filing rule pushes those into shards —
     // so the created-file case is the NORMAL one here, not an edge.
     const { decision, changedFiles } = loop.decision;
+    planEnding = `verdict ${decision.action}`;
 
     // W1-T985 — THE RARE-OVERLAP ADVISORY, AT THE POINT THE FILED SHARD IS ON DISK. The advisory
     // shipped 2026-08-16 (W1-T533) and gained its only reader the same day (W1-T917,
@@ -48591,7 +48665,9 @@ export async function planCommand(
       changedFiles: planPrFiles,
       proofCwd: worktreePath,
     });
+    planPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
     await gitPushRunBranchAsync(worktreePath);
+    planPushed = pushedBranchIds(worktreePath, log);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -48665,6 +48741,7 @@ export async function planCommand(
     return reviewCode;
   } catch (e) {
     log("plan.error", { error: String((e as Error)?.message ?? e) });
+    planEnding = `errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`;
     try {
       worktreeRemove(repoDir, worktreePath);
     } catch {
@@ -48673,6 +48750,11 @@ export async function planCommand(
     throw e;
   } finally {
     removeRunLock(worktreePath); // terminal ⇒ drop the liveness token
+    // W1-T9488: the REMOTE half is given back too — every reserved id the pushed branch does not declare.
+    releaseUnfiledReservations(planHeld, planPushed, {
+      run: gitRunAdapter((args) => hostWorktreeGitResult(repoDir, args)), lane: "plan", log,
+      reason: laneReleaseReason("plan", planEnding, planPushed),
+    });
       // Release EVERY reserved id — the ones the worker filed AND the ones it declined. Once the
       // PR exists the mint sees those ids via openPrMintTexts, so holding them longer would only
       // punch holes in the id space (the phantom-id trap: W1-T199/224/247/263).
@@ -51363,6 +51445,18 @@ async function approveBatchCommand(
   let allWrittenPaths: string[] = [];
   let allFiledTaskIds: string[] = [];
   const idBlocks: TaskIdReservationBlock[] = [];
+  // W1-T9488: the remote claims behind idBlocks, and what the pushed batch branch declares. The batch gives back
+  // every member's id that branch does not carry, on every way out.
+  const batchHeld: HeldTaskIdReservation[] = [];
+  let batchPushed: LanePushedIds;
+  const releaseBatchUnfiled = (ending: string): void => {
+    if (batchHeld.length === 0 || repoDir === undefined) return;
+    const cloneDir = repoDir;
+    releaseUnfiledReservations(batchHeld, batchPushed, {
+      run: gitRunAdapter((args) => hostWorktreeGitResult(cloneDir, args)), lane: "approve-batch", log,
+      reason: laneReleaseReason(`rmd approve batch ${runId}`, ending, batchPushed),
+    });
+  };
   const ensureRepoDir = (): string => {
     repoDir = repoDir ?? join(config.root, "repos", repo);
     if (!existsSync(repoDir)) {
@@ -51409,23 +51503,20 @@ async function approveBatchCommand(
                 });
                 idBlocks.push(block);
                 const reserveFrom = block.ids[0];
+                const batchReserver = gatedRemoteRefReserver({
+                  lane: "approve-batch", log,
+                  run: (args) => {
+                    const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
+                    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+                  },
+                });
                 const remote = withIdReservationLogging(
                   log,
                   "approve.id_reservation_failed",
-                  () =>
-                    reserveTaskIdBlockRemote(
-                      reserveFrom,
-                      count,
-                      gatedRemoteRefReserver({
-                        lane: "approve-batch", log,
-                        run: (args) => {
-                          const r = spawnSync("git", ["-C", batchWorktree, ...args], { encoding: "utf8" });
-                          return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-                        },
-                      }),
-                    ),
+                  () => reserveTaskIdBlockRemote(reserveFrom, count, batchReserver),
                   { proposal_id: payload.proposalId },
                 );
+                batchHeld.push(...heldFromBlock(remote, batchReserver));
                 return { ids: remote.ids };
               },
             },
@@ -51445,7 +51536,9 @@ async function approveBatchCommand(
 
       execFileSync("git", ["-C", batchWorktree, "add", "--", ...allWrittenPaths], { stdio: "inherit" });
       execFileSync("git", ["-C", worktreePath, "commit", "-m", approveBatchCommitMessage(payloads)], { stdio: "inherit" });
+      batchPushed = "unknown"; // W1-T9488: a push that throws leaves the branch's ids unknowable
       gitPushRunBranch(worktreePath);
+      batchPushed = pushedBranchIds(worktreePath, log);
       return branch;
     },
     openPlanPr(branch, ids) {
@@ -51491,6 +51584,7 @@ async function approveBatchCommand(
   } catch (e) {
     log("approve.error", { error: String((e as Error)?.message ?? e) });
     idBlocks.forEach((b) => b.releaseAll());
+    releaseBatchUnfiled(`errored: ${String((e as Error)?.message ?? e).slice(0, 160)}`);
     if (repoDir && worktreePath) {
       try {
         worktreeRemove(repoDir, worktreePath);
@@ -51509,11 +51603,13 @@ async function approveBatchCommand(
   if (!result.ok) {
     console.error(`rmd approve: ${result.refusal}`);
     for (const s of result.skipped) console.error(`  skipped ${s.proposalId}: ${s.reason}`);
+    releaseBatchUnfiled(`refused: ${result.refusal.slice(0, 160)}`);
     return 1;
   }
   for (const s of result.skipped) console.log(`rmd approve: skipped ${s.proposalId} — ${s.reason}`);
 
   idBlocks.forEach((b) => b.releaseAll());
+  releaseBatchUnfiled("ratified");
 
   updateProposalRegistry(registryPath, (current) => {
     const acceptedIds = new Set(result.accepted.map((p) => p.proposalId));
