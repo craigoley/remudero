@@ -4,7 +4,7 @@ import test, { type TestContext } from "node:test";
 import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
-import { ownedFixtureDir } from "../helpers/owned-fixture-dir.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 function fixture(scope: TestContext, outcome: () => string | void) {
   const ledgerPath = join(ownedFixtureDir(scope, "dep-incomplete").dir, "ledger.ndjson");
