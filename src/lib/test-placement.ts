@@ -587,3 +587,28 @@ export function renderPlacement(f: PlacedFile): string {
   const via = p.primary === undefined ? "" : ` (${p.primary}${p.runnerUp ? `, runner-up ${p.runnerUp}` : ""})`;
   return [`${f.path} -> test/${p.folder}/  [${p.confidence}${via}]`, ...p.reasons.map((r) => `  - ${r}`)].join("\n");
 }
+
+export interface TestPlaceOutcome {
+  readonly code: number;
+  readonly out: string;
+  readonly err: string;
+}
+
+/**
+ * The whole of `rmd test-place` below argument parsing, so the verb in src/run-task.ts stays a
+ * three-line shell and a test reaches it without importing the 55k-line hub. Exit 2: no path or an
+ * unknown flag. Exit 1: a path that does not exist.
+ */
+export function testPlaceOutcome(rest: readonly string[], repoRoot: string, treeSha: () => string): TestPlaceOutcome {
+  const paths = rest.filter((a) => !a.startsWith("-"));
+  const flags = rest.filter((a) => a.startsWith("-"));
+  if (paths.length === 0) return { code: 2, out: "", err: "rmd test-place: at least one test path is required" };
+  const unknown = flags.filter((f) => f !== "--json");
+  if (unknown.length > 0) return { code: 2, out: "", err: `rmd test-place: unknown flag ${unknown.join(" ")}` };
+  try {
+    const placed = placePaths(repoRoot, paths, treeSha());
+    return { code: 0, out: flags.includes("--json") ? JSON.stringify(placed) : placed.map(renderPlacement).join("\n"), err: "" };
+  } catch (err) {
+    return { code: 1, out: "", err: err instanceof Error ? err.message : String(err) };
+  }
+}

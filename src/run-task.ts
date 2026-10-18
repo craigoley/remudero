@@ -545,7 +545,7 @@ import { daemonInstanceRegistryPath, IMAGE_BUILD_SHA_PATH, requestDeploy, runDep
 import { refusalEscalationOrNone } from "./lib/deploy-refusal-escalation.js";
 import { escalationSpoolDrain, spoolingIssueVoice, withEscalationSpoolDrain } from "./lib/host-escalation-spool.js";
 import { hostAlertCommandResult } from "./lib/launcher-host-alerts.js";
-import { placePaths, renderPlacement } from "./lib/test-placement.js";
+import { testPlaceOutcome } from "./lib/test-placement.js";
 import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { createSelectedModeQualification, observeSelectedMode, instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import type { RegistryFileIO } from "./lib/instance-registry-selection.js";
@@ -7889,20 +7889,10 @@ export function hostAlertCommand(rest: string[], clock: Clock = systemClock): nu
 
 /** `rmd test-place <path...>` (W1-T9874): the folder a test belongs in, computed from its imports. */
 export function testPlaceCommand(rest: string[], root: string = repoRoot): number {
-  const paths = rest.filter((a) => !a.startsWith("-"));
-  const badArg = paths.length === 0 ? "rmd test-place: at least one test path is required" : unknownArgError("test-place", rest.filter((a) => a.startsWith("-")), [], ["--json"]);
-  if (badArg !== null) {
-    console.error(`${badArg}\n${USAGE}`);
-    return 2;
-  }
-  try {
-    const placed = placePaths(root, paths, hostWorktreeGit(root, ["rev-parse", "HEAD^{tree}"]).trim());
-    console.log(rest.includes("--json") ? JSON.stringify(placed) : placed.map(renderPlacement).join("\n"));
-    return 0;
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    return 1;
-  }
+  const done = testPlaceOutcome(rest, root, () => hostWorktreeGit(root, ["rev-parse", "HEAD^{tree}"]).trim());
+  if (done.out !== "") console.log(done.out);
+  if (done.err !== "") console.error(done.code === 2 ? `${done.err}\n${USAGE}` : done.err);
+  return done.code;
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the

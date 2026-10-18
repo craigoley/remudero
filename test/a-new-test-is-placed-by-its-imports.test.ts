@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
-import { testPlaceCommand } from "#src/run-task.js";
+import { spawnSync } from "node:child_process";
 import {
   allFolderNames,
   extractTestFeatures,
@@ -12,6 +12,7 @@ import {
   placeTest,
   populationFor,
   stripComments,
+  testPlaceOutcome,
 } from "#src/lib/test-placement.js";
 import { RULE_SUITE_NAME_RE } from "#src/lib/rule-suites.js";
 
@@ -38,7 +39,7 @@ function captured(run: () => number): { code: number; out: string; err: string }
 }
 
 test("W1-T9874: a test importing only sweep is placed in sweep", () => {
-  const text = 'import { sweep } from "#src/lib/sweep.js";\nimport { mergeState } from "../src/lib/merge-state.js";\n';
+  const text = 'import { sweep } from "#src/lib/sweep.js";\nimport { mergeState } from "#src/lib/merge-state.js";\n';
   const features = extractTestFeatures("test/a-pass-reaps-merged-branches.test.ts", text);
   assert.deepEqual(features.imports.map((i) => i.module).sort(), ["merge-state", "sweep"]);
   const placed = placeFeatures(features, map);
@@ -97,7 +98,7 @@ test("W1-T9874: no folder name reads as a rule suite", () => {
 });
 
 test("W1-T9874: the comment-aware scanner keeps code a regex stripper would eat", () => {
-  const src = '// every src/**/*.ts file\nimport { a } from "#src/lib/clock.js";\nconst re = /\\/\\*/;\nconst s = `x ${"//"} y`; /* gone */ import { b } from "../src/lib/sweep.js";\n';
+  const src = '// every src/**/*.ts file\nimport { a } from "#src/lib/clock.js";\nconst re = /\\/\\*/;\nconst s = `x ${"//"} y`; /* gone */ import { b } from "#src/lib/sweep.js";\n';
   const stripped = stripComments(src);
   assert.doesNotMatch(stripped, /every src/);
   assert.doesNotMatch(stripped, /gone/);
@@ -107,14 +108,14 @@ test("W1-T9874: the comment-aware scanner keeps code a regex stripper would eat"
 
 test("W1-T9874: helpers are followed, type-only imports are weighed less and artifacts are strings", () => {
   const files: Record<string, string> = {
-    "test/helpers/ledger-fixture.ts": 'import { appendLedger } from "../../src/lib/ledger.js";\n',
-    "test/helpers/git-repo.ts": 'import { sweep } from "../../src/lib/sweep.js";\n',
+    "test/helpers/ledger-fixture.ts": 'import { appendLedger } from "#src/lib/ledger.js";\n',
+    "test/helpers/git-repo.ts": 'import { sweep } from "#src/lib/sweep.js";\n',
   };
   const text = [
     'import type { Row } from "#src/lib/review.js";',
     'import { type Other } from "#src/lib/plan.js";',
-    'import { gitRepo } from "./helpers/git-repo.js";',
-    'import { ledgerFixture } from "./helpers/ledger-fixture.js";',
+    'import { gitRepo } from "#test/helpers/git-repo.js";',
+    'import { ledgerFixture } from "#test/helpers/ledger-fixture.js";',
     'const w = ".github/workflows/ci.yml"; const s = "scripts/gate.mjs";',
   ].join("\n");
   const f = extractTestFeatures("test/z.test.ts", text, (p) => files[p], map);
@@ -141,15 +142,28 @@ test("W1-T9874: the TSV header's recorded agreement parses", () => {
 });
 
 test("W1-T9874: rmd test-place prints the folder, confidence and reasons, and refuses bad input", () => {
-  const ok = captured(() => testPlaceCommand(["test/coverage-ratchet.test.ts", "test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts"], REPO_ROOT));
+  const tree = (): string => "tree-for-test";
+  const ok = testPlaceOutcome(["test/coverage-ratchet.test.ts", "test/a-balanced-squeeze-diverts-to-foundry-sonnet.test.ts"], REPO_ROOT, tree);
   assert.equal(ok.code, 0);
   assert.match(ok.out, /test\/coverage-ratchet\.test\.ts -> test\/rules\/ {2}\[high\]/);
   assert.match(ok.out, /-> test\/worker\/spawn\/ {2}\[high/);
-  const json = captured(() => testPlaceCommand(["--json", "test/coverage-ratchet.test.ts"], REPO_ROOT));
+  const json = testPlaceOutcome(["--json", "test/coverage-ratchet.test.ts"], REPO_ROOT, tree);
   assert.equal((JSON.parse(json.out) as { placement: { folder: string } }[])[0]?.placement.folder, "rules");
-  assert.equal(captured(() => testPlaceCommand([], REPO_ROOT)).code, 2);
-  assert.equal(captured(() => testPlaceCommand(["--bogus", "x"], REPO_ROOT)).code, 2);
-  const missing = captured(() => testPlaceCommand(["test/no-such-file.test.ts"], REPO_ROOT));
+  assert.equal(testPlaceOutcome([], REPO_ROOT, tree).code, 2);
+  assert.equal(testPlaceOutcome(["--bogus", "x"], REPO_ROOT, tree).code, 2);
+  const missing = testPlaceOutcome(["test/no-such-file.test.ts"], REPO_ROOT, tree);
   assert.equal(missing.code, 1);
   assert.match(missing.err, /does not exist/);
+});
+
+test("W1-T9874: the registered verb really runs end to end", () => {
+  const run = (...args: string[]) => spawnSync(process.execPath, ["--import", "tsx", "src/run-task.ts", "test-place", ...args], { cwd: REPO_ROOT, encoding: "utf8" });
+  const ok = run("test/coverage-ratchet.test.ts");
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /-> test\/rules\//);
+  const bad = run();
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /at least one test path is required/);
+  assert.match(bad.stderr, /usage:/);
+  assert.equal(run("test/no-such-file.test.ts").status, 1);
 });
