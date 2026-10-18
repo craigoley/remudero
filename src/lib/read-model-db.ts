@@ -12,7 +12,7 @@ import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
-import { threadId, Worker } from "node:worker_threads";
+import { SHARE_ENV, threadId, Worker } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
@@ -193,7 +193,9 @@ function identity(){try{
  const pidNamespace=fs.readlinkSync('/proc/'+pid+'/ns/pid'),stat=fs.readFileSync('/proc/'+pid+'/stat','utf8');
  const startTicks=stat.slice(stat.lastIndexOf(')')+2).split(' ')[19];
  return bootId&&pidNamespace&&/^\d+$/.test(startTicks)?{pid,bootId,pidNamespace,startTicks}:undefined;
-}catch{return undefined;}}
+}catch{
+ // Missing procfs identity stays absent, so inventories report unknown rather than trusting a PID.
+ return undefined;}}
 const ownIdentity=identity();
 function schedule(){if(!scheduled){scheduled=true;setImmediate(pump);}}
 function pump(){
@@ -214,7 +216,10 @@ function pump(){
      }
     }else publish(e.file,record);
    }
-  }catch(error){failed=true;e.failureCode=typeof error.code==='string'?error.code:'publication_failed';}
+  }catch(error){
+   // The failed ACK carries the errno; a failed publication is never reported as an empty inventory.
+   failed=true;e.failureCode=typeof error.code==='string'?error.code:'publication_failed';
+  }
   e.seen=v;Atomics.store(c,4,failed?1:0);Atomics.store(c,3,v);
   const closed=!!Atomics.load(c,2)&&v===Atomics.load(c,0);if(closed)entries.delete(id);
   parentPort.postMessage({id,failed,closed,reason:failed?e.failureCode:undefined});
@@ -244,7 +249,7 @@ let transactionWriter: {
 function transactionPublisher(file: string, failure: (reason?: string) => void, defaultIdentity: boolean): TransactionPublication {
   if (!transactionWriter) {
     const wake = new Int32Array(new SharedArrayBuffer(4));
-    const worker = new Worker(TRANSACTION_WRITER_SOURCE, { eval: true, execArgv: [], workerData: { wake: wake.buffer },
+    const worker = new Worker(TRANSACTION_WRITER_SOURCE, { eval: true, execArgv: [], env: SHARE_ENV, workerData: { wake: wake.buffer },
       resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4, stackSizeMb: 1 } });
     const owner = transactionWriter = { worker, wake, entries: new Map<string, TransactionPublication>(), waiters: new Set<() => void>(), failed: false as boolean };
     worker.on("message", (message: { id: string; failed: boolean; closed: boolean; reason?: string }) => {
@@ -318,7 +323,12 @@ export function createReadModelTransactionRecorder(path: string, connection: str
       else process.stderr.write(`${JSON.stringify({ step: "read_model.holder_record_failed", ...extra })}\n`);
     } catch { /* Diagnostic sinks cannot change SQL behavior. */ }
   };
-  const diagnostic = (fn: () => void): void => { try { fn(); } catch { failure(); } };
+  const diagnostic = (fn: () => void): void => {
+    try { fn(); } catch (error) {
+      const reason = String((error as NodeJS.ErrnoException)?.code ?? "diagnostic_failed").slice(0, 40);
+      failure(reason);
+    }
+  };
   diagnostic(() => { if (!opts.publish) publication = transactionPublisher(file, failure, !opts.identity); });
   const publish = (record: TransactionRecord, keepReleased = false): void => {
     if (opts.publish) opts.publish(file, record);
@@ -431,7 +441,10 @@ export function readReadModelTransactions(path: string | undefined, opts: { proc
         result.records.push({ ...record, state, recordAgeMs: Math.max(0, asOf - record.updatedAt), lockOwnership: "unverified" });
         result.records.sort((a, b) => (a.acquiredAt ?? a.attemptedAt) - (b.acquiredAt ?? b.attemptedAt) || a.connection.localeCompare(b.connection));
         result.records.length = Math.min(3, result.records.length);
-      } catch { result.unknownRecords++; result.complete = false; }
+      } catch {
+        // An unreadable entry makes the inventory incomplete, never evidence of absence.
+        result.unknownRecords++; result.complete = false;
+      }
     }
     for (const entry of transactionWriter?.entries.values() ?? []) {
       if (dirname(entry.file) !== readModelTransactionDir(path)) continue;
@@ -447,8 +460,14 @@ export function readReadModelTransactions(path: string | undefined, opts: { proc
       }
     }
     result.state = !result.complete ? "unknown" : result.records.length ? "observed" : "none-recorded";
-  } catch { result.complete = false; }
-  finally { try { dir?.closeSync(); } catch { result.complete = false; result.state = "unknown"; } }
+  } catch {
+    // A missing or unreadable directory leaves the inventory unknown rather than none-recorded.
+    result.complete = false;
+  }
+  finally { try { dir?.closeSync(); } catch {
+    // Failed traversal close invalidates the inventory completeness it would otherwise claim.
+    result.complete = false; result.state = "unknown";
+  } }
   return result;
 }
 
