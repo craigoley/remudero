@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {OWNED_RUN_PROBE_CAPS,validateOwnedRunnerHierarchy,inspectOwnedRunnerCapabilities} from '../scripts/lib/owned-run-hierarchy-contract.mjs';
+import {OWNED_RUN_PROBE_CAPS,validateOwnedRunnerHierarchy,inspectOwnedRunnerCapabilities} from '#scripts/lib/owned-run-hierarchy-contract.mjs';
 
 // Synthetic read-back records only; neither branch proof nor an absent feature certifies a native run.
 function fixture(cpuset=true) {
