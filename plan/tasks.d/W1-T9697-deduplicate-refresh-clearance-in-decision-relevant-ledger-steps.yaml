@@ -5,9 +5,9 @@
   type: implement
   verify: auto
   risk: low
-  priority: 2
+  priority: 3
   status: queued
-  # backlog gardener: band=2 evidence=ed28774e6a1e1a39
+  # backlog gardener: band=3 evidence=3f683c34c39b5ffd
   attempts: 0
   files:
     - src/lib/ledger.ts
