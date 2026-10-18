@@ -15,7 +15,7 @@ function fixture(t: TestContext, text = "needle\n") {
   return { root, output: () => lines.join("\n") };
 }
 
-function failingTool(t: TestContext, root: string) {
+function failingTool(t: TestContext, root: string, status = 2) {
   const bin = join(root, "bin");
   mkdirSync(bin);
   // Real default spawner, real child and filesystem; only the external tool's controlled failure is a fixture.
@@ -25,7 +25,7 @@ if /usr/bin/grep -q BASE_REFUSAL "$last"; then
   n=1
   while [ "$n" -le 55 ]; do printf 'fixture stderr line %s\\n' "$n" >&2; n=$((n + 1)); done
   printf '%s\\n' 'api_key=fixture-credential-never-real' 'fixture runner refused to collect' >&2
-  exit 2
+  exit ${status}
 fi
 exec /usr/bin/grep "$@"
 `, { mode: 0o700 });
@@ -76,4 +76,27 @@ test("check-proof passing head and base retain executed-stale with no failure ou
   assert.equal(code, CHECK_PROOF_EXIT.executedStale);
   assert.match(f.output(), /discrimination: executed_stale/);
   assert.doesNotMatch(f.output(), /(?:head|base) output:/);
+});
+
+test("check-proof ordinary head failure retains its verdict and redacted failure tail", t => {
+  const f = fixture(t, "BASE_REFUSAL\n");
+  failingTool(t, f.root, 1);
+  assert.equal(checkProofCommand(["grep: needle in src/marker.txt"], { pathStatus: () => "" }), CHECK_PROOF_EXIT.fail);
+  assert.match(f.output(), /head output:/);
+  assert.match(f.output(), /fixture runner refused to collect/);
+  assert.match(f.output(), /verdict:\s+fail/);
+  assert.doesNotMatch(f.output(), /fixture-credential-never-real/);
+});
+
+test("check-proof ordinary base failure still discriminates and shows its redacted tail", t => {
+  const f = fixture(t);
+  failingTool(t, f.root, 1);
+  const code = checkProofCommand(["grep: needle in src/marker.txt", "--base", "fixture-base"], {
+    pathStatus: () => "", baseBlobDeps: { showBlob: () => "BASE_REFUSAL\n" },
+  });
+  assert.equal(code, CHECK_PROOF_EXIT.pass);
+  assert.match(f.output(), /base output:/);
+  assert.match(f.output(), /fixture runner refused to collect/);
+  assert.match(f.output(), /discrimination: discriminates/);
+  assert.doesNotMatch(f.output(), /fixture-credential-never-real/);
 });
