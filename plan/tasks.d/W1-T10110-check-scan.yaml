@@ -1,0 +1,103 @@
+- id: W1-T10110
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:Scan cost 116.3 PR minute(s) across 171 round(s) on 100 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 1.07
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:Scan"
+  files:
+    - .github/workflows/semgrep.yml
+    - test/check-scan.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:Scan"
+      proof: "grep: test(\"W1-T10110: check:Scan is prevented, not retried\" in test/check-scan.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:Scan's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:Scan cost 116.3 PR minute(s) across 171 red run(s) within the measured window on 100 pull request(s).
+
+    WHERE IT COMES FROM:
+    - .github/workflows/semgrep.yml: declares job semgrep for Scan
+
+    RECENT ROUNDS (newest first):
+    - PR #12639 (https://github.com/craigoley/remudero/pull/12639) at 2026-10-17T21:36:46.564Z: ci-log round — coverage-shard (7/8): pool defect: test/b.test.ts leaks into test/c.test.ts; Scan
+        failing tests: W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain, W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row, W1-T6356: the loop turns during a managed checkout refresh; W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain
+        log excerpt:
+          | FLAKE-RETRY: first attempt failed — W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain, W1-T7746: a main-thread busy loop past the bound is profiled and its function is the top frame in the ledger row, W1-T6356: the loop turns during a managed checkout refresh
+          | not ok 3 - W1-T5935: the rotation census names a step a FromLedger fold reads back through a constant but rotation does not retain
+          |   ---
+          |   duration_ms: 295.297545
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/a-spent-check-requeue-survives-ledger-
+    - PR #12582 (https://github.com/craigoley/remudero/pull/12582) at 2026-10-17T15:38:06.225Z: ci-log round — coverage-shard (3/8): test/ci-cache-concurrency-and-job-timeouts.test.ts; Scan; acceptance-author-gate
+        failing tests: R-50: every job in every PR-firing workflow declares a positive timeout-minutes; W1-T8830: an unchanged re-ask writes nothing and keeps the pin, R-50: setup caches npm unless it only bootstraps guarded dependency-free admission, R-50: every job in every PR-firing workflow declares a positive timeout-minutes; W1-T8830: an unchanged re-ask writes nothing and keeps the pin
+        log excerpt:
+          | ...
+          | not ok 5 - R-50: every job in every PR-firing workflow declares a positive timeout-minutes
+          |   ---
+          |   duration_ms: 101.3899
+          |   type: 'test'
+          |   location: '/tmp/rmd-author-workflow-contract-oPNzSB/test/ci-cache-concurrency-and-job-timeouts.test.ts:3:3338'
+          |   failureType: 'testCodeFailure'
+          |   error: "new-directory-member.yml: job 'probe' (a PR-firing workflow) has no positive timeout-minutes (got undefined) — it would inherit GitHub's 360-minute default"
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: true
+          |   actual: false
+          |   operator: '=='
+          |   stack: |-
+    - PR #12570 (https://github.com/craigoley/remudero/pull/12570) at 2026-10-17T13:45:03.775Z: ci-log round — coverage-ratchet: diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/e; CodeQL; Scan; security-merge-policy
+        log excerpt:
+          | diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; cover each line, or only for re-exec/exit glue use a process-boundary directive, even though the aggregate coverage-ratchet floor may still be satisfied:
+          |   - src/lib/test-slot-mutation.ts:141
+          |   - src/lib/test-slot-mutation.ts:183
+          |   - src/lib/test-slot-mutation.ts:184
+          |   - src/lib/test-slot-mutation.ts:185
+          |   - src/lib/test-slot-mutation.ts:186
+          |   - src/lib/test-slot-mutation.ts:198
+          |   - src/lib/test-slot-mutation.ts:199
+          |   - src/lib/test-slot-mutation.ts:213
+          |   - src/lib/test-slot-mutation.ts:214
+          |   - src/lib/test-slot-
+    - PR #12551 (https://github.com/craigoley/remudero/pull/12551) at 2026-10-17T09:55:57.947Z: ci-log round — coverage-shard (1/8): test/feedback-record-monotonic.test.ts; Scan
+        failing tests: W1-T3561: source A stuck at `new` cannot overwrite origin/main once source B has landed it at `grilling` with reply metadata — refused, reported, never armed; refused, reported, never armed"]
+        log excerpt:
+          | not ok 1379 - W1-T3561: source A stuck at `new` cannot overwrite origin/main once source B has landed it at `grilling` with reply metadata — refused, reported, never armed
+          |   ---
+          |   duration_ms: 640.819368
+          |   type: 'test'
+          |   location: '/home/runner/work/remudero/remudero/test/feedback-record-monotonic.test.ts:176:1'
+          |   failureType: 'testCodeFailure'
+          |   error: |-
+          |     a wholly-refused landing must never even ask gh anything
+          | 
+          |     1 !== 0
+          | 
+          |   code: 'ERR_ASSERTION'
+          |   name: 'AssertionError'
+          |   expected: 0
+    - PR #12544 (https://github.com/craigoley/remudero/pull/12544) at 2026-10-17T07:18:33.961Z: ci-log round — rule-checks: test/bound-kind-declared.test.ts; ci-shard (5/8): test/source-text-assertion-census.test.ts; ci-shard (1/8): test/deploy-run-freshness-exempt.test.ts; ci-shard (6/8): test/
+        failing tests: W1-T5617: the default listing reads this repository's admission table, and a tree without one has no admitted suites; W1-T2905: the per-file count of source-text reads in tests is recorded and CANNOT GROW; test/deploy-run-freshness-exempt.test.ts; W1-T9757: the precheck runs a source-text census the diff joins; ["W1-T5617: the default listing reads this repository's admission table, and a tree without one has no admitted suites"]
+        log excerpt:
+          | ✖ failing tests:
+          | 
+          | test at test/census-precheck-runs-the-admitted-census-suites.test.ts:30:468
+          | ✖ W1-T5617: the default listing reads this repository's admission table, and a tree without one has no admitted suites (1158.959137ms)
+          |   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+          |   + actual - expected
+          |   ... Skipped lines
+          | 
+          |     [
+          |       {
+          |         script: 'census:bound-kind',
+          |         testFile: 'test/bound-kind-declared.test.ts',
+          |         walks: [
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

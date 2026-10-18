@@ -65,13 +65,12 @@ test("W1-T4072: a stale index never enters the commit tree", () => {
   const priorHeadSha = repo.git("rev-parse", "HEAD");
   repo.git("read-tree", oldSha);
   writeFileSync(join(repo.dir, "declared.txt"), "fixed\n");
-  const index = readFileSync(repo.git("rev-parse", "--path-format=absolute", "--git-path", "index"));
   const result = commitWorkerEdits(repo.dir, ["declared.txt"], message, {}, [], { priorHeadSha, branch });
   assert.equal(result.committed, true);
   assert.equal(repo.git("rev-parse", "HEAD^"), priorHeadSha);
   assert.equal(repo.git("diff", "--name-only", priorHeadSha, "HEAD"), "declared.txt");
   for (let i = 0; i < 37; i++) assert.equal(repo.git("show", `HEAD:other-${i}.txt`), "main advanced");
-  assert.deepEqual(readFileSync(repo.git("rev-parse", "--path-format=absolute", "--git-path", "index")), index);
+  assert.equal(repo.git("write-tree"), repo.git("rev-parse", "HEAD^{tree}"));
 });
 
 test("W1-T4072: an unmoved branch commits exactly the declared paths", () => {

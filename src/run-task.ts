@@ -908,7 +908,6 @@ import {
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   decideDraftDeferral,
-  declinedReasonInLedger,
   type ProposalVerdictKind,
   deferralFromOutcomes,
   parseDraftDeferralCache,
@@ -978,6 +977,7 @@ import {
   ratificationPrBody,
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
+import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
 import {
@@ -43446,8 +43446,9 @@ export function commitWorkerEdits(
     }
     if (mergeHead !== undefined) {
       runGit(["merge", "--quit"]);
-      runGit(["read-tree", sha]);
     }
+    // W1-T10068: refresh the index only after CAS; never update working-tree files.
+    runGit(["read-tree", sha]);
   }
   return {
     committed: true,
@@ -48957,7 +48958,7 @@ export function buildInboxDraftHook(
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
           openProposalIds: new Set(proposals.map((p) => p.id)),
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+          isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
@@ -49275,7 +49276,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       grepAnchorTrue: (a: EvidenceAnchor) => gitGrepAnchorTrue(repoRoot, "origin/main", a),
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
-      isDeclined: (id) => declinedReasonInLedger(ledgerLinesForRatify, id),
+      isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -49354,7 +49355,7 @@ function loadProposalForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -49395,7 +49396,7 @@ function loadProposalsForRatify(
     retirement: inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root }),
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-    isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
+    isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
@@ -49600,7 +49601,26 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   ledgerPath: string;
   runId: string;
   shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
+  clock?: Clock;
 };
+
+function lifetimeShardAge(
+  taskId: string,
+  root: string,
+  nowMs: number,
+  rows: readonly Record<string, unknown>[],
+): Pick<ShardUnderJudgement, "ageDays" | "ageUnknownReason"> {
+  const fromGit = shardAgeDays(taskId, root, nowMs);
+  if (fromGit.ageDays !== null) return fromGit;
+  let first: number | undefined;
+  for (const row of rows) {
+    if (row.task_id !== taskId && row.task !== taskId) continue;
+    const t = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isNaN(t) && (first === undefined || t < first)) first = t;
+  }
+  if (first === undefined) return fromGit;
+  return { ageDays: Math.max(0, Math.floor((nowMs - first) / 86400000)) };
+}
 
 function latestLifetimeOperatorRuling(note: string | undefined): { date: string; decision: "automate" | "needs_operator" } | undefined {
   if (!note) return undefined;
@@ -49618,6 +49638,7 @@ export async function routeAdaptiveLifetimePressure(
   deps: AdaptiveLifetimePressureRoute,
 ): Promise<VerifyHumanRouteResult> {
   const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
+  const nowMs = (deps.clock ?? systemClock).now();
   const shards: ShardUnderJudgement[] = [];
   const infraOnly: string[] = [];
   const rulings = new Map<string, VerifyHumanVerdict>();
@@ -49657,7 +49678,9 @@ export async function routeAdaptiveLifetimePressure(
         "inside the feature is not a build-time need. Judge why attributable attempts keep failing; " +
         "choose automate, backlog, or needs_operator for the build process.",
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
-      ageDays: 0,
+      route: "lifetime-pressure",
+      attributableDispatches,
+      ...lifetimeShardAge(task.id, deps.root, nowMs, rows),
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
