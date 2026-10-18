@@ -13062,7 +13062,8 @@ export interface SweepDeps {
   close: (pr: OpenPrView, reason: string) => void | Promise<void>;
   /** Invoke the W1-T54 dep-review lane on a Dependabot PR and return its DECISION, so the disposed
    *  line records the outcome and dedup can tell TERMINAL outcomes — never re-run for the same
-   *  head — from "hold", which re-runs next sweep because a red check can go green on the SAME sha. */
+   *  head — from "hold" or an incomplete/unknown result, which re-run next sweep because a red
+   *  check can go green or a retitle can finish without deciding on the SAME sha. */
   depReview?: (pr: OpenPrView, refresh?: DependabotRefreshVerdict, ownRed?: DependabotOwnRedSignal) => string | void | Promise<string | void>; // W1-T9584: `refresh` is the base-red evidence's verdict on a red head; W1-T9586: `ownRed` reads an own one
   /** Invoke the review lane on a checks-green PR whose review was never posted. Verdicts are
    *  per-head, so dedup is unconditional per `pr@head` and a fresh push re-routes naturally.
@@ -14410,9 +14411,11 @@ function priorActionsFromLedger(
         escalated.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         break;
       case "dep-review":
-        // Only a TERMINAL outcome dedups; a "hold" must re-run next sweep so a
-        // same-sha red check going green is picked up (see SweepDeps.depReview).
-        if (line.dep_review_outcome !== "hold") {
+        // Only an explicit completed decision dedups. A retitle can return without deciding,
+        // recorded as "unknown"; missing/unrecognized outcomes are not terminal either.
+        // They, like "hold", must re-run at the SAME sha (see SweepDeps.depReview).
+        if (line.dep_review_outcome === "arm" || line.dep_review_outcome === "escalate" ||
+            line.dep_review_outcome === "refuse" || line.dep_review_outcome === "migrate") {
           depReviewed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
         }
         break;
