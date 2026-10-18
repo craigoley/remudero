@@ -18,6 +18,7 @@ import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './li
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
+import { guardedAuthorEntry, MacAuthorCapacityRefusal } from './lib/mac-author-admission.mjs';
 
 /** The exit status of a run whose selection the host cannot carry: distinct from pass (0) and fail (1). */
 export const OVER_CAPACITY_EXIT = 3;
@@ -218,7 +219,7 @@ export function authorPublicationIdentity({ headRef, headSha, baseSha, publicati
 }
 
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
-  select = (changed, range) => authorSelection(root, changed, range), host } = {}) {
+  select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -449,6 +450,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             if (!decision.fits) throw new Error(`runtime deadline does not fit admitted ${decision.workers}-worker pool: need ${decision.requiredMs}ms, have ${decision.availableMs}ms; expensive phase not started`);
           };
           admitRuntime('before-static');
+          const staticCapacity = admitHost('static-preflight');
+          if (staticCapacity) (receipt.hostCapacity ??= []).push(staticCapacity);
           const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
             join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
             '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
@@ -507,6 +510,8 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
             } else if (!notRun) {
             const testsName = receipt.tiered ? 'affected-tests-subset' : 'affected-tests';
             admitRuntime('before-tests', 0, ranSuites, executionWorkers);
+            const testCapacity = admitHost('affected-tests');
+            if (testCapacity) (receipt.hostCapacity ??= []).push(testCapacity);
             // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
             // The host-wide test slot, a load-derived concurrency (never above the old 4) and nice (test-slot.ts).
             slot.refresh();
@@ -559,9 +564,13 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     receipt.verdict = values['dry-run'] ? 'not-run' : !receipt.steps.every((step) => step.ok) ? 'failed'
       : receipt.selection === 'over-capacity' ? 'over-capacity' : 'passed';
   } catch (error) {
-    receipt.verdict = 'refused';
+    receipt.verdict = error instanceof MacAuthorCapacityRefusal ? 'over-capacity' : 'refused';
+    if (error instanceof MacAuthorCapacityRefusal) {
+      (receipt.hostCapacity ??= []).push({stage: error.stage, ...error.admission});
+      receipt.affectedTestsNotRunReason = error.message;
+    }
     receipt.error = error.message;
-    console.error(`author preflight REFUSED: ${error.message}`);
+    console.error(`author preflight ${error instanceof MacAuthorCapacityRefusal ? 'NOT_RUN' : 'REFUSED'}: ${error.message}`);
   }
   receipt.durationMs = Date.now() - startedAt;
   receipt.phaseAccounting = accountAuthorPhases(receipt);
@@ -586,4 +595,12 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   return ['passed', 'not-run'].includes(receipt.verdict) ? 0 : receipt.verdict === 'over-capacity' ? OVER_CAPACITY_EXIT : 1;
 }
 
-if (isMainModule(import.meta.url)) process.exit(main(process.argv.slice(2)));
+if (isMainModule(import.meta.url)) {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--low-footprint')) {
+    const {runLowFootprintAuthor} = await import('./lib/author-low-footprint.mjs');
+    process.exitCode = await runLowFootprintAuthor(argv, {
+      root: REPO_ROOT, publicationIdentity: authorPublicationIdentity, authorEnvironment, completeTestResult,
+    });
+  } else process.exitCode = guardedAuthorEntry(argv, {root: REPO_ROOT, runAuthor: (args, deps) => main(args, deps)});
+}

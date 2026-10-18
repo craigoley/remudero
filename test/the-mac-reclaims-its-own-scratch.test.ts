@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -190,6 +190,39 @@ test("nested TSX discovery retains active, Git-owned, seed, linked and unrecogni
     assert.match(out, /TSX discovery retains Git-owned/);
     assert.match(out, /TSX discovery contains unrecognized/);
   } finally { rmSync(fx.base, { recursive: true, force: true }); }
+});
+
+test("nested TSX cleanup preserves owned IPC sockets without letting them hide eligible old cache files", () => {
+  for (const mode of ['idle-socket', 'live-socket', 'regular-pipe-impostor', 'linked-pipe']) {
+    const fx = fixture();
+    try {
+      const job = join(fx.root, 'job'); const cache = join(job, 'tsx-501');
+      mkdirSync(cache, {recursive: true});
+      // A sibling Git fixture prevents generic whole-job retirement, as in real job TMPDIRs.
+      mkdirSync(join(job, 'source', '.git'), {recursive: true});
+      const old = join(cache, `17920-${'f'.repeat(40)}`), young = join(cache, `17920-${'e'.repeat(40)}`);
+      writeFileSync(old, 'compiled cache'); writeFileSync(young, 'fresh cache');
+      const ipc = join(cache, '123.pipe');
+      if (mode === 'regular-pipe-impostor') writeFileSync(ipc, 'not an IPC socket');
+      else if (mode === 'linked-pipe') symlinkSync(old, ipc);
+      else {
+        // Bind a short relative path to respect macOS's Unix-socket path limit.
+        const r = spawnSync(process.execPath, ['-e',
+          'const s=require("node:net").createServer();s.listen("123.pipe",()=>process.exit(0));'],
+          {cwd: cache, encoding: 'utf8', timeout: 5000});
+        assert.equal(r.status, 0, r.stderr); assert.ok(lstatSync(ipc).isSocket());
+      }
+      age(job, HOURS_AGO(8)); age(young, HOURS_AGO(5));
+      if (mode === 'live-socket') writeFileSync(fx.open, realpathSync(ipc) + '\n');
+      const {out} = reclaim(fx, 40);
+      assert.ok(existsSync(ipc), 'IPC sockets and unrecognized entries are never removed: ' + out);
+      assert.ok(existsSync(young));
+      assert.equal(existsSync(old), mode !== 'idle-socket', mode + ': ' + out);
+      if (mode === 'idle-socket') assert.match(out, /pruned tsx cache files=1/);
+      else if (mode === 'live-socket') assert.match(out, /open file or lsof scan uncertain/);
+      else assert.match(out, /TSX discovery contains unrecognized/);
+    } finally {rmSync(fx.base, {recursive: true, force: true});}
+  }
 });
 
 test("real kernel ctime protects backdated TSX cache files on scheduled discovery", () => {
