@@ -9,7 +9,7 @@
   risk: high  # one concern across inbox, retro and the command: a registry contender must permit holder progress and cancellation
   band_meaning: span
   origin: "operator session 2026-10-13: an updateProposalRegistry call timed out on a lock the core daemon held; it cleared on its own"
-  plan_refs: [W1-T240, W1-T337, W1-T289, W1-T368, W1-T2490, W1-T9443]
+  plan_refs: [W1-T240, W1-T337, W1-T289, W1-T368, W1-T2490, W1-T9443, W1-T132]
   files:
     - src/lib/inbox.ts
     - src/lib/retro.ts
@@ -35,6 +35,11 @@
     repair is PR #12799; coordinate with that bridge rather than reintroducing an early harvest acknowledgement.
     Neither this amendment nor the eventual implementation may delete historical harvest marks or replay retired
     proposals blindly. Historical reconciliation is a separate read-only obligation.
+    W1-T132 shares the retro/command files but owns merge-credit gathering, not registry acquisition or publication;
+    it is not superseded by this task. The 2026-10-18 ownership refresh covered 436 refs / 430 unique trees against
+    main 350a59d4, with 35 matching baseline records and no introduced matching owner. Seven unrelated-history heads
+    were compared as full trees rather than silently skipped. Dispatch/run refs for W1-T9240 were empty, and exact
+    merged trailer/branch searches returned no build; these are distinct checks, not an inference from status: queued.
 
     HISTORICAL OBSERVATION (the diagnosis remains; the unsafe synchronous remedy is superseded by this design):
     OPERATOR-REPORTED 2026-10-13: an `updateProposalRegistry` call threw "timed out after 2000ms waiting for
