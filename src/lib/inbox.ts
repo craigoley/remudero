@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { setTimeout as waitForRegistryPoll } from "node:timers/promises";
 import { observeSelectedRegistrySync, selectedRegistryObserverInContext, type SelectedRegistryObserver } from "./selected-registry-consumers.js";
 import { boundChildByLoopTime, type LoopBound } from "./loop-bounded-child.js";
 import { hostWorktreeGit } from "./worktree-git.js";
@@ -3100,9 +3101,10 @@ export function loadProposalRegistry(registryPath: string): Proposal[] {
 // delete on the lock's on-disk identity and two reclaimers cannot both believe they hold it.
 
 export interface UpdateProposalRegistryOpts {
-  /** Throw if the lock cannot be acquired within this long (ms). Default 2000 — every critical section takes
-   *  microseconds, so a lock held after 2s means a crashed holder, not contention. */
+  /** Bounded synchronous compatibility wait (default 2000ms), not evidence that a holder is dead. */
   maxWaitMs?: number;
+  signal?: AbortSignal;
+  log?: (step: string, detail: Record<string, unknown>) => void;
   /** Poll interval while a live holder is waited out (ms). Default 20. */
   pollIntervalMs?: number;
   /** Injectable liveness probe (tests). Defaults to {@link defaultIsPidAlive}. */
@@ -3142,6 +3144,31 @@ function defaultRegistryLockSleep(ms: number): void {
   execFileSync("sleep", [String(ms / 1000)]);
 }
 
+const ownedAsyncRegistryLocks = new Set<string>();
+
+export class ProposalRegistryBusyError extends Error {
+  constructor(readonly outcome: "same-process-busy" | "cancelled" | "deadline", readonly lockPath: string,
+    readonly holder: RegistryLockInfo | undefined) {
+    super(`proposal registry ${outcome}: ${lockPath} (held by pid ${holder?.pid ?? "unknown"})`);
+    this.name = "ProposalRegistryBusyError";
+  }
+}
+
+function registryWaitRefusal(opts: UpdateProposalRegistryOpts, outcome: ProposalRegistryBusyError["outcome"],
+  lockPath: string, holder?: RegistryLockInfo): never {
+  opts.log?.("proposal_registry.lock_wait_refused", { outcome, lock_path: lockPath, holder: holder ?? null });
+  throw new ProposalRegistryBusyError(outcome, lockPath, holder);
+}
+
+function recordRegistryHold(registryPath: string, started: number, opts: UpdateProposalRegistryOpts): void {
+  try {
+    // One bounded observation, not a liveness oracle or a history store. Never used to reclaim a lock.
+    writeAtomic(`${registryPath}.lock-hold.json`, JSON.stringify({ held_ms: systemClock.now() - started }));
+  } catch (error) {
+    opts.log?.("proposal_registry.lock_measurement_unavailable", { reason: String(error) });
+  }
+}
+
 /** Read-modify-write `registryPath`, guarded against the hazards this section's header describes. `update` sees the
  *  CURRENT proposals, re-read under the lock; returning `null` skips the write. */
 export function updateProposalRegistry(
@@ -3176,6 +3203,11 @@ export function updateProposalRegistry(
         beforeDelete: opts.__beforeReclaimDelete,
       });
       if (result.outcome === "live") {
+        // Only locally owned async acquisitions are known to need this event loop to release.
+        // A lock merely naming our pid (including another thread) retains the bounded compatibility wait.
+        if (result.holder.pid === process.pid && ownedAsyncRegistryLocks.has(resolvePath(lockPath))) {
+          registryWaitRefusal(opts, "same-process-busy", lockPath, result.holder);
+        }
         if (Date.now() >= deadline) {
           throw new Error(`updateProposalRegistry: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
         }
@@ -3186,7 +3218,21 @@ export function updateProposalRegistry(
     }
   }
 
+  const started = systemClock.now();
   try {
+    return updateLockedProposalRegistry(registryPath, update);
+  } finally {
+    recordRegistryHold(registryPath, started, opts);
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {
+      // already gone — idempotent
+    }
+  }
+}
+
+/** Shared by both acquisition paths: one parser, shard population and atomic writer, always under the same lock. */
+function updateLockedProposalRegistry(registryPath: string, update: (current: Proposal[]) => Proposal[] | null): Proposal[] | null {
     // W1-T2490: `current` is the SHARD-MERGED population, read under this SAME lock. `shards` is kept so the write
     // half below knows, per id, whether it already lives in its own file.
     const shardDir = proposalShardDir(registryPath);
@@ -3247,12 +3293,21 @@ export function updateProposalRegistry(
     fs.writeFileSync(tmpPath, JSON.stringify({ proposals: next }, null, 2), "utf8");
     fs.renameSync(tmpPath, registryPath);
     return next;
+}
+
+/** A finite caller budget or a caller-owned terminal cancellation signal is mandatory; no implicit infinite wait. */
+export async function updateProposalRegistryAsync(registryPath: string, update: (current: Proposal[]) => Proposal[] | null,
+  opts: UpdateProposalRegistryOpts): Promise<Proposal[] | null> {
+  if ((opts.maxWaitMs === undefined && !opts.signal) ||
+      (opts.maxWaitMs !== undefined && (!Number.isFinite(opts.maxWaitMs) || opts.maxWaitMs < 0))) {
+    throw new Error("asynchronous proposal registry update requires a finite budget or owned cancellation signal");
+  }
+  const release = await acquireProposalRegistryLockAsync(registryPath, opts);
+  try {
+    if (opts.signal?.aborted) registryWaitRefusal(opts, "cancelled", `${registryPath}.lock`);
+    return updateLockedProposalRegistry(registryPath, update);
   } finally {
-    try {
-      fs.unlinkSync(lockPath);
-    } catch {
-      // already gone — idempotent
-    }
+    await release();
   }
 }
 
@@ -3313,12 +3368,30 @@ async function readFileIfExistsAsync(path: string): Promise<string | undefined> 
 /** {@link updateProposalRegistry}'s lock, awaiting between polls; resolves to its release. */
 async function acquireProposalRegistryLockAsync(registryPath: string, opts: UpdateProposalRegistryOpts = {}): Promise<() => Promise<void>> {
   const lockPath = `${registryPath}.lock`;
-  const maxWaitMs = opts.maxWaitMs ?? 2000;
+  const maxWaitMs = opts.maxWaitMs ?? (opts.signal ? Infinity : 2000);
   const pollIntervalMs = opts.pollIntervalMs ?? 20;
   const isAlive = opts.isPidAlive ?? defaultIsPidAlive;
   await fs.promises.mkdir(dirname(lockPath), { recursive: true });
   const deadline = systemClock.now() + maxWaitMs;
+  let holder: RegistryLockInfo | undefined;
+  let reportedIdentity: string | undefined;
+  let measurement: { held_ms: number } | undefined;
+  let measurementState = "missing";
+  try {
+    const value = JSON.parse(await fs.promises.readFile(`${registryPath}.lock-hold.json`, "utf8"));
+    if (!Number.isFinite(value.held_ms) || value.held_ms < 0) throw new Error("invalid hold measurement");
+    measurement = value;
+    measurementState = "observed";
+  } catch (error) {
+    if (!isEnoent(error)) measurementState = "unreadable";
+  }
+  const waitingAt = systemClock.now();
+  const check = () => {
+    if (opts.signal?.aborted) registryWaitRefusal(opts, "cancelled", lockPath, holder);
+    if (systemClock.now() >= deadline) registryWaitRefusal(opts, "deadline", lockPath, holder);
+  };
   for (;;) {
+    check();
     try {
       const handle = await fs.promises.open(lockPath, "wx");
       try {
@@ -3336,20 +3409,38 @@ async function acquireProposalRegistryLockAsync(registryPath: string, opts: Upda
         beforeDelete: opts.__beforeReclaimDelete,
       });
       if (result.outcome === "live") {
-        if (systemClock.now() >= deadline) {
-          throw new Error(`pruneOrphanedDraftsAsync: timed out after ${maxWaitMs}ms waiting for ${lockPath} (held by pid ${result.holder.pid})`);
+        holder = result.holder;
+        check();
+        const identity = JSON.stringify(holder);
+        if (identity !== reportedIdentity && (!measurement || systemClock.now() - waitingAt > measurement.held_ms)) {
+          opts.log?.(measurement ? "proposal_registry.lock_wait_long" : "proposal_registry.lock_measurement_unavailable",
+            { lock_path: lockPath, holder, measurement: measurementState, observed_hold_ms: measurement?.held_ms ?? null });
+          reportedIdentity = identity;
         }
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        try {
+          await waitForRegistryPoll(Math.min(pollIntervalMs, deadline - systemClock.now()), undefined, { signal: opts.signal });
+        } catch (error) {
+          if (!opts.signal?.aborted) throw error;
+          check();
+        }
       }
     }
   }
-  return async () => {
+  const started = systemClock.now();
+  const ownedPath = resolvePath(lockPath);
+  ownedAsyncRegistryLocks.add(ownedPath);
+  const release = async () => {
+    recordRegistryHold(registryPath, started, opts);
+    ownedAsyncRegistryLocks.delete(ownedPath);
     try {
       await fs.promises.unlink(lockPath);
     } catch {
       // already gone — idempotent
     }
   };
+  // Cancellation/deadline can arrive during async open/write/close. Do not run the update afterwards.
+  try { check(); } catch (error) { await release(); throw error; }
+  return release;
 }
 
 /** W1-T9443: {@link pruneOrphanedDrafts} with every read awaited. Only an orphan takes the lock, and it looks again
