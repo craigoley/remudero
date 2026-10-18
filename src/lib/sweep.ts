@@ -187,6 +187,7 @@ import {
   REVIEW_CONTEXT,
   reviewLedgerKeyFor,
   UNFILED_RUN_SENTINEL,
+  unknownReservationReads,
 } from "./review.js";
 import type {
   ArmDecision,
@@ -13669,6 +13670,20 @@ function retryableReviewThrowBackoffReason(
     `retry backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
     `this is a retryable transport/process outcome, not a durable review refusal`
   );
+}
+
+/** W1-T9907 — the row `runReview` logs when a verdict is withheld on an unreadable reservation. It carries the
+ *  review input digest so the sweep keys the refusal to the PR's exact current input (a digest-less row folds
+ *  under the legacy `<task>@<head>` key that no live view reads). */
+export function withheldReviewRefusalRow(opts: {
+  headSha: string; prUrl: string; reason: string;
+  ownership: Parameters<typeof unknownReservationReads>[0]; inputDigest: string | undefined;
+}): Record<string, unknown> {
+  return {
+    head_sha: opts.headSha, pr_url: opts.prUrl, reason: opts.reason,
+    unknown_reservations: unknownReservationReads(opts.ownership),
+    ...(opts.inputDigest !== undefined ? { review_input_digest: opts.inputDigest } : {}),
+  };
 }
 
 /** W1-T9907 — a withheld verdict's `unknown_reservations` is a TIMED-OUT READ when it is non-empty and every

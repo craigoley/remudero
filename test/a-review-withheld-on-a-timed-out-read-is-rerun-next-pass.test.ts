@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reviewLedgerKeyFor } from "../src/lib/review.js";
-import { withheldReviewRefusalRow } from "../src/run-task.js";
-import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { reviewLedgerKeyFor } from "#src/lib/review.js";
+
+import { DEFAULT_SWEEP_POLICY, runSweep, withheldReviewRefusalRow, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-10-16T16:57:00Z");

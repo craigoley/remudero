@@ -65,7 +65,7 @@ import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/ada
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
 import { realFixRoundReapplyPorts, reapplyFixRoundOnMovedTip, type FixRoundReapplyPorts } from "./lib/fix-round-reapply.js";
-import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger,
+import { productionDispatchBreakJudge, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, jobRerunRefusal, requeuedCheckKeysFromLedger, withheldReviewRefusalRow,
   type BaseChangedFiles, type JobRequeueOutcome } from "./lib/sweep.js";
 import { DEFAULT_GH_CALL_TIMEOUT_MS, ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor, withGhTransportFloorMode, type GhAsyncExecutor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
@@ -1625,7 +1625,7 @@ import {
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
-import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError, unknownReservationReads } from "./lib/review.js";
+import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { alertFixBodyDeps, judgeOpenedAlertFixBody, type AlertFixAcceptanceCheck, type AlertFixBodyRead } from "./lib/alert-fix-body.js";
 import { baseLacksPrAddedExports } from "./lib/proof-missing-export.js";
@@ -8537,20 +8537,6 @@ export function reappendLostReviewPosted(
   });
   ctx.say(`remudero-review: review.posted for ${ctx.headSha.slice(0, 7)} was missing from the ledger — re-appended (W1-T5516)`);
   return "reappended";
-}
-
-/** W1-T9907 — the row `runReview` logs when a verdict is withheld on an unreadable reservation. It carries the
- *  review input digest so the sweep keys the refusal to the PR's exact current input (a digest-less row folds
- *  under the legacy `<task>@<head>` key that no live view reads). */
-export function withheldReviewRefusalRow(opts: {
-  headSha: string; prUrl: string; reason: string;
-  ownership: Parameters<typeof unknownReservationReads>[0]; inputDigest: string | undefined;
-}): Record<string, unknown> {
-  return {
-    head_sha: opts.headSha, pr_url: opts.prUrl, reason: opts.reason,
-    unknown_reservations: unknownReservationReads(opts.ownership),
-    ...(opts.inputDigest !== undefined ? { review_input_digest: opts.inputDigest } : {}),
-  };
 }
 
 /**
