@@ -5,17 +5,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ciFrictionShardStem, ciFrictionShardYaml, type CiFrictionDraft } from "../src/lib/ci-friction-gardener.js";
-import { flowFollowUpStem, renderFlowFollowUp, type FlowStageStat } from "../src/lib/flow-gardener.js";
-import { draftShard, FLOW_LADDER, type FlowAction } from "../src/lib/flow-remedy-gardener.js";
-import { hotFileShardStem, hotFileShardYaml } from "../src/lib/hot-file-gardener.js";
-import { lintDraftedFragment } from "../src/lib/inbox.js";
+import { ciFrictionShardStem, ciFrictionShardYaml, type CiFrictionDraft } from "#src/lib/ci-friction-gardener.js";
+import { flowFollowUpStem, renderFlowFollowUp, type FlowStageStat } from "#src/lib/flow-gardener.js";
+import { draftShard, FLOW_LADDER, type FlowAction } from "#src/lib/flow-remedy-gardener.js";
+import { hotFileShardStem, hotFileShardYaml } from "#src/lib/hot-file-gardener.js";
+import { lintDraftedFragment } from "#src/lib/inbox.js";
 import {
   computedTestFolder, isPlacedTestPath, loadPlanFromYaml, newTestPath, placementImports, placementSubsystemMap,
-} from "../src/lib/plan.js";
-import { scoutShard } from "../src/lib/scout-gardener.js";
-import { selectorShadowStructuralTask, selectorShadowStructuralTestPath } from "../src/lib/selector-shadow-gardener.js";
-import { placeTest } from "../src/lib/test-placement.js";
+} from "#src/lib/plan.js";
+import { scoutShard } from "#src/lib/scout-gardener.js";
+import { selectorShadowStructuralTask, selectorShadowStructuralTestPath } from "#src/lib/selector-shadow-gardener.js";
+import { placeTest } from "#src/lib/test-placement.js";
 
 /** The test a rendered shard names last in files: — every machine minter appends its new test there (or before .gitattributes). */
 function newTestOf(yaml: string): string {
