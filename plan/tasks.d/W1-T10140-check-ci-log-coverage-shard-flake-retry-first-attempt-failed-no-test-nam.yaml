@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.28
   status: queued
@@ -37,3 +37,15 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.72
+    reasons:
+      - "The declared files are one library file (src/lib/affected-suites.ts) and one new test file. Neither is a secrets, auth, permissions, deploy, merge-policy or review-policy path, and the description names no deletion or irreversible action."
+      - "The task asks for no operator-only decision. Its acceptance is a grep for a named test in the new test file, which can be checked automatically."
+      - "The rationale cites 5 distinct PRs (#11844, #11800, #11615, #10516, #10392), and three of them touched affected-suites.ts. That makes the target file plausible as the source of the recurring failure."
+      - "The ci-friction family has a mixed record (28 merged, 40 declined, Beta mean 0.64), and the cause rests on a flake-retry signature with no test name parsed. That calls for review caution, but the PR still passes CI and review."
+      - "No bounded view of the actual change was supplied, so I cannot see its size or shape. The declared scope is small and bounded."
+    judged_at: "2026-10-18T12:29:40.886Z"
+    pin: "0e8260787b5f1ebb03e2abd7cd6f3ff5a164d5b44466af8dbe480274129badbc"

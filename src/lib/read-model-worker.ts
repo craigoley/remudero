@@ -80,7 +80,7 @@ import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer, type ThreadHolds, type ThreadHoldsSnapshot } from "./worker-heaps.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
-import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
+import { describeSource, judgeLedgerReads, judgeSource, type SourcePhase } from "./view-freshness.js";
 import { startWorker } from "./child-entry-argv.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
@@ -243,7 +243,7 @@ export type ReadModelWorkerMessage =
   /** A key the slow lane's view no longer has (a page that emptied): serve forgets its body. */
   | { type: "drop"; view: string; key: string }
   /** Each source's latest reading, posted once per tick when one changed (`bodies`: per body, ledger included), so an unmoved body is judged by its last build. */
-  | { type: "sources"; sources: ViewSource[]; bodies?: Array<{ view: string; key: string; sources: ViewSource[] }> }
+  | { type: "sources"; sources: ViewSource[]; bodies?: Array<{ view: string; key: string; sources: ViewSource[] }>; ledgerReads?: Record<string, Record<string, string | null>> }
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
   | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number }
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
@@ -281,6 +281,8 @@ export interface ReadModelView {
   version: number;
   qualificationGeneration?: string;
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
+  /** The newest projected instant among the ledger rows this view reads, or null before its first input. */
+  ledgerReads?(db: ReadModelDb): string | null;
   /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
   prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
   stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
@@ -344,8 +346,9 @@ function newerReading(own: ViewSource, reading: ViewSource | undefined): ViewSou
 }
 
 /** A body's `ledger:` source by the rows its build read: once the projector holds newer rows it lags by their age, stale past the ledger budget. */
-export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS): ViewSource {
+export function builtLedgerSource(built: ViewSource, state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS, reads?: string | null): ViewSource {
   const current = ledgerSource(state, now, staleMs);
+  if (reads !== undefined) return judgeLedgerReads(built, current, reads, now);
   const builtMs = built.asOf === null ? Number.NaN : Date.parse(built.asOf);
   const headMs = state.newestTs === null ? Number.NaN : Date.parse(state.newestTs);
   if (!Number.isFinite(builtMs) || !Number.isFinite(headMs) || headMs <= builtMs) return current;
@@ -836,6 +839,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   let clocksMoved = false;
   const readings = new Map<string, { key: string; body: { view: string; key: string; sources: ViewSource[] } }>();
   const movedReadings = new Set<string>();
+  const ledgerReads = new Map<string, NonNullable<ReadModelView["ledgerReads"]>>();
+  let ledgerReadsKey = "{}";
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let deferredLoggedAt = Number.NEGATIVE_INFINITY;
   let heldLoggedAt = Number.NEGATIVE_INFINITY;
@@ -1317,12 +1322,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let live: ReadModelView | undefined;
     try {
       live = viewOf(unit);
+      if (live.ledgerReads) ledgerReads.set(view.name, live.ledgerReads);
       ready = live.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
       if (ready) {
         calls++;
+        const read = live.ledgerReads;
+        const readAsOf = read ? new Map(scoped.instances.map(({ state, db }) =>
+          [`${LEDGER_SOURCE_PREFIX}${state.instance}`, db ? read(db) : null])) : undefined;
         for (const { key, data, sources } of live.materialize(scoped)) {
           yielded++;
-          publish(view.name, live.version, key, data, sources, generation, buildStartedMs, live.qualificationGeneration);
+          const stamped = readAsOf ? sources.map((source) => readAsOf.has(source.name)
+            ? { ...source, asOf: readAsOf.get(source.name)! } : source) : sources;
+          publish(view.name, live.version, key, data, stamped, generation, buildStartedMs, live.qualificationGeneration);
         }
       }
       succeeded = ready && yielded > 0;
@@ -1485,11 +1496,16 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   const postState = (now: number): void => {
     reportViewBuilds();
-    if (clocksMoved || movedReadings.size > 0) {
+    const reads = Object.fromEntries([...ledgerReads].map(([view, read]) => [view,
+      Object.fromEntries(slots.map((slot) => [`${LEDGER_SOURCE_PREFIX}${slot.instance.name}`, slot.db ? read(slot.db) : null])),
+    ]));
+    const readsKey = JSON.stringify(reads);
+    if (clocksMoved || movedReadings.size > 0 || readsKey !== ledgerReadsKey) {
       clocksMoved = false;
+      ledgerReadsKey = readsKey;
       const bodies = [...movedReadings].map((id) => readings.get(id)!.body);
       movedReadings.clear();
-      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source), ...(bodies.length > 0 ? { bodies } : {}) });
+      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source), ...(bodies.length > 0 ? { bodies } : {}), ledgerReads: reads });
     }
     if (!viewsOnly) opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
   };
@@ -2205,6 +2221,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const instances = new Map<string, ReadModelInstanceState>();
   const sourceClocks = new Map<string, ViewSource>();
   const bodyReadings = new Map<string, ReadonlyMap<string, ViewSource>>();
+  const ledgerReads = new Map<string, Record<string, string | null>>();
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let at: number | undefined;
   const home = opts.instances[0]?.name ?? "core";
@@ -2378,6 +2395,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       bodyReadings.delete(readModelBodyKey(msg.view, msg.key));
     } else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
+      for (const [view, reads] of Object.entries(msg.ledgerReads ?? {})) ledgerReads.set(view, reads);
       for (const body of msg.bodies ?? []) bodyReadings.set(readModelBodyKey(body.view, body.key), new Map(body.sources.map((source) => [source.name, source])));
     } else if (msg.type === "progress") {
       if (msg.phase === "opened") slowestOpenMs = Math.max(slowestOpenMs, msg.ms ?? 0);
@@ -2428,11 +2446,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
     judge: (sources, now, body) => sources.map((source) => {
-      const read = body ? newerReading(source, bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name)) : undefined;
+      const own = body ? bodyReadings.get(readModelBodyKey(body.view, body.key))?.get(source.name) : undefined;
+      const declaredReads = body ? ledgerReads.get(body.view)?.[source.name] : undefined;
+      const read = body ? (declaredReads !== undefined ? own ?? source : newerReading(source, own)) : undefined;
       if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(read ?? sourceClocks.get(source.name) ?? source, now);
       const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
       const state = instances.get(instance);
-      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now) : ledgerSource(state, now);
+      if (state?.tickedAt !== undefined) return read ? builtLedgerSource(read, state, now, undefined, declaredReads) : ledgerSource(state, now);
       const committed = committedAt.get(instance);
       if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
         return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
@@ -2443,13 +2463,22 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       const again = loadCommittedViewBodies(opts.stateDir, home);
       committedAt = committedTickTimes(opts.stateDir, opts.instances);
       let replaced = 0;
+      let removed = 0;
+      if (again.reason === undefined) {
+        const committed = new Set(again.bodies.map(entry => readModelBodyKey(entry.view, entry.key)));
+        for (const key of bodies.keys()) if (!posted.has(key) && !committed.has(key)) {
+          bodies.delete(key);
+          bodyReadings.delete(key);
+          removed++;
+        }
+      }
       for (const entry of again.bodies) {
         const key = readModelBodyKey(entry.view, entry.key);
         if (posted.has(key) || bodies.get(key)?.etag === entry.etag) continue;
         bodies.set(key, entry);
         replaced++;
       }
-      opts.log?.("read_model.reloaded", { bodies: again.bodies.length, replaced, ...(again.reason ? { reason: again.reason } : {}) });
+      opts.log?.("read_model.reloaded", { bodies: again.bodies.length, replaced, removed, ...(again.reason ? { reason: again.reason } : {}) });
       return replaced;
     },
     switches: () => mainSwitches,

@@ -20,3 +20,11 @@
     The ledger step inbox.thread_list_classification_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 3 in the older half, 15 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.6
+    reasons:
+      - "low-confidence verdict (0.60 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single new test file (test/scout-inbox-thread-list-classification-failed.test.ts). Nothing in the description or files list touches secrets, auth, permissions, deletion, merge/deploy/infra/review policy, or irreversible actions.; on the change's description/files alone, no diff was read — The task asks for a root-cause fix rather than hiding rows, and the acceptance is a grep for a named test, which is verifiable. The cause is not yet located, though, so the fix may touch files beyond the declared one.; on the change's description/files alone, no diff was read — The family track record is weak (0 merged, 1 declined; Beta mean 0.33), and the task cites no PRs. This warrants scrutiny, but the normal CI and review steps still apply, and none of the escalation criteria is met."
+    judged_at: "2026-10-18T12:33:44.386Z"
+    pin: "303668bda4b7a237d8fa303c350dafddf7d7a86b87825d2a368c1567972aa625"

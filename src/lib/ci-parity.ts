@@ -16,6 +16,7 @@ import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { createStaticCheckTiming, type StaticCheckTiming } from "./preflight-step-timing.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
 import { shortPathWhenTooLong } from "./short-path-root.js";
 import { acquireTestSlot, lowPriorityCommand, testSlotExecutionAllowed, TEST_FILE_PEAK_BYTES, testRunArgv, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
@@ -2058,6 +2059,31 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   },
 ];
 
+/** W1-T9380: the PR-body-free half of acceptance-author-gate (`--commit-trailer-only`), run locally.
+ * The range is origin/main's merge-base..HEAD, which the hosted gate also reads; the PR body
+ * checks stay hosted because no body exists before a PR does. An unresolvable base is a FAIL
+ * naming the cause, never a silent pass. */
+export function acceptanceAuthorGateCommitTrailerLeaf(repoRoot: string, spawn: PreflightSpawn): { ok: boolean; detail: string } {
+  // The run's PINNED base (a refusal throws into a named failing step), so this leaf and the diff-scoped
+  // leaves read one base; HEAD is the literal ref the gate resolves inside the checkout.
+  const baseSha = requirePinnedBase(repoRoot, spawn);
+  const headSha = "HEAD";
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}aag-event-`));
+  try {
+    const eventPath = join(dir, "event.json");
+    writeFileSync(eventPath, JSON.stringify({ pull_request: { body: "", base: { sha: baseSha }, head: { sha: headSha } } }));
+    return shellOut(
+      spawn,
+      "node scripts/acceptance-author-gate.mjs --commit-trailer-only",
+      process.execPath,
+      [join(repoRoot, "scripts", "acceptance-author-gate.mjs"), "--commit-trailer-only", "--event-path", eventPath],
+      { cwd: repoRoot },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function standaloneNpmScriptEntry(workflow: string, job: string, script: string): CiParityEntry {
   return { ...npmScriptEntry(job, script), workflow };
 }
@@ -2069,8 +2095,8 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
   {
     workflow: "acceptance-author-gate.yml",
     job: "acceptance-author-gate",
-    mirrored: false,
-    reason: "needs the pull_request event's base/head range and PR body; a local checkout before a PR exists cannot supply either identity honestly",
+    mirrored: true,
+    run: (repoRoot, spawn) => [runStep("acceptance-author-gate:commit-trailers", () => acceptanceAuthorGateCommitTrailerLeaf(repoRoot, spawn))],
   },
   {
     workflow: "ci-gate.yml",

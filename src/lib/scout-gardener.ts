@@ -5,6 +5,7 @@ import { backlogCitedSteps } from "./backlog-gardener.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { CI_FRICTION_LEDGER_STEPS } from "./ci-friction-gardener.js";
 import { slug } from "./feedback-docket.js";
+import { newTestPath } from "./plan.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type Outcome } from "./gardener.js";
 import { readMainHistory } from "./hot-file-gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -204,11 +205,11 @@ export function scoutInventory(sources: ScoutSources): ScoutInventory {
 }
 
 /** The test a filed record's acceptance proof names, one per symptom. */
-const scoutTestPath = (step: string): string => `test/scout-${slug(step, 60).replace(/-+$/, "")}.test.ts`;
+const scoutTestPath = (step: string, files: readonly string[]): string => newTestPath(`scout-${slug(step, 60).replace(/-+$/, "")}`, files, "scout-gardener");
 
 /** Render ONE uncovered symptom as a single-record shard; `refused` names the lint checks that blocked it. */
 export function scoutShard(symptom: ScoutSymptom, taskId: string, population: readonly number[]): { text: string; refused?: string } {
-  const testPath = scoutTestPath(symptom.step);
+  const testPath = scoutTestPath(symptom.step, symptom.files);
   const recon = symptom.files.length === 0;
   return renderMachineShard({
     taskId,

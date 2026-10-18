@@ -55,6 +55,8 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
   origin`), not only `origin/main`, counting per head against main.**
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.**
+- **A new test goes in the `test/<folder>/` that `rmd test-place` computes from its imports — never directly
+  under `test/`.**
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names**
 - **A contested reservation is never deleted and an unfiled one is never free — the
