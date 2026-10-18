@@ -16143,8 +16143,15 @@ export async function runSweep(
     const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
     if (reportedStage) { stuckStages.set(key, reportedStage); return; }
     const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
+    // W1-T9971: the fix rung writes `fix.dispatch` when a round ENDS, so a round an EARLIER pass handed to it
+    // (still queued in memory admission, or running) has no qualifying row yet. Read it as the dedup does: this
+    // head is in the dispatched set and its seed's rung has not ended. Only a seed since the stage began counts.
+    const roundInFlight = prior.fixed.has(`${pr.prNumber}@${pr.headSha}`) &&
+      (fixSeedRead(ledgerLines, pr, deps.runId)?.kind ?? "live") === "live" &&
+      ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber && row.acted === true &&
+        row.head_sha === pr.headSha && Date.parse(String(row.ts)) >= since);
     if ((fields.blocker === "conflict" || fields.blocker === "own-red") &&
-        (repairStarted || stageRows.some(row => row.step === "fix.dispatch" ||
+        (repairStarted || roundInFlight || stageRows.some(row => row.step === "fix.dispatch" ||
           (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
           (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
             ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
