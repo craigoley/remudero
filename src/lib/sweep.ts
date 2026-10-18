@@ -15875,6 +15875,31 @@ function claimArmEvidence(ledgerPath: string, pr: OpenPrView, facts: ArmReprobeF
   }
 }
 
+/** W1-T9232: the review cause for a build head cut before its own shard merged. */
+export const OWN_TASK_RECORD_MISSING_CAUSE = "own-task-record-missing-at-head";
+export const OWN_TASK_RECORD_REFRESH_STEP = "sweep.own_task_record.refresh";
+interface TaskRecordRead { criteria: readonly unknown[]; taskRisk?: unknown; taskBudgetUsd?: unknown; divergence?: unknown }
+
+/** W1-T9232: the plan at the PR head has no record for the task (and loaded fine) while origin/main has it. A task
+ *  absent from both, or a plan that could not be loaded, is a real fault and stays today's failure. */
+export function headLacksOwnTaskRecord(atHead: TaskRecordRead, atMain: TaskRecordRead): boolean {
+  const lacks = atHead.divergence === undefined && atHead.criteria.length === 0 &&
+    atHead.taskRisk === undefined && atHead.taskBudgetUsd === undefined;
+  const has = atMain.divergence === undefined && (atMain.criteria.length > 0 || atMain.taskRisk !== undefined);
+  return lacks && has;
+}
+
+/** W1-T9232: the review's skip row naming this cause for the PR's exact head, when it is the latest review row there. */
+export function ownTaskRecordMissingRow(
+  lines: readonly Record<string, unknown>[], pr: Pick<OpenPrView, "prUrl" | "headSha">,
+): Record<string, unknown> | undefined {
+  // The provenance row is written before the skip and says nothing about the verdict: it never supersedes the cause.
+  const ignoredStep = "review.provider_provenance";
+  const latest = lines.findLast((row) => typeof row.step === "string" && row.step.startsWith("review.") &&
+    row.pr_url === pr.prUrl && row.head_sha === pr.headSha && row.step !== ignoredStep);
+  return latest?.step === "review.reviewer.skipped" && latest.reason === OWN_TASK_RECORD_MISSING_CAUSE ? latest : undefined;
+}
+
 const CONTRADICTORY_REASON = "review failing with no actionable unmet criteria (contradictory) — escalating";
 const CONTRADICTORY_BACKOFF_CAP_MS = 4 * 60 * 60_000;
 type ContradictoryMemory = {
@@ -17731,6 +17756,36 @@ export async function runSweep(
       deriveDisposition(dispositionView, policy, actNowMs, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
     let { disposition, reason } = derived;
+    // W1-T9232: a build head cut before its own shard merged is refreshed from main and re-reviewed, never escalated
+    // as "contradictory". A refresh that does not take, or a second miss after one, keeps the escalation, named.
+    if (ownTaskRecordMissingRow(ledgerLines, pr) !== undefined) {
+      const refreshRow = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: OWN_TASK_RECORD_REFRESH_STEP,
+        pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, cause: OWN_TASK_RECORD_MISSING_CAUSE };
+      const named = `${OWN_TASK_RECORD_MISSING_CAUSE} → base refresh`;
+      if (ledgerLines.some((row) => row.step === OWN_TASK_RECORD_REFRESH_STEP && row.pr_number === pr.prNumber)) {
+        disposition = "blocked-ambiguous";
+        reason = `${OWN_TASK_RECORD_MISSING_CAUSE} persists after a base refresh — escalating`;
+      } else if (deps.dryRun) {
+        disposition = "wait";
+        reason = `${named} (dry run: not pressed)`;
+      } else if (!deps.updateBranch) {
+        disposition = "blocked-ambiguous";
+        reason = `${OWN_TASK_RECORD_MISSING_CAUSE}: the branch refresh is unwired — escalating`;
+      } else {
+        let outcome: string;
+        try { outcome = await deps.updateBranch(pr); }
+        catch (error) { outcome = `error: ${String((error as Error)?.message ?? error)}`; }
+        appendLine(deps.ledgerPath, { ...refreshRow, ts: clockFromMillisFn(() => now).iso(), outcome, disposition_note: named });
+        ledgerLines.push({ ...refreshRow, outcome });
+        if (outcome === "updated") {
+          disposition = "wait";
+          reason = `${named} (updated) — re-reviewing the refreshed head`;
+        } else {
+          disposition = "blocked-ambiguous";
+          reason = `${OWN_TASK_RECORD_MISSING_CAUSE}: base refresh did not take (${outcome}) — escalating`;
+        }
+      }
+    }
     if (disposition === "post-review" && harvestIncomplete) {
       reason = `checks green, prior cause promise-harvest-incomplete — re-running the review lane on #${pr.prNumber}`;
     }
