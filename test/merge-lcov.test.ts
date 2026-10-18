@@ -166,6 +166,55 @@ function runCompactor(output: string, ...rawDirectories: string[]): string {
   );
 }
 
+test('coverage manifest reads reject replacement and growth before publishing LCOV', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'rmd-coverage-manifest-identity-')));
+  try {
+    const raw = join(root, 'raw'); mkdirSync(raw);
+    const probe = join(root, 'probe.mjs'), source = 'export const evidence = 1;\n';
+    writeFileSync(probe, source);
+    writeFileSync(join(raw, 'coverage-1-0000000000000-0.json'), JSON.stringify({ result: [{
+      scriptId: '1', url: `file://${probe}`, functions: [{ functionName: '',
+        ranges: [{ startOffset: 0, endOffset: source.length, count: 1 }], isBlockCoverage: true }],
+    }] }));
+    for (const mutation of ['replacement', 'growth']) {
+      const compact = join(root, mutation); runCompactor(compact, raw);
+      const manifest = join(compact, readdirSync(compact).find(name => /^coverage-corpus-/.test(name))!);
+      const output = join(root, `${mutation}.info`);
+      execFileSync(process.execPath, ['--expose-internals', '--input-type=module', '-e', `
+        import assert from 'node:assert/strict';
+        import fs from 'node:fs';
+        import { syncBuiltinESMExports } from 'node:module';
+        import { main } from './scripts/coverage-merge-ratchet.mjs';
+        const [manifest, output, compact, mutation, root] = process.argv.slice(1);
+        const original = { open: fs.openSync, stat: fs.fstatSync };
+        let targetFd = -1, mutated = false;
+        fs.openSync = (path, ...args) => {
+          const fd = original.open(path, ...args);
+          if (path === manifest) targetFd = fd;
+          return fd;
+        };
+        fs.fstatSync = (fd, ...args) => {
+          const stat = original.stat(fd, ...args);
+          if (fd === targetFd && !mutated) {
+            mutated = true;
+            if (mutation === 'replacement') {
+              fs.renameSync(manifest, root + '/original-manifest.json');
+              fs.writeFileSync(manifest, ' '.repeat(stat.size));
+            } else fs.appendFileSync(manifest, ' '.repeat(16));
+          }
+          return stat;
+        };
+        syncBuiltinESMExports();
+        try { await assert.rejects(main(['--output', output, compact]), /changed coverage chunk/); }
+        finally { fs.openSync = original.open; fs.fstatSync = original.stat; syncBuiltinESMExports(); }
+        assert.ok(mutated, 'the manifest must change after its descriptor size check');
+        assert.equal(fs.existsSync(output), false, 'changed input must publish no LCOV');
+        assert.throws(() => original.stat(targetFd), { code: 'EBADF' });
+      `, manifest, output, compact, mutation, root], { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' });
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: string; order: number[]; reportPaths: string[] } {
   // Match the production merger's explicit input order: caller directory order, then sorted report paths.
   // Do not infer order from a separate process's directory enumeration; filesystems can return a different
