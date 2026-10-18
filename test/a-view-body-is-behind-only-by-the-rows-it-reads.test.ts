@@ -21,7 +21,7 @@ function fixture(t: TestContext, declared = true, heartbeat = true) {
   const repoPath = join(dir, "instances.yaml");
   writeFileSync(repoPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n    project: remudero\n");
   const ledger = join(dir, "ledger.ndjson");
-  const append = (step: string, ms: number) => appendFileSync(ledger, `${JSON.stringify({ step, ts: iso(ms) })}\n`);
+  const append = (step: string, ms: number) => appendFileSync(ledger, `${JSON.stringify({ ts: iso(ms), step })}\n`);
   writeFileSync(ledger, "");
   if (heartbeat) append("daemon.tick", START - 60_000);
   append("unrelated.initial", START);
@@ -125,8 +125,8 @@ test("serve judges the real instances worker's heartbeat readings without changi
   writeFileSync(repoPath, "instances:\n  core:\n    github_repo: craigoley/remudero\n    project: remudero\n");
   const now = Date.now();
   writeFileSync(join(dir, "ledger.ndjson"), [
-    { step: "daemon.tick", ts: iso(now - 60_000) },
-    { step: "unrelated.later", ts: iso(now) },
+    { ts: iso(now - 60_000), step: "daemon.tick" },
+    { ts: iso(now), step: "unrelated.later" },
   ].map((row) => JSON.stringify(row) + "\n").join(""));
   writeFileSync(readModelSwitchesPath(dir), JSON.stringify({ views: { instances: "serve" } }));
   let readReceived = false;
