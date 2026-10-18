@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
+import { readProofFileInside } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
@@ -3816,14 +3817,7 @@ function proofFormText(s: string): string {
 
 /** A target file's text, or `undefined` when it is absent, unreadable, or resolves outside `root` (R-18). */
 function readTargetInside(root: string, target: string): string | undefined {
-  try {
-    const realRoot = realpathSync(root);
-    const real = realpathSync(join(realRoot, target));
-    if (!real.startsWith(realRoot + pathSep) || !statSync(real).isFile()) return undefined;
-    return readFileSync(real, "utf8");
-  } catch {
-    return undefined; // deliberate: absent and unreadable both mean "no literal here", never a manufactured match
-  }
+  return readProofFileInside(root, target);
 }
 
 function literalPresent(text: string, pattern: string, target: string): boolean {
