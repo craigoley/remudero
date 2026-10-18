@@ -235,7 +235,8 @@ function scopeRace(t: TestContext, f: ReturnType<typeof fixture>, action: "save"
   const outside = join(f.opts.config.root, "outside-race");
   mkdirSync(join(outside, "lib"), { recursive: true });
   const sentinel = join(outside, "lib/rule-suites.ts");
-  writeFileSync(sentinel, "OUTSIDE_SENTINEL"); chmodSync(sentinel, 0o640);
+  writeFileSync(sentinel, "OUTSIDE_SENTINEL", { mode: 0o640 });
+  const outsideMode = statSync(sentinel).mode & 0o777;
   const target = component === "leaf" ? join(f.repo.dir, path) : join(f.repo.dir, "src");
   const destination = component === "leaf" ? sentinel : outside;
   let fires = 0;
@@ -276,7 +277,7 @@ os.supports_dir_fd.add(racing)
     fires++;
     return result.stdout;
   } };
-  return { io, sentinel, outside, fired: () => fires };
+  return { io, sentinel, outside, outsideMode, fired: () => fires };
 }
 
 for (const component of ["leaf", "ancestor"] as const) {
@@ -302,7 +303,7 @@ for (const component of ["leaf", "ancestor"] as const) {
     assert.deepEqual(await restoreScopeAmendmentWork(input, race.io), [path]);
     assert.equal(race.fired(), 1);
     assert.equal(readFileSync(race.sentinel, "utf8"), "OUTSIDE_SENTINEL", "restore followed an outside-worktree replacement");
-    assert.equal(statSync(race.sentinel).mode & 0o777, 0o640, "restore changed an outside file's mode");
+    assert.equal(statSync(race.sentinel).mode & 0o777, race.outsideMode, "restore changed an outside file's mode");
     assert.equal(readFileSync(join(f.repo.dir, component === "ancestor" ? "src-raced/lib/rule-suites.ts" : path), "utf8"), content);
   });
 }
@@ -340,11 +341,12 @@ test("scope recovery replaces restore targets without modifying their other hard
   writeFileSync(join(f.repo.dir, path), content);
   await saveScopeAmendmentWork(input);
   const outside = join(f.opts.config.root, "outside-hardlink");
-  writeFileSync(outside, "OUTSIDE_SENTINEL"); chmodSync(outside, 0o640);
+  writeFileSync(outside, "OUTSIDE_SENTINEL", { mode: 0o640 });
+  const outsideMode = statSync(outside).mode & 0o777;
   rmSync(join(f.repo.dir, path)); linkSync(outside, join(f.repo.dir, path));
   await restoreScopeAmendmentWork(input);
   assert.equal(readFileSync(outside, "utf8"), "OUTSIDE_SENTINEL");
-  assert.equal(statSync(outside).mode & 0o777, 0o640);
+  assert.equal(statSync(outside).mode & 0o777, outsideMode);
   assert.equal(readFileSync(join(f.repo.dir, path), "utf8"), content);
 });
 
