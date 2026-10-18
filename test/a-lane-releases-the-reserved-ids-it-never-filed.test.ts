@@ -12,20 +12,21 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
-import { approveCommand, laneReleaseReason, releaseUnfiledReservations, triageCommand } from "../src/run-task.js";
+// Through the shared re-export helper, not `../src/run-task.js` directly: the affected-suite reach
+// ratchet (test/the-affected-suite-reach-ratchet.test.ts) refuses every new DIRECT run-task importer.
+import { approveCommand, laneReleaseReason, releaseUnfiledReservations, triageCommand } from "./helpers/run-task-test.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, "..");
 const GIT_ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
@@ -56,19 +57,19 @@ const TASK_FIELDS = ["  repo: remudero", "  depends_on: []", "  type: implement"
 
 /** The fixture world: a bare origin, a managed clone of it at `<root>/repos/<repo>`, and a HOME whose config points at it. */
 function world(kind: string, seed: (dir: string) => void) {
-  const bare = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}-origin-`));
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { env: GIT_ENV });
-  const seedDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}-seed-`));
-  execFileSync("git", ["init", "--quiet", "-b", "main", seedDir], { env: GIT_ENV });
+  const origin = gitRepo({ bare: true, kind: `${kind}-origin` });
+  const bare = origin.dir;
+  const seedRepo = gitRepo({ kind: `${kind}-seed`, seedCommit: false });
+  const seedDir = seedRepo.dir;
   mkdirSync(join(seedDir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(seedDir, "plan", "tasks.yaml"), `- id: W1-T9\n  title: "seed"\n${TASK_FIELDS}\n`);
   writeFileSync(join(seedDir, "MASTER-PLAN.md"), "# MASTER-PLAN (fixture)\n");
   seed(seedDir);
-  git(seedDir, "add", "-A");
-  git(seedDir, "commit", "--quiet", "-m", "chore: seed plan");
-  git(seedDir, "remote", "add", "origin", bare);
-  git(seedDir, "push", "--quiet", "origin", "main");
-  rmSync(seedDir, { recursive: true, force: true });
+  seedRepo.git("add", "-A");
+  seedRepo.git("commit", "--quiet", "-m", "chore: seed plan");
+  seedRepo.addRemote("origin", bare);
+  seedRepo.git("push", "--quiet", "origin", "main");
+  seedRepo.cleanup();
 
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}-root-`));
   const remoteUrl = execFileSync("git", ["-C", REPO_ROOT, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
@@ -91,7 +92,7 @@ function world(kind: string, seed: (dir: string) => void) {
     git(bare, "for-each-ref", "--format=%(refname)", "refs/rmd-id/").split("\n").filter(Boolean).map((r) => r.replace("refs/rmd-id/", ""));
   return {
     bare, root, repoDir, home, config, ledger, reservedRefs,
-    cleanup: () => { for (const d of [bare, root, home]) rmSync(d, { recursive: true, force: true }); },
+    cleanup: () => { origin.cleanup(); for (const d of [root, home]) rmSync(d, { recursive: true, force: true }); },
   };
 }
 
