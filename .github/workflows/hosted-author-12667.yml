@@ -20,7 +20,6 @@ jobs:
       CAPTURED_BASE: f9935f71c4f332921fde9409e757227f5871067b
       SOURCE_BUNDLE_SHA256: 8d7b65b404f1f1b59733c1a79713c934ae74aad490ca91e9db3a91bf99532cd4
       PUBLICATION_BRANCH: run-unfiled-1792341522996
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pilot-browsers
       PILOT_CONCERN: instrument-companion
     steps:
       - name: Fix one total deadline including setup and calibration
@@ -32,6 +31,7 @@ jobs:
           deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=195)
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write('PILOT_DEADLINE=' + deadline.isoformat() + '\n')
+              f.write('PLAYWRIGHT_BROWSERS_PATH=' + os.path.join(os.environ['RUNNER_TEMP'], 'pilot-browsers') + '\n')
           PY
 
           node --input-type=module - <<'JS'
@@ -76,7 +76,7 @@ jobs:
              cp.execFileSync('git',['-C',mirror,'update-ref','refs/heads/main',base],{encoding:'utf8',timeout:10000});
              git(['remote','set-url','origin','file://'+mirror]);
              assert.equal(config.controllerBranch,'run-unfiled-1792334880000');
-             assert.equal(config.controllerPriorHead,'ae1deb4a2b5ea91a93a8781f1577f3ca6fa5c63f');
+             assert.equal(config.controllerPriorHead,'bb1b3d73019fdedbd72311c60ab243c3e19cec8f');
              const controlGit=args=>cp.execFileSync('git',['-C',config.controller,...args],{encoding:'utf8',timeout:60000}).trim();
              assert.equal(controlGit(['rev-parse','HEAD']),config.controllerHead);assert.equal(controlGit(['status','--porcelain']),'');
              assert.equal(controlGit(['rev-parse','--is-shallow-repository']),'false');assert(!fs.existsSync(path.join(config.controller,'.git/objects/info/alternates')));
@@ -252,7 +252,7 @@ jobs:
           import fs from 'node:fs';
           import path from 'node:path';
           const tmp=process.env.RUNNER_TEMP,workspace=process.env.GITHUB_WORKSPACE;
-          const config={concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792334880000",controllerPriorHead:"ae1deb4a2b5ea91a93a8781f1577f3ca6fa5c63f",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
+          const config={concern:process.env.PILOT_CONCERN,controller:path.join(workspace,"pilot-control"),controllerHead:process.env.GITHUB_SHA,controllerBranch:"run-unfiled-1792334880000",controllerPriorHead:"bb1b3d73019fdedbd72311c60ab243c3e19cec8f",source:path.join(workspace,'source'),head:process.env.SOURCE_HEAD,base:process.env.CAPTURED_BASE,publicationBranch:process.env.PUBLICATION_BRANCH,deadline:process.env.PILOT_DEADLINE,output:path.join(tmp,'pilot-evidence'),privateHome:path.join(tmp,'pilot-home'),privateTmp:path.join(tmp,'pilot-tmp'),browsers:process.env.PLAYWRIGHT_BROWSERS_PATH,uid:process.getuid(),hostNetNamespace:fs.readlinkSync('/proc/self/ns/net')};
           fs.writeFileSync(path.join(tmp,'pilot-config.json'),JSON.stringify(config),{flag:'wx',mode:0o600});
           JS
           node "$RUNNER_TEMP/hosted-author-12667.mjs" prepare "$RUNNER_TEMP/pilot-config.json"
