@@ -45,7 +45,7 @@ function currentSources(): Map<string, string> {
 }
 
 test("W1-T9863: a census pointed at the wrong root fails its inspected count", () => {
-  const root = mkdtempSync(join(tmpdir(), "inspected-population-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-inspected-population-"));
   try {
     mkdirSync(join(root, "src"));
     mkdirSync(join(root, "test"));
