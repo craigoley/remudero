@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Content-only migration; dry-run by default. Unsupported expressions are reported, never guessed.
-import { parseSync } from "@swc/core";
+import { createRequire } from "node:module";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
+
+const require = createRequire(import.meta.url);
 
 export const SHAPES = ["join/resolve(dirname(fileURLToPath(import.meta.url)), parents)",
   "join/resolve(__dirname, parents)", "join/resolve(import.meta.dirname, parents)",
@@ -16,7 +18,7 @@ export function testFiles(root) {
     if (entry.isDirectory()) return walk(path);
     return entry.isFile() && entry.name.endsWith(".test.ts") ? [relative(root, path).split("\\").join("/")] : [];
   });
-  return walk(join(root, "test")).filter((p) => !/^test\/(helpers|setup|lib)\//.test(p)).sort();
+  return walk(join(root, "test")).filter((p) => !/^test\/(helpers|setup|lib|fixtures)\//.test(p)).sort();
 }
 
 function children(node) {
@@ -26,6 +28,7 @@ function children(node) {
 
 /** Parse executable expressions so comments and fixture strings cannot become edits. */
 export function analyzeSource(source, file) {
+  const { parseSync } = require("@swc/core");
   const tree = parseSync(source, { syntax: "typescript", target: "es2022" });
   const bytes = Buffer.from(source);
   const text = (node) => bytes.subarray(node.span.start - 1, node.span.end - 1).toString();

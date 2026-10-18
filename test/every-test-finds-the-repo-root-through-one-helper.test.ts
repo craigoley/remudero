@@ -9,6 +9,8 @@ import { REPO_ROOT, repoRoot } from "#test/helpers/repo-root.js";
 import { assertInspected } from "#test/helpers/inspected-population.js";
 // @ts-expect-error the codemod is an executable JavaScript module
 import { analyzeSource, rewriteSource, testFiles } from "#scripts/test-repo-root-codemod.mjs";
+// @ts-expect-error the census precheck is an executable JavaScript module
+import { evaluateCensusPrecheck, PRECHECK_PARITY } from "#scripts/census-precheck.mjs";
 
 function git(...args: string[]): string {
   return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 << 20 });
@@ -17,7 +19,7 @@ function git(...args: string[]): string {
 function sourcesAtBase(): Map<string, string> {
   const base = git("merge-base", "HEAD", "origin/main").trim();
   const paths = git("ls-tree", "-r", "--name-only", base, "--", "test").split("\n")
-    .filter((p) => /^test\/.*\.test\.ts$/.test(p) && !/^test\/(helpers|setup|lib)\//.test(p));
+    .filter((p) => /^test\/.*\.test\.ts$/.test(p) && !/^test\/(helpers|setup|lib|fixtures)\//.test(p));
   assert.ok(paths.length > 0, "the merge base contains test files");
   const objects = execFileSync("git", ["cat-file", "--batch"], {
     cwd: REPO_ROOT, input: paths.map((p) => `${base}:${p}\n`).join(""), maxBuffer: 128 << 20,
@@ -38,11 +40,47 @@ function sourcesAtBase(): Map<string, string> {
 function currentSources(): Map<string, string> {
   const files: string[] = testFiles(REPO_ROOT);
   const tracked = git("ls-files", "--", "test").split("\n").filter((p) =>
-    /^test\/.*\.test\.ts$/.test(p) && !/^test\/(helpers|setup|lib)\//.test(p));
+    /^test\/.*\.test\.ts$/.test(p) && !/^test\/(helpers|setup|lib|fixtures)\//.test(p));
   const untracked = new Set(git("ls-files", "--others", "--", "test").split("\n"));
   assertInspected("root guard tracked tests", files.filter((p) => !untracked.has(p)).length, tracked.length);
   return new Map(files.map((file) => [file, readFileSync(join(REPO_ROOT, file), "utf8")]));
 }
+
+test("W1-T9863: census-precheck refuses new own-folder roots and net count growth", () => {
+  const suite = "test/every-test-finds-the-repo-root-through-one-helper.test.ts";
+  assert.equal(typeof PRECHECK_PARITY[suite]?.modeled, "function");
+  const ownRoot = 'import { join } from "node:path"; const root = join(import.meta.dirname, "..");';
+  const helper = 'import { REPO_ROOT } from "#test/helpers/repo-root.js";';
+  const evaluate = (head: Record<string, string>, base: Record<string, string>) => {
+    const changed = [...new Set([...Object.keys(head), ...Object.keys(base)])];
+    return evaluateCensusPrecheck({
+      changed, readHead: (p: string) => head[p] ?? null, readBase: (p: string) => base[p] ?? null,
+      measuredFiles: [], testFiles: [], srcFiles: [],
+    });
+  };
+  const path = "test/member.test.ts";
+  assert.deepEqual(evaluate({ [path]: helper }, {}), []);
+  assert.deepEqual(evaluate({ [path]: ownRoot }, { [path]: ownRoot }), []);
+  assert.deepEqual(evaluate({ [path]: helper }, { [path]: ownRoot }), []);
+  assert.deepEqual(evaluate({}, { [path]: ownRoot }), []);
+  assert.match(evaluate({ [path]: ownRoot }, { [path]: helper }).join("\n"), /head=1, merge base=0/);
+  const added = evaluate({ [path]: ownRoot }, {});
+  assert.equal(added.length, 2);
+  assert.match(added[0], /new test test\/member.test.ts derives its own root/);
+  assert.match(added[1], /head=1, merge base=0/);
+  // An addition still fails when deleting an old offender keeps the total count flat.
+  assert.equal(evaluate({ [path]: ownRoot }, { "test/removed.test.ts": ownRoot }).length, 1);
+  assert.deepEqual(evaluate({ [path]: `${helper}\n// ${ownRoot}` }, {}), []);
+  for (const dir of ["helpers", "setup", "lib", "fixtures"]) {
+    assert.deepEqual(evaluate({ [`test/${dir}/member.test.ts`]: ownRoot }, {}), []);
+  }
+  const nested = "test/nested/member.test.ts";
+  const nestedRoot = ownRoot.replace('".."', '"..", ".."');
+  assert.match(evaluate({ [nested]: nestedRoot }, {}).join("\n"), /new test test\/nested\/member.test.ts/);
+  // Counts are files, so adding another expression to an existing offender is not growth.
+  assert.deepEqual(evaluate({ [path]: `${ownRoot}\nconst other = join(import.meta.dirname, "..");` }, { [path]: ownRoot }), []);
+  assert.throws(() => evaluate({ [path]: "const = import.meta.url;" }, {}));
+});
 
 test("W1-T9863: a census pointed at the wrong root fails its inspected count", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-inspected-population-"));
