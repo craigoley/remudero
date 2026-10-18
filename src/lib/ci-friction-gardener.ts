@@ -14,7 +14,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
-import { loadPlanFromYaml } from "./plan.js";
+import { loadPlanFromYaml, newTestPath } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { lintTask } from "./task-linter.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard } from "./machine-filing.js";
@@ -1216,7 +1216,7 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
   const { price, rung, owner } = draft;
   const key = ciFrictionCauseKey(price.cause);
   const origin = ciFrictionRungOrigin(key, rung);
-  const testPath = `test/${ciFrictionShardStem(key)}.test.ts`;
+  const testPath = newTestPath(ciFrictionShardStem(key), [owner.files[0]!], "ci-friction-gardener");
   // The shared machine-filing path (operator ruling 2026-09-29): the header, verify and risk are its.
   return renderMachineShard({
     taskId,

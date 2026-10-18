@@ -12,7 +12,7 @@ import fs from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan } from "./plan.js";
-import { missingDeclaredPaths, parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
+import { isPlacedTestPath, missingDeclaredPaths, placementImports, placementSubsystemMap, parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
 import { lintPlan, lintTask, MINTED_TASK_ID_RE, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
@@ -33,6 +33,7 @@ import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
 import { fileURLToPath } from "node:url";
+import { placeTest } from "./test-placement.js";
 import { readInstanceRegistryText } from "./instance-mode.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { loadManagedRepos } from "./managed-repos.js";
@@ -1753,7 +1754,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "\"RATIFICATION CANDIDATE\" and \"§7/P25\" above name this PROCESS: never put them in a task title.",
     `Every task MUST declare ${SCOPE_HINT} — never omit it and never leave it empty.`,
     "Every files: path must exist in this checkout or origin/main: confirm with Glob before listing it.",
-    "A new file is either test/<task-title-slug>.test.ts or declared in design on its own CREATES: <path> line.",
+    "A new file is either test/<folder>/<task-title-slug>.test.ts, where <folder> is the folder placeTest computes from the src modules in files: (see `rmd test-place`; never directly under test/), or declared in design on its own CREATES: <path> line.",
     "A CREATES path is new-file scope only, never the call site of a call-site proof. Every proof must fail on main.",
     'Every acceptance `proof:` value MUST be double-quoted (for example, `proof: "grep: symbol in src/file.ts"`): a proof contains a colon and unquoted YAML is invalid.',
     "RAW YAML ONLY between the FRAGMENT markers — do NOT wrap it in a markdown code fence",
@@ -2176,13 +2177,28 @@ function draftCreatedPaths(task: import("./plan.js").Task): Set<string> {
   return new Set([...task.design?.matchAll(/^[ \t]*CREATES:[ \t]*(\S+)[ \t]*$/gm) ?? []].map((m) => m[1]));
 }
 
+/** W1-T9875: the path a draft's slug-named new test belongs at, computed by placeTest from the src modules it declares. */
+function draftExpectedTestPath(task: import("./plan.js").Task, slug: string): string {
+  const placed = placeTest({ imports: placementImports(task.files ?? []), name: slug, kind: "unit" }, placementSubsystemMap());
+  return `test/${placed.folder}/${slug}.test.ts`;
+}
+
 function draftMissingPathViolations(task: import("./plan.js").Task, facts: DraftRepoFacts): DraftLintViolation[] {
   const slug = draftShardSlug(task.title);
   const creates = draftCreatedPaths(task);
+  const expected = draftExpectedTestPath(task, slug);
   const missing = missingDeclaredPaths(task, { pathExists: facts.moduleExists, pathExistsAtBase: facts.pathExistsAtBase },
-    (path) => path === `test/${slug}.test.ts` || creates.has(path));
-  return missing.map((path) => ({ check: "draft-path-missing", severity: "block",
-    message: `${task.id}: files path ${JSON.stringify(path)} exists in neither the checkout nor origin/main; use an existing path, a slug-named test, or a CREATES: declaration` }));
+    (path) => path === expected || creates.has(path));
+  const out: DraftLintViolation[] = missing.map((path) => ({ check: "draft-path-missing", severity: "block",
+    message: `${task.id}: files path ${JSON.stringify(path)} exists in neither the checkout nor origin/main; use an existing path, the slug-named test at ${JSON.stringify(expected)}, or a CREATES: declaration` }));
+  // A NEW test lands in its computed folder, whether the slug names it or a CREATES: line does; an existing one keeps its path.
+  for (const path of task.files ?? []) {
+    if (!/^test\/[\w./-]+\.test\.[mc]?[jt]s$/.test(path) || isPlacedTestPath(path)) continue;
+    if (facts.moduleExists(path) || facts.pathExistsAtBase?.(path) === true) continue;
+    out.push({ check: "draft-test-unplaced", severity: "block",
+      message: `${task.id}: new test ${JSON.stringify(path)} sits directly under test/ or in a folder scripts/test-placement/subsystem-map.json does not name; a new test goes in the folder placeTest computes (here ${JSON.stringify(expected)}; \`rmd test-place\` prints it for an existing test)` });
+  }
+  return out;
 }
 
 /** W1-T9307: a call-site-shaped proof (`grep: <sym>( in src/<x>.ts`) must name a caller the tree HOLDS. A path absent from
