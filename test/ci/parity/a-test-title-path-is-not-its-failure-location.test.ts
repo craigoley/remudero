@@ -6,10 +6,10 @@ import { test, type TestContext } from "node:test";
 import {
   ciFailureLedgerEntry, ciFailureSignature, ciFrictionCauseKey, ciFrictionRoundsFromLedger,
   gitCiFrictionOwnerSearch, RED_WITH_NO_FAILING_TEST,
-} from "../../src/lib/ci-friction-gardener.js";
-import { locateCiFrictionOwner } from "../../src/lib/ci-friction-remedy.js";
-import type { LedgerRecord } from "../../src/lib/retro.js";
-import { gitRepo } from "../helpers/git-repo.js";
+} from "../../../src/lib/ci-friction-gardener.js";
+import { locateCiFrictionOwner } from "../../../src/lib/ci-friction-remedy.js";
+import type { LedgerRecord } from "../../../src/lib/retro.js";
+import { gitRepo } from "../../helpers/git-repo.js";
 
 const MENTIONED = "test/classify.test.ts";
 const ACTUAL = "test/mutation-trigger-covers-its-own-command.test.ts";
@@ -40,8 +40,8 @@ function ownerFixture(t: TestContext) {
     mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
     writeFileSync(join(repo.dir, path), text);
   };
-  put(ACTUAL, readFileSync(new URL("../mutation-trigger-covers-its-own-command.test.ts", import.meta.url), "utf8"));
-  put("scripts/mutation-ratchet.mjs", readFileSync(new URL("../../scripts/mutation-ratchet.mjs", import.meta.url), "utf8"));
+  put(ACTUAL, readFileSync(new URL("../../mutation-trigger-covers-its-own-command.test.ts", import.meta.url), "utf8"));
+  put("scripts/mutation-ratchet.mjs", readFileSync(new URL("../../../scripts/mutation-ratchet.mjs", import.meta.url), "utf8"));
   put(MENTIONED, 'import "../src/lib/classify.js";\n');
   put("src/lib/classify.ts", "export const classify = () => true;\n");
   put("test/real-product.test.ts", 'import "../src/lib/real-product.js";\n');
@@ -196,4 +196,45 @@ test("a real failing file wrapper is not attributed to a path in its exception",
       env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: "" } });
   assert.equal(r.error, undefined); assert.equal(r.signal, null); assert.equal(r.status, 1);
   assert.equal(ciFailureSignature(r.stdout), "test/wrapper-fixture.test.mjs");
+});
+
+test("malformed, traversing and non-test diagnostic locations remain unknown", () => {
+  for (const location of ["'test/../other.test.ts:3:1'", "'test/./other.test.ts:3:1'", "'test/other.test.ts:0:1'",
+    "'/workspace/src/product.ts:3:1'", "'file://foreign/test/other.test.ts:3:1'", "'test/other.test.ts:3:1"]) {
+    unknown(tap().replace(/  location:.*\n/, `  location: ${location}\n`));
+  }
+  assert.equal(ciFailureSignature(tap().replace(/  location:.*\n/, "  location: '/test/root.test.ts:3:1'\n")), "test/root.test.ts");
+  unknown(tap().replace("  ---", "    ---"));
+  unknown(tap().replace("  ...", "    ..."));
+});
+
+test("only a complete same-failure stack can supply a missing TAP location", () => {
+  const frame = "    TestContext.<anonymous> (file:///workspace/test/stack.test.ts:8:3)";
+  const base = tap().replace(/  location:.*\n/, "");
+  const own = base.replace("  ...", `  stack: |-\n${frame}\n    at file:///workspace/test/stack.test.ts:9:3\n  ...`);
+  assert.equal(ciFailureSignature(own), "test/stack.test.ts");
+  unknown(own.replace("test/stack.test.ts:9:3", "test/different.test.ts:9:3"));
+  unknown(base.replace("  ...", `  error: |-\n${frame}\n  expected: 'irrelevant'\n  ...`));
+  unknown(`not ok 1 - ${TITLE}\n${frame}\n    at file:///workspace/test/different.test.ts:9:3`);
+  unknown(`not ok 1 - ${TITLE}\n  AssertionError: title path\n${frame}`);
+});
+
+test("spec headers require the same repeated title and a valid unambiguous location", () => {
+  const spec = [`✖ neutral (1ms)`, "✖ failing tests:", "test at /workspace/test/a.test.ts:2:1", "✖ neutral (1ms)"].join("\n");
+  assert.equal(ciFailureSignature(spec), "test/a.test.ts");
+  for (const text of [spec.replace("✖ neutral (1ms)\n✖ failing", "✖ different (1ms)\n✖ failing"),
+    spec.replace("test/a.test.ts:2:1", "src/a.ts:2:1"), spec.replace(/\n✖ neutral \(1ms\)$/, ""),
+    spec + "\ntest at /workspace/test/b.test.ts:2:1\n✖ neutral (1ms)"]) unknown(text);
+  assert.equal(ciFailureSignature("✖ test/wrapper.test.ts (1ms)"), "test/wrapper.test.ts");
+  assert.equal(ciFailureSignature("✖ neutral (1ms)"), "neutral", "legacy bare names remain non-file signatures");
+});
+
+test("printed reporter notices cannot become failures and pool attribution uses the same bound block", () => {
+  assert.equal(ciFailureSignature("ok 1 - healthy\n# COVERAGE-REPORT-FAILED: deliberately printed\n# tests 1\n# fail 0"), RED_WITH_NO_FAILING_TEST);
+  const pool = "\npure-test-pool: the pool of 2 file(s) failed\npure-test-pool: every pooled file passes isolated";
+  assert.equal(ciFailureSignature(tap() + pool), `pool failure: ${ACTUAL} fails pooled, passes isolated`);
+  const missing = tap().replace(/  location:.*\n/, "") + pool;
+  assert.match(ciFailureSignature(missing)!, /^pool failure: unknown runner failure location /);
+  assert.doesNotMatch(ciFailureSignature(missing)!, /test\/classify/);
+  assert.equal(ciFailureSignature("# tests 0\n# fail 0"), RED_WITH_NO_FAILING_TEST);
 });
