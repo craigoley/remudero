@@ -150,7 +150,7 @@ const BASELINE_COMMAND_NAMES = [
   "reframe",
   "risk-judge-eval",
   "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
-  "serve", "serve-plist", "skill", "skill-eval", "status", "stop", "sweep", "sync", "trace", "triage", "triage-outcomes", "up",
+  "serve", "serve-plist", "skill", "skill-eval", "status", "stop", "sweep", "sync", "test-place", "trace", "triage", "triage-outcomes", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
 ].sort();
