@@ -175,6 +175,7 @@ import {
   openWeightReservationUsd,
   readOpenWeightAllowance,
   spawnCodexWorker,
+  codexReadOnly,
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
   FOUNDRY_CLAUDE_ENDPOINT_ENV,
@@ -254,6 +255,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Provider-safe continuation disposition; never contains a session id or prompt. */
+  continuation?: WorkerContinuationReceipt;
   notStarted?: "admission-abandoned";
   admissionSinceMs?: number;
   /** Opt-in policy configuration and bounded inventory; not effective permission or execution proof. */
@@ -595,6 +598,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * present, defaulted to `null`, so a silent provider renders an honest unknown rather than a key that looks forgotten, and an
  * unreportable model never fails the run (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  continuation?: WorkerContinuationReceipt;
   mcp_isolation?: WorkerMcpIsolationEvidence;
   mcp_boundary?: typeof WORKER_MCP_STRICT;
   mcp_exposure?: WorkerMcpExposure;
@@ -675,6 +679,7 @@ export function workerLedgerFields(r: WorkerResult): {
     ...(r.credentialHelperUnwired ? { credential_helper_unwired: r.credentialHelperUnwired } : {}),
     ...(r.egressUnenforced ? { egress_unenforced: r.egressUnenforced } : {}),
     ...(r.provider ? { provider: r.provider } : {}),
+    ...(r.continuation ? { continuation: r.continuation } : {}),
     model: r.model,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
     ...(r.modelHealthState ? { model_health_state: r.modelHealthState } : {}),
@@ -1134,6 +1139,9 @@ export interface SpawnWorkerArgs {
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
+  /** W1-T10164: identity comes from the prior result, not the requested mount. freshPrompt is
+   * self-contained task/action context for a selected provider that cannot resume that session. */
+  continuation?: { provider?: WorkerProviderId; contextPrompt: string };
   /** Extra env vars merged into the allowlisted child env (never ANTHROPIC_*). */
   env?: Record<string, string>;
   model?: string;
@@ -2411,9 +2419,60 @@ export function withWorkerPidReport<A extends unknown[], R extends { pid: number
   };
 }
 
+export interface WorkerContinuationReceipt {
+  mode: "resumed" | "fresh-handoff";
+  reason: "same-provider" | "provider-changed" | "origin-unavailable" | "provider-fresh-only" | "session-unavailable";
+  from?: WorkerProviderId;
+  to: WorkerProviderId;
+}
+
+/** Bounded prior narrative, original task/tool contract unchanged. The final pending action is
+ * added at selection, so callers cannot size one prompt and send another. Read current files. */
+export function workerContinuation(previous: Pick<WorkerResult, "provider" | "text" | "blocks">,
+  taskPrompt: string, cwd: string): NonNullable<SpawnWorkerArgs["continuation"]> {
+  return { provider: previous.provider, contextPrompt: [
+    "Fresh-session handoff: you have no earlier conversation. Read the current workspace before editing.",
+    `Workspace: ${cwd}`, taskPrompt,
+    "Prior report excerpt (context, not proof of current state):",
+    workerTranscript(previous).slice(-REPORT_EXCERPT_CAP),
+  ].join("\n\n") };
+}
+
+/** Resolve only after routing. A session id has a provider namespace; cash never resumes,
+ * and Codex's unchanged adapter predicate decides which sessions retain its sandbox. */
+export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
+  "prompt" | "resumeSessionId" | "continuation" | "tools" | "sandboxIntent">, provider: WorkerProviderId):
+  { prompt: string; resumeSessionId?: string; receipt?: WorkerContinuationReceipt } {
+  if (!args.resumeSessionId && !args.continuation) return { prompt: args.prompt };
+  const from = args.continuation?.provider === undefined ? undefined :
+    canonicalWorkerProviderId(args.continuation.provider) as WorkerProviderId;
+  const to = canonicalWorkerProviderId(provider) as WorkerProviderId;
+  if (args.resumeSessionId && from === to && (to === "claude" || to === "codex" && codexReadOnly(args))) {
+    return { prompt: args.prompt, resumeSessionId: args.resumeSessionId,
+      receipt: { mode: "resumed", reason: "same-provider", from, to } };
+  }
+  if (!args.continuation?.contextPrompt.trim()) {
+    throw new Error("continuation requires provider provenance and a self-contained fresh handoff before execution");
+  }
+  return { prompt: `${args.continuation.contextPrompt}\n\nPending action:\n${args.prompt}`,
+    receipt: { mode: "fresh-handoff",
+      reason: !args.resumeSessionId ? "session-unavailable" : from === undefined ? "origin-unavailable"
+        : from !== to ? "provider-changed" : "provider-fresh-only",
+      ...(from === undefined ? {} : { from }), to } };
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   validateWorkerMcpIsolation(args);
-  const executionPrompt = withWorkspaceCleanup(args.prompt);
+  const executions = new Map<WorkerProviderId, ReturnType<typeof workerExecutionForProvider>>();
+  const executionFor = (provider: WorkerProviderId) => {
+    let execution = executions.get(provider);
+    if (!execution) {
+      execution = workerExecutionForProvider(args, provider);
+      execution.prompt = withWorkspaceCleanup(execution.prompt);
+      executions.set(provider, execution);
+    }
+    return execution;
+  };
   // The ENFORCE mode of the host memory budget: under the shipped "shadow" mode this returns at once and changes
   // nothing; under "enforce" (an operator ruling in plan/policy.yaml) it waits, tiered and in priority order, while the
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
@@ -2644,10 +2703,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
-      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionPrompt, models,
+      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
         fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
       const plainCashModels = () => {
-        const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionPrompt, "utf8"),
+        const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionFor("cash").prompt, "utf8"),
           { cashSqueezed: true, modelApprovals: config.modelApprovals,
             ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}) });
         return [choice.model, ...choice.alternatives];
@@ -2693,7 +2752,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
             // A refused plain ladder does not remove the independently eligible Sonnet arm.
             models = [];
           }
-          if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionPrompt));
+          if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionFor("cash").prompt));
           const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
@@ -2809,8 +2868,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     if (selection.provider === "codex") {
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+      const execution = executionFor("codex");
       const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-        spawnCodex({ ...codexArgs, prompt: executionPrompt, containment: boundContainment }, workerConfig, capacity);
+        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -2839,6 +2899,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
+        result.continuation = execution.receipt;
         result.routedModel = selection.capacity.model ?? result.model;
         result.selectionAssignmentId = selectionAssignmentId;
         if (args.model) result.model = args.model;
@@ -2897,8 +2958,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
   if (args.mountProvider === "codex") {
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
+    const execution = executionFor("codex");
     const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-      spawnCodex({ ...codexArgs, prompt: executionPrompt, containment: boundContainment }, workerConfig, capacity);
+      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -2918,6 +2980,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     try {
       materializeWorkerHome({ workerHome, realHome });
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      result.continuation = execution.receipt;
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
       if (args.model) result.model = args.model;
@@ -2931,6 +2994,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       throw new SubscriptionOnlyRefusedError(args.model!);
     }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    const execution = executionFor("cash");
+    const executionPrompt = execution.prompt;
     // env means child extras here, but a complete daemon override in the adapter. Keep custody distinct.
     const { env: workerEnv, ...cashArgs } = args;
     if (args.providerRouting?.spawnOpenWeight === undefined) {
@@ -3016,7 +3081,9 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
               alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
             },
           });
-          const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
+            resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
           if (args.draftRouting) {
@@ -3210,7 +3277,8 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // applyWorkerMcpBoundary below, so no spawn's `disallowedTools` is absent any more (W1-T9489 retires W1-T2591's
     // "unrestricted spawn is byte-identical" note).
     if (args.disallowedTools && args.disallowedTools.length > 0) options.disallowedTools = [...args.disallowedTools];
-    if (args.resumeSessionId) options.resume = args.resumeSessionId;
+    const execution = executionFor("claude");
+    if (execution.resumeSessionId) options.resume = execution.resumeSessionId;
     // Never unnamed: the CLI's own default is Opus with a 1M context (measured 2026-09-22), not the worker tier.
     const routedClaudeModel = claudeHealthRoute?.routedModel ?? args.model ?? workerModel(config);
     assertModelAllowed(routedClaudeModel, config);
@@ -3329,7 +3397,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // W1-T9489: EVERY Claude spawn is strict with an explicit server map (knowledge-only with ruleLookup, else none), so
       // the shared config dir's claude.ai connectors can never attach to a worker running under bypassPermissions.
       const boundaryServers = applyWorkerMcpBoundary(options);
-      const liveQuery = runQuery({ prompt: executionPrompt, options });
+      const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
         pidRef,
@@ -3366,6 +3434,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         teardownContained,
       );
       result.provider = "claude";
+      result.continuation = execution.receipt;
       if (args.mcpIsolation) {
         result.mcpIsolation = workerMcpIsolationEvidence(result.initSummary, !!args.ruleLookup);
         // An opted-in run with unknown/leaked inventory must not earn successful worker credit.
