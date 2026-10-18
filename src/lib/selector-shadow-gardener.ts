@@ -13,7 +13,7 @@ import { prepareGardenTaskIds, releaseGardenTaskIds, type GardenCheckout, type G
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { linkWorktreeNodeModules } from "./worker.js";
-import { loadPlan, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
+import { loadPlan, newTestPath, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { machineShardHeaderLines, machineShardLandingGuard } from "./machine-filing.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -1205,7 +1205,7 @@ export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string,
 
 /** The regression test a structural repair must add: its proof greps for the missed file there. */
 export function selectorShadowStructuralTestPath(file: string): string {
-  return `test/affected-suites-selects-${file.split("/").at(-1)!.replace(/\.test\.ts$/, "")}.test.ts`;
+  return newTestPath(`affected-suites-selects-${file.split("/").at(-1)!.replace(/\.test\.ts$/, "")}`, ["src/lib/affected-suites.ts"], "selector-shadow-gardener");
 }
 
 /** W1-T4839: a test that missed again after its narrow edge merged. The narrow edges did not hold,
