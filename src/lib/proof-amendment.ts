@@ -21,6 +21,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { RmdError } from "./errors.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
@@ -728,7 +729,12 @@ function scopeWorkPath(root: string, path: string): string {
 
 interface ScopeWorkEntry { path: string; data: string | null; mode: number }
 
-class MissingScopeWorkError extends Error {}
+class MissingScopeWorkError extends RmdError {
+  constructor() {
+    super("scope_recovery", 1, "missing saved work from the round that asked for scope");
+    this.name = "MissingScopeWorkError";
+  }
+}
 
 function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
   const file = scopeWorkRecoveryPath(input);
@@ -737,7 +743,7 @@ function readScopeWork(input: ScopeAmendmentWork): ScopeWorkEntry[] {
     text = readFileSync(file, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    throw new MissingScopeWorkError("missing saved work from the round that asked for scope");
+    throw new MissingScopeWorkError();
   }
   const saved = JSON.parse(text);
   if (saved.identity !== scopeWorkIdentity(input) || typeof saved.payload !== "string" ||
