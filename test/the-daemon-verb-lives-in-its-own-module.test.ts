@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { REPO_ROOT } from "./helpers/repo-root.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject: the claim under test IS where a declaration lives and what a module imports, which no
 // behaviour of the verb exposes. The verb's behaviour is held by its existing tests, which run untouched.
