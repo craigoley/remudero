@@ -1643,7 +1643,8 @@ export function cashAllowanceFallbackRefusal(config: Config, prompt: string, dep
     const cheapest = candidates.reduce((a, b) => a.wantUsd <= b.wantUsd ? a : b);
     return `cash daily allowance exhausted until ${reading.resetAt}: committed $${cheapest.committedUsd.toFixed(6)} of $${cheapest.capUsd.toFixed(2)}, this spawn needs at least $${cheapest.wantUsd.toFixed(6)}`;
   } catch (error) {
-    return `cash allowance observation unavailable: ${String((error as Error).message).slice(0, 512)}`;
+    const reason = `cash allowance observation unavailable: ${String((error as Error).message).slice(0, 512)}`;
+    return reason;
   }
 }
 
