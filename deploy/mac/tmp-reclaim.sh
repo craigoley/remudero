@@ -386,7 +386,11 @@ process_tmp_entry() {
   fi
   why=$(artifact_risk "$path")
   if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/${path#./}"; return 0; fi
-  # Recheck age and every risk gate immediately before deletion.
+  # Sizing may be slow, or a run may start while it executes. Keep sizing before
+  # the final age/activity qualification rather than leaving a gap before rm.
+  k=$(du -xsk "$path" 2>/dev/null | cut -f1)
+  if [ -z "$k" ]; then report_risk 'size scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
+  # Recheck age and every risk gate after sizing, immediately before deletion.
   if [ "$APPLY" = 1 ]; then
     old_check=$(find "$path" -xdev \( -mmin -"$AGE_MIN" -o -cmin -"$AGE_MIN" \) -print -quit 2>/dev/null); old_status=$?
     if [ "$old_status" -ne 0 ]; then report_risk 'age recheck unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
@@ -394,8 +398,6 @@ process_tmp_entry() {
     why=$(artifact_risk "$path")
     if [ -n "$why" ]; then report_risk "$why" "$ROOT_REAL/${path#./}"; return 0; fi
   fi
-  k=$(du -xsk "$path" 2>/dev/null | cut -f1)
-  if [ -z "$k" ]; then report_risk 'size scan unavailable' "$ROOT_REAL/${path#./}"; return 0; fi
   del_k=$(( del_k + ${k:-0} )); del_n=$(( del_n + 1 ))
   if [ "$APPLY" = 1 ]; then
     if ! rm -rf "$path"; then report_risk 'delete failed/incomplete' "$ROOT_REAL/${path#./}"; fi

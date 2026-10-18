@@ -468,6 +468,27 @@ test("six-hour session scratch cleanup removes only wholly old, unheld, non-Git 
   }
 });
 
+test("whole temporary entries are requalified after sizing before removal", () => {
+  for (const activation of ["cwd", "recent-content"]) {
+    const fx = fixture();
+    try {
+      const tree = join(realpathSync(fx.root), "whole-candidate");
+      mkdirSync(tree);
+      writeFileSync(join(tree, "old-output.txt"), "retain when activity starts during sizing\n");
+      age(tree, HOURS_AGO(8));
+      const du = sh(fx.base, "sh", "-c", "command -v du").trim();
+      const activate = activation === "cwd"
+        ? `printf '%s\\n' ${JSON.stringify(tree)} > ${JSON.stringify(fx.cwds)}`
+        : `printf 'new work\\n' > ${JSON.stringify(join(tree, "fresh.txt"))}`;
+      writeFileSync(join(fx.bin, "du"), `#!/bin/bash\ncase "\${@: -1}" in ./whole-candidate) ${activate} ;; esac\nexec '${du}' "$@"\n`, { mode: 0o755 });
+      const { out } = reclaim(fx, 40);
+      assert.ok(existsSync(join(tree, "old-output.txt")), activation + ": " + out);
+      if (activation === "cwd") assert.match(out, /process working directory is inside path/);
+      else assert.ok(existsSync(join(tree, "fresh.txt")), out);
+    } finally { rmSync(fx.base, { recursive: true, force: true }); }
+  }
+});
+
 test("stale inactive logs are removed, but scheduled or open logs are retained", () => {
   const fx = fixture();
   try {
