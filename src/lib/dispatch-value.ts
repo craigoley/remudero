@@ -543,7 +543,7 @@ export function validityShareNearAge(
   return { valid, total };
 }
 
-interface TierPass { readonly id: string; readonly tier: number; readonly blocked: boolean; readonly pass0: number; readonly passF: number }
+export interface TierPass { readonly id: string; readonly tier: number; readonly blocked: boolean; readonly pass0: number; readonly passF: number }
 
 /**
  * W1-T9968 (operator 2026-10-17: fan-out never jumps a tier): the no-fan-out passes fix which tier owns each
@@ -566,6 +566,28 @@ function fanoutWithinTier(passes: readonly TierPass[]): Map<string, number> {
     ranked.forEach((m, k) => stridePassByTaskId.set(m.id, slots[k]));
   }
   return stridePassByTaskId;
+}
+
+/** W1-T10028: each dealt pass map's slot inputs. Keyed by the map itself, so a context whose `stridePassByTaskId` was replaced has none and is never redealt. */
+const slotInputsByPassMap = new WeakMap<ReadonlyMap<string, number>, ReadonlyMap<string, TierPass>>();
+
+/** The slot inputs (tier, blocked, pass0, passF) behind a context's dealt passes, when it still holds the map they dealt. */
+export function stridePassInputs(context: DispatchValueContext | undefined): ReadonlyMap<string, TierPass> | undefined {
+  return context?.stridePassByTaskId === undefined ? undefined : slotInputsByPassMap.get(context.stridePassByTaskId);
+}
+
+/**
+ * W1-T10028: deal W1-T9968's slots over `ids` only — the tasks the selector can dispatch in this pass. A task the
+ * selector declines (verify: human, retired, blocked) must not hold a slot, or an eligible task of its tier takes
+ * it and jumps the tiers above. MEASURED 2026-10-17: W1-T9874 (P2) took W1-T9378's best P2 slot and sorted above
+ * about 10 eligible P1s. A context with no slot inputs (fallback, unscored) is returned unchanged.
+ */
+export function redealFanoutOver(context: DispatchValueContext | undefined, ids: ReadonlySet<string>): DispatchValueContext | undefined {
+  const inputs = stridePassInputs(context);
+  if (!context || inputs === undefined) return context;
+  const dealt = fanoutWithinTier([...inputs.values()].filter(entry => ids.has(entry.id)));
+  slotInputsByPassMap.set(dealt, inputs);
+  return Object.freeze({ ...context, stridePassByTaskId: dealt });
 }
 
 function costOfDelayContext(
@@ -720,6 +742,7 @@ function costOfDelayContext(
     }));
   }
   const stridePassByTaskId = fanoutWithinTier(passes);
+  slotInputsByPassMap.set(stridePassByTaskId, new Map(passes.map(entry => [entry.id, entry])));
   return {
     kind: "ready",
     context: { costOfDelayByTaskId, stridePassByTaskId, costOfDelayInputsByTaskId, costOfDelayTierWaits,
