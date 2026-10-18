@@ -384,3 +384,62 @@ console.log(JSON.stringify({direct,fenced}));
   assert.match(labels.direct, /businessDirectWrite/, "a bundle filename cannot identify the transaction caller");
   assert.match(labels.fenced, /businessFencedWrite/, "the lease helper must not hide its business caller");
 });
+
+test("failed opens retire diagnostic connections and preserve the original schema error", async (t) => {
+  const f = await fixture(t);
+  f.db.prepare("UPDATE meta SET v = '99' WHERE k = 'schema_version'").run();
+  const mismatch = (error: unknown) => error instanceof adapter.ReadModelError && error.reason === "schema_mismatch";
+  assert.throws(() => adapter.attachReadModel(f.db.path, 1), mismatch);
+  const marker = adapter.readModelDirtyMarkerPath(f.db.path);
+  const original = fs.rmSync;
+  let cleanupFailures = 0;
+  const mocked = t.mock.method(fs, "rmSync", ((path: fs.PathLike, options?: fs.RmOptions) => {
+    if (String(path) === marker) { cleanupFailures++; throw Error("injected marker cleanup failure"); }
+    return original(path, options);
+  }) as typeof fs.rmSync);
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => adapter.openReadModel({ stateDir: f.dir, instance: "core", schemaVersion: 1 }), mismatch,
+      "a later cleanup failure must not replace the schema error");
+    assert.equal(cleanupFailures, 1, "the real close path reached its failing marker cleanup");
+  } finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  await adapter.flushReadModelTransactions();
+  assert.equal(adapter.readReadModelTransactions(f.db.path).state, "none-recorded");
+  const reports: string[] = [];
+  const probes = Array.from({ length: 127 }, (_, n) => adapter.createReadModelTransactionRecorder(f.db.path, `open-cleanup-${n}`, {
+    report: step => reports.push(step),
+  }));
+  f.closers.push(() => { for (const probe of probes) probe.close(); });
+  assert.deepEqual(reports, [], "failed opens must retire their observers instead of exhausting publisher capacity");
+  assert.equal(f.db.meta("schema_version"), "99", "refusal must not rewrite incompatible metadata");
+});
+
+test("a stalled worker with an unreadable generation pointer reports an unknown inventory", async (t) => {
+  const f = await fixture(t);
+  writeFileSync(join(f.dir, "ledger.ndjson"), "");
+  writeFileSync(adapter.readModelPointerPath(f.dir, "core", 1), "invalid-generation");
+  let now = Date.now();
+  const clock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+  const logs: Array<Extract<ReadModelWorkerMessage, { type: "log" }>> = [];
+  const details: string[] = [];
+  const ticker = createReadModelTicker({ stateDir: f.dir, instances: [{ name: "core", ledgerDir: f.dir }],
+    views: [], oracle: "off", clock, post: message => { if (message.type === "log") logs.push(message); },
+    escalation: { runId: "pointer-test", ledgerPath: join(f.dir, "pointer-escalations.ndjson"), issues: {
+      create: (_title, body) => { details.push(body); return "https://github.com/craigoley/remudero/issues/1"; },
+    } },
+  });
+  f.closers.push(() => { ticker.release(); });
+  ticker.start(); ticker.tick();
+  for (let n = 0; n < 3; n++) { now += READ_MODEL_STALL_MS + 1; ticker.tick(); }
+  assert.ok(logs.some(row => row.step === "read_model.tick_failed"), "the real broken pointer prevented opening the store");
+  for (const step of ["read_model.stalled", "read_model.stall_escalated"]) {
+    const row = logs.find(log => log.step === step);
+    assert.ok(row, step);
+    const inventory = row.extra.transactions as adapter.ReadModelTransactionInventory;
+    assert.equal(inventory.state, "unknown");
+    assert.equal(inventory.complete, false);
+    assert.deepEqual(inventory.records, [], "an unreadable pointer cannot identify or exclude a holder");
+  }
+  assert.equal(details.length, 1);
+  assert.match(details[0]!, /"state":"unknown"/);
+});
