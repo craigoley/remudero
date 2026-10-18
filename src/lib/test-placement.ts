@@ -472,8 +472,8 @@ export function placeTest(input: PlaceInput, map: SubsystemMap): Placement {
     else cur.total += OTHER_MODULE_SHARE * s.score;
   }
   const ranked = [...bySub.entries()].sort((a, b) => b[1].total - a[1].total);
-  let subsystem = ranked[0]?.[0];
-  let primaryModule = ranked[0]?.[1].best.module;
+  let subsystem: string | undefined = ranked[0]?.[0];
+  let primaryModule: string | undefined = ranked[0]?.[1].best.module;
   const topScore = ranked[0]?.[1].total ?? 0;
   const secondScore = ranked[1]?.[1].total ?? 0;
   let runnerUp = ranked[1]?.[0];
