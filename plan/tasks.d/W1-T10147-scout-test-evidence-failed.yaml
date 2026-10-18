@@ -20,3 +20,11 @@
     The ledger step test.evidence_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 1 in the older half, 2 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
+  risk_ruling:
+    verdict: "low"
+    action: escalate
+    confidence: 0.7
+    reasons:
+      - "low-confidence verdict (0.70 < 0.8) — on the change's description/files alone, no diff was read — The declared scope is a single new test file (test/scout-test-evidence-failed.test.ts), which does not exist at base. The description and files list show no contact with secrets, credentials, auth, permissions, merge/deploy/infrastructure policy, or data deletion.; on the change's description/files alone, no diff was read — The task asks to fix the cause of a recurring ledger step. This is an ordinary engineering fix, not an operator-only decision on priorities, budget, or policy. The acceptance criterion is a grep-verifiable test name, so it is checkable from what is shown.; on the change's description/files alone, no diff was read — The family track record is weak (0 merged, 1 declined), and the rows name no file, so the real fix location is unknown. This calls for stricter scrutiny in CI and review, but it is not by itself an escalation criterion. The PR still passes CI and review."
+    judged_at: "2026-10-18T12:42:20.060Z"
+    pin: "101c9e7ab065f92d3ffedfc24eb6fdff5459ac9406783d9bbb650113ab8fe08b"
