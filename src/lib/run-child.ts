@@ -18,6 +18,7 @@ import {
 } from "./host-memory-learning.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { loadRunChildMode, runChildEffectiveMode, type RunChildMode } from "./policy.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { pauseDetail, stopDetail } from "./fleet-control.js";
 import { classifyRunChildLoss, decideRunChildMode, RUN_CHILD_ADOPTION_PASS_STEP, type RunChildModeEvidence } from "./run-child-mode.js";
 import {
@@ -532,10 +533,10 @@ export interface RunChildHandle {
 }
 
 /** W1-T10001: a run child gone with a non-terminal status. `loss` is what {@link classifyRunChildLoss} names from the detail and stderr the `run_child.lost` row carries. */
-export class RunChildLostError extends Error {
+export class RunChildLostError extends RmdError {
   readonly loss: ReturnType<typeof classifyRunChildLoss>;
   constructor(message: string, loss: ReturnType<typeof classifyRunChildLoss>) {
-    super(message);
+    super("child_process", GENERIC_EXIT_CODE, message, { loss });
     this.name = "RunChildLostError";
     this.loss = loss;
   }
