@@ -1895,6 +1895,7 @@ import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-tele
 import {
   createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus,
 } from "./lib/daemon-memory-census.js";
+import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -3125,6 +3126,7 @@ import {
   foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath,
   workerLedgerFields,
   workerTranscript,
+  workerContinuation,
   withAssignmentTrailer, resolveCommitAssignment,
   uniqueRunBranch,
   excludeNodeModulesFromGit,
@@ -11765,6 +11767,7 @@ export async function runFixRung(opts: {
   worktreePath: string;
   /** The failing implement worker's session id — resumed on strike 1. */
   initialSessionId: string;
+  initialSessionProvider?: WorkerResult["provider"];
   mount: Mount;
   /** The final fresh strike's mount (`step_up:`); absent keeps every strike on {@link mount}. */
   stepUpMount?: Mount;
@@ -12207,6 +12210,9 @@ export async function runFixRung(opts: {
     return { outcome: "handed_off", review, strikes, retriggers, reason };
   };
   let sessionToResume: string | undefined = opts.initialSessionId;
+  let previousForResume: Pick<WorkerResult, "provider" | "text" | "blocks"> = {
+    provider: opts.initialSessionProvider, text: "", blocks: [],
+  };
   // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
   // blocked_ci dispatch (opts.ciFailures set) has no reviewer verdict at all
   // yet, so its evidence is ci-log-shaped rather than review-shaped. Flips
@@ -13726,6 +13732,9 @@ export async function runFixRung(opts: {
       prompt,
       ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
       resumeSessionId: round === "resume" ? sessionToResume : undefined,
+      ...(round === "resume" && sessionToResume ? {
+        continuation: workerContinuation(previousForResume, "The current self-contained repair contract and evidence appear in the pending action below.", opts.worktreePath),
+      } : {}),
       // W1-T210: ci-log mode's prompt carries an untrusted CI log tail, so no WebFetch/WebSearch.
       // W1-T4458 (iii): a round the harness commits loses Bash too, so its prompt and tools agree.
       tools: fixHarnessOwnsGit ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
@@ -13993,6 +14002,7 @@ export async function runFixRung(opts: {
             declaredPaths: opts.task.files ?? [],
           }),
           resumeSessionId: fixResult.sessionId,
+          continuation: workerContinuation(fixResult, prompt, opts.worktreePath),
         },
         { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) } },
       );
@@ -14154,6 +14164,7 @@ export async function runFixRung(opts: {
       );
     }
     sessionToResume = fixResult.sessionId;
+    previousForResume = fixResult;
     if (harnessCommitRefused && fixAction.kind !== "scope-needed") {
       const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
@@ -19333,6 +19344,7 @@ export async function repairCensusRefusedPush(input: {
   worktreePath: string;
   branch: string;
   resumeSessionId: string;
+  resumeSessionProvider?: WorkerResult["provider"];
   mount: Mount;
   stepUpMount?: Mount;
   settingsFile: string;
@@ -19394,6 +19406,10 @@ export async function repairCensusRefusedPush(input: {
         prompt,
         ...(censusSnapshotPath ? { env: { [CENSUS_SNAPSHOT_ENV]: censusSnapshotPath } } : {}),
         resumeSessionId: strike === 1 ? input.resumeSessionId : undefined,
+        ...(strike === 1 && input.resumeSessionId ? { continuation: workerContinuation(
+          { provider: input.resumeSessionProvider, text: "", blocks: [] },
+          "The current task, output contract and refused gate are in the pending action below.", cwd,
+        ) } : {}),
         tools: harnessCommits ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
         ...(cashTools === undefined ? {} : { cashTools }),
         runId: input.runId,
@@ -20908,6 +20924,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           permissionMode: "bypassPermissions",
           settingsFile,
           resumeSessionId: impl.sessionId,
+          continuation: workerContinuation(impl, prompt, worktreePath),
           model: implementMount.model, // same mount as the initial implement spawn (§9).
           mountProvider: implementMount.provider,
           effort: implementMount.effort,
@@ -20993,6 +21010,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           permissionMode: "bypassPermissions",
           settingsFile,
           resumeSessionId: impl.sessionId,
+          continuation: workerContinuation(impl, prompt, worktreePath),
           model: implementMount.model,
           mountProvider: implementMount.provider,
           effort: implementMount.effort,
@@ -21029,6 +21047,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             permissionMode: "bypassPermissions",
             settingsFile,
             resumeSessionId: impl.sessionId,
+            continuation: workerContinuation(impl, prompt, worktreePath),
             model: implementMount.model,
             mountProvider: implementMount.provider,
             effort: implementMount.effort,
@@ -21144,6 +21163,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         permissionMode: "bypassPermissions",
         settingsFile,
         resumeSessionId: impl.sessionId,
+        continuation: workerContinuation(impl, prompt, worktreePath),
         model: implementMount.model,
         mountProvider: implementMount.provider,
         effort: implementMount.effort,
@@ -21438,7 +21458,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         if (!refusal) throw err;
         const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : censusPushRefusal(err) ? "census-refused" : "pre-push-refused";
         const rung = await repairCensusRefusedPush({
-          refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
+          refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId,
+          resumeSessionProvider: impl.provider, mount: fixMount,
           ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
@@ -21735,6 +21756,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         branch,
         worktreePath,
         initialSessionId: impl.sessionId,
+        initialSessionProvider: impl.provider,
         mount: fixMount,
         ...(stepUpMount ? { stepUpMount } : {}),
         settingsFile,
@@ -23595,6 +23617,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
+  let ownTaskRecordMissing = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
@@ -23607,6 +23630,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     taskRisk = resolved.taskRisk;
     taskBudgetUsd = resolved.taskBudgetUsd;
     resolverDivergence = resolved.divergence;
+    // W1-T9232: a head cut before its own shard merged is pending a refresh from main, not a plan fault. Only a task
+    // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
+    if (taskId !== UNFILED_RUN_SENTINEL && resolved.divergence === undefined && resolved.criteria.length === 0 &&
+      resolved.taskRisk === undefined && resolved.taskBudgetUsd === undefined) {
+      const atMain = await resolvePlanCriteriaAtHeadAsync(body, subjectRepoDir, "plan/tasks.yaml", "origin/main");
+      ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
+    }
   }
   if (criteria.length === 0) {
     const fromBody = parseAcceptanceBlock(reportBody);
@@ -23711,6 +23741,20 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     });
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
+
+  // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
+  // The sweep reads this row, refreshes the branch from main and re-reviews the new head.
+  if (ownTaskRecordMissing) {
+    log("review.reviewer.skipped", {
+      reason: OWN_TASK_RECORD_MISSING_CAUSE, pr_number: view.number, pr_url: view.url, head_sha: view.headRefOid,
+      derived_repair: "refresh the branch from main", missing: ["risk", "budget_usd", "criteria"],
+    });
+    console.log(
+      `rmd review PR #${view.number}: ${taskId} has no record at head ${view.headRefOid.slice(0, 7)} but origin/main has it ` +
+        `(${OWN_TASK_RECORD_MISSING_CAUSE}) — pending; refresh the branch from main, then re-review`,
+    );
+    return 2;
   }
 
   // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
@@ -34355,6 +34399,7 @@ async function retroCommand(
           config: repairConfig,
           prompt: repairPrompt,
           resumeSessionId: worker.sessionId,
+          continuation: workerContinuation(worker, prompt, worktreePath),
         });
         log("retro.preflight_repair", {
           session_id: repaired.sessionId,

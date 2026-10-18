@@ -160,6 +160,19 @@ export function rowPrNumber(row: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
+/** A delivered unfiled-scope question is an authority wait, not another paid repair attempt.
+ * Only this PR/head is held; a new head or a genuine filed identity is re-derived normally.
+ * An answer alone does not expand the PR's diff or grant paths to its worker. */
+export function unfiledScopeStandDown(ledger: readonly Record<string, unknown>[],
+  pr: { taskId?: string; prNumber: number; headSha: string }): string | undefined {
+  if (pr.taskId && pr.taskId !== "unfiled" && pr.taskId !== `PR-${pr.prNumber}`) return undefined;
+  const held = ledger.findLast(row => row.step === "fix.scope_amendment" && rowPrNumber(row) === pr.prNumber &&
+    row.head_sha === pr.headSha && row.outcome === "unfiled-escalated" &&
+    typeof row.issue_url === "string" && row.issue_url.length > 0 &&
+    Array.isArray(row.paths) && row.paths.length > 0 && row.paths.every(p => typeof p === "string" && p.length > 0));
+  return held ? `unfiled scope decision awaits resolution at this head — ${held.issue_url}; no automatic judge or fix round spent` : undefined;
+}
+
 export function buildFixProgressInput(facts: {
   taskId?: string; prNumber?: number; headSha: string; strikesSpent?: number; currentRed: string[];
   ledger: readonly Record<string, unknown>[]; operatorAnswer?: string; formerCeiling?: number; parkedReason?: string;
@@ -196,7 +209,9 @@ export function buildFixProgressInput(facts: {
       const n = Number(row.amendmentNumber ?? row.amendment_number);
       const number = Number.isSafeInteger(n) && n > 0 ? n : round.scopeAmendment?.number;
       const refused = row.outcome === "refused" || row.kind === "refused";
-      round.scopeAmendment = { number, state: refused ? "refused" : "pending" };
+      if (refused) round.scopeAmendment = { number, state: "refused" };
+      else if (number !== undefined && ["created", "resumed", "branch_update_requested", "scope_amendment"].includes(String(row.outcome ?? row.kind)))
+        round.scopeAmendment = { number, state: "pending" };
     } else if (row.step === "review.posted") {
       const failures = failuresOfReview(row);
       for (const round of rounds) if (round.completed && round.reviewAfter === undefined) round.reviewAfter = failures;

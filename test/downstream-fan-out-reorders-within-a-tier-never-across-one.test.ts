@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDispatchValueContext } from "../src/lib/dispatch-value.js";
+import { buildDispatchValueContext, dispatchUrgency } from "../src/lib/dispatch-value.js";
 import type { DispatchValueContext } from "../src/lib/dispatch-value.js";
 import { dispatchOrder } from "../src/lib/drain.js";
 import type { Task } from "../src/lib/plan.js";
@@ -58,7 +58,11 @@ test("W1-T9968: a P2 with 29 open dependents does not outrank a fresh P1", () =>
   assert.equal(context.openDependentFanoutByTaskId.get(p2.id), 29);
   assert.deepEqual(dispatchOrder([p2, p1], context).map(t => t.id), [p1.id, p2.id]);
   const cod = context.costOfDelayByTaskId!;
-  assert.ok(cod.get(p2.id)! > 10 * cod.get(p1.id)!, "the cost of delay keeps the fan-out product (W1-T9325's row)");
+  const inputs = context.costOfDelayInputsByTaskId!.get(p2.id)!;
+  const expectedValue = Array.from({ length: 29 }, (_, i) =>
+    dispatchUrgency(1 + i + 1, 12 * HOUR / inputs.median_wait_ms)).reduce((sum, value) => sum + value, 0);
+  assert.equal(inputs.dependent_value, expectedValue, "each P2 wave contributes at its own depth");
+  assert.ok(cod.get(p2.id)! > cod.get(p1.id)!, "tier slots keep P1 first even when P2 has a larger weighted score");
 });
 
 test("W1-T9968: inside one tier more open dependents still dispatch first", () => {

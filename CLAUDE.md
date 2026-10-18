@@ -66,6 +66,8 @@ aliased in `doctrine/merged-rules.json`. Cite symbols, not line numbers, and the
 - **Before filing, sweep the task's SUBJECT over every open PR head's tree (`git ls-remote --heads
   origin`), not only `origin/main`, counting per head against main.** → doctrine/plan-and-task-hygiene/sweep-open-pr-heads.md
 - **NAME A SESSION BRANCH `run-<taskId>-<epochMs>` WHEN BUILDING A FILED TASK.** → doctrine/plan-and-task-hygiene/name-the-session-branch.md
+- **A new test goes in the `test/<folder>/` that `rmd test-place` computes from its imports — never directly
+  under `test/`.** → doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md
 - **Before believing "task X is next", confirm the frontier with the repo's own selector —
   `runnableCandidates(plan, isMerged, n)` — not the task a brief or retro names** → doctrine/plan-and-task-hygiene/confirm-the-frontier.md
 - **A contested reservation is never deleted and an unfiled one is never free — the

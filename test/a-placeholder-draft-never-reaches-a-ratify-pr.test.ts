@@ -102,13 +102,13 @@ test("each placeholder form independently blocks a draft while ordinary titles a
     assert.ok(lintDraftedFragment(GOOD, PROPOSAL, stamp, KNOWN)
       .some((v) => v.check === "draft-placeholder-stamp" && v.severity === "block"));
   }
-  for (const proof of ["unit test: test/future.test.ts", "unit test: widget rejects ../bad.txt input"]) {
+  for (const proof of ["unit test: test/plan/future.test.ts", "unit test: widget rejects ../bad.txt input"]) {
     assert.deepEqual(lintDraftedFragment(amended((t) => {
       // This newly declared suite is the draft's own falsifier under its minted shard slug.
       t.title = "Future";
       t.acceptance[0].proof = proof;
-      t.files.push("test/future.test.ts");
-      t.design = "CREATES: test/future.test.ts";
+      t.files.push("test/plan/future.test.ts");
+      t.design = "CREATES: test/plan/future.test.ts";
     }),
       PROPOSAL, GOOD_STAMP, KNOWN), []);
   }
@@ -152,7 +152,7 @@ test("filing refuses placeholders before writing and checks directories in the d
     assert.throws(() => fileRatificationDraft(root, payload, fs, join, KNOWN), RatificationDraftRefusedError);
     assert.equal(fs.existsSync(join(root, "plan")), false);
     assert.equal(fs.readFileSync(join(root, "MASTER-PLAN.md"), "utf8"), before);
-    const absent = amended((t) => { t.files = ["test/future.test.ts"]; });
+    const absent = amended((t) => { t.files = ["test/plan/future.test.ts"]; });
     assert.throws(() => fileRatificationDraft(root, { ...payload, fragmentYaml: absent, stampLine: GOOD_STAMP },
       fs, join, KNOWN), (e: unknown) => e instanceof RatificationDraftRefusedError && /draft-missing-directory/.test(e.message));
     assert.equal(fs.existsSync(join(root, "plan")), false);

@@ -8,13 +8,15 @@ import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import { isMainModule } from "./lib/argv.mjs";
 import { parseLcovRecords } from './lib/lcov.mjs';
+import { decodeCoverageChunk, encodeCoverageChunk, readCoverageChunkBytes, validCoverageChunkEncoding } from './lib/coverage-chunk-codec.mjs';
 
 const RAW_COVERAGE_FILE = /^coverage-\d+-\d{13}-\d+\.json$/;
 const COMPACT_COVERAGE_FILE = /^coverage-bundle-\d+-\d{13}-\d+\.json$/;
 const COMPACT_FORMAT = 'rmd-v8-coverage-bundle-v1';
 const CORPUS_FILE = /^coverage-corpus-(\d+)-(\d{13})\.json$/;
 const CORPUS_PIECE = /^coverage-(?:corpus|maps|reports)-/;
-const CORPUS_FORMAT = 'rmd-v8-coverage-corpus-v2';
+const LEGACY_CORPUS_FORMAT = 'rmd-v8-coverage-corpus-v2';
+const CORPUS_FORMAT = 'rmd-v8-coverage-corpus-v3';
 const CHUNK_BYTES = 64 * 1024 ** 2;
 const CORPUS_LOCK = '.coverage-corpus-write.lock';
 // W1-T5923: a shard's reports already translated through pinned Node's source mapper, plus the line
@@ -327,10 +329,14 @@ function restoreReport(report, sourceMaps, file) {
  *  a reader that re-verifies each chunk's bytes and digest before parsing it. */
 function verifiedChunkReader(file, manifest, format, piecePattern, stem, groups, bytes) {
   const expected = new Set([basename(file)]);
+  const encoded = format === CORPUS_FORMAT;
   for (const [kind, chunks] of groups) for (const [index, chunk] of chunks.entries()) {
-    const name = `coverage-${kind}-${stem[1]}-${stem[2]}-${String(index).padStart(8, '0')}.json`;
+    const suffix = encoded && chunk?.encoding === 'gzip' ? '.json.gz' : '.json';
+    const name = `coverage-${kind}-${stem[1]}-${stem[2]}-${String(index).padStart(8, '0')}${suffix}`;
     if (chunk?.file !== name || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > manifest.maxChunkBytes ||
-        !Number.isSafeInteger(chunk.entries) || chunk.entries < 1 || !/^[a-f0-9]{64}$/.test(chunk.sha256)) {
+        !Number.isSafeInteger(chunk.entries) || chunk.entries < 1 || !/^[a-f0-9]{64}$/.test(chunk.sha256) ||
+        (encoded && !validCoverageChunkEncoding(chunk, manifest.maxChunkBytes)) ||
+        (!encoded && chunk.encoding !== undefined)) {
       throw new Error(`${file} has unsafe or invalid chunk metadata`);
     }
     expected.add(name);
@@ -339,22 +345,21 @@ function verifiedChunkReader(file, manifest, format, piecePattern, stem, groups,
   if (actual.length !== expected.size || actual.some(name => !expected.has(name))) throw new Error(`${file} has incomplete or extra coverage chunks`);
   return (chunk, key) => {
     const path = join(dirname(file), chunk.file);
-    if (fileBytes(path) !== chunk.bytes) throw new Error(`${path} has a coverage chunk size mismatch`);
-    const source = readCoverageSource(path, manifest.maxChunkBytes);
-    const size = Buffer.byteLength(source);
-    if (size !== chunk.bytes || digest(source) !== chunk.sha256) throw new Error(`${path} has a coverage chunk checksum mismatch`);
+    const data = readCoverageChunkBytes(path, chunk.bytes, manifest.maxChunkBytes);
+    if (!encoded && digest(data) !== chunk.sha256) throw new Error(`${path} has a coverage chunk checksum mismatch`);
+    const source = encoded ? decodeCoverageChunk(data, chunk, manifest.maxChunkBytes) : data.toString('utf8');
     const parsed = JSON.parse(source);
     if (parsed?.format !== format || !Array.isArray(parsed[key]) || parsed[key].length !== chunk.entries) {
       throw new Error(`${path} has invalid coverage chunk contents`);
     }
-    bytes.inputBytes += size;
+    bytes.inputBytes += data.length;
     return parsed[key];
   };
 }
 
 function* corpusReports(file, manifest, bytes) {
   const stem = CORPUS_FILE.exec(basename(file));
-  if (manifest?.format !== CORPUS_FORMAT || !Number.isSafeInteger(manifest.maxChunkBytes) ||
+  if (![CORPUS_FORMAT, LEGACY_CORPUS_FORMAT].includes(manifest?.format) || !Number.isSafeInteger(manifest.maxChunkBytes) ||
       manifest.maxChunkBytes < 1024 || manifest.maxChunkBytes > CHUNK_BYTES ||
       !Number.isSafeInteger(manifest.reportCount) || manifest.reportCount < 1 ||
       !Number.isSafeInteger(manifest.sourceMapCount) || manifest.sourceMapCount < 0 ||
@@ -363,7 +368,7 @@ function* corpusReports(file, manifest, bytes) {
     throw new Error(`${file} has an invalid chunked coverage manifest`);
   }
   addRecordedDrops(manifest, bytes, file);
-  const readChunk = verifiedChunkReader(file, manifest, CORPUS_FORMAT, CORPUS_PIECE, stem,
+  const readChunk = verifiedChunkReader(file, manifest, manifest.format, CORPUS_PIECE, stem,
     [['maps', manifest.mapChunks], ['reports', manifest.reportChunks]], bytes);
   const sourceMaps = [];
   for (const chunk of manifest.mapChunks) for (const map of readChunk(chunk, 'sourceMaps')) {
@@ -703,9 +708,13 @@ function chunkWriter(outputDirectory, stem, format, kind, key, maxChunkBytes) {
   const flush = () => {
     if (!pending.length) return;
     const source = `${header}${pending.join(',')}]}`;
-    const file = `coverage-${kind}-${stem}-${String(chunks.length).padStart(8, '0')}.json`;
-    atomicCoverageFile(join(outputDirectory, file), source);
-    chunks.push({ file, bytes: Buffer.byteLength(source), sha256: digest(source), entries: pending.length });
+    const encoded = format === CORPUS_FORMAT ? encodeCoverageChunk(source) : undefined;
+    const data = encoded?.data ?? Buffer.from(source);
+    const suffix = encoded?.encoding === 'gzip' ? '.json.gz' : '.json';
+    const file = `coverage-${kind}-${stem}-${String(chunks.length).padStart(8, '0')}${suffix}`;
+    atomicCoverageFile(join(outputDirectory, file), data);
+    const codec = encoded ? { encoding: encoded.encoding, decodedBytes: encoded.decodedBytes } : {};
+    chunks.push({ file, bytes: data.length, sha256: encoded?.sha256 ?? digest(data), entries: pending.length, ...codec });
     pending = []; size = Buffer.byteLength(header) + 2;
   };
   return { chunks, flush, add: source => {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { buildPanelGraphRoutes, classifyAllProposalsSliced, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { buildPanelGraphRoutes, classifyAllProposalsSliced, peekClassifiedInbox, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { refreshInboxClassification } from "#src/lib/inbox-view.js";
 import { registryThreadItems } from "#src/lib/inbox-responder.js";
 import { createService } from "#src/lib/service.js";
@@ -120,4 +120,36 @@ test("the stored receipts are bounded by the registry and rewritten only on a ch
   writeFileSync(inboxVerdictReceiptsPath(root), "{torn");
   assert.deepEqual(readVerdictReceipts(root), []);
   assert.match(readFileSync(inboxVerdictReceiptsPath(root), "utf8"), /torn/);
+});
+
+test("a sliced inbox memo publishes and reuses the same complete receipt-bearing snapshot", async (t) => {
+  const { deps } = rotatedFixture(t);
+  const first = await classifyAllProposalsSliced(deps);
+  assert.equal(first.verdictReceipts?.length, 201);
+  assert.strictEqual(peekClassifiedInbox(deps), first);
+  assert.strictEqual(await classifyAllProposalsSliced(deps), first);
+});
+
+test("an incomplete archive refresh cannot inherit authority to replace stored decline receipts", async (t) => {
+  const { inboxVerdictReceiptsPath } = await receipts();
+  const { deps, stateDir } = rotatedFixture(t);
+  await refreshInboxClassification(deps, {});
+  const complete = await classifyAllProposalsSliced(deps);
+  assert(complete.verdictReceipts?.some((r) => r.task_id === DECLINED));
+  const before = readFileSync(inboxVerdictReceiptsPath(stateDir), "utf8");
+  const broken = join(stateDir, `ledger.${new Date().toISOString().replaceAll(":", "-")}.ndjson.gz`);
+  writeFileSync(broken, "not a gzip archive");
+  const partial = await classifyAllProposalsSliced(deps);
+  assert.equal(partial.attentionEvidence?.archiveLedger, "unavailable");
+  assert.equal(partial.verdictReceipts, undefined);
+  assert.notStrictEqual(partial, complete);
+  assert.strictEqual(peekClassifiedInbox(deps), partial);
+  assert(complete.verdictReceipts?.some((r) => r.task_id === DECLINED), "the old snapshot was not mutated");
+  await refreshInboxClassification(deps, {});
+  assert.equal(readFileSync(inboxVerdictReceiptsPath(stateDir), "utf8"), before);
+  rmSync(broken);
+  const recovered = await classifyAllProposalsSliced(deps);
+  assert(recovered.verdictReceipts?.some((r) => r.task_id === DECLINED));
+  assert.strictEqual(peekClassifiedInbox(deps), recovered);
+  assert.strictEqual(await classifyAllProposalsSliced(deps), recovered);
 });

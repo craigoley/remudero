@@ -156,7 +156,8 @@ test("W1-T4904: a plan-only filing whose grep proof is a declared guard or a for
 });
 
 // #12389 — a filing citing a doctrine page no file holds is refused, unless its own files: creates the page.
-const DOCTRINE_PAGE = "doctrine/plan-and-task-hygiene/new-tests-go-in-their-computed-folder.md";
+// The page is a fixture no tree ever holds: the page #12389 first cited has since landed, so citing it proves nothing.
+const DOCTRINE_PAGE = "doctrine/plan-and-task-hygiene/a-page-no-file-ever-holds-for-the-filing-lint.md";
 
 function doctrineShard(id: string, files: string[]): string {
   return shard(id, '      proof: "grep: a line no file holds yet in src/lib/plan.ts"')

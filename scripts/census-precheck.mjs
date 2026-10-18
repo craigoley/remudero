@@ -40,6 +40,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
+// A static import keeps the codemod an ES module: require()-ing it under tsx compiles it as
+// CommonJS, which reports a synthetic scripts/<define:import.meta> coverage source.
+import { analyzeSource } from "./test-repo-root-codemod.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
@@ -260,6 +263,33 @@ function depsInterfaceViolations(input) {
   return out;
 }
 
+function testRepoRootViolations({ changed, readHead, readBase }) {
+  const paths = changed.filter((p) => /^test\/(?!helpers\/|setup\/|lib\/|fixtures\/).*\.test\.ts$/.test(p));
+  const out = [];
+  let headCount = 0;
+  let baseCount = 0;
+  for (const path of paths) {
+    const head = readHead(path);
+    const base = readBase(path);
+    const derivesRoot = (text) => {
+      if (text === null || !/import\s*\.\s*meta|__dirname/.test(text)) return false;
+      return analyzeSource(text, path).computations.length > 0;
+    };
+    const headOwnsRoot = derivesRoot(head);
+    headCount += Number(headOwnsRoot);
+    baseCount += Number(derivesRoot(base));
+    if (base === null && headOwnsRoot) {
+      out.push(`test-repo-root: new test ${path} derives its own root — import #test/helpers/repo-root.js`);
+    }
+  }
+  // Unchanged files cancel: comparing changed-file counts asks the whole-tree ratchet's question.
+  if (headCount > baseCount) {
+    out.push(`test-repo-root: own-folder root files in the diff head=${headCount}, merge base=${baseCount} — ` +
+      "import #test/helpers/repo-root.js; run test/every-test-finds-the-repo-root-through-one-helper.test.ts");
+  }
+  return out;
+}
+
 /**
  * Every census violation this branch causes. Pure over its readers, so every arm is testable
  * without git: `readHead` and `readBase` return a repo-relative file's text on this tree and at
@@ -276,6 +306,7 @@ export function evaluateCensusPrecheck(input) {
     ...houseLayoutViolations(input),
     ...depsInterfaceViolations(input),
     ...scriptRatchetViolations(input),
+    ...testRepoRootViolations(input),
   ];
 }
 
@@ -1084,6 +1115,7 @@ export const PRECHECK_PARITY = {
   "test/fixture-copy-census.test.ts": { modeled: fixtureCopyViolations },
   "test/deps-interface-census.test.ts": { modeled: depsInterfaceViolations },
   "test/repo-layout.test.ts": { modeled: houseLayoutViolations },
+  "test/every-test-finds-the-repo-root-through-one-helper.test.ts": { modeled: testRepoRootViolations },
   "test/instrument-surface-completeness.test.ts": { modeled: evaluateInstrumentSurface },
   // W1-T5737: the script gates ci.yml runs, read out of ci.yml whenever a push edits it or the parity baseline.
   "test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts": { modeled: scriptRatchetViolations },
