@@ -1763,7 +1763,7 @@ export async function daemonCommand(
         // BETWEEN polls is still found within one cycle; awaited off the loop (W1-T5620).
         sweepFeedbackLanding: sweepFeedbackLandingRung,
         // RETRO CADENCE TRIGGER (W1-T160) — SELF-TARGET ONLY: the retro reads/writes
-        // THIS repo's own MASTER-PLAN.md/LEARNINGS.md/plan/tasks.yaml/state, never a
+        // THIS repo's own MASTER-PLAN/LEARNINGS.md/plan/tasks.yaml/state, never a
         // drained target's, so the trigger is wired only when the daemon is draining
         // itself. `runRetroTrigger`'s return (an exit code) is discarded — retroCommand
         // already ledgers everything the daemon loop needs (retro_triggered above,
