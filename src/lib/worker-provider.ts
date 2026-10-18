@@ -3340,6 +3340,7 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
   readonly committedUsd: number;
   readonly capUsd: number;
   readonly wantUsd: number;
+  readonly resetAt: string;
   constructor(detail: { committedUsd: number; capUsd: number; wantUsd: number; utcDay: string }) {
     // Kind "usage", the same discriminant `GhReadCadenceRefusal` carries: both are a LIMIT refusing
     // a call that was otherwise well-formed, not a malformed request. Adopting the shared envelope
@@ -3356,7 +3357,70 @@ export class OpenWeightAllowanceExhaustedError extends RmdError {
     this.committedUsd = detail.committedUsd;
     this.capUsd = detail.capUsd;
     this.wantUsd = detail.wantUsd;
+    this.resetAt = openWeightAllowanceReset(detail.utcDay);
   }
+}
+
+function openWeightAllowanceReset(day: string): string {
+  return fixedClock(Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000).iso();
+}
+
+function parseOpenWeightAllowance(snapshot: string | undefined, path: string, utcDay: string, requireFleetCap: boolean): OpenWeightAllowanceState {
+  if (snapshot === undefined) {
+    if (requireFleetCap) throw new Error(`shared cash allowance is missing at ${path}; refusing to reset unknown fleet spend`);
+    return { utcDay, reservations: {} };
+  }
+  let parsed: Partial<OpenWeightAllowanceState>;
+  try { parsed = JSON.parse(snapshot) as Partial<OpenWeightAllowanceState>; }
+  catch (error) {
+    throw new Error(`openweight allowance file is unreadable at ${path}; refusing to spend against an unknown committed total (${error instanceof Error ? error.message : String(error)})`);
+  }
+  if (parsed === null || typeof parsed !== "object" || typeof parsed.utcDay !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.utcDay) ||
+      parsed.reservations === null || typeof parsed.reservations !== "object" || Array.isArray(parsed.reservations)) {
+    throw new Error(`openweight allowance file at ${path} has no readable utcDay/reservations; refusing to spend against an unknown committed total`);
+  }
+  if (requireFleetCap && (!Number.isFinite(parsed.fleetCapUsd) || (parsed.fleetCapUsd ?? 0) <= 0))
+    throw new Error(`shared cash allowance at ${path} has no valid fleet cap; refusing paid spend`);
+  for (const [id, row] of Object.entries(parsed.reservations)) {
+    if (!id || row === null || typeof row !== "object" || !Number.isFinite(row.reservedUsd) || row.reservedUsd < 0 ||
+        (row.settledUsd !== null && (!Number.isFinite(row.settledUsd) || row.settledUsd < 0 || row.settledUsd > row.reservedUsd)) ||
+        (row.deployment !== undefined && typeof row.deployment !== "string")) {
+      throw new Error(`openweight allowance file at ${path} has an unreadable reservation ${id}; refusing to spend against an unknown committed total`);
+    }
+  }
+  if (requireFleetCap && parsed.utcDay > utcDay)
+    throw new Error(`shared cash allowance is already on ${parsed.utcDay}; refusing an older ${utcDay} request`);
+  return { utcDay, fleetCapUsd: parsed.fleetCapUsd, reservations: parsed.utcDay === utcDay ? parsed.reservations : {} };
+}
+
+function configuredCashCap(config: Config, squeezed?: boolean): number {
+  const cap = effectiveCashCapUsd(config.dailyCapUsd, { squeezed });
+  if (cap === undefined || !Number.isFinite(cap) || cap <= 0) throw new Error("cash provider requires a dailyCapUsd before any paid request");
+  return cap;
+}
+
+function cashAllowanceLimits(state: OpenWeightAllowanceState, cap: number, deployment: string, squeezed?: boolean) {
+  const limits = [{ committedUsd: openWeightCommittedUsd(state), capUsd: Math.min(cap, state.fleetCapUsd ?? Infinity) }];
+  if (isFoundryClaudeDeployment(deployment)) {
+    const reservations = Object.fromEntries(Object.entries(state.reservations)
+      .filter(([, row]) => row.deployment !== undefined && isFoundryClaudeDeployment(row.deployment)));
+    limits.push({ committedUsd: openWeightCommittedUsd({ utcDay: state.utcDay, reservations }),
+      capUsd: squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal });
+  }
+  return limits;
+}
+
+/** Observe without locking, reserving or writing; the adapter's later reservation remains binding. */
+export function readOpenWeightAllowance(config: Config,
+  input: { deployments: readonly string[]; atIso: string; squeezed?: boolean }) {
+  const utcDay = openWeightUtcDay(input.atIso), path = openWeightAllowancePath(config);
+  const state = parseOpenWeightAllowance(readFileIfExists(path), path, utcDay, sharedCashAllowancePath(config) !== undefined);
+  const cap = configuredCashCap(config, input.squeezed);
+  return { resetAt: openWeightAllowanceReset(utcDay), deployments: input.deployments.map(deployment => {
+    const limits = cashAllowanceLimits(state, cap, deployment, input.squeezed);
+    const tightest = limits.reduce((a, b) => a.capUsd - a.committedUsd <= b.capUsd - b.committedUsd ? a : b);
+    return { deployment, ...tightest, remainingUsd: tightest.capUsd - tightest.committedUsd };
+  }) };
 }
 
 /** How many times a compare-and-swap may lose its race before the reservation gives up. A loss
@@ -3390,47 +3454,7 @@ function mutateOpenWeightAllowance<T>(
   }
   for (let attempt = 1; ; attempt++) {
     const snapshot = readFileIfExists(path);
-    if (requireFleetCap && snapshot === undefined) {
-      throw new Error(`shared cash allowance is missing at ${path}; refusing to reset unknown fleet spend`);
-    }
-    let state: OpenWeightAllowanceState | undefined;
-    if (snapshot !== undefined) {
-      // FAIL CLOSED ON AN UNREADABLE ALLOWANCE. A corrupt or truncated file is the one case where
-      // "start fresh" is actively dangerous: it hands the whole day's cap back, so a single bad
-      // write — or anything that can damage this file — silently uncaps paid spend. An ABSENT file
-      // is a genuine "nothing spent yet"; a PRESENT file we cannot read is unknown spend, and
-      // unknown spend is refused rather than assumed to be zero. Clearing it is an operator act.
-      let parsed: Partial<OpenWeightAllowanceState>;
-      try {
-        parsed = JSON.parse(snapshot) as Partial<OpenWeightAllowanceState>;
-      } catch (error) {
-        throw new Error(
-          `openweight allowance file is unreadable at ${path}; refusing to spend against an unknown committed total ` +
-            `(${error instanceof Error ? error.message : String(error)})`,
-        );
-      }
-      if (typeof parsed.utcDay !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.utcDay) ||
-          parsed.reservations === null || typeof parsed.reservations !== "object" || Array.isArray(parsed.reservations)) {
-        throw new Error(`openweight allowance file at ${path} has no readable utcDay/reservations; refusing to spend against an unknown committed total`);
-      }
-      if (requireFleetCap && (!Number.isFinite(parsed.fleetCapUsd) || (parsed.fleetCapUsd ?? 0) <= 0)) {
-        throw new Error(`shared cash allowance at ${path} has no valid fleet cap; refusing paid spend`);
-      }
-      for (const [id, row] of Object.entries(parsed.reservations)) {
-        if (!id || row === null || typeof row !== "object" || !Number.isFinite(row.reservedUsd) || row.reservedUsd < 0 ||
-            (row.settledUsd !== null && (!Number.isFinite(row.settledUsd) || row.settledUsd < 0 || row.settledUsd > row.reservedUsd)) ||
-            (row.deployment !== undefined && typeof row.deployment !== "string")) {
-          throw new Error(`openweight allowance file at ${path} has an unreadable reservation ${id}; refusing to spend against an unknown committed total`);
-        }
-      }
-      state = { utcDay: parsed.utcDay, fleetCapUsd: parsed.fleetCapUsd, reservations: parsed.reservations as OpenWeightAllowanceState["reservations"] };
-    }
-    if (requireFleetCap && state && state.utcDay > utcDay) {
-      throw new Error(`shared cash allowance is already on ${state.utcDay}; refusing an older ${utcDay} request`);
-    }
-    // A different UTC day starts a fresh allowance: yesterday's committed spend must not consume
-    // today's cap, and must not be carried forward as credit either. This is the ONLY reset.
-    if (state === undefined || state.utcDay !== utcDay) state = { utcDay, fleetCapUsd: state?.fleetCapUsd, reservations: {} };
+    const state = parseOpenWeightAllowance(snapshot, path, utcDay, requireFleetCap);
 
     const { next, result } = mutate(state);
     // TEST-ONLY seam, in the shape {@link import("./fs-race-safe.js").reclaimStaleLock}'s own
@@ -3510,33 +3534,18 @@ export function reserveOpenWeightBudget(
     extraInputTokens?: number;
   },
 ): { reservedUsd: number; committedUsd: number; capUsd: number } {
-  const configuredCapUsd = effectiveCashCapUsd(config.dailyCapUsd, { squeezed: input.squeezed });
-  // validateConfig already refuses an enabled cash provider (W1-T3607: canonical id, "openweight"
-  // accepted as a deprecated alias) with no dailyCapUsd. This is the runtime half of that same rule:
-  // an absent cap here means the transport must not run at all, rather than defaulting to unlimited.
-  if (configuredCapUsd === undefined || configuredCapUsd === null || !Number.isFinite(configuredCapUsd) || configuredCapUsd <= 0) {
-    throw new Error("cash provider requires a dailyCapUsd before any paid request");
-  }
+  const configuredCapUsd = configuredCashCap(config, input.squeezed);
   const utcDay = openWeightUtcDay(input.atIso);
   const wantUsd = openWeightReservationUsd(input.deployment, input.requestBodyBytes, input.extraInputTokens ?? 0);
   return mutateOpenWeightAllowance(openWeightAllowancePath(config), utcDay, (state) => {
-    const capUsd = Math.min(configuredCapUsd, state.fleetCapUsd ?? Infinity);
+    const limits = cashAllowanceLimits(state, configuredCapUsd, input.deployment, input.squeezed);
+    const { capUsd, committedUsd } = limits[0]!;
     if (Object.hasOwn(state.reservations, input.requestId)) {
       throw new Error(`cash allowance request identity already reserved: ${input.requestId}`);
     }
-    const committedUsd = openWeightCommittedUsd(state);
-    if (committedUsd + wantUsd > capUsd) {
-      throw new OpenWeightAllowanceExhaustedError({ committedUsd, capUsd, wantUsd, utcDay });
-    }
-    if (isFoundryClaudeDeployment(input.deployment)) {
-      const claudeCapUsd = input.squeezed ? FOUNDRY_CLAUDE_DAILY_CAP_USD.squeezed : FOUNDRY_CLAUDE_DAILY_CAP_USD.normal;
-      const claudeCommittedUsd = openWeightCommittedUsd({
-        utcDay,
-        reservations: Object.fromEntries(Object.entries(state.reservations).filter(([, row]) => row.deployment !== undefined && isFoundryClaudeDeployment(row.deployment))),
-      });
-      if (claudeCommittedUsd + wantUsd > claudeCapUsd) {
-        throw new OpenWeightAllowanceExhaustedError({ committedUsd: claudeCommittedUsd, capUsd: claudeCapUsd, wantUsd, utcDay });
-      }
+    for (const limit of limits) {
+      if (limit.committedUsd + wantUsd > limit.capUsd)
+        throw new OpenWeightAllowanceExhaustedError({ ...limit, wantUsd, utcDay });
     }
     return {
       next: { ...state, reservations: { ...state.reservations, [input.requestId]: { reservedUsd: wantUsd, settledUsd: null, deployment: input.deployment } } },
@@ -3701,6 +3710,7 @@ export interface OpenWeightWorkerResult {
   budgetReservedUsd: number;
   budgetSettledUsd: number;
   budgetRefused: boolean;
+  cashAllowanceResetAt?: string;
   externalEffect?: ExternalEffectResult;
 }
 
@@ -4541,10 +4551,10 @@ function openWeightResult(input: {
     text,
     blocks: text ? [text] : [],
     stderr: error ?? "",
-    subtype: error ? "openweight_error" : "success",
+    subtype: input.budgetRefused ? "cash_allowance_exhausted" : error ? "openweight_error" : "success",
     isError: error !== undefined,
     exit: { kind: "unobserved" },
-    apiError: error !== undefined,
+    apiError: error !== undefined && !input.budgetRefused,
     permissionDenials: [],
     childEnvKeys: [],
     model: input.model,
@@ -4561,6 +4571,7 @@ function openWeightResult(input: {
     budgetReservedUsd: input.budgetReservedUsd ?? 0,
     budgetSettledUsd: input.budgetSettledUsd ?? 0,
     budgetRefused: input.budgetRefused ?? false,
+    ...(input.error instanceof OpenWeightAllowanceExhaustedError ? { cashAllowanceResetAt: input.error.resetAt } : {}),
     ...(input.deploymentAbsent ? { openWeightDeploymentAbsent: input.deploymentAbsent } : {}),
     webSearchAttempted: input.webSearchAttempted ?? 0,
     webSearchAccepted: input.webSearchAccepted ?? 0,
@@ -4771,7 +4782,7 @@ export async function spawnFoundryClaudeWorker(
       actualCostUsd: spentUsd, budgetReservedUsd, budgetSettledUsd,
       budgetRefused: error instanceof OpenWeightAllowanceExhaustedError,
       ...(error instanceof OpenWeightDeploymentNotFoundError ? { deploymentAbsent: selection.model } : {}),
-      error: error instanceof Error ? error.message : String(error),
+      error,
     }), args.externalEffect);
   } finally {
     toolLineage.finish(lineageEnd);
@@ -5080,7 +5091,7 @@ export async function spawnOpenWeightWorker(
         completionTokens,
         cacheReadTokens, cacheCreationTokens,
         ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}),
-        error: error instanceof Error ? error.message : String(error),
+        error,
         budgetReservedUsd,
         budgetSettledUsd,
         // A refusal is a distinct outcome from a transport failure: no paid request was made, so the

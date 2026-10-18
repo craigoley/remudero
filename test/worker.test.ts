@@ -494,7 +494,13 @@ test("workerLedgerFields: success call ⇒ {model, effort, tokens, cache_read_in
       schema: "sdk-init-summary-v1", state: "unavailable", source: null,
       serverNames: { state: "unavailable", names: [], inputEntries: null, inspectedEntries: 0, rejectedEntries: 0, truncated: false },
       mcpToolNames: { state: "unavailable", names: [], inputEntries: null, inspectedEntries: 0, rejectedEntries: 0, truncated: false },
+      pluginNames: { state: "unavailable", names: [], inputEntries: null, inspectedEntries: 0, rejectedEntries: 0, truncated: false },
+      skillNames: { state: "unavailable", names: [], inputEntries: null, inspectedEntries: 0, rejectedEntries: 0, truncated: false },
+      agentNames: { state: "unavailable", names: [], inputEntries: null, inspectedEntries: 0, rejectedEntries: 0, truncated: false },
+      pluginErrorCount: null,
     },
+    // W1-T9642: no init message ⇒ the plugin/skill census is UNKNOWN (null), never an empty list.
+    plugin_inventory: { state: "unknown", plugins: null, skills: null, agents: null, plugin_error_count: null },
     model: "claude-opus-4",
     // W1-T2572: `usageStream()`'s assistant message carries no `model` field, so the
     // provider reported nothing this call could attribute a served model to — an
