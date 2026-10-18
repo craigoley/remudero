@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Config } from "../src/lib/config.js";
-import * as runner from "../src/run-task.js";
+// Through the helper: a direct src/run-task.ts import raises the affected-suite reach ratchet.
+import * as runner from "./helpers/run-task-test.js";
 import { DEFAULT_SWEEP_POLICY, MACHINE_LANE_HEAD_RE, isMachineLanePlanHead, planConflictRoundCandidate, runSweep, type OpenPrView, type SweepDeps } from "./helpers/sweep-test.js";
 import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
