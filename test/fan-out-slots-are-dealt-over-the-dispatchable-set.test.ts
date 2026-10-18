@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDispatchValueContext, stridePassInputs } from "../src/lib/dispatch-value.js";
-import type { DispatchValueContext } from "../src/lib/dispatch-value.js";
-import { dispatchOrder, nextRunnable, runnableCandidates } from "../src/lib/drain.js";
-import { NO_OBSERVED_SCOPE } from "../src/lib/dispatch-overlap.js";
-import { captureDispatchFrontier, dispatchPickPayload } from "../src/lib/daemon.js";
-import type { Plan, Task } from "../src/lib/plan.js";
+import { buildDispatchValueContext, stridePassInputs } from "#src/lib/dispatch-value.js";
+import type { DispatchValueContext } from "#src/lib/dispatch-value.js";
+import { dispatchOrder, nextRunnable, runnableCandidates } from "#src/lib/drain.js";
+import { NO_OBSERVED_SCOPE } from "#src/lib/dispatch-overlap.js";
+import { captureDispatchFrontier, dispatchPickPayload } from "#src/lib/daemon.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-10-17T02:00:00Z");
