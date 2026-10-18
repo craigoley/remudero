@@ -1139,7 +1139,7 @@ export interface SpawnWorkerArgs {
   prompt: string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
   resumeSessionId?: string;
-  /** W1-T10164: identity comes from the prior result, not the requested mount. freshPrompt is
+  /** W1-T10164: identity comes from the prior result, not the requested mount. contextPrompt is
    * self-contained task/action context for a selected provider that cannot resume that session. */
   continuation?: { provider?: WorkerProviderId; contextPrompt: string };
   /** Extra env vars merged into the allowlisted child env (never ANTHROPIC_*). */

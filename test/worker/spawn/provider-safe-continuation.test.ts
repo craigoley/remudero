@@ -3,10 +3,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { canonicalWorkerProviderId, type Config, type WorkerProviderId } from "#src/lib/config.js";
-import { openWeightAllowancePath, openWeightReservationUsd } from "#src/lib/worker-provider.js";
+import { OpenWeightRequestTooLargeError, openWeightAllowancePath, openWeightReservationUsd } from "#src/lib/worker-provider.js";
 import { createClaudeExecutableCache, spawnWorker, workerContinuation, workerExecutionForProvider,
   workerLedgerFields, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
-import { withWorkspaceCleanup } from "#src/lib/workspace-cleanup-contract.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -74,7 +73,8 @@ test("a continuation never resumes another provider session", async t => {
   const own = fixture(t, "claude");
   const result = await spawnWorker(own.args);
   assert.equal(own.captured[0].resume, "original-session");
-  assert.equal(own.captured[0].prompt, withWorkspaceCleanup(action));
+  assert.ok(own.captured[0].prompt.startsWith(action));
+  assert.equal(own.captured[0].prompt.includes(task), false, "a real resume does not duplicate original context");
   assert.equal(result.continuation?.mode, "resumed");
 });
 
@@ -85,7 +85,8 @@ test("a routed fresh continuation carries its task and pending action", async t 
   assert.ok(f.captured[0].prompt.includes(action));
   assert.ok(f.captured[0].prompt.includes(f.root));
   assert.match(f.captured[0].prompt, /edits are saved/);
-  assert.equal(f.captured[0].prompt, withWorkspaceCleanup(workerExecutionForProvider(f.args, "claude").prompt));
+  assert.ok(f.captured[0].prompt.startsWith(workerExecutionForProvider(f.args, "claude").prompt));
+  assert.equal(f.captured[0].prompt.indexOf(task), f.captured[0].prompt.lastIndexOf(task));
   const missing = fixture(t, undefined);
   delete missing.args.continuation;
   await assert.rejects(() => spawnWorker(missing.args), /self-contained fresh handoff/);
@@ -102,7 +103,8 @@ test("same-provider Codex writers get fresh context but read-only continuations 
   reader.args.tools = ["Read", "Grep", "Glob", "Bash"];
   await spawnWorker(reader.args);
   assert.equal(reader.captured[0].resume, "original-session");
-  assert.equal(reader.captured[0].prompt, withWorkspaceCleanup(action));
+  assert.ok(reader.captured[0].prompt.startsWith(action));
+  assert.equal(reader.captured[0].prompt.includes(task), false);
   const foreign = fixture(t, "claude", "codex");
   await spawnWorker(foreign.args);
   assert.equal(foreign.captured[0].resume, undefined);
@@ -119,8 +121,8 @@ test("continuation sizing accounts for the selected provider prompt", async t =>
   f.args.tools = [];
   f.args.routingTrial = { id: "fixture-only", arm: "cash", reason: "fixture model", models: ["gpt-6-luna"] };
   f.args.continuation = workerContinuation(prior("claude"), task + "x".repeat(300_000), f.root);
-  const execution = withWorkspaceCleanup(workerExecutionForProvider(f.args, "cash").prompt);
-  const shortWant = openWeightReservationUsd("gpt-6-luna", Buffer.byteLength(withWorkspaceCleanup(action)));
+  const execution = workerExecutionForProvider(f.args, "cash").prompt;
+  const shortWant = openWeightReservationUsd("gpt-6-luna", Buffer.byteLength(action));
   const longWant = openWeightReservationUsd("gpt-6-luna", Buffer.byteLength(execution));
   assert.ok(longWant > shortWant);
   f.config.dailyCapUsd = (shortWant + longWant) / 2;
@@ -134,6 +136,12 @@ test("continuation sizing accounts for the selected provider prompt", async t =>
   await spawnWorker(roomy.args);
   assert.equal(roomy.captured[0].resume, undefined);
   assert.ok(roomy.captured[0].prompt.includes(task));
+  const oversized = fixture(t, "claude", "cash");
+  oversized.args.tools = [];
+  oversized.args.routingTrial = { id: "fixture-only", arm: "cash", reason: "fixture model", models: ["gpt-6-luna"] };
+  oversized.args.continuation = workerContinuation(prior("claude"), task + "x".repeat(4_000_000), oversized.root);
+  await assert.rejects(() => spawnWorker(oversized.args), OpenWeightRequestTooLargeError);
+  assert.equal(oversized.captured.length, 0, "the final handoff must fit before any transport");
 });
 
 test("ordinary spawns and bounded prior-report handoffs keep their own contracts", () => {
