@@ -13,6 +13,7 @@
   plan_refs: [W1-T100, W1-T3792, W1-T4052, W1-T5325, W1-T9748]
   files:
     - src/lib/worker.ts
+    - src/lib/worker-provider.ts
     - src/run-task.ts
     - src/lib/sweep.ts
     - test/worker/spawn/provider-safe-continuation.test.ts
@@ -45,6 +46,8 @@
     including mount affinity and cash diversion, resume only a provider-supported same-provider
     session. Claude must never receive a Codex/cash/unknown-origin id. Preserve genuine Claude
     resume and the Codex adapter's existing fresh-writer sandbox rule.
+    Reuse the Codex adapter's actual read-only/resume predicate rather than copying its tool
+    classification into the router; exposing that unchanged predicate is in scope.
 
     Supply a bounded self-contained fresh-session handoff when an actual resume is unavailable:
     original task/output/tool contract, current workspace identity and the pending action/error,
