@@ -7,12 +7,12 @@
  * the writer lease whose fence is re-checked inside every write transaction.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, opendirSync, readFileSync, readlinkSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
-import { threadId } from "node:worker_threads";
+import { SHARE_ENV, threadId, Worker } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
@@ -84,6 +84,7 @@ export interface ReadModelOpenOptions {
   ddl?: string;
   readOnly?: boolean;
   clock?: Clock;
+  transactionObservation?: ReadModelTransactionObservationOptions;
   /** Opens this generation's file instead of the one the pointer names (a rebuild's side file);
    *  `null` opens the un-generationed file, the one in use before any rebuild published a pointer. */
   generation?: string | null;
@@ -114,6 +115,373 @@ export function readModelSidecarDir(dbDir: string, env: NodeJS.ProcessEnv = proc
   const at = mapping.indexOf(":");
   if (at > 0 && mapping.length > at + 1 && resolve(mapping.slice(at + 1)) === resolve(dbDir)) return join(mapping.slice(0, at), READ_MODEL_DIRNAME);
   return dbDir;
+}
+
+export interface ReadModelProcessIdentity {
+  pid: number;
+  bootId: string;
+  pidNamespace: string;
+  startTicks: string;
+}
+type ProcessInspection = { status: "identified"; identity: ReadModelProcessIdentity } | { status: "missing" | "unknown" };
+
+/** Linux identities are comparable only in the same boot and PID namespace. Other platforms are unknown. */
+function inspectReadModelProcess(pid: number): ProcessInspection {
+  try {
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const pidNamespace = readlinkSync(`/proc/${pid}/ns/pid`);
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const startTicks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    if (!bootId || !pidNamespace || !startTicks || !/^\d+$/.test(startTicks)) return { status: "unknown" };
+    return { status: "identified", identity: { pid, bootId, pidNamespace, startTicks } };
+  } catch (error) {
+    // Procfs may hide a live foreign UID. Only ESRCH confirms absence within the caller's namespace.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      try { process.kill(pid, 0); }
+      catch (probe) { if ((probe as NodeJS.ErrnoException).code === "ESRCH") return { status: "missing" }; }
+    }
+    return { status: "unknown" };
+  }
+}
+
+export function readModelProcessIdentity(): ReadModelProcessIdentity | undefined {
+  const read = inspectReadModelProcess(process.pid);
+  return read.status === "identified" ? read.identity : undefined;
+}
+
+type TransactionRecord = {
+  connection: string; transaction: string; recorder: string; label: string; pid: number; thread: number;
+  identity?: ReadModelProcessIdentity; recordedState: "attempting" | "recorded-acquired" | "released";
+  attemptedAt: number; acquiredAt?: number; updatedAt: number;
+};
+export interface ReadModelTransactionObservationOptions {
+  label?: string;
+  identity?: () => ReadModelProcessIdentity | undefined;
+  clock?: Clock;
+  /** Diagnostic seams never replace SQLite, its timeout, or its ordering. */
+  publish?: (file: string, record: TransactionRecord) => void;
+  remove?: (file: string) => void;
+  report?: (step: string, extra: Record<string, unknown>) => void;
+}
+export interface ReadModelTransactionInventory {
+  asOf: number;
+  state: "observed" | "none-recorded" | "unknown";
+  complete: boolean;
+  inspected: number;
+  unknownRecords: number;
+  truncated: boolean;
+  records: Array<TransactionRecord & {
+    state: "attempting" | "recorded-acquired" | "stale" | "unknown";
+    recordAgeMs: number;
+    lockOwnership: "unverified";
+  }>;
+}
+const TRANSACTION_RECORD_BYTES = 4096; // PRIMARY CONTROL: bounds each diagnostic read and write.
+const TRANSACTION_INVENTORY_LIMIT = 128; // PRIMARY CONTROL: bounds a failure's filesystem inventory.
+
+export function readModelTransactionDir(path: string): string {
+  return join(readModelSidecarDir(dirname(path)), `${basename(path)}.transactions`);
+}
+
+// One bounded publisher per JS isolate. Shared snapshots coalesce updates without waiting on disk or ACKs.
+const TRANSACTION_WRITER_SOURCE = String.raw`
+const {parentPort,workerData}=require('node:worker_threads');
+const fs=require('node:fs');const {dirname}=require('node:path');
+const wake=new Int32Array(workerData.wake),entries=new Map();let scheduled=false;
+function identity(){try{
+ const pid=process.pid,bootId=fs.readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim();
+ const pidNamespace=fs.readlinkSync('/proc/'+pid+'/ns/pid'),stat=fs.readFileSync('/proc/'+pid+'/stat','utf8');
+ const startTicks=stat.slice(stat.lastIndexOf(')')+2).split(' ')[19];
+ return bootId&&pidNamespace&&/^\d+$/.test(startTicks)?{pid,bootId,pidNamespace,startTicks}:undefined;
+}catch{
+ // Missing procfs identity stays absent, so inventories report unknown rather than trusting a PID.
+ return undefined;}}
+const ownIdentity=identity();
+function schedule(){if(!scheduled){scheduled=true;setImmediate(pump);}}
+function pump(){
+ scheduled=false;const observed=Atomics.load(wake,0);
+ for(const [id,e] of entries){
+  const c=e.control,v=Atomics.load(c,0);if((v&1)||v===e.seen&&!Atomics.load(c,2))continue;
+  const length=Atomics.load(c,1),body=Buffer.from(e.bytes.subarray(0,length));
+  if(v!==Atomics.load(c,0))continue;
+  let failed=false;
+  try{
+   if(e.seen<0)fs.mkdirSync(dirname(e.file),{recursive:true,mode:0o700});
+   if(length){
+    const record=JSON.parse(body.toString('utf8'));if(e.defaultIdentity)record.identity=ownIdentity;
+    if(record.recordedState==='released'){
+     let existing;try{const st=fs.statSync(e.file);if(st.size>4096)throw Error('oversize');existing=JSON.parse(fs.readFileSync(e.file,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+     if(existing?.recorder===record.recorder){
+      publish(e.file,record);if(!Atomics.load(c,5))fs.rmSync(e.file,{force:true});
+     }
+    }else publish(e.file,record);
+   }
+  }catch(error){
+   // The failed ACK carries the errno; a failed publication is never reported as an empty inventory.
+   failed=true;e.failureCode=typeof error.code==='string'?error.code:'publication_failed';
+  }
+  e.seen=v;Atomics.store(c,4,failed?1:0);Atomics.store(c,3,v);
+  const closed=!!Atomics.load(c,2)&&v===Atomics.load(c,0);if(closed)entries.delete(id);
+  parentPort.postMessage({id,failed,closed,reason:failed?e.failureCode:undefined});
+ }
+ const waiting=Atomics.waitAsync(wake,0,observed);
+ if(waiting.async)waiting.value.then(schedule);else schedule();
+}
+function publish(file,record){
+ const body=JSON.stringify(record);if(Buffer.byteLength(body)>4096)throw Error('oversize');
+ fs.mkdirSync(dirname(file),{recursive:true,mode:0o700});const tmp=file+'.tmp';
+ try{fs.writeFileSync(tmp,body,{mode:0o600});fs.renameSync(tmp,file);}finally{fs.rmSync(tmp,{force:true});}
+}
+parentPort.on('message',e=>{
+ if(entries.size>=128){parentPort.postMessage({id:e.id,failed:true,closed:true});return;}
+ entries.set(e.id,{...e,control:new Int32Array(e.memory,0,8),bytes:new Uint8Array(e.memory,32),seen:-1});schedule();
+});
+`;
+type TransactionPublication = {
+  id: string; file: string; memory: SharedArrayBuffer; control: Int32Array; bytes: Uint8Array;
+  current?: TransactionRecord; failure: (reason?: string) => void;
+};
+let transactionWriter: {
+  worker: Worker; wake: Int32Array; entries: Map<string, TransactionPublication>;
+  waiters: Set<() => void>; failed: boolean;
+} | undefined;
+
+function transactionPublisher(file: string, failure: (reason?: string) => void, defaultIdentity: boolean): TransactionPublication {
+  if (!transactionWriter) {
+    const wake = new Int32Array(new SharedArrayBuffer(4));
+    const worker = new Worker(TRANSACTION_WRITER_SOURCE, { eval: true, execArgv: [], env: SHARE_ENV, workerData: { wake: wake.buffer },
+      resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4, stackSizeMb: 1 } });
+    const owner = transactionWriter = { worker, wake, entries: new Map<string, TransactionPublication>(), waiters: new Set<() => void>(), failed: false as boolean };
+    worker.on("message", (message: { id: string; failed: boolean; closed: boolean; reason?: string }) => {
+      const entry = owner.entries.get(message.id);
+      if (message.failed) entry?.failure(message.reason);
+      if (message.closed) owner.entries.delete(message.id);
+      for (const waiter of owner.waiters) waiter();
+      if (!owner.entries.size) { if (transactionWriter === owner) transactionWriter = undefined; void worker.terminate(); }
+    });
+    const failed = (): void => {
+      owner.failed = true;
+      for (const entry of owner.entries.values()) { Atomics.store(entry.control, 4, 1); entry.failure(); }
+      for (const waiter of owner.waiters) waiter();
+    };
+    worker.on("error", failed); worker.on("exit", () => { if (owner.entries.size) failed(); }); worker.unref();
+  }
+  const owner = transactionWriter;
+  if (owner.failed) throw new Error("transaction publisher stopped");
+  if (owner.entries.size >= TRANSACTION_INVENTORY_LIMIT) throw new Error("transaction publisher capacity reached");
+  const memory = new SharedArrayBuffer(32 + TRANSACTION_RECORD_BYTES);
+  const entry = { id: randomUUID(), file, memory, control: new Int32Array(memory, 0, 8), bytes: new Uint8Array(memory, 32), failure };
+  Atomics.store(entry.control, 3, -2);
+  owner.entries.set(entry.id, entry);
+  owner.worker.postMessage({ id: entry.id, file, memory, defaultIdentity });
+  return entry;
+}
+
+function queueTransaction(entry: TransactionPublication, record: TransactionRecord, keepReleased = false): void {
+  const bytes = Buffer.from(JSON.stringify(record));
+  if (bytes.length > TRANSACTION_RECORD_BYTES) throw new Error("oversized transaction observation");
+  entry.current = record;
+  Atomics.add(entry.control, 0, 1); entry.bytes.set(bytes); Atomics.store(entry.control, 1, bytes.length);
+  Atomics.store(entry.control, 5, keepReleased ? 1 : 0); Atomics.add(entry.control, 0, 1);
+  const owner = transactionWriter;
+  if (owner?.failed || owner?.entries.get(entry.id) !== entry) throw new Error("transaction publisher unavailable");
+  Atomics.add(owner.wake, 0, 1); Atomics.notify(owner.wake, 0);
+}
+
+/** Optional diagnostic barrier for tests/tools; production SQLite callers never await it. */
+export function flushReadModelTransactions(): Promise<void> {
+  const owner = transactionWriter;
+  if (!owner) return Promise.resolve();
+  const goals = [...owner.entries.values()].map(entry => ({ entry, version: Atomics.load(entry.control, 0) }));
+  return new Promise((resolve, reject) => {
+    owner.worker.ref();
+    const done = (error?: Error): void => {
+      clearTimeout(timer); owner.waiters.delete(check); if (!owner.waiters.size) owner.worker.unref();
+      if (error) reject(error); else resolve();
+    };
+    const check = (): void => {
+      if (owner.failed) return done(new Error("transaction publisher stopped"));
+      if (goals.every(({ entry, version }) => ((Atomics.load(entry.control, 3) - version) >>> 0) < 0x80000000
+        && (!Atomics.load(entry.control, 2) || !owner.entries.has(entry.id)))) done();
+    };
+    const timer = setTimeout(() => done(new Error("transaction publication observation expired")), 10_000);
+    owner.waiters.add(check); check();
+  });
+}
+
+/** One bounded record per connection. It is an observation, never authority to reclaim a lock. */
+export function createReadModelTransactionRecorder(path: string, connection: string, opts: ReadModelTransactionObservationOptions = {}) {
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(connection)) throw new Error("invalid transaction observation connection");
+  const file = join(readModelTransactionDir(path), `${connection}.json`), recorder = randomUUID();
+  let current: TransactionRecord | undefined, publication: TransactionPublication | undefined;
+  let reported = false;
+  const failure = (reason = "diagnostic_failed"): void => {
+    if (reported) return; reported = true;
+    try {
+      const extra = { connection, pid: process.pid, thread: threadId, path, release: "unverified", reason };
+      if (opts.report) opts.report("read_model.holder_record_failed", extra);
+      else process.stderr.write(`${JSON.stringify({ step: "read_model.holder_record_failed", ...extra })}\n`);
+    } catch { /* Diagnostic sinks cannot change SQL behavior. */ }
+  };
+  const diagnostic = (fn: () => void): void => {
+    try { fn(); } catch (error) {
+      const reason = String((error as NodeJS.ErrnoException)?.code ?? "diagnostic_failed").slice(0, 40);
+      failure(reason);
+    }
+  };
+  diagnostic(() => { if (!opts.publish) publication = transactionPublisher(file, failure, !opts.identity); });
+  const publish = (record: TransactionRecord, keepReleased = false): void => {
+    if (opts.publish) opts.publish(file, record);
+    else if (publication) queueTransaction(publication, record, keepReleased);
+    else throw new Error("transaction publication unavailable");
+  };
+  const now = (): number => (opts.clock ?? systemClock).now();
+  let identityRead = false, identity: ReadModelProcessIdentity | undefined;
+  const release = (nonce: string): void => {
+    diagnostic(() => {
+      if (current?.transaction !== nonce) return;
+      if (opts.publish && readTransactionRecord(file).transaction !== nonce) return;
+      current = { ...current, recordedState: "released", updatedAt: now() };
+      if (opts.remove) {
+        try { opts.remove(file); }
+        catch { publish(current, true); throw new Error("transaction retirement unverified"); }
+      }
+      publish(current);
+      if (opts.publish && !opts.remove) rmSync(file, { force: true });
+      current = undefined;
+    });
+  };
+  const observer: { attempt(caller?: (...args: never[]) => unknown): string; acquired(nonce: string): void;
+    release(nonce: string): void; close(): void } = {
+    attempt(caller: (...args: never[]) => unknown = observer.attempt): string {
+      const nonce = randomUUID();
+      diagnostic(() => {
+        if (!identityRead) { identity = opts.identity?.(); identityRead = true; }
+        // Function references survive bundling; adapter filenames do not. Trim the outer transaction helper first.
+        const site: { stack?: string } = {};
+        Error.captureStackTrace(site, withWriteTransaction);
+        if (site.stack === undefined || !site.stack.includes("\n")) Error.captureStackTrace(site, acquireLease);
+        if (site.stack === undefined || !site.stack.includes("\n")) Error.captureStackTrace(site, caller);
+        const label = site.stack?.split("\n")[1]?.trim().split(" (")[0];
+        current = { connection, transaction: nonce, recorder, label: (opts.label ?? label ?? "unlabeled").slice(0, 120),
+          pid: process.pid, thread: threadId, identity, recordedState: "attempting", attemptedAt: now(), updatedAt: now() };
+        publish(current);
+      });
+      return nonce;
+    },
+    acquired(nonce: string): void {
+      diagnostic(() => {
+        if (current?.transaction !== nonce) return;
+        current = { ...current, recordedState: "recorded-acquired", acquiredAt: now(), updatedAt: now() };
+        publish(current);
+      });
+    },
+    release,
+    close(): void {
+      if (current) release(current.transaction);
+      diagnostic(() => {
+        if (!publication) return;
+        Atomics.add(publication.control, 0, 1); Atomics.store(publication.control, 2, 1); Atomics.add(publication.control, 0, 1);
+        const owner = transactionWriter;
+        if (owner?.entries.get(publication.id) === publication) {
+          if (owner.failed) { owner.entries.delete(publication.id); if (!owner.entries.size) transactionWriter = undefined; }
+          else { Atomics.add(owner.wake, 0, 1); Atomics.notify(owner.wake, 0); }
+        }
+      });
+    },
+  };
+  return observer;
+}
+
+function readTransactionRecord(file: string): TransactionRecord {
+  const fd = openSync(file, "r");
+  try {
+    const size = fstatSync(fd).size;
+    if (size > TRANSACTION_RECORD_BYTES) throw new Error("oversized transaction record");
+    const bytes = Buffer.alloc(TRANSACTION_RECORD_BYTES + 1);
+    const count = readSync(fd, bytes, 0, bytes.length, 0);
+    if (count > TRANSACTION_RECORD_BYTES) throw new Error("growing transaction record");
+    const value = JSON.parse(bytes.subarray(0, count).toString("utf8")) as TransactionRecord;
+    if (!value || typeof value.connection !== "string" || value.connection.length > 80 || typeof value.transaction !== "string" || value.transaction.length > 80
+      || typeof value.recorder !== "string" || value.recorder.length > 80
+      || typeof value.label !== "string" || value.label.length > 120 || !Number.isSafeInteger(value.pid) || value.pid <= 0 || !Number.isSafeInteger(value.thread)
+      || !["attempting", "recorded-acquired", "released"].includes(value.recordedState)
+      || !Number.isFinite(value.attemptedAt) || !Number.isFinite(value.updatedAt)
+      || (value.acquiredAt !== undefined && !Number.isFinite(value.acquiredAt))
+      || (value.recordedState === "recorded-acquired" && value.acquiredAt === undefined)) throw new Error("malformed transaction record");
+    // Select fields: no unbounded or unrelated fields from an inventory file enter an error or ledger.
+    const i = value.identity;
+    const identity = i && Number.isSafeInteger(i.pid) && typeof i.bootId === "string" && i.bootId.length <= 80
+      && typeof i.pidNamespace === "string" && i.pidNamespace.length <= 80 && typeof i.startTicks === "string" && i.startTicks.length <= 40
+      ? { pid: i.pid, bootId: i.bootId, pidNamespace: i.pidNamespace, startTicks: i.startTicks } : undefined;
+    return { connection: value.connection, transaction: value.transaction, recorder: value.recorder, label: value.label, pid: value.pid, thread: value.thread,
+      identity, recordedState: value.recordedState, attemptedAt: value.attemptedAt, acquiredAt: value.acquiredAt, updatedAt: value.updatedAt };
+  } finally { closeSync(fd); }
+}
+
+/** Bounded, best-effort inventory. Empty means none recorded; it never proves there is no SQLite writer. */
+export function readReadModelTransactions(path: string | undefined, opts: { processIdentity?: (pid: number) => ProcessInspection; clock?: Clock } = {}): ReadModelTransactionInventory {
+  const asOf = (opts.clock ?? systemClock).now();
+  const result: ReadModelTransactionInventory = { asOf, state: "unknown", complete: true, inspected: 0, unknownRecords: 0, truncated: false, records: [] };
+  let dir: ReturnType<typeof opendirSync> | undefined;
+  try {
+    if (!path || path === ":memory:") throw new Error("no persistent database inventory");
+    const inspect = opts.processIdentity ?? inspectReadModelProcess;
+    const own = inspect(process.pid);
+    // The publisher thread runs concurrently with this scan: a record it finishes publishing mid-scan can be
+    // missed by the directory walk yet look settled afterwards. Entries pending at scan start stay unknown.
+    const pendingAtStart = new Set<string>();
+    for (const entry of transactionWriter?.entries.values() ?? []) {
+      if (Atomics.load(entry.control, 0) !== Atomics.load(entry.control, 3) || Atomics.load(entry.control, 4)) pendingAtStart.add(entry.id);
+    }
+    dir = opendirSync(readModelTransactionDir(path));
+    for (;;) {
+      const entry = dir.readSync();
+      if (!entry) break;
+      if (++result.inspected > TRANSACTION_INVENTORY_LIMIT) { result.truncated = true; result.complete = false; break; }
+      if (!entry.name.endsWith(".json")) { result.complete = false; result.unknownRecords++; continue; }
+      try {
+        if (!entry.isFile()) throw new Error("not a regular transaction record");
+        const record = readTransactionRecord(join(dir.path, entry.name));
+        let state: ReadModelTransactionInventory["records"][number]["state"] = "unknown";
+        const id = record.identity;
+        if (id && id.pid === record.pid && own.status === "identified" && id.bootId === own.identity.bootId && id.pidNamespace === own.identity.pidNamespace) {
+          const current = inspect(id.pid);
+          if (current.status === "missing") state = "stale";
+          else if (current.status === "identified" && current.identity.bootId === id.bootId && current.identity.pidNamespace === id.pidNamespace
+            && current.identity.startTicks === id.startTicks && record.recordedState !== "released") state = record.recordedState;
+        }
+        result.records.push({ ...record, state, recordAgeMs: Math.max(0, asOf - record.updatedAt), lockOwnership: "unverified" });
+        result.records.sort((a, b) => (a.acquiredAt ?? a.attemptedAt) - (b.acquiredAt ?? b.attemptedAt) || a.connection.localeCompare(b.connection));
+        result.records.length = Math.min(3, result.records.length);
+      } catch {
+        // An unreadable entry makes the inventory incomplete, never evidence of absence.
+        result.unknownRecords++; result.complete = false;
+      }
+    }
+    for (const entry of transactionWriter?.entries.values() ?? []) {
+      if (dirname(entry.file) !== readModelTransactionDir(path)) continue;
+      const pending = Atomics.load(entry.control, 0) !== Atomics.load(entry.control, 3);
+      if (!pending && !Atomics.load(entry.control, 4) && !pendingAtStart.has(entry.id)) continue;
+      result.complete = false; result.unknownRecords++;
+      if (entry.current) {
+        const record = { ...entry.current, identity: entry.current.identity ?? (own.status === "identified" ? own.identity : undefined) };
+        result.records = result.records.filter(r => r.connection !== record.connection);
+        result.records.push({ ...record, state: "unknown", recordAgeMs: Math.max(0, asOf - record.updatedAt), lockOwnership: "unverified" });
+        result.records.sort((a, b) => (a.acquiredAt ?? a.attemptedAt) - (b.acquiredAt ?? b.attemptedAt) || a.connection.localeCompare(b.connection));
+        result.records.length = Math.min(3, result.records.length);
+      }
+    }
+    result.state = !result.complete ? "unknown" : result.records.length ? "observed" : "none-recorded";
+  } catch {
+    // A missing or unreadable directory leaves the inventory unknown rather than none-recorded.
+    result.complete = false;
+  }
+  finally { try { dir?.closeSync(); } catch {
+    // Failed traversal close invalidates the inventory completeness it would otherwise claim.
+    result.complete = false; result.state = "unknown";
+  } }
+  return result;
 }
 
 /** `<db dir>/<instance>.v<schemaVersion>.sqlite` — a schema bump is a new file. */
@@ -194,13 +562,17 @@ function identifyLockFailure(error: unknown, path: string, connection: string, r
   const code = sqliteErrcode(error);
   if (error instanceof Error && code !== undefined && [5, 6].includes(code & 0xff)) {
     error.message += ` [connection=${connection}/${readOnly ? "reader" : "writer"} pid=${process.pid} thread=${threadId} path=${path}] [operation=${operation}]`;
+    // Recorded holders ride on the error object; the message keeps its `[operation=…]` tail contract.
+    Object.assign(error, { readModelTransactions: readReadModelTransactions(path) });
   }
 }
 
 /** `marker`: the dirty marker this connection wrote and its close removes; only openReadModel's writer owns one. */
-function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"], marker?: { path: string; unclean: boolean }): ReadModelDb {
+function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"], marker?: { path: string; unclean: boolean }, observation?: ReadModelTransactionObservationOptions): ReadModelDb {
   let reader: DatabaseSync | undefined;
   const connection = randomUUID();
+  const recorder = readOnly || path === ":memory:" ? undefined : createReadModelTransactionRecorder(path, connection, observation);
+  let transaction: string | undefined;
   const checked = <T>(target: DatabaseSync, operation: () => T, label: LockOperation = "read-route"): T => {
     try {
       return operation();
@@ -224,7 +596,13 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
       const label: LockOperation = /^BEGIN IMMEDIATE(?: TRANSACTION)?$/i.test(command) ? "exec.begin-immediate"
         : beginRead ? "exec.begin-read" : /^(?:COMMIT|END)(?: TRANSACTION)?$/i.test(command) ? "exec.commit"
         : /^ROLLBACK(?: TRANSACTION)?$/i.test(command) ? "exec.rollback" : "exec";
+      const writeBegin = target === raw && /^BEGIN (?:IMMEDIATE|EXCLUSIVE)(?: TRANSACTION)?$/i.test(command);
+      // A nested/failed BEGIN must not overwrite evidence of an existing successful transaction.
+      const attempt = writeBegin && !raw.isTransaction ? recorder?.attempt(db.exec) : undefined;
+      if (attempt) transaction = attempt;
       checked(target, () => target.exec(sql), label);
+      if (attempt) recorder?.acquired(attempt);
+      if (target === raw && transaction && !raw.isTransaction) { recorder?.release(transaction); transaction = undefined; }
     },
     prepare: (sql, opts = {}) => {
       const statement: StatementSync = checked(raw, () => raw.prepare(sql), "prepare");
@@ -282,6 +660,8 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
     close: () => {
       reader?.close();
       raw.close();
+      if (transaction) { recorder?.release(transaction); transaction = undefined; }
+      recorder?.close();
       if (marker) rmSync(marker.path, { force: true });
     },
   };
@@ -354,17 +734,21 @@ export function openReadModel(opts: ReadModelOpenOptions): ReadModelDb {
   }
   const marker = readOnly ? undefined : { path: readModelDirtyMarkerPath(path), unclean: existsSync(readModelDirtyMarkerPath(path)) };
   if (marker) writeFileSync(marker.path, `${process.pid}\n`, { flush: true });
-  const db = wrap(raw, path, opts.schemaVersion, readOnly, recoveredFrom, marker);
-  if (!readOnly) {
-    immediate(db, () => db.exec(`${BASE_DDL} ${opts.ddl ?? ""}
-      INSERT OR IGNORE INTO meta(k, v) VALUES('schema_version', '${opts.schemaVersion}');`));
+  const db = wrap(raw, path, opts.schemaVersion, readOnly, recoveredFrom, marker, opts.transactionObservation);
+  try {
+    if (!readOnly) {
+      immediate(db, () => db.exec(`${BASE_DDL} ${opts.ddl ?? ""}
+        INSERT OR IGNORE INTO meta(k, v) VALUES('schema_version', '${opts.schemaVersion}');`));
+    }
+    const stored = db.meta("schema_version");
+    if (stored !== String(opts.schemaVersion)) {
+      throw new ReadModelError("schema_mismatch", `${path} holds schema ${stored}, expected ${opts.schemaVersion}`, { path, stored });
+    }
+    return db;
+  } catch (error) {
+    try { db.close(); } catch { /* Preserve the opening failure; close must also retire its observer. */ }
+    throw error;
   }
-  const stored = db.meta("schema_version");
-  if (stored !== String(opts.schemaVersion)) {
-    db.close();
-    throw new ReadModelError("schema_mismatch", `${path} holds schema ${stored}, expected ${opts.schemaVersion}`, { path, stored });
-  }
-  return db;
 }
 
 /**
@@ -391,15 +775,17 @@ export function quickCheckReadModel(path: string): { ok: true } | { ok: false; c
  * thread beside the projector's): no directory, no DDL, no quick_check and never a recovery, so it
  * can never move a live file aside. Writes still go through a lease's fence.
  */
-export function attachReadModel(path: string, schemaVersion: number): ReadModelDb {
+export function attachReadModel(path: string, schemaVersion: number, observation?: ReadModelTransactionObservationOptions): ReadModelDb {
   const { DatabaseSync: Database } = require("node:sqlite") as typeof import("node:sqlite");
-  const db = wrap(new Database(path, { timeout: READ_MODEL_BUSY_TIMEOUT_MS }), path, schemaVersion, false);
-  const stored = db.meta("schema_version");
-  if (stored !== String(schemaVersion)) {
-    db.close();
-    throw new ReadModelError("schema_mismatch", `${path} holds schema ${stored}, expected ${schemaVersion}`, { path, stored });
+  const db = wrap(new Database(path, { timeout: READ_MODEL_BUSY_TIMEOUT_MS }), path, schemaVersion, false, undefined, undefined, observation);
+  try {
+    const stored = db.meta("schema_version");
+    if (stored !== String(schemaVersion)) throw new ReadModelError("schema_mismatch", `${path} holds schema ${stored}, expected ${schemaVersion}`, { path, stored });
+    return db;
+  } catch (error) {
+    try { db.close(); } catch { /* Retire diagnostics without replacing the schema/read failure. */ }
+    throw error;
   }
-  return db;
 }
 
 export interface ReadModelLease {
